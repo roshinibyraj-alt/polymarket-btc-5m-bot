@@ -3,9 +3,9 @@
 module.exports = {
   // --- Data source ---
   symbol: 'btcusdt',              // Binance symbol (lowercase for WS streams)
-  tradeStreamUrl: 'wss://stream.binance.com:9443/ws/btcusdt@trade',
-  depthStreamUrl: 'wss://stream.binance.com:9443/ws/btcusdt@depth20@100ms',
-  klineRestUrl: 'https://api.binance.com/api/v3/klines',
+  tradeStreamUrl: 'wss://stream.binance.us:9443/ws/btcusdt@trade',
+  depthStreamUrl: 'wss://stream.binance.us:9443/ws/btcusdt@depth20@100ms',
+  klineRestUrl: 'https://api.binance.us/api/v3/klines',
 
   // --- Window ---
   windowMinutes: 5,               // must match the Polymarket window you're targeting
