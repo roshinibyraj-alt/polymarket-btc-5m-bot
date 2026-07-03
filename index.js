@@ -9,6 +9,7 @@ const WindowManager = require('./src/windowManager');
 const { runAllPredictors } = require('./src/predictors');
 const { STRATEGIES } = require('./src/strategies');
 const { PaperEngine } = require('./src/paperEngine');
+const { startDashboard } = require('./src/dashboard');
 
 async function main() {
   console.log('=== Polymarket-style BTC 5m Paper Trading Simulator ===');
@@ -21,6 +22,16 @@ async function main() {
 
   const engine = new PaperEngine(Object.keys(STRATEGIES));
 
+  // Shared state the dashboard reads from — updated as the loop runs.
+  const dashboardState = { signals: {}, recentTrades: [] };
+  startDashboard(() => ({
+    updatedAt: new Date().toISOString(),
+    lastPrice: feed.lastPrice,
+    signals: dashboardState.signals,
+    strategies: engine.summary(),
+    recentTrades: dashboardState.recentTrades.slice(-30),
+  }));
+
   // Track window open price (from feed.lastPrice at decision time) so we can compute
   // the actual resolution direction when the window closes.
   const windowOpenPrices = {};
@@ -30,6 +41,7 @@ async function main() {
       // --- WINDOW OPEN: run predictors, let each strategy decide, place paper trades ---
       const signals = runAllPredictors(feed);
       windowOpenPrices[windowStart] = feed.lastPrice;
+      dashboardState.signals = signals;
 
       const decisions = {};
       for (const [name, strategyFn] of Object.entries(STRATEGIES)) {
@@ -62,6 +74,7 @@ async function main() {
       console.log(`[Resolve ${new Date(windowStart).toISOString()}] ${openPrice} -> ${closePrice} = ${actualDirection.toUpperCase()}`);
       for (const [name, rec] of Object.entries(results)) {
         console.log(`  ${name}: ${rec.side} | ${rec.won ? 'WIN' : 'LOSS'} | pnl=${rec.pnl.toFixed(2)} | bankroll=${rec.bankrollAfter.toFixed(2)}`);
+        dashboardState.recentTrades.push({ strategy: name, windowStart, ...rec });
       }
 
       console.log('\n  --- Running totals ---');
