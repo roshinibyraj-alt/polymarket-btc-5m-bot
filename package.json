@@ -1,0 +1,14 @@
+{
+  "name": "polymarket-btc-bot",
+  "version": "0.1.0",
+  "description": "Live paper-trading simulator for Polymarket-style 5-minute BTC up/down windows, using Binance data and multiple independent prediction strategies.",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
