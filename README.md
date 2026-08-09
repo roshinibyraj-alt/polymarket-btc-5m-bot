@@ -1,74 +1,48 @@
-# Polymarket-style BTC 5m Paper Trading Simulator
+# polymarket-copy-bot
 
-Live paper-trading bot for 5-minute BTC up/down binary windows. Pulls real-time
-price/trade/order-book data from Binance, runs 5 independent prediction signals,
-and lets 5 different strategies each decide independently whether to "trade" and
-which side — with their own separate paper bankrolls so you can compare them.
-
-## Setup
-
-```bash
-npm install    # no dependencies needed beyond Node 18+ (uses native fetch/WebSocket)
-npm start
-```
-
-Runs continuously. Logs every window's signals/decisions to console and writes
-running results to `results.json` after every resolution. Ctrl+C to stop (persists
-final state first).
+Watches a Polymarket wallet's trade activity and mirrors it as paper trades. Demo mode only — no live execution is wired in yet.
 
 ## How it works
 
-1. **Data** (`src/binanceFeed.js`): live trades + order book depth via Binance
-   WebSocket, backfilled with recent 1-minute klines on startup.
-2. **Predictors** (`src/predictors.js`): 5 independent signals, each returning
-   `{direction, confidence}`:
-   - `momentum` — recent return over 1min/5min
-   - `orderFlow` — aggressor buy vs sell volume imbalance
-   - `orderBook` — resting bid vs ask depth imbalance
-   - `meanReversion` — z-score vs short moving average (contrarian)
-   - `volBreakout` — recent range expansion vs historical average
-3. **Strategies** (`src/strategies.js`): different ways of turning those signals
-   into a trade decision — consensus vote, order-flow-only scalp, momentum-follow,
-   pure mean-reversion, and "whichever single signal is most confident."
-4. **Paper engine** (`src/paperEngine.js`): each strategy gets its own $1000
-   virtual bankroll, sizes bets as a confidence-scaled fraction of bankroll
-   (capped), and settles against the actual window close.
-5. **Window manager** (`src/windowManager.js`): aligns to 5-minute UTC
-   boundaries, waits `decisionOffsetSeconds` before locking in a decision.
+- Polls `https://data-api.polymarket.com/activity?user=<wallet>&type=TRADE` every `POLL_INTERVAL_MS`.
+- On first poll, seeds itself with the wallet's existing trades (doesn't mirror history) — mirroring starts from the next new trade onward.
+- Each new BUY/SELL is mirrored as a paper trade sized at `MIRROR_SCALE` × the source wallet's share size (or a flat `MIRROR_FIXED_SHARES` if set), against a simulated `DEMO_CAPITAL` bankroll.
+- Dashboard (Express + Socket.IO) shows the source wallet's raw feed side-by-side with your mirrored trades, open paper positions, and a paper equity curve.
 
-## Important caveats — read before trusting any numbers this produces
+## Local setup
 
-- **Market pricing is simulated, not real.** `paperEngine.js` prices every
-  YES/NO position at `0.5 + spread/2` (a fixed synthetic spread). It does **not**
-  reflect Polymarket's actual order book, which moves with sentiment and can be
-  far from 50/50 heading into a window. To make this realistic you need to pull
-  live prices from Polymarket's CLOB API and price fills against that book. Until
-  then, treat P&L here as "how often was I directionally right," not "what I'd
-  actually have earned."
-- **Verify the resolution source.** This uses Binance spot BTCUSDT for open/close.
-  Confirm which price feed/oracle the specific Polymarket market you're targeting
-  actually resolves against — if it differs from Binance spot, your backtest
-  edge won't transfer.
-- **Short backtests lie.** A handful of winning windows means nothing. Run this
-  for at least a few hundred windows (it logs every one) before drawing any
-  conclusion about whether a strategy has real edge.
-- **This was built and syntax/logic-tested with synthetic data in a sandboxed
-  environment without live network access.** I verified the full pipeline
-  (predictors → strategies → paper engine → resolution) runs correctly against
-  mocked feed data, but I have not been able to test it against live Binance
-  WebSocket connections myself — do a short supervised run first to confirm the
-  live data wiring behaves as expected on your machine.
+```bash
+npm install
+cp .env.example .env    # edit WATCH_WALLET / sizing if needed
+npm start
+```
 
-## Tuning
+Dashboard at `http://localhost:8080`.
 
-All thresholds, lookback windows, position sizing, and the simulated spread are
-in `config.js` — nothing is hardcoded in the logic files.
+## Config (env vars)
 
-## Natural next steps
+| Var | Default | Meaning |
+|---|---|---|
+| `WATCH_WALLET` | `0xb5de863cfef62edecbf1f0e39d0c6acc82df2c54` | wallet address to mirror |
+| `POLL_INTERVAL_MS` | `5000` | how often to check for new trades |
+| `DEMO_CAPITAL` | `2000` | starting paper bankroll |
+| `MIRROR_SCALE` | `0.01` | mirror this fraction of the source wallet's share size |
+| `MIRROR_FIXED_SHARES` | unset | if set, always mirror this flat share count instead of scaling |
+| `MIN_MIRROR_SHARES` | `1` | skip trades whose mirrored size rounds below this |
+| `ACTIVITY_LIMIT` | `100` | rows pulled per poll |
+| `PORT` | `8080` | dashboard port |
 
-- Replace `quotePrice()` in `paperEngine.js` with a real Polymarket CLOB fetch
-- Add a signal-calibration step (log predicted probability vs actual outcome
-  over many windows, check if it's actually calibrated — most raw heuristics
-  aren't)
-- Persist raw signals per window (not just trades) so you can retrain/tune
-  offline against a larger history
+## Known limitations (v1)
+
+- **Demo only.** `setMode(true)` (the LIVE toggle) is stubbed to refuse — no order-placement/auth code exists yet. Wiring in a real executor (CLOB or Perps API depending on what the source wallet actually trades) is a separate follow-up.
+- **No live pricing on open positions.** Mark value uses cost basis, not current market price, since this build doesn't poll a price feed for held tokens yet.
+- **REDEEM events aren't mirrored.** If the source wallet's position resolves (market settles) rather than being sold, that isn't reflected here yet — only BUY/SELL trade activity is.
+- Data API `/activity` covers standard prediction-market (CTF) trades. If the watched wallet's activity is specifically on Polymarket Perps, that may live on a separate feed (`api.perpetuals.polymarket.com`) not yet wired into this watcher.
+
+## Deploy to Railway
+
+1. Push this repo to GitHub.
+2. In Railway: New Project → Deploy from GitHub repo → select this repo.
+3. Railway auto-detects Node via `package.json` (`npm start`). No build step needed.
+4. Set env vars from `.env.example` in the Railway service settings (at minimum, none are required — it'll run with defaults).
+5. Railway assigns `PORT` automatically — the app already reads `process.env.PORT`.
