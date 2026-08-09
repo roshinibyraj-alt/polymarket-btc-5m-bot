@@ -1,7 +1,7 @@
 {
   "name": "polymarket-copy-bot",
   "version": "1.0.0",
-  "description": "Watches a Polymarket wallet's trades and mirrors them in paper/demo mode (live mode not yet implemented).",
+  "description": "Mirrors a master Polymarket Perpetuals wallet (long/short) in paper/demo mode using public APIs.",
   "main": "index.js",
   "engines": {
     "node": ">=18.0.0"

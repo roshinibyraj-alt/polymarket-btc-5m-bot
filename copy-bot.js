@@ -2,50 +2,45 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET COPY-TRADING BOT — DEMO MODE
- *  POSITION-DIFF MIRRORING
+ *  POLYMARKET PERPS COPY-TRADING BOT — DEMO MODE
+ *  MIRRORS A MASTER PERPS WALLET (LONG / SHORT)
  * ═══════════════════════════════════════════════════════════════
  *
- *  Every POLL_INTERVAL_MS, fetches the target wallet's CURRENT open
- *  positions from Polymarket's Data API
- *  (GET https://data-api.polymarket.com/positions?user=<wallet>) and
- *  diffs them against what it saw last poll, per outcome token:
+ *  Reads the master wallet's Polymarket Perpetuals portfolio from the
+ *  PUBLIC perps API and mirrors it in paper:
  *
- *    master had 0, now has shares  -> bot OPENS a mirrored position
- *    master's size increased       -> bot ADDS proportionally
- *    master's size decreased       -> bot REDUCES proportionally
- *    master had shares, now has 0  -> bot CLOSES the position fully
+ *    GET /v1/info/portfolio?address=<wallet>   (master positions)
+ *    GET /v1/info/tickers                       (mark prices)
  *
- *  This is state-diffing (not trade-log replay), so it naturally
- *  handles opens, closes, and partial adjustments the same way —
- *  the bot's target size for a token is always
- *  `master's current size × MIRROR_SCALE` (or a flat
- *  MIRROR_FIXED_SHARES while master holds any amount > 0), and each
- *  poll just moves the paper position toward that target.
+ *  Every POLL_INTERVAL_MS the bot diffs the master portfolio against
+ *  the last poll:
  *
- *  DEMO MODE ONLY — no real orders are ever placed. LIVE mode is
- *  stubbed out (setMode(true) logs a warning and refuses) until a
- *  live executor is wired in on top of this.
+ *    master had no position, now has size   -> bot OPENS (same direction)
+ *    master's size grows                    -> bot ADDS proportionally
+ *    master's size shrinks                  -> bot REDUCES proportionally
+ *    master flips LONG <-> SHORT            -> bot closes then re-opens
+ *    master had size, now 0                 -> bot CLOSES fully
  *
- *  MIRROR_EXISTING_ON_START (default true) — if the master wallet
- *  already has open positions the first time the bot polls, those
- *  are immediately mirrored as opens rather than being ignored.
+ *  Direction comes from the sign of the perps size: positive = LONG,
+ *  negative = SHORT. All reads are public — no private key needed.
+ *  Positions are mirrored in PAPER only (see setMode).
+ *
+ *  WATCH_WALLET accepts a perps account address (0x...) or a profile
+ *  username (@abc9901) which is resolved from the profile page.
  * ═══════════════════════════════════════════════════════════════
  */
 
-const DATA_API = 'https://data-api.polymarket.com';
+const PERPS_INFO_API = 'https://api.perpetuals.polymarket.com/v1/info';
 
-const WATCH_WALLET       = (process.env.WATCH_WALLET || '0xb5de863cfef62edecbf1f0e39d0c6acc82df2c54').toLowerCase();
-const POLL_INTERVAL_MS   = Number(process.env.POLL_INTERVAL_MS || 5000);
-const DEMO_CAPITAL       = Number(process.env.DEMO_CAPITAL || 2000);
-const MIRROR_SCALE       = Number(process.env.MIRROR_SCALE || 0.01);     // bot target size = master size * this
-const MIRROR_FIXED_SHARES = process.env.MIRROR_FIXED_SHARES ? Number(process.env.MIRROR_FIXED_SHARES) : null; // if set, bot target is this flat amount whenever master > 0
-const MIN_MIRROR_SHARES  = Number(process.env.MIN_MIRROR_SHARES || 0.5); // ignore deltas smaller than this (dust / rounding)
+const WATCH_WALLET            = (process.env.WATCH_WALLET || '0x2070f45c22e44a52cb42210d1112a0bfb6a9a0c7').trim();
+const POLL_INTERVAL_MS        = Number(process.env.POLL_INTERVAL_MS || 5000);
+const DEMO_CAPITAL            = Number(process.env.DEMO_CAPITAL || 20000);
+const MIRROR_SCALE            = Number(process.env.MIRROR_SCALE || 0.01);          // bot target = |master size| * this
+const MIRROR_FIXED_SIZE       = process.env.MIRROR_FIXED_SIZE ? Number(process.env.MIRROR_FIXED_SIZE) : null; // if set, flat magnitude whenever master > 0
+const MIN_MIRROR_SIZE         = Number(process.env.MIN_MIRROR_SIZE || 0.0001);     // ignore deltas smaller than this
 const MIRROR_EXISTING_ON_START = (process.env.MIRROR_EXISTING_ON_START ?? 'true').toLowerCase() === 'true';
-const POSITIONS_LIMIT    = Number(process.env.POSITIONS_LIMIT || 500);
-const ACTIVITY_LIMIT     = Number(process.env.ACTIVITY_LIMIT || 40);
 
-let DRY_RUN = true; // this bot only ever runs DRY_RUN=true today — see setMode()
+let DRY_RUN = true; // this build only ever runs DRY_RUN=true — see setMode()
 
 function round2(n) { return Math.round(n * 100) / 100; }
 function round4(n) { return Math.round(n * 10000) / 10000; }
@@ -65,10 +60,56 @@ function log(msg) {
   slog(line);
 }
 
-async function getJSON(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-copy-bot/1.0' } });
+async function getJSON(url, headers = {}) {
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-copy-bot/1.0', ...headers } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
+}
+
+// ─────────────────────────────────────────
+//  Wallet resolution (address or @username)
+// ─────────────────────────────────────────
+let watchAddress = null;
+let resolveError = null;
+
+async function resolveMasterWallet(input) {
+  const s = String(input || '').trim();
+  if (/^0x[0-9a-fA-F]{40}$/.test(s)) return s.toLowerCase();
+  const name = s.replace(/^@/, '');
+  log(`🔎 resolving perps wallet for @${name} from the profile page...`);
+  const res = await fetch(`https://polymarket.com/@${encodeURIComponent(name)}`, {
+    headers: { 'User-Agent': 'polymarket-copy-bot/1.0' },
+  });
+  if (!res.ok) throw new Error(`profile page HTTP ${res.status}`);
+  const html = await res.text();
+  const m = html.match(/walletAddress\\?"?\s*:\s*\\?"?(0x[0-9a-fA-F]{40})/);
+  if (!m) throw new Error(`could not find a perps walletAddress on @${name}'s profile`);
+  log(`🔎 @${name} -> perps wallet ${m[1].toLowerCase()}`);
+  return m[1].toLowerCase();
+}
+
+// ─────────────────────────────────────────
+//  Market data — public REST (mark prices)
+// ─────────────────────────────────────────
+let markCache = {}; // instrumentId -> mark
+
+function markPriceOf(key) {
+  const m = markCache[key];
+  return m && m > 0 ? m : null;
+}
+
+async function refreshTickers() {
+  try {
+    const tickers = await getJSON(`${PERPS_INFO_API}/tickers`);
+    if (!Array.isArray(tickers)) return;
+    for (const t of tickers) {
+      if (t && t.instrument_id != null && t.mark_price != null) {
+        markCache[String(t.instrument_id)] = Number(t.mark_price);
+      }
+    }
+  } catch (e) {
+    // display/valuation only — never block position syncing
+  }
 }
 
 // ─────────────────────────────────────────
@@ -77,17 +118,26 @@ async function getJSON(url) {
 let initialScanDone = false;
 let lastPollAt = null;
 let lastPollError = null;
-let masterMap = {};             // asset -> { asset, size, avgPrice, curPrice, title, outcome, conditionId }
-let sourceFeed = [];            // recent raw activity rows, display-only (not used for trading decisions)
-
-let positions = {};             // asset -> { tokenId, marketTitle, outcome, shares, avgCost }
+let lastEmptyWarnAt = 0;
+let masterMap = {};  // instrumentId -> { key, symbol, size (signed), entryPrice, unrealizedPnl, leverage }
+let positions = {};  // instrumentId -> { key, symbol, side ('LONG'|'SHORT'), size (magnitude), avgPrice }
+let lastSkipWarn = {}; // instrumentId -> timestamp (throttle insufficient-bankroll logs)
 let bankroll = DEMO_CAPITAL;
 let realizedPnl = 0;
 let wins = 0, losses = 0;
 let equityCurve = [{ t: Date.now(), equity: DEMO_CAPITAL }];
 
+function markValue() {
+  let total = bankroll;
+  for (const p of Object.values(positions)) {
+    const mark = markPriceOf(p.key) || p.avgPrice;
+    total += p.side === 'LONG' ? p.size * mark : -p.size * mark;
+  }
+  return round2(total);
+}
+
 function recordEquity() {
-  const v = round2(bankroll); // paper mark-to-cost; no live pricing feed for held tokens polled here
+  const v = markValue();
   equityCurve.push({ t: Date.now(), equity: v });
   if (equityCurve.length > 500) equityCurve.shift();
   totalEquityCurve.push({ t: Date.now(), equity: v });
@@ -101,60 +151,72 @@ function registerTrade(entry) {
 }
 
 // ─────────────────────────────────────────
-//  Sizing policy — bot's TARGET size for a token given master's size
+//  Sizing policy
 // ─────────────────────────────────────────
-function targetBotShares(masterShares) {
-  if (!masterShares || masterShares <= 0) return 0;
-  if (MIRROR_FIXED_SHARES != null) return MIRROR_FIXED_SHARES;
-  return Math.max(0, round4(masterShares * MIRROR_SCALE));
+function targetBotSize(masterSize) {
+  if (!masterSize || Math.abs(masterSize) <= 0) return 0;
+  const magnitude = MIRROR_FIXED_SIZE != null
+    ? MIRROR_FIXED_SIZE
+    : round4(Math.abs(masterSize) * MIRROR_SCALE);
+  return Math.sign(masterSize) * Math.abs(magnitude); // keep direction
 }
 
 // ─────────────────────────────────────────
-//  Master wallet polling — POSITIONS (drives mirroring decisions)
+//  Master polling — PUBLIC PERPS PORTFOLIO (drives mirroring)
 // ─────────────────────────────────────────
-async function fetchMasterPositions() {
-  const url = `${DATA_API}/positions?user=${WATCH_WALLET}&sortBy=CURRENT&sortDirection=DESC&limit=${POSITIONS_LIMIT}`;
-  return getJSON(url);
+async function fetchMasterPortfolio() {
+  return getJSON(`${PERPS_INFO_API}/portfolio?address=${watchAddress}`);
 }
 
 function normalizePosition(r) {
-  const asset = r.asset || r.token_id || r.tokenId || r.assetId;
-  const size = Number(r.size ?? r.tokens ?? r.shares ?? 0);
-  const avgPrice = Number(r.avgPrice ?? r.averagePrice ?? 0);
-  const curPrice = Number(r.curPrice ?? r.currentPrice ?? r.price ?? avgPrice);
-  const title = r.title || r.eventTitle || r.slug || 'Unknown market';
-  const outcome = r.outcome || r.outcomeName || '?';
-  const conditionId = r.conditionId || r.condition_id || null;
-  return { asset, size, avgPrice, curPrice, title, outcome, conditionId };
+  const key = String(r.instrument_id ?? r.instrumentId);
+  const symbol = r.symbol || `instrument-${key}`;
+  const size = Number(r.size ?? 0); // signed: >0 LONG, <0 SHORT
+  const entryPrice = Number(r.entry_price ?? r.entryPrice ?? 0);
+  const unrealizedPnl = Number(r.unrealized_pnl ?? r.unrealizedPnl ?? 0);
+  const leverage = Number(r.leverage ?? 1);
+  return { key, symbol, size, entryPrice, unrealizedPnl, leverage };
 }
 
 async function pollMasterPositions() {
+  if (!watchAddress) {
+    lastPollError = resolveError || 'watch wallet not resolved';
+    return;
+  }
   let raw;
   try {
-    raw = await fetchMasterPositions();
+    raw = await fetchMasterPortfolio();
     lastPollAt = Date.now();
     lastPollError = null;
   } catch (e) {
     lastPollError = e.message;
-    log(`⚠️  positions fetch failed: ${e.message}`);
+    if (Date.now() - lastEmptyWarnAt > 30000) {
+      lastEmptyWarnAt = Date.now();
+      log(`⚠️  portfolio fetch failed: ${e.message}`);
+    }
     return;
   }
-  if (!Array.isArray(raw)) return;
 
+  const rows = raw && Array.isArray(raw.positions) ? raw.positions : [];
   const newMasterMap = {};
-  for (const row of raw) {
+  for (const row of rows) {
     const p = normalizePosition(row);
-    if (!p.asset || p.size <= 0) continue;
-    newMasterMap[p.asset] = p;
+    if (!p.key || p.size === 0) continue;
+    newMasterMap[p.key] = p;
+  }
+  const masterCount = Object.keys(newMasterMap).length;
+  if (masterCount === 0 && Date.now() - lastEmptyWarnAt > 60000) {
+    lastEmptyWarnAt = Date.now();
+    log(`ℹ️  master perps portfolio is empty (0 positions) — nothing to mirror`);
   }
 
   if (!initialScanDone) {
     initialScanDone = true;
     masterMap = newMasterMap;
-    log(`👀 watching ${WATCH_WALLET} — ${Object.keys(masterMap).length} open position(s) found`);
+    log(`👀 watching ${watchAddress} — ${Object.keys(masterMap).length} open perps position(s) found`);
     if (MIRROR_EXISTING_ON_START) {
-      for (const asset of Object.keys(masterMap)) {
-        if (tradingEnabled) await syncToken(asset, masterMap[asset]);
+      for (const key of Object.keys(masterMap)) {
+        if (tradingEnabled) await syncToken(key, masterMap[key]);
       }
     } else {
       log(`ℹ️  MIRROR_EXISTING_ON_START=false — existing open positions were NOT mirrored, only future changes will be`);
@@ -162,92 +224,136 @@ async function pollMasterPositions() {
     return;
   }
 
-  const tokens = new Set([...Object.keys(newMasterMap), ...Object.keys(positions)]);
-  for (const asset of tokens) {
+  const keys = new Set([...Object.keys(newMasterMap), ...Object.keys(positions)]);
+  for (const key of keys) {
     if (!tradingEnabled) continue;
-    await syncToken(asset, newMasterMap[asset] || null);
+    await syncToken(key, newMasterMap[key] || null);
   }
   masterMap = newMasterMap;
 }
 
 // ─────────────────────────────────────────
-//  Sync one token's bot position toward its target
+//  Paper mirroring helpers
 // ─────────────────────────────────────────
-async function syncToken(asset, masterInfo) {
-  const masterShares = masterInfo ? masterInfo.size : 0;
-  const target = targetBotShares(masterShares);
-  const bot = positions[asset];
-  const botShares = bot ? bot.shares : 0;
-  const delta = round4(target - botShares);
-  if (Math.abs(delta) < MIN_MIRROR_SHARES) return;
+function paperOpen(key, symbol, side, size, price) {
+  if (size <= 0) return;
+  const cost = round2(size * price);
+  if (cost > bankroll) {
+    if (Date.now() - (lastSkipWarn[key] || 0) > 30000) {
+      lastSkipWarn[key] = Date.now();
+      log(`⏭️  can't OPEN ${symbol} ${side} ${size} @ ${price.toFixed(2)} — need $${cost.toFixed(2)}, have $${bankroll.toFixed(2)} paper bankroll`);
+    }
+    return;
+  }
+  if (side === 'LONG') bankroll = round2(bankroll - cost);
+  else bankroll = round2(bankroll + cost); // short proceeds received
+  const prev = positions[key];
+  const prevQty = prev ? prev.size : 0;
+  const newQty = round4(prevQty + size);
+  const prevCost = prev ? prev.avgPrice * prev.size : 0;
+  const avgPrice = newQty > 0 ? round4((prevCost + cost) / newQty) : 0;
+  positions[key] = { key, symbol, side, size: newQty, avgPrice };
+  const reason = prevQty === 0 ? 'OPEN' : 'ADD';
+  log(`✅ ${reason} — ${symbol} ${side} ${size} @ ${price.toFixed(2)} | cost=$${cost.toFixed(2)}`);
+  registerTrade({ side: 'BUY', reason, symbol, dir: side, price, size, cost });
+  recordEquity();
+}
 
-  const title = masterInfo?.title || bot?.marketTitle || 'Unknown market';
-  const outcome = masterInfo?.outcome || bot?.outcome || '?';
-  const price = (masterInfo?.curPrice > 0 ? masterInfo.curPrice : masterInfo?.avgPrice) || bot?.avgCost || null;
+function paperClosePartial(key, price, deltaSize, masterSize) {
+  const bot = positions[key];
+  if (!bot || deltaSize <= 0) return;
+  const closing = Math.min(deltaSize, bot.size);
+  let profit;
+  if (bot.side === 'LONG') {
+    const proceeds = round2(closing * price);
+    bankroll = round2(bankroll + proceeds);
+    profit = round2((price - bot.avgPrice) * closing);
+  } else {
+    const buyback = round2(closing * price);
+    bankroll = round2(bankroll - buyback);
+    profit = round2((bot.avgPrice - price) * closing);
+  }
+  realizedPnl = round2(realizedPnl + profit);
+  if (profit >= 0) wins++; else losses++;
+  const newSize = round4(bot.size - closing);
+  if (newSize <= 0.0001) delete positions[key];
+  else positions[key] = { ...bot, size: newSize };
+  const icon = profit >= 0 ? '💰' : '💥';
+  log(`${icon} REDUCE — ${bot.symbol} ${bot.side} ${closing} @ ${price.toFixed(2)} | pnl=$${profit.toFixed(2)}${masterSize != null ? ` | master now ${masterSize}` : ''}`);
+  registerTrade({ side: 'SELL', reason: 'REDUCE', symbol: bot.symbol, dir: bot.side, price, size: closing, profit });
+  recordEquity();
+}
+
+function paperCloseAll(key, price) {
+  const bot = positions[key];
+  if (!bot) return;
+  const size = bot.size;
+  let proceeds;
+  if (bot.side === 'LONG') {
+    proceeds = round2(size * price);
+    bankroll = round2(bankroll + proceeds);
+  } else {
+    proceeds = round2(size * price); // buyback cost
+    bankroll = round2(bankroll - proceeds);
+  }
+  const profit = round2((bot.side === 'LONG' ? price - bot.avgPrice : bot.avgPrice - price) * size);
+  realizedPnl = round2(realizedPnl + profit);
+  if (profit >= 0) wins++; else losses++;
+  delete positions[key];
+  const icon = profit >= 0 ? '💰' : '💥';
+  log(`${icon} CLOSE — ${bot.symbol} ${bot.side} ${size} @ ${price.toFixed(2)} | proceeds=$${proceeds.toFixed(2)} | pnl=$${profit.toFixed(2)}`);
+  registerTrade({ side: 'SELL', reason: 'CLOSE', symbol: bot.symbol, dir: bot.side, price, size, proceeds, profit });
+  recordEquity();
+}
+
+// ─────────────────────────────────────────
+//  Sync one instrument's bot position toward its target
+// ─────────────────────────────────────────
+async function syncToken(key, masterInfo) {
+  const masterSize = masterInfo ? masterInfo.size : 0;      // signed
+  const target = targetBotSize(masterSize);                  // signed
+  const bot = positions[key];
+  const botSigned = bot ? (bot.side === 'SHORT' ? -bot.size : bot.size) : 0;
+
+  const symbol = masterInfo?.symbol || bot?.symbol || `instrument-${key}`;
+  const price = (masterInfo && masterInfo.entryPrice > 0 ? masterInfo.entryPrice : null)
+    || markPriceOf(key) || bot?.avgPrice || null;
   if (!price || price <= 0) {
-    log(`⏭️  skip sync for "${title}" (${outcome}) — no usable price yet`);
+    log(`⏭️  skip sync for ${symbol} — no usable price yet`);
     return;
   }
 
-  if (delta > 0) {
-    const deltaShares = delta;
-    const cost = round2(deltaShares * price);
-    if (cost > bankroll) {
-      log(`⏭️  can't ${botShares === 0 ? 'OPEN' : 'ADD'} "${title}" (${outcome}) — need $${cost.toFixed(2)}, have $${bankroll.toFixed(2)} paper bankroll`);
-      return;
-    }
-    bankroll = round2(bankroll - cost);
-    const newShares = round4(botShares + deltaShares);
-    const prevCost = bot ? bot.avgCost * bot.shares : 0;
-    const avgCost = newShares > 0 ? round4((prevCost + cost) / newShares) : 0;
-    positions[asset] = { tokenId: asset, marketTitle: title, outcome, shares: newShares, avgCost };
+  // nothing to change
+  if (Math.abs(round4(target - botSigned)) < MIN_MIRROR_SIZE) return;
 
-    const reason = botShares === 0 ? 'OPEN' : 'ADD';
-    log(`✅ ${reason} — bought ${deltaShares}sh @ ${price.toFixed(2)} "${title}" (${outcome}) | cost=$${cost.toFixed(2)} | master holds ${masterShares}sh`);
-    registerTrade({ side: 'BUY', reason, title, outcome, price, shares: deltaShares, cost });
-    recordEquity();
-  } else {
-    const deltaShares = round4(-delta);
-    const proceeds = round2(deltaShares * price);
-    const costBasis = round2(deltaShares * (bot ? bot.avgCost : 0));
-    const profit = round2(proceeds - costBasis);
-    bankroll = round2(bankroll + proceeds);
-    realizedPnl = round2(realizedPnl + profit);
-    const newShares = round4(botShares - deltaShares);
-    if (newShares <= 0.0001) delete positions[asset];
-    else positions[asset] = { ...bot, shares: newShares };
-    if (profit >= 0) wins++; else losses++;
-
-    const reason = target === 0 ? 'CLOSE' : 'REDUCE';
-    const icon = profit >= 0 ? '💰' : '💥';
-    log(`${icon} ${reason} — sold ${deltaShares}sh @ ${price.toFixed(2)} "${title}" (${outcome}) | proceeds=$${proceeds.toFixed(2)} | pnl=$${profit.toFixed(2)} | master holds ${masterShares}sh`);
-    registerTrade({ side: 'SELL', reason, title, outcome, price, shares: deltaShares, proceeds, profit });
-    recordEquity();
+  // sign flip: close the old direction fully, then open the new one
+  if (bot && botSigned !== 0 && target !== 0 && Math.sign(botSigned) !== Math.sign(target)) {
+    paperCloseAll(key, price);
+    paperOpen(key, symbol, target > 0 ? 'LONG' : 'SHORT', Math.abs(target), price);
+    return;
   }
-}
 
-// ─────────────────────────────────────────
-//  Master wallet polling — ACTIVITY (display-only source feed)
-// ─────────────────────────────────────────
-async function fetchWalletActivity() {
-  const url = `${DATA_API}/activity?user=${WATCH_WALLET}&type=TRADE&limit=${ACTIVITY_LIMIT}&sortBy=TIMESTAMP&sortDirection=DESC`;
-  return getJSON(url);
-}
-function normalizeActivity(raw) {
-  const side = (raw.side || '').toUpperCase();
-  const shares = Number(raw.size ?? raw.tokens ?? raw.shares ?? 0);
-  const price = Number(raw.price ?? 0);
-  const title = raw.title || raw.eventTitle || raw.slug || 'Unknown market';
-  const outcome = raw.outcome || raw.outcomeName || '?';
-  const timestamp = Number(raw.timestamp || 0);
-  return { side, shares, price, title, outcome, timestamp };
-}
-async function refreshSourceFeed() {
-  try {
-    const activity = await fetchWalletActivity();
-    if (Array.isArray(activity)) sourceFeed = activity.map(normalizeActivity);
-  } catch (e) {
-    // display-only — don't let this block position syncing
+  if (target === 0) {
+    if (bot) paperCloseAll(key, price);
+    return;
+  }
+
+  const side = target > 0 ? 'LONG' : 'SHORT';
+  const absTarget = Math.abs(target);
+  const absBot = Math.abs(botSigned);
+
+  // no position yet -> open in the target direction
+  if (!bot || absBot === 0) {
+    paperOpen(key, symbol, side, absTarget, price);
+    return;
+  }
+
+  // same direction as the target -> add or reduce by the size difference
+  const diff = round4(absTarget - absBot);
+  if (diff >= MIN_MIRROR_SIZE) {
+    paperOpen(key, symbol, side, diff, price);
+  } else if (diff <= -MIN_MIRROR_SIZE) {
+    paperClosePartial(key, price, -diff, masterSize);
   }
 }
 
@@ -255,27 +361,40 @@ async function refreshSourceFeed() {
 //  UI state
 // ─────────────────────────────────────────
 function buildState() {
-  const heldCost = round2(Object.values(positions).reduce((s, p) => s + p.shares * p.avgCost, 0));
-  const markValue = round2(bankroll + heldCost); // cost-basis mark — no live price feed on held tokens yet
+  const mv = markValue();
+  const masterList = Object.values(masterMap).map(m => ({
+    ...m,
+    side: m.size > 0 ? 'LONG' : 'SHORT',
+    size: Math.abs(m.size),
+  }));
+  const botList = Object.values(positions).map(p => {
+    const mark = markPriceOf(p.key) || p.avgPrice;
+    return {
+      ...p,
+      mark,
+      unrealizedPnl: round2(((p.side === 'LONG' ? 1 : -1) * (mark - p.avgPrice)) * p.size),
+    };
+  });
   return {
     dryRun: DRY_RUN, tradingEnabled,
-    watchWallet: WATCH_WALLET,
-    demoCapital: DEMO_CAPITAL, bankroll, markValue,
-    realizedPnl, totalPnl: round2(markValue - DEMO_CAPITAL),
+    watchWallet: watchAddress || WATCH_WALLET,
+    resolveError,
+    demoCapital: DEMO_CAPITAL, bankroll, markValue: mv,
+    realizedPnl, totalPnl: round2(mv - DEMO_CAPITAL),
     wins, losses,
     winRate: (wins + losses) > 0 ? round2((wins / (wins + losses)) * 100) : null,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     lastPollAt, lastPollError,
+    masterPositionsCount: Object.keys(masterMap).length,
     config: {
       pollIntervalMs: POLL_INTERVAL_MS,
       mirrorScale: MIRROR_SCALE,
-      mirrorFixedShares: MIRROR_FIXED_SHARES,
-      minMirrorShares: MIN_MIRROR_SHARES,
+      mirrorFixedSize: MIRROR_FIXED_SIZE,
+      minMirrorSize: MIN_MIRROR_SIZE,
       mirrorExistingOnStart: MIRROR_EXISTING_ON_START,
     },
-    masterPositions: Object.values(masterMap),
-    positions: Object.values(positions),
-    sourceFeed,
+    masterPositions: masterList,
+    positions: botList,
     equityCurve, totalEquityCurve,
     logs: logs.slice(-100),
     trades: trades.slice(-80).reverse(),
@@ -288,8 +407,8 @@ async function mainLoop() {
   loopRunning = true;
   while (true) {
     try {
+      await refreshTickers();
       await pollMasterPositions();
-      await refreshSourceFeed();
       emitFn('state', buildState());
     } catch (e) {
       log(`⚠️  Loop error: ${e.message}`);
@@ -302,9 +421,7 @@ function pauseTrading() { tradingEnabled = false; log('⏸️  Mirroring paused 
 function resumeTrading() { tradingEnabled = true; log('▶️  Mirroring resumed'); return { ok: true }; }
 function getStatus() { return { ok: true, ...buildState() }; }
 
-// LIVE mode is intentionally not implemented yet — this bot is demo-only
-// until a real order executor is wired up. Calling setMode(true) refuses
-// and stays in DRY_RUN.
+// LIVE mode is intentionally not implemented yet — this bot is demo-only.
 function setMode(wantLive) {
   if (wantLive) {
     log('⚠️  LIVE mode requested but not implemented — this bot only places paper trades today. Staying in DEMO mode.');
@@ -316,9 +433,14 @@ function setMode(wantLive) {
 async function init(emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 Polymarket Copy-Trading Bot — DEMO MODE — POSITION MIRRORING`);
-  log(`👀 watching wallet ${WATCH_WALLET} | polling every ${POLL_INTERVAL_MS}ms | $${DEMO_CAPITAL} paper capital | target size = ${MIRROR_FIXED_SHARES != null ? MIRROR_FIXED_SHARES + 'sh fixed whenever master > 0' : (MIRROR_SCALE * 100) + '% of master size'} | opens when master opens, scales with adds/reduces, closes fully when master closes | existing-on-start mirroring: ${MIRROR_EXISTING_ON_START ? 'ON' : 'OFF'}`);
-  log(`⚠️  DEMO MODE — paper trades only, no real orders will ever be placed by this build`);
+  log(`🚀 Polymarket PERPS Copy-Trading Bot — DEMO MODE — LONG/SHORT POSITION MIRRORING`);
+  try {
+    watchAddress = await resolveMasterWallet(WATCH_WALLET);
+  } catch (e) {
+    resolveError = `cannot resolve watch wallet "${WATCH_WALLET}": ${e.message}`;
+    log(`❌ ${resolveError}`);
+  }
+  log(`👀 target master perps wallet ${watchAddress || WATCH_WALLET} | polling every ${POLL_INTERVAL_MS}ms | $${DEMO_CAPITAL} paper capital | target = ${MIRROR_FIXED_SIZE != null ? MIRROR_FIXED_SIZE + ' (fixed magnitude)' : (MIRROR_SCALE * 100) + '% of master size'} | existing-on-start mirroring: ${MIRROR_EXISTING_ON_START ? 'ON' : 'OFF'}`);
   mainLoop().catch(e => log(`❌ Fatal: ${e.message}`));
 }
 

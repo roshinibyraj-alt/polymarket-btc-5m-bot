@@ -54,6 +54,7 @@ app.get('/', (_, res) => {
   .mode-badge { padding: 4px 14px; border-radius: 20px; font-size: 11px; font-weight: bold; }
   .mode-dry { background: #ffd74022; color: var(--yellow); border: 1px solid var(--yellow); }
   .mode-live { background: #ff475722; color: var(--red); border: 1px solid var(--red); }
+  .wallet-warn { display: none; margin: 10px 20px 0; padding: 10px 14px; background: #e8304a18; color: var(--red); border: 1px solid var(--red); border-radius: 8px; font-size: 11px; }
   .toolbar { display: flex; gap: 8px; padding: 14px 20px 0; flex-wrap: wrap; align-items: center; }
   .toolbar button { background: var(--cyan); color: #001018; border: none; padding: 10px 16px; border-radius: 8px; font-weight: bold; cursor: pointer; font-family: inherit; font-size: 12px; }
   .toolbar button.pause { background: var(--yellow); }
@@ -99,6 +100,7 @@ app.get('/', (_, res) => {
     </div>
     <div id="mode-badge" class="mode-badge mode-dry">DEMO</div>
   </div>
+  <div id="wallet-warn" class="wallet-warn">⚠️ <span id="wallet-warn-text">Perps auth is not configured — the bot cannot read the master wallet yet.</span></div>
 
   <div class="toolbar">
     <button id="pause-btn" class="pause">Pause</button>
@@ -113,6 +115,7 @@ app.get('/', (_, res) => {
     <div class="stat"><div class="stat-label">Bankroll</div><div class="stat-val" id="bankroll">$0.00</div></div>
     <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-val" id="win-rate">—</div><div class="stat-sub" id="win-loss-sub">0W / 0L</div></div>
     <div class="stat"><div class="stat-label">Mirroring</div><div class="stat-val" id="trading-flag">ON</div></div>
+    <div class="stat"><div class="stat-label">Master Positions</div><div class="stat-val" id="master-count">—</div></div>
     <div class="stat"><div class="stat-label">Last Poll</div><div class="stat-val" id="last-poll" style="font-size:13px">—</div></div>
     <div class="stat"><div class="stat-label">Uptime</div><div class="stat-val" id="uptime">0s</div></div>
   </div>
@@ -122,25 +125,25 @@ app.get('/', (_, res) => {
     <div id="equity-chart"><svg class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none"></svg></div>
   </div>
 
-  <div class="section"><div class="section-hdr">Positions — Master vs Mirrored</div></div>
+  <div class="section"><div class="section-hdr">Perps Positions — Master vs Mirrored</div></div>
   <div class="section" style="padding-top:0"><div class="tbl-wrap" id="positions-wrap"><div class="empty">No open positions</div></div></div>
 
   <div class="bottom-grid">
     <div>
-      <div class="section-hdr" style="padding:0 0 8px">Source Wallet Feed (raw trades)</div>
+      <div class="section-hdr" style="padding:0 0 8px">Master Portfolio (perps)</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Time</th><th>Side</th><th>Market</th><th>Price</th><th>Their Size</th></tr></thead>
-          <tbody id="source-body"><tr><td colspan="5" class="empty">No trades seen yet</td></tr></tbody>
+          <thead><tr><th>Symbol</th><th>Side</th><th>Size</th><th>Entry</th><th>uPnL</th><th>Lev</th></tr></thead>
+          <tbody id="master-body"><tr><td colspan="6" class="empty">No perps positions</td></tr></tbody>
         </table>
       </div>
     </div>
     <div>
-      <div class="section-hdr" style="padding:0 0 8px">Mirrored Trades</div>
+      <div class="section-hdr" style="padding:0 0 8px">Mirrored Trades (paper)</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Time</th><th>Action</th><th>Market</th><th>Price</th><th>Size</th><th>P&amp;L</th></tr></thead>
-          <tbody id="trade-body"><tr><td colspan="6" class="empty">No mirrored trades yet</td></tr></tbody>
+          <thead><tr><th>Time</th><th>Action</th><th>Symbol</th><th>Dir</th><th>Price</th><th>Size</th><th>P&amp;L</th></tr></thead>
+          <tbody id="trade-body"><tr><td colspan="7" class="empty">No mirrored trades yet</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -190,6 +193,14 @@ app.get('/', (_, res) => {
 
   socket.on('state', s => {
     document.getElementById('wallet-tag').textContent = 'watching ' + (s.watchWallet || '—');
+    const warnEl = document.getElementById('wallet-warn');
+    const warnText = document.getElementById('wallet-warn-text');
+    if (s.resolveError) { warnText.textContent = s.resolveError; warnEl.style.display = 'block'; }
+    else if (s.lastPollError) { warnText.textContent = 'Last poll failed: ' + s.lastPollError; warnEl.style.display = 'block'; }
+    else if (s.lastPollAt && s.masterPositionsCount === 0) { warnText.textContent = 'Master perps portfolio returned 0 open positions — the bot has nothing to mirror.'; warnEl.style.display = 'block'; }
+    else { warnEl.style.display = 'none'; }
+    document.getElementById('master-count').textContent = (s.masterPositionsCount ?? 0);
+    document.getElementById('master-count').className = 'stat-val ' + ((s.masterPositionsCount ?? 0) > 0 ? 'pnl-pos' : '');
     const modeBadge = document.getElementById('mode-badge');
     modeBadge.className = 'mode-badge ' + (s.dryRun ? 'mode-dry' : 'mode-live');
     modeBadge.textContent = s.dryRun ? 'DEMO' : '🔴 LIVE';
@@ -214,33 +225,33 @@ app.get('/', (_, res) => {
     document.getElementById('equity-chart').innerHTML = '<svg class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none">'+buildEquitySvg(s.equityCurve, 600, 90, s.demoCapital)+'</svg>';
 
     const posWrap = document.getElementById('positions-wrap');
-    const masterByAsset = {};
-    (s.masterPositions||[]).forEach(m => masterByAsset[m.asset] = m);
-    const botByAsset = {};
-    (s.positions||[]).forEach(p => botByAsset[p.tokenId] = p);
-    const allAssets = Array.from(new Set([...Object.keys(masterByAsset), ...Object.keys(botByAsset)]));
-    if (allAssets.length > 0) {
-      posWrap.innerHTML = '<table class="tbl"><thead><tr><th>Market</th><th>Outcome</th><th>Master Size</th><th>Bot Size</th><th>Bot Avg Cost</th></tr></thead><tbody>' +
-        allAssets.map(a => {
-          const m = masterByAsset[a], b = botByAsset[a];
-          const title = (m && m.title) || (b && b.marketTitle) || '—';
-          const outcome = (m && m.outcome) || (b && b.outcome) || '—';
-          return '<tr><td>'+title+'</td><td>'+outcome+'</td><td>'+(m ? m.size : 0)+'sh</td><td>'+(b ? b.shares : 0)+'sh</td><td>'+(b ? b.avgCost.toFixed(2) : '—')+'</td></tr>';
+    const masterByKey = {};
+    (s.masterPositions||[]).forEach(m => masterByKey[m.key] = m);
+    const botByKey = {};
+    (s.positions||[]).forEach(p => botByKey[p.key] = p);
+    const allKeys = Array.from(new Set([...Object.keys(masterByKey), ...Object.keys(botByKey)]));
+    if (allKeys.length > 0) {
+      posWrap.innerHTML = '<table class="tbl"><thead><tr><th>Symbol</th><th>Side</th><th>Master Size</th><th>Bot Size</th><th>Bot Avg Entry</th></tr></thead><tbody>' +
+        allKeys.map(k => {
+          const m = masterByKey[k], b = botByKey[k];
+          const symbol = (m && m.symbol) || (b && b.symbol) || k;
+          const side = (m && m.side) || (b && b.side) || '—';
+          const sideColor = side === 'LONG' ? '#00a854' : (side === 'SHORT' ? '#e8304a' : '');
+          return '<tr><td>'+symbol+'</td><td style="color:'+sideColor+'">'+side+'</td><td>'+(m ? m.size : 0)+'</td><td>'+(b ? b.size : 0)+'</td><td>'+(b ? b.avgPrice.toFixed(2) : '—')+'</td></tr>';
         }).join('') +
         '</tbody></table>';
     } else {
       posWrap.innerHTML = '<div class="empty">No open positions</div>';
     }
 
-    const sb = document.getElementById('source-body');
-    if (s.sourceFeed && s.sourceFeed.length > 0) {
-      sb.innerHTML = s.sourceFeed.map(t => {
-        const time = t.timestamp ? new Date(t.timestamp*1000).toISOString().slice(11,19) : '—';
-        const color = t.side === 'BUY' ? '#00a854' : '#e8304a';
-        return '<tr><td>'+time+'</td><td style="color:'+color+'">'+t.side+'</td><td>'+t.title+' ('+t.outcome+')</td><td>'+t.price.toFixed(2)+'</td><td>'+t.shares+'sh</td></tr>';
+    const mb = document.getElementById('master-body');
+    if (s.masterPositions && s.masterPositions.length > 0) {
+      mb.innerHTML = s.masterPositions.map(m => {
+        const color = m.side === 'LONG' ? '#00a854' : '#e8304a';
+        return '<tr><td>'+m.symbol+'</td><td style="color:'+color+'">'+m.side+'</td><td>'+m.size+'</td><td>'+(m.entryPrice||0).toFixed(2)+'</td><td class="'+pClass(m.unrealizedPnl)+'">'+sgn(m.unrealizedPnl)+'</td><td>'+m.leverage+'x</td></tr>';
       }).join('');
     } else {
-      sb.innerHTML = '<tr><td colspan="5" class="empty">No trades seen yet</td></tr>';
+      mb.innerHTML = '<tr><td colspan="6" class="empty">No perps positions</td></tr>';
     }
 
     const tb = document.getElementById('trade-body');
@@ -251,13 +262,14 @@ app.get('/', (_, res) => {
         const reason = t.reason || t.side;
         return '<tr><td>'+t.time+'</td>'+
           '<td><span class="reason-tag reason-'+reason+'">'+reason+'</span></td>'+
-          '<td>'+t.title+' ('+t.outcome+')</td>'+
+          '<td>'+t.symbol+'</td>'+
+          '<td>'+(t.dir||'—')+'</td>'+
           '<td>'+(t.price||0).toFixed(3)+'</td>'+
-          '<td>'+(t.shares||0)+'</td>'+
+          '<td>'+(t.size||0)+'</td>'+
           '<td class="'+pnlCls+'">'+pnlStr+'</td></tr>';
       }).join('');
     } else {
-      tb.innerHTML = '<tr><td colspan="6" class="empty">No mirrored trades yet</td></tr>';
+      tb.innerHTML = '<tr><td colspan="7" class="empty">No mirrored trades yet</td></tr>';
     }
 
     const logEl = document.getElementById('logs');
