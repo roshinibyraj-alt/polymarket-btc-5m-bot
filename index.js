@@ -84,6 +84,11 @@ app.get('/', (_, res) => {
   .logs-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 10px; max-height: 320px; overflow-y: auto; font-size: 10px; }
   .logs-wrap div { padding: 1px 0; }
   .empty { padding: 20px; text-align: center; color: var(--muted); font-size: 10px; }
+  .reason-tag { padding: 2px 7px; border-radius: 8px; font-size: 9px; }
+  .reason-OPEN { background: #00a85422; color: var(--green); }
+  .reason-ADD { background: #0099cc22; color: var(--cyan); }
+  .reason-REDUCE { background: #e6a80022; color: var(--yellow); }
+  .reason-CLOSE { background: #e8304a22; color: var(--red); }
 </style>
 </head>
 <body>
@@ -117,12 +122,12 @@ app.get('/', (_, res) => {
     <div id="equity-chart"><svg class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none"></svg></div>
   </div>
 
-  <div class="section"><div class="section-hdr">Open Mirrored Positions</div></div>
+  <div class="section"><div class="section-hdr">Positions — Master vs Mirrored</div></div>
   <div class="section" style="padding-top:0"><div class="tbl-wrap" id="positions-wrap"><div class="empty">No open positions</div></div></div>
 
   <div class="bottom-grid">
     <div>
-      <div class="section-hdr" style="padding:0 0 8px">Source Wallet Feed</div>
+      <div class="section-hdr" style="padding:0 0 8px">Source Wallet Feed (raw trades)</div>
       <div class="tbl-wrap">
         <table class="tbl">
           <thead><tr><th>Time</th><th>Side</th><th>Market</th><th>Price</th><th>Their Size</th></tr></thead>
@@ -134,7 +139,7 @@ app.get('/', (_, res) => {
       <div class="section-hdr" style="padding:0 0 8px">Mirrored Trades</div>
       <div class="tbl-wrap">
         <table class="tbl">
-          <thead><tr><th>Time</th><th>Side</th><th>Market</th><th>Price</th><th>Size</th><th>P&amp;L</th></tr></thead>
+          <thead><tr><th>Time</th><th>Action</th><th>Market</th><th>Price</th><th>Size</th><th>P&amp;L</th></tr></thead>
           <tbody id="trade-body"><tr><td colspan="6" class="empty">No mirrored trades yet</td></tr></tbody>
         </table>
       </div>
@@ -209,9 +214,19 @@ app.get('/', (_, res) => {
     document.getElementById('equity-chart').innerHTML = '<svg class="equity-svg" viewBox="0 0 600 90" preserveAspectRatio="none">'+buildEquitySvg(s.equityCurve, 600, 90, s.demoCapital)+'</svg>';
 
     const posWrap = document.getElementById('positions-wrap');
-    if (s.positions && s.positions.length > 0) {
-      posWrap.innerHTML = '<table class="tbl"><thead><tr><th>Market</th><th>Outcome</th><th>Shares</th><th>Avg Cost</th></tr></thead><tbody>' +
-        s.positions.map(p => '<tr><td>'+p.marketTitle+'</td><td>'+p.outcome+'</td><td>'+p.shares+'sh</td><td>'+p.avgCost.toFixed(2)+'</td></tr>').join('') +
+    const masterByAsset = {};
+    (s.masterPositions||[]).forEach(m => masterByAsset[m.asset] = m);
+    const botByAsset = {};
+    (s.positions||[]).forEach(p => botByAsset[p.tokenId] = p);
+    const allAssets = Array.from(new Set([...Object.keys(masterByAsset), ...Object.keys(botByAsset)]));
+    if (allAssets.length > 0) {
+      posWrap.innerHTML = '<table class="tbl"><thead><tr><th>Market</th><th>Outcome</th><th>Master Size</th><th>Bot Size</th><th>Bot Avg Cost</th></tr></thead><tbody>' +
+        allAssets.map(a => {
+          const m = masterByAsset[a], b = botByAsset[a];
+          const title = (m && m.title) || (b && b.marketTitle) || '—';
+          const outcome = (m && m.outcome) || (b && b.outcome) || '—';
+          return '<tr><td>'+title+'</td><td>'+outcome+'</td><td>'+(m ? m.size : 0)+'sh</td><td>'+(b ? b.shares : 0)+'sh</td><td>'+(b ? b.avgCost.toFixed(2) : '—')+'</td></tr>';
+        }).join('') +
         '</tbody></table>';
     } else {
       posWrap.innerHTML = '<div class="empty">No open positions</div>';
@@ -233,9 +248,9 @@ app.get('/', (_, res) => {
       tb.innerHTML = s.trades.map(t => {
         const pnlStr = (t.profit !== undefined) ? sgn(t.profit) : '—';
         const pnlCls = (t.profit !== undefined) ? pClass(t.profit) : '';
-        const color = t.side === 'BUY' ? '#b8860b' : '#0099cc';
+        const reason = t.reason || t.side;
         return '<tr><td>'+t.time+'</td>'+
-          '<td style="color:'+color+'">'+t.side+'</td>'+
+          '<td><span class="reason-tag reason-'+reason+'">'+reason+'</span></td>'+
           '<td>'+t.title+' ('+t.outcome+')</td>'+
           '<td>'+(t.price||0).toFixed(3)+'</td>'+
           '<td>'+(t.shares||0)+'</td>'+
@@ -266,7 +281,7 @@ app.get('/', (_, res) => {
 const emit = (event, data) => io.emit(event, data);
 const slog = (line) => { console.log(line); io.emit('log', line); };
 
-console.log('🪞 Polymarket Copy-Trading Bot — DEMO MODE');
+console.log('🪞 Polymarket Copy-Trading Bot — DEMO MODE — position mirroring');
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Dashboard: http://0.0.0.0:${PORT}`);
