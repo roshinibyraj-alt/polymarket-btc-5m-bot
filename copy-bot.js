@@ -2,56 +2,88 @@
 
 /**
  * ═══════════════════════════════════════════════════════════════
- *  POLYMARKET PERPS COPY-TRADING BOT — DEMO MODE
- *  MIRRORS A MASTER PERPS WALLET (LONG / SHORT)
+ *  POLYMARKET BINARY COPY-TRADING BOT — DEMO MODE
+ *  MIRRORS A MASTER WALLET'S BINARY (UP/DOWN) TRADES
  * ═══════════════════════════════════════════════════════════════
  *
- *  Reads the master wallet's Polymarket Perpetuals portfolio from the
- *  PUBLIC perps API and mirrors it in paper:
+ *  Watches a master wallet that trades Polymarket BINARY markets
+ *  (e.g. BTC 5m/15m Up or Down) and mirrors every trade in paper:
  *
- *    GET /v1/info/portfolio?address=<wallet>   (master positions)
- *    GET /v1/info/tickers                       (mark prices)
+ *    GET data-api.polymarket.com/trades?user=<wallet>    (new trades)
+ *    GET data-api.polymarket.com/positions?user=<wallet> (master state)
+ *    GET gamma-api.polymarket.com/markets?condition_ids= (resolution)
  *
- *  Every POLL_INTERVAL_MS the bot diffs the master portfolio against
- *  the last poll:
+ *  Every POLL_INTERVAL_MS the bot picks up NEW master buys/sells:
+ *    master BUY  -> paper BUY (same shares x MIRROR_SCALE, same price)
+ *    master SELL -> paper SELL (reduce, realize at the trade price)
+ *  When a mirrored market resolves, the paper position settles at
+ *  $1/share (won) or $0 (lost) — winners never need a manual redeem
+ *  in paper, the payout is the same $1/share.
  *
- *    master had no position, now has size   -> bot OPENS (same direction)
- *    master's size grows                    -> bot ADDS proportionally
- *    master's size shrinks                  -> bot REDUCES proportionally
- *    master flips LONG <-> SHORT            -> bot closes then re-opens
- *    master had size, now 0                 -> bot CLOSES fully
+ *  A LEARNING MODEL (learn-model.js) continuously fingerprints the
+ *  master's strategy: market mix, stakes, entry prices/timing,
+ *  per-window win rate, edge per window, repeat-vs-fade, and named
+ *  behavior labels — surfaced on the dashboard "Learning" panel.
  *
- *  Direction comes from the sign of the perps size: positive = LONG,
- *  negative = SHORT. All reads are public — no private key needed.
- *  Positions are mirrored in PAPER only (see setMode).
- *
- *  WATCH_WALLET accepts a perps account address (0x...) or a profile
- *  username (@abc9901) which is resolved from the profile page.
+ *  Demo-only: DRY_RUN=true, no wallet/keys needed. Reads are public.
  * ═══════════════════════════════════════════════════════════════
  */
 
-const PERPS_INFO_API = 'https://api.perpetuals.polymarket.com/v1/info';
+const { analyze, describe, fetchActivity, fetchPositions } = require('./learn-model');
 
-const WATCH_WALLET            = (process.env.WATCH_WALLET || '0x2070f45c22e44a52cb42210d1112a0bfb6a9a0c7').trim();
-const POLL_INTERVAL_MS        = Number(process.env.POLL_INTERVAL_MS || 5000);
-const DEMO_CAPITAL            = Number(process.env.DEMO_CAPITAL || 20000);
-const MIRROR_SCALE            = Number(process.env.MIRROR_SCALE || 0.01);          // bot target = |master size| * this
-const MIRROR_FIXED_SIZE       = process.env.MIRROR_FIXED_SIZE ? Number(process.env.MIRROR_FIXED_SIZE) : null; // if set, flat magnitude whenever master > 0
-const MIN_MIRROR_SIZE         = Number(process.env.MIN_MIRROR_SIZE || 0.0001);     // ignore deltas smaller than this
+const DATA_API = 'https://data-api.polymarket.com';
+const GAMMA_API = 'https://gamma-api.polymarket.com';
+
+const WATCH_WALLET             = (process.env.WATCH_WALLET || '0x251c1a283703beed41590b0875a8dcb8ddd1541f').trim();
+const POLL_INTERVAL_MS         = Number(process.env.POLL_INTERVAL_MS || 2000); // fast pickup — mirrors the master within ~2s of each fire
+const POSITION_SWEEP_INTERVAL_MS = Number(process.env.POSITION_SWEEP_INTERVAL_MS || 30000);
+const LEARN_REFRESH_MS         = Number(process.env.LEARN_REFRESH_MS || 10 * 60 * 1000);
+const DEMO_CAPITAL             = Number(process.env.DEMO_CAPITAL || 20000);
+const MIRROR_SCALE             = Number(process.env.MIRROR_SCALE || 1);          // bot shares = master shares x this
+const MIRROR_FIXED_SHARES      = process.env.MIRROR_FIXED_SHARES ? Number(process.env.MIRROR_FIXED_SHARES) : null; // fixed size when set
 const MIRROR_EXISTING_ON_START = (process.env.MIRROR_EXISTING_ON_START ?? 'true').toLowerCase() === 'true';
+const MAX_POSITION_USDC        = Number(process.env.MAX_POSITION_USDC || 20000); // skip buys that would exceed this cost per mirrored window
 
-let DRY_RUN = true; // this build only ever runs DRY_RUN=true — see setMode()
+let DRY_RUN = true; // demo-only — see setMode()
 
 function round2(n) { return Math.round(n * 100) / 100; }
 function round4(n) { return Math.round(n * 10000) / 10000; }
+
+// Seconds between the trade timestamp and its window's open (the slug's
+// trailing epoch is the window open time). Used to tag every mirrored
+// fill with exactly when inside the window the master fired.
+function windowSecOf(slug) {
+  if (!slug) return null;
+  if (/-5m-/.test(slug)) return 300;
+  if (/-15m-/.test(slug)) return 900;
+  if (/-1h-/.test(slug) || /-60m-/.test(slug)) return 3600;
+  return null;
+}
+function fireOffset(t) {
+  const w = windowSecOf(t.slug);
+  if (!w || !t.timestamp) return null;
+  return t.timestamp % w; // slug epoch is aligned to the window open
+}
+function fmtOffset(off) {
+  if (off == null) return '';
+  const m = Math.floor(off / 60), sec = Math.round(off % 60);
+  return `+${m}:${String(sec).padStart(2, '0')}`;
+}
+function fireTag(t) {
+  const off = fireOffset(t);
+  return off == null ? '' : ` [fire ${fmtOffset(off)}]`;
+}
 
 let emitFn = () => {};
 let slog = () => {};
 let startTime = Date.now();
 let logs = [];
-let trades = [];
+let tradeLog = [];           // mirrored trade events (for the dashboard table)
 let tradingEnabled = true;
+let equityCurve = [{ t: Date.now(), equity: DEMO_CAPITAL }];
 let totalEquityCurve = [];
+let learning = null;
+let learningError = null;
 
 function log(msg) {
   const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
@@ -60,14 +92,14 @@ function log(msg) {
   slog(line);
 }
 
-async function getJSON(url, headers = {}) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-copy-bot/1.0', ...headers } });
+async function getJSON(url) {
+  const res = await fetch(url, { headers: { 'User-Agent': 'polymarket-copy-bot/1.0' } });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
   return res.json();
 }
 
 // ─────────────────────────────────────────
-//  Wallet resolution (address or @username)
+//  Master wallet resolution (0x... or @username)
 // ─────────────────────────────────────────
 let watchAddress = null;
 let resolveError = null;
@@ -76,64 +108,43 @@ async function resolveMasterWallet(input) {
   const s = String(input || '').trim();
   if (/^0x[0-9a-fA-F]{40}$/.test(s)) return s.toLowerCase();
   const name = s.replace(/^@/, '');
-  log(`🔎 resolving perps wallet for @${name} from the profile page...`);
+  log(`🔎 resolving wallet for @${name} from the profile page...`);
   const res = await fetch(`https://polymarket.com/@${encodeURIComponent(name)}`, {
     headers: { 'User-Agent': 'polymarket-copy-bot/1.0' },
   });
   if (!res.ok) throw new Error(`profile page HTTP ${res.status}`);
   const html = await res.text();
   const m = html.match(/walletAddress\\?"?\s*:\s*\\?"?(0x[0-9a-fA-F]{40})/);
-  if (!m) throw new Error(`could not find a perps walletAddress on @${name}'s profile`);
-  log(`🔎 @${name} -> perps wallet ${m[1].toLowerCase()}`);
+  if (!m) throw new Error(`could not find a walletAddress on @${name}'s profile`);
+  log(`🔎 @${name} -> wallet ${m[1].toLowerCase()}`);
   return m[1].toLowerCase();
 }
 
 // ─────────────────────────────────────────
-//  Market data — public REST (mark prices)
+//  Paper mirror state
 // ─────────────────────────────────────────
-let markCache = {}; // instrumentId -> mark
-
-function markPriceOf(key) {
-  const m = markCache[key];
-  return m && m > 0 ? m : null;
-}
-
-async function refreshTickers() {
-  try {
-    const tickers = await getJSON(`${PERPS_INFO_API}/tickers`);
-    if (!Array.isArray(tickers)) return;
-    for (const t of tickers) {
-      if (t && t.instrument_id != null && t.mark_price != null) {
-        markCache[String(t.instrument_id)] = Number(t.mark_price);
-      }
-    }
-  } catch (e) {
-    // display/valuation only — never block position syncing
-  }
-}
-
-// ─────────────────────────────────────────
-//  State
-// ─────────────────────────────────────────
-let initialScanDone = false;
+let masterPositions = [];     // latest master positions snapshot
 let lastPollAt = null;
 let lastPollError = null;
-let lastEmptyWarnAt = 0;
-let masterMap = {};  // instrumentId -> { key, symbol, size (signed), entryPrice, unrealizedPnl, leverage }
-let positions = {};  // instrumentId -> { key, symbol, side ('LONG'|'SHORT'), size (magnitude), avgPrice }
-let lastSkipWarn = {}; // instrumentId -> timestamp (throttle insufficient-bankroll logs)
+let lastTradeTs = null;       // newest master trade timestamp already processed
+let seenTrades = new Set();   // dedupe key `tx|cond|outcome|ts|size|price` (survives API duplicate rows)
+let mirror = {};              // key `${conditionId}:${outcome}` -> paper position
 let bankroll = DEMO_CAPITAL;
 let realizedPnl = 0;
 let wins = 0, losses = 0;
-let equityCurve = [{ t: Date.now(), equity: DEMO_CAPITAL }];
+let windowHistory = [];       // settled mirrored windows
+let condMeta = {};            // slug -> { resolved, winner }
+let lastSweepAt = 0;
+
+const key = (conditionId, outcome) => `${conditionId}:${outcome}`;
 
 function markValue() {
-  let total = bankroll;
-  for (const p of Object.values(positions)) {
-    const mark = markPriceOf(p.key) || p.avgPrice;
-    total += p.side === 'LONG' ? p.size * mark : -p.size * mark;
+  let v = bankroll;
+  for (const p of Object.values(mirror)) {
+    if (p.status !== 'open') continue;
+    v += p.shares * (p.curPrice != null ? p.curPrice : p.avgPrice);
   }
-  return round2(total);
+  return round2(v);
 }
 
 function recordEquity() {
@@ -144,216 +155,220 @@ function recordEquity() {
   if (totalEquityCurve.length > 500) totalEquityCurve.shift();
 }
 
-function registerTrade(entry) {
-  const rec = { time: new Date().toISOString().slice(11, 19), ...entry };
-  trades.push(rec);
-  if (trades.length > 300) trades.shift();
+function pushTradeLog(entry) {
+  tradeLog.push(entry);
+  if (tradeLog.length > 200) tradeLog.shift();
 }
 
 // ─────────────────────────────────────────
-//  Sizing policy
+//  Gamma resolution lookup (per conditionId)
 // ─────────────────────────────────────────
-function targetBotSize(masterSize) {
-  if (!masterSize || Math.abs(masterSize) <= 0) return 0;
-  const magnitude = MIRROR_FIXED_SIZE != null
-    ? MIRROR_FIXED_SIZE
-    : round4(Math.abs(masterSize) * MIRROR_SCALE);
-  return Math.sign(masterSize) * Math.abs(magnitude); // keep direction
+async function sweepResolutions() {
+  const open = Object.values(mirror).filter((p) => p.status === 'open');
+  const need = open.filter((p) => p.slug && (!condMeta[p.slug] || !condMeta[p.slug].resolved));
+  if (!need.length) { settleOpenPositions(); return; }
+  // Resolve via the event-by-slug endpoint (one market per event for
+  // the BTC up/down series); outcomes+outcomePrices on a closed event
+  // give the authoritative winner. Concurrent, chunked.
+  const CONC = 8, CHUNK = 40;
+  for (let i = 0; i < need.length; i += CHUNK) {
+    const chunk = need.slice(i, i + CHUNK);
+    await Promise.all(chunk.map(async (p) => {
+      try {
+        const ev = await getJSON(`${GAMMA_API}/events?slug=${encodeURIComponent(p.slug)}`);
+        const markets = (Array.isArray(ev) && ev.length && Array.isArray(ev[0].markets)) ? ev[0].markets : [];
+        const mk = markets.find((m) => m.conditionId === p.conditionId) || markets[0];
+        if (!mk || !mk.closed) return;
+        let winner = null;
+        try {
+          const outs = JSON.parse(mk.outcomes || '[]');
+          const prices = JSON.parse(mk.outcomePrices || '[]');
+          const upIdx = outs.findIndex((o) => /up|yes|true/i.test(o));
+          if (prices.length === 2 && upIdx >= 0 && prices[upIdx] != null) {
+            winner = parseFloat(prices[upIdx]) > 0.5 ? 'UP' : 'DOWN';
+          }
+        } catch (_) {}
+        if (winner) condMeta[p.slug] = { resolved: true, winner };
+      } catch (_) { /* skip this window this sweep */ }
+    }));
+  }
+  settleOpenPositions();
+}
+
+// Settles every open mirrored position whose market is resolved (winner
+// known in condMeta) at $1/share won / $0 lost.
+function settleOpenPositions() {
+  for (const p of Object.values(mirror)) {
+    if (p.status !== 'open') continue;
+    const meta = condMeta[p.slug];
+    if (!meta || !meta.resolved) continue;
+    const won = p.outcome.toUpperCase().startsWith('U') ? meta.winner === 'UP' : meta.winner === 'DOWN';
+    p.status = won ? 'won' : 'lost';
+    p.resolvedWon = won;
+    p.payout = won ? p.shares : 0;
+    p.pnl = round2(p.payout - p.cost);
+    p.resolvedAt = new Date().toISOString();
+    bankroll = round2(bankroll + p.payout);
+    realizedPnl = round2(realizedPnl + p.pnl);
+    if (won) wins++; else losses++;
+    windowHistory.push({
+      conditionId: p.conditionId, slug: p.slug, title: p.title, side: p.outcome,
+      shares: p.shares, avgPrice: p.avgPrice, cost: p.cost, payout: p.payout,
+      pnl: p.pnl, won, resolvedAt: p.resolvedAt,
+    });
+    if (windowHistory.length > 500) windowHistory.shift();
+    log(`${won ? '✅' : '💥'} RESOLVED ${p.slug} — ${p.outcome} ${won ? 'WON' : 'LOST'} | ${p.shares}sh @ avg $${p.avgPrice.toFixed(3)} | cost $${p.cost.toFixed(2)} payout $${p.payout.toFixed(2)} pnl ${p.pnl >= 0 ? '+' : ''}$${p.pnl.toFixed(2)} | bankroll $${bankroll.toFixed(2)}`);
+  }
+  recordEquity();
 }
 
 // ─────────────────────────────────────────
-//  Master polling — PUBLIC PERPS PORTFOLIO (drives mirroring)
+//  Mirroring trades
 // ─────────────────────────────────────────
-async function fetchMasterPortfolio() {
-  return getJSON(`${PERPS_INFO_API}/portfolio?address=${watchAddress}`);
+function mirrorBuy(t) {
+  const k = key(t.conditionId, t.outcome);
+  let shares = MIRROR_FIXED_SHARES != null ? MIRROR_FIXED_SHARES : round4((t.size || 0) * MIRROR_SCALE);
+  if (!shares || shares <= 0) return;
+  const cost = shares * (t.price || 0);
+  const pos = mirror[k];
+  const posCost = pos ? pos.cost : 0;
+  if (posCost + cost > MAX_POSITION_USDC) {
+    log(`⏭️ skip mirror buy ${t.slug} ${t.outcome} — would exceed MAX_POSITION_USDC $${MAX_POSITION_USDC} (${(posCost + cost).toFixed(2)})`);
+    return;
+  }
+  if (bankroll < cost) {
+    log(`⏭️ skip mirror buy ${t.slug} ${t.outcome} $${cost.toFixed(2)} — insufficient bankroll $${bankroll.toFixed(2)}`);
+    return;
+  }
+  if (pos) {
+    const newShares = pos.shares + shares;
+    pos.avgPrice = round4((pos.shares * pos.avgPrice + shares * (t.price || 0)) / newShares);
+    pos.shares = newShares;
+    pos.cost = round2(pos.cost + cost);
+    pos.buys++;
+    pos.lastPrice = t.price;
+  } else {
+    mirror[k] = {
+      conditionId: t.conditionId, outcome: t.outcome, title: t.title, slug: t.slug,
+      shares, avgPrice: t.price, cost: round2(cost), buys: 1, lastPrice: t.price,
+      status: 'open', openedAt: new Date().toISOString(), curPrice: t.price,
+    };
+  }
+  bankroll = round2(bankroll - cost);
+  pushTradeLog({ t: t.timestamp, action: 'BUY', slug: t.slug, side: t.outcome, price: t.price, shares, cost: round2(cost), profit: null, fireOffset: fireOffset(t) });
+  log(`🛒 MIRROR BUY ${t.slug} ${t.outcome} ${shares}sh @ $${t.price.toFixed(3)} ($${cost.toFixed(2)})${fireTag(t)} | bankroll $${bankroll.toFixed(2)}`);
 }
 
-function normalizePosition(r) {
-  const key = String(r.instrument_id ?? r.instrumentId);
-  const symbol = r.symbol || `instrument-${key}`;
-  const size = Number(r.size ?? 0); // signed: >0 LONG, <0 SHORT
-  const entryPrice = Number(r.entry_price ?? r.entryPrice ?? 0);
-  const unrealizedPnl = Number(r.unrealized_pnl ?? r.unrealizedPnl ?? 0);
-  const leverage = Number(r.leverage ?? 1);
-  return { key, symbol, size, entryPrice, unrealizedPnl, leverage };
+function mirrorSell(t) {
+  const k = key(t.conditionId, t.outcome);
+  const pos = mirror[k];
+  if (!pos || pos.status !== 'open') return;
+  let sellShares = MIRROR_FIXED_SHARES != null ? Math.min(MIRROR_FIXED_SHARES, pos.shares) : round4((t.size || 0) * MIRROR_SCALE);
+  sellShares = Math.min(sellShares, pos.shares);
+  if (sellShares <= 0) return;
+  const proceeds = sellShares * (t.price || pos.avgPrice);
+  const realized = round2(proceeds - sellShares * pos.avgPrice);
+  pos.shares = round4(pos.shares - sellShares);
+  pos.cost = round2(pos.cost - sellShares * pos.avgPrice);
+  bankroll = round2(bankroll + proceeds);
+  realizedPnl = round2(realizedPnl + realized);
+  pushTradeLog({ t: t.timestamp, action: 'SELL', slug: t.slug, side: t.outcome, price: t.price, shares: sellShares, cost: round2(proceeds), profit: realized, fireOffset: fireOffset(t) });
+  log(`🔄 MIRROR SELL ${t.slug} ${t.outcome} ${sellShares}sh @ $${(t.price || pos.avgPrice).toFixed(3)}${fireTag(t)} | realized ${realized >= 0 ? '+' : ''}$${realized.toFixed(2)} | bankroll $${bankroll.toFixed(2)}`);
+  if (pos.shares <= 0.001) { pos.status = 'closed'; pos.closedAt = new Date().toISOString(); }
+}
+
+async function pollMasterTrades() {
+  // Two pages (0..200) so a burst of fills can never fall between polls.
+  const base = `${DATA_API}/trades?user=${encodeURIComponent(watchAddress)}&limit=100`;
+  const [p0, p1] = await Promise.all([getJSON(base), getJSON(base + '&offset=100')]);
+  const data = [...(Array.isArray(p0) ? p0 : []), ...(Array.isArray(p1) ? p1 : [])];
+  if (!data.length) return;
+  // First poll is only a BASELINE: the master's current positions were
+  // already mirrored from the positions snapshot, so recent trades must
+  // not be re-mirrored. Only NEW trades (after the baseline) are copied.
+  if (lastTradeTs == null) {
+    lastTradeTs = Math.max(0, ...data.map((t) => t.timestamp));
+    return;
+  }
+  // Newest first from the API; copy every fill the master fires EXACTLY
+  // (same shares x scale, same price), including multiple fills in the
+  // same window and even in the same second (composite dedupe key, so
+  // identical API duplicate rows collapse but distinct fills survive).
+  const fresh = data.filter((t) => t.timestamp >= (lastTradeTs || 0));
+  if (!fresh.length) return;
+  const sorted = fresh.slice().sort((a, b) => a.timestamp - b.timestamp);
+  lastTradeTs = Math.max(lastTradeTs || 0, ...data.map((t) => t.timestamp));
+  for (const t of sorted) {
+    const dk = [t.transactionHash, t.conditionId, t.outcome, t.timestamp, t.size, t.price].join('|');
+    if (seenTrades.has(dk)) continue;
+    seenTrades.add(dk);
+    if (seenTrades.size > 20000) seenTrades.clear(); // keep the set bounded
+    if (!t.conditionId || !t.outcome) continue;
+    if (!tradingEnabled) continue;
+    if (t.side === 'BUY') mirrorBuy(t);
+    else if (t.side === 'SELL') mirrorSell(t);
+  }
+  recordEquity();
 }
 
 async function pollMasterPositions() {
-  if (!watchAddress) {
-    lastPollError = resolveError || 'watch wallet not resolved';
-    return;
+  masterPositions = await fetchPositions(watchAddress);
+  for (const p of masterPositions) {
+    if (p.curPrice != null) {
+      const mk = mirror[key(p.conditionId, p.outcome)];
+      if (mk && mk.status === 'open') mk.curPrice = Number(p.curPrice) || mk.curPrice;
+    }
+    // Fast path: a redeemable master position means the market resolved
+    // AND that side won — settle without a gamma round-trip.
+    if (p.redeemable === true && p.outcome && p.slug && (!condMeta[p.slug] || !condMeta[p.slug].resolved)) {
+      const winner = String(p.outcome).toUpperCase().startsWith('U') ? 'UP' : 'DOWN';
+      condMeta[p.slug] = { resolved: true, winner };
+    }
   }
-  let raw;
+  settleOpenPositions();
+  recordEquity();
+}
+
+// ─────────────────────────────────────────
+//  Learning model refresh
+// ─────────────────────────────────────────
+async function refreshLearning() {
   try {
-    raw = await fetchMasterPortfolio();
-    lastPollAt = Date.now();
-    lastPollError = null;
+    log('🧠 refreshing master strategy fingerprint...');
+    const [activity, positions] = await Promise.all([fetchActivity(watchAddress), fetchPositions(watchAddress)]);
+    learning = analyze(activity, positions);
+    log(`🧠 fingerprint: ${describe(learning)}`);
+    learningError = null;
   } catch (e) {
-    lastPollError = e.message;
-    if (Date.now() - lastEmptyWarnAt > 30000) {
-      lastEmptyWarnAt = Date.now();
-      log(`⚠️  portfolio fetch failed: ${e.message}`);
-    }
-    return;
+    learningError = e.message;
+    log(`⚠️ learning refresh failed: ${e.message}`);
   }
+}
 
-  const rows = raw && Array.isArray(raw.positions) ? raw.positions : [];
-  const newMasterMap = {};
-  for (const row of rows) {
-    const p = normalizePosition(row);
-    if (!p.key || p.size === 0) continue;
-    newMasterMap[p.key] = p;
-  }
-  const masterCount = Object.keys(newMasterMap).length;
-  if (masterCount === 0 && Date.now() - lastEmptyWarnAt > 60000) {
-    lastEmptyWarnAt = Date.now();
-    log(`ℹ️  master perps portfolio is empty (0 positions) — nothing to mirror`);
-  }
-
-  if (!initialScanDone) {
-    initialScanDone = true;
-    masterMap = newMasterMap;
-    log(`👀 watching ${watchAddress} — ${Object.keys(masterMap).length} open perps position(s) found`);
-    if (MIRROR_EXISTING_ON_START) {
-      for (const key of Object.keys(masterMap)) {
-        if (tradingEnabled) await syncToken(key, masterMap[key]);
+// ─────────────────────────────────────────
+//  Loop
+// ─────────────────────────────────────────
+let loopRunning = false;
+async function mainLoop() {
+  if (loopRunning) return;
+  loopRunning = true;
+  while (true) {
+    try {
+      await pollMasterTrades();
+      const now = Date.now();
+      if (now - lastSweepAt >= POSITION_SWEEP_INTERVAL_MS) {
+        lastSweepAt = now;
+        await Promise.all([pollMasterPositions(), sweepResolutions()]);
       }
-    } else {
-      log(`ℹ️  MIRROR_EXISTING_ON_START=false — existing open positions were NOT mirrored, only future changes will be`);
+      lastPollAt = Date.now();
+      lastPollError = null;
+      emitFn('state', buildState());
+    } catch (e) {
+      lastPollError = e.message;
+      log(`⚠️ Loop error: ${e.message}`);
+      emitFn('state', buildState());
     }
-    return;
-  }
-
-  const keys = new Set([...Object.keys(newMasterMap), ...Object.keys(positions)]);
-  for (const key of keys) {
-    if (!tradingEnabled) continue;
-    await syncToken(key, newMasterMap[key] || null);
-  }
-  masterMap = newMasterMap;
-}
-
-// ─────────────────────────────────────────
-//  Paper mirroring helpers
-// ─────────────────────────────────────────
-function paperOpen(key, symbol, side, size, price) {
-  if (size <= 0) return;
-  const cost = round2(size * price);
-  if (cost > bankroll) {
-    if (Date.now() - (lastSkipWarn[key] || 0) > 30000) {
-      lastSkipWarn[key] = Date.now();
-      log(`⏭️  can't OPEN ${symbol} ${side} ${size} @ ${price.toFixed(2)} — need $${cost.toFixed(2)}, have $${bankroll.toFixed(2)} paper bankroll`);
-    }
-    return;
-  }
-  if (side === 'LONG') bankroll = round2(bankroll - cost);
-  else bankroll = round2(bankroll + cost); // short proceeds received
-  const prev = positions[key];
-  const prevQty = prev ? prev.size : 0;
-  const newQty = round4(prevQty + size);
-  const prevCost = prev ? prev.avgPrice * prev.size : 0;
-  const avgPrice = newQty > 0 ? round4((prevCost + cost) / newQty) : 0;
-  positions[key] = { key, symbol, side, size: newQty, avgPrice };
-  const reason = prevQty === 0 ? 'OPEN' : 'ADD';
-  log(`✅ ${reason} — ${symbol} ${side} ${size} @ ${price.toFixed(2)} | cost=$${cost.toFixed(2)}`);
-  registerTrade({ side: 'BUY', reason, symbol, dir: side, price, size, cost });
-  recordEquity();
-}
-
-function paperClosePartial(key, price, deltaSize, masterSize) {
-  const bot = positions[key];
-  if (!bot || deltaSize <= 0) return;
-  const closing = Math.min(deltaSize, bot.size);
-  let profit;
-  if (bot.side === 'LONG') {
-    const proceeds = round2(closing * price);
-    bankroll = round2(bankroll + proceeds);
-    profit = round2((price - bot.avgPrice) * closing);
-  } else {
-    const buyback = round2(closing * price);
-    bankroll = round2(bankroll - buyback);
-    profit = round2((bot.avgPrice - price) * closing);
-  }
-  realizedPnl = round2(realizedPnl + profit);
-  if (profit >= 0) wins++; else losses++;
-  const newSize = round4(bot.size - closing);
-  if (newSize <= 0.0001) delete positions[key];
-  else positions[key] = { ...bot, size: newSize };
-  const icon = profit >= 0 ? '💰' : '💥';
-  log(`${icon} REDUCE — ${bot.symbol} ${bot.side} ${closing} @ ${price.toFixed(2)} | pnl=$${profit.toFixed(2)}${masterSize != null ? ` | master now ${masterSize}` : ''}`);
-  registerTrade({ side: 'SELL', reason: 'REDUCE', symbol: bot.symbol, dir: bot.side, price, size: closing, profit });
-  recordEquity();
-}
-
-function paperCloseAll(key, price) {
-  const bot = positions[key];
-  if (!bot) return;
-  const size = bot.size;
-  let proceeds;
-  if (bot.side === 'LONG') {
-    proceeds = round2(size * price);
-    bankroll = round2(bankroll + proceeds);
-  } else {
-    proceeds = round2(size * price); // buyback cost
-    bankroll = round2(bankroll - proceeds);
-  }
-  const profit = round2((bot.side === 'LONG' ? price - bot.avgPrice : bot.avgPrice - price) * size);
-  realizedPnl = round2(realizedPnl + profit);
-  if (profit >= 0) wins++; else losses++;
-  delete positions[key];
-  const icon = profit >= 0 ? '💰' : '💥';
-  log(`${icon} CLOSE — ${bot.symbol} ${bot.side} ${size} @ ${price.toFixed(2)} | proceeds=$${proceeds.toFixed(2)} | pnl=$${profit.toFixed(2)}`);
-  registerTrade({ side: 'SELL', reason: 'CLOSE', symbol: bot.symbol, dir: bot.side, price, size, proceeds, profit });
-  recordEquity();
-}
-
-// ─────────────────────────────────────────
-//  Sync one instrument's bot position toward its target
-// ─────────────────────────────────────────
-async function syncToken(key, masterInfo) {
-  const masterSize = masterInfo ? masterInfo.size : 0;      // signed
-  const target = targetBotSize(masterSize);                  // signed
-  const bot = positions[key];
-  const botSigned = bot ? (bot.side === 'SHORT' ? -bot.size : bot.size) : 0;
-
-  const symbol = masterInfo?.symbol || bot?.symbol || `instrument-${key}`;
-  const price = (masterInfo && masterInfo.entryPrice > 0 ? masterInfo.entryPrice : null)
-    || markPriceOf(key) || bot?.avgPrice || null;
-  if (!price || price <= 0) {
-    log(`⏭️  skip sync for ${symbol} — no usable price yet`);
-    return;
-  }
-
-  // nothing to change
-  if (Math.abs(round4(target - botSigned)) < MIN_MIRROR_SIZE) return;
-
-  // sign flip: close the old direction fully, then open the new one
-  if (bot && botSigned !== 0 && target !== 0 && Math.sign(botSigned) !== Math.sign(target)) {
-    paperCloseAll(key, price);
-    paperOpen(key, symbol, target > 0 ? 'LONG' : 'SHORT', Math.abs(target), price);
-    return;
-  }
-
-  if (target === 0) {
-    if (bot) paperCloseAll(key, price);
-    return;
-  }
-
-  const side = target > 0 ? 'LONG' : 'SHORT';
-  const absTarget = Math.abs(target);
-  const absBot = Math.abs(botSigned);
-
-  // no position yet -> open in the target direction
-  if (!bot || absBot === 0) {
-    paperOpen(key, symbol, side, absTarget, price);
-    return;
-  }
-
-  // same direction as the target -> add or reduce by the size difference
-  const diff = round4(absTarget - absBot);
-  if (diff >= MIN_MIRROR_SIZE) {
-    paperOpen(key, symbol, side, diff, price);
-  } else if (diff <= -MIN_MIRROR_SIZE) {
-    paperClosePartial(key, price, -diff, masterSize);
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
 }
 
@@ -362,66 +377,57 @@ async function syncToken(key, masterInfo) {
 // ─────────────────────────────────────────
 function buildState() {
   const mv = markValue();
-  const masterList = Object.values(masterMap).map(m => ({
-    ...m,
-    side: m.size > 0 ? 'LONG' : 'SHORT',
-    size: Math.abs(m.size),
+  const winRate = (wins + losses) > 0 ? round2((wins / (wins + losses)) * 100) : null;
+  const masterCashPnl = round2(masterPositions.reduce((s, p) => s + (p.cashPnl || 0), 0));
+  const mirrorList = Object.values(mirror).filter((p) => p.status === 'open').map((p) => ({ ...p }));
+  const masterList = masterPositions.map((p) => ({
+    conditionId: p.conditionId, outcome: p.outcome, title: p.title, slug: p.slug,
+    size: p.size, avgPrice: p.avgPrice, cashPnl: p.cashPnl, curPrice: p.curPrice, redeemable: p.redeemable,
   }));
-  const botList = Object.values(positions).map(p => {
-    const mark = markPriceOf(p.key) || p.avgPrice;
-    return {
-      ...p,
-      mark,
-      unrealizedPnl: round2(((p.side === 'LONG' ? 1 : -1) * (mark - p.avgPrice)) * p.size),
-    };
-  });
   return {
-    dryRun: DRY_RUN, tradingEnabled,
+    dryRun: DRY_RUN,
+    tradingEnabled,
     watchWallet: watchAddress || WATCH_WALLET,
     resolveError,
-    demoCapital: DEMO_CAPITAL, bankroll, markValue: mv,
-    realizedPnl, totalPnl: round2(mv - DEMO_CAPITAL),
-    wins, losses,
-    winRate: (wins + losses) > 0 ? round2((wins / (wins + losses)) * 100) : null,
-    uptime: Math.floor((Date.now() - startTime) / 1000),
-    lastPollAt, lastPollError,
-    masterPositionsCount: Object.keys(masterMap).length,
+    demoCapital: DEMO_CAPITAL,
+    bankroll,
+    markValue: mv,
+    realizedPnl,
+    totalPnl: round2(mv - DEMO_CAPITAL),
+    wins, losses, winRate,
+    windowHistory: windowHistory.slice(-40).reverse(),
+    master: {
+      positionsCount: masterPositions.length,
+      currentCashPnl: masterCashPnl,
+      currentValue: round2(masterPositions.reduce((s, p) => s + (p.currentValue || 0), 0)),
+      positions: masterList,
+    },
+    positions: mirrorList,
+    equityCurve,
+    totalEquityCurve,
+    trades: tradeLog.slice(-80).reverse(),
+    logs: logs.slice(-100),
+    learning,
+    learningError,
     config: {
       pollIntervalMs: POLL_INTERVAL_MS,
+      positionSweepIntervalMs: POSITION_SWEEP_INTERVAL_MS,
       mirrorScale: MIRROR_SCALE,
-      mirrorFixedSize: MIRROR_FIXED_SIZE,
-      minMirrorSize: MIN_MIRROR_SIZE,
+      mirrorFixedShares: MIRROR_FIXED_SHARES,
+      maxPositionUsdc: MAX_POSITION_USDC,
       mirrorExistingOnStart: MIRROR_EXISTING_ON_START,
     },
-    masterPositions: masterList,
-    positions: botList,
-    equityCurve, totalEquityCurve,
-    logs: logs.slice(-100),
-    trades: trades.slice(-80).reverse(),
+    uptime: Math.floor((Date.now() - startTime) / 1000),
+    lastPollAt,
+    lastPollError,
   };
-}
-
-let loopRunning = false;
-async function mainLoop() {
-  if (loopRunning) return;
-  loopRunning = true;
-  while (true) {
-    try {
-      await refreshTickers();
-      await pollMasterPositions();
-      emitFn('state', buildState());
-    } catch (e) {
-      log(`⚠️  Loop error: ${e.message}`);
-    }
-    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
-  }
 }
 
 function pauseTrading() { tradingEnabled = false; log('⏸️  Mirroring paused (still watching + logging the master wallet)'); return { ok: true }; }
 function resumeTrading() { tradingEnabled = true; log('▶️  Mirroring resumed'); return { ok: true }; }
 function getStatus() { return { ok: true, ...buildState() }; }
 
-// LIVE mode is intentionally not implemented yet — this bot is demo-only.
+// Demo-only build — LIVE mode would need private keys/signing.
 function setMode(wantLive) {
   if (wantLive) {
     log('⚠️  LIVE mode requested but not implemented — this bot only places paper trades today. Staying in DEMO mode.');
@@ -433,15 +439,40 @@ function setMode(wantLive) {
 async function init(emit, slogFn) {
   emitFn = emit;
   slog = slogFn;
-  log(`🚀 Polymarket PERPS Copy-Trading Bot — DEMO MODE — LONG/SHORT POSITION MIRRORING`);
-  try {
-    watchAddress = await resolveMasterWallet(WATCH_WALLET);
-  } catch (e) {
-    resolveError = `cannot resolve watch wallet "${WATCH_WALLET}": ${e.message}`;
-    log(`❌ ${resolveError}`);
+  watchAddress = await resolveMasterWallet(WATCH_WALLET);
+  log(`🚀 Binary Copy-Trading Bot — DEMO MODE — watching ${watchAddress}`);
+  log(`   mirroring: buys/sells on binary markets, ${MIRROR_SCALE}x scale, $${DEMO_CAPITAL} demo capital, resolve at $1/$0`);
+
+  // Mirror the master's CURRENT open positions so paper equity starts
+  // at the same point, then run the learning model on the full record.
+  if (MIRROR_EXISTING_ON_START) {
+    try {
+      await pollMasterPositions();
+      let seeded = 0;
+      for (const p of masterPositions) {
+        const k = key(p.conditionId, p.outcome);
+        if (mirror[k] || !p.size || !p.avgPrice) continue;
+        const shares = MIRROR_FIXED_SHARES != null ? Math.min(MIRROR_FIXED_SHARES, p.size) : round4(p.size * MIRROR_SCALE);
+        const cost = round2(shares * p.avgPrice);
+        if (!shares) continue;
+        mirror[k] = {
+          conditionId: p.conditionId, outcome: p.outcome, title: p.title, slug: p.slug,
+          shares, avgPrice: p.avgPrice, cost, buys: 1, lastPrice: p.avgPrice,
+          status: 'open', openedAt: new Date().toISOString(), curPrice: p.curPrice != null ? p.curPrice : p.avgPrice,
+          seeded: true,
+        };
+        bankroll = round2(bankroll - cost);
+        seeded++;
+      }
+      log(`👀 mirrored ${seeded} existing master position(s) (cost $${round2(DEMO_CAPITAL - bankroll)}) — bankroll $${bankroll.toFixed(2)}`);
+      recordEquity();
+    } catch (e) {
+      log(`⚠️ existing-position mirror failed: ${e.message}`);
+    }
   }
-  log(`👀 target master perps wallet ${watchAddress || WATCH_WALLET} | polling every ${POLL_INTERVAL_MS}ms | $${DEMO_CAPITAL} paper capital | target = ${MIRROR_FIXED_SIZE != null ? MIRROR_FIXED_SIZE + ' (fixed magnitude)' : (MIRROR_SCALE * 100) + '% of master size'} | existing-on-start mirroring: ${MIRROR_EXISTING_ON_START ? 'ON' : 'OFF'}`);
-  mainLoop().catch(e => log(`❌ Fatal: ${e.message}`));
+  refreshLearning();
+  setInterval(refreshLearning, LEARN_REFRESH_MS).unref();
+  mainLoop();
 }
 
-module.exports = { init, pauseTrading, resumeTrading, setMode, getStatus, buildState };
+module.exports = { init, getStatus, pauseTrading, resumeTrading, setMode };

@@ -1,7 +1,7 @@
 {
-  "name": "polymarket-copy-bot",
+  "name": "polymarket-binary-copy-bot",
   "version": "1.0.0",
-  "description": "Mirrors a master Polymarket Perpetuals wallet (long/short) in paper/demo mode using public APIs.",
+  "description": "Mirrors a master Polymarket binary (up/down) wallet in paper/demo mode using public APIs, with a learning model that fingerprints the master strategy.",
   "main": "index.js",
   "engines": {
     "node": ">=18.0.0"
