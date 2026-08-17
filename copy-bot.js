@@ -3,11 +3,11 @@
 const DATA_API  = 'https://data-api.polymarket.com';
 const GAMMA_API = 'https://gamma-api.polymarket.com';
 
-const WATCH_WALLET  = (process.env.WATCH_WALLET || '0x251c1a283703beed41590b0875a8dcb8ddd1541f').trim();
-const POLL_MS       = Number(process.env.POLL_INTERVAL_MS || 1000);
-const SWEEP_MS      = Number(process.env.POSITION_SWEEP_INTERVAL_MS || 15000);
-const CAPITAL       = Number(process.env.DEMO_CAPITAL || 20000);
-const COPY_PCT      = 0.05;
+const WATCH_WALLET = (process.env.WATCH_WALLET || '0x251c1a283703beed41590b0875a8dcb8ddd1541f').trim();
+const POLL_MS      = Number(process.env.POLL_INTERVAL_MS || 1000);
+const SWEEP_MS     = Number(process.env.POSITION_SWEEP_INTERVAL_MS || 15000);
+const CAPITAL      = Number(process.env.DEMO_CAPITAL || 20000);
+const COPY_PCT     = 0.05;
 
 function round2(n) { return Math.round(n * 100) / 100; }
 
@@ -16,16 +16,18 @@ let slogFn = () => {};
 let logs = [];
 let trades = [];
 let positions = {};
+let windowHistory = [];
 let bankroll = CAPITAL;
 let wins = 0, losses = 0;
 let realizedPnl = 0;
 let equityCurve = [{ t: Date.now(), equity: CAPITAL }];
 let watchAddress = null;
 let seenTradeIds = new Set();
+let biggestBuy = null;
+let smallestBuy = null;
 let biggestBuys = [];
 let smallestBuys = [];
 let masterPositions = [];
-let masterBuys = [];
 let startTime = Date.now();
 
 function log(msg) {
@@ -39,13 +41,13 @@ async function getJSON(url, timeout = 3000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
-    const res = await fetch(url, { headers: { 'User-Agent': 'copy-bot/2.0' }, signal: ctrl.signal });
+    const res = await fetch(url, { headers: { 'User-Agent': 'copy-bot/3.0' }, signal: ctrl.signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } finally { clearTimeout(timer); }
 }
 
-function key(conditionId, outcome) { return conditionId + ':' + outcome; }
+function key(cid, outcome) { return cid + ':' + outcome; }
 
 async function resolveMasterWallet(input) {
   if (!input.startsWith('@')) return input.toLowerCase();
@@ -58,19 +60,17 @@ async function resolveMasterWallet(input) {
 
 async function pollMasterTrades() {
   try {
-    const trades_data = await getJSON(`${DATA_API}/trades?user=${watchAddress}&limit=20`);
-    if (!Array.isArray(trades_data)) return;
-    for (const t of trades_data) {
+    const data = await getJSON(`${DATA_API}/trades?user=${watchAddress}&limit=20`);
+    if (!Array.isArray(data)) return;
+    for (const t of data) {
       const tid = t.id || t.transactionHash + t.timestamp;
       if (seenTradeIds.has(tid)) continue;
       seenTradeIds.add(tid);
-      if (seenTradeIds.size > 5000) { const arr = [...seenTradeIds]; seenTradeIds = new Set(arr.slice(-2500)); }
+      if (seenTradeIds.size > 5000) { const a = [...seenTradeIds]; seenTradeIds = new Set(a.slice(-2500)); }
       if (t.side !== 'BUY') continue;
       await mirrorBuy(t);
     }
-  } catch (e) {
-    log(`⚠️ Trade poll error: ${e.message}`);
-  }
+  } catch (e) { log(`⚠️ Poll: ${e.message}`); }
 }
 
 async function mirrorBuy(t) {
@@ -84,24 +84,23 @@ async function mirrorBuy(t) {
 
   const copyShares = round2(masterShares * COPY_PCT);
   const cost = round2(copyShares * price);
-  if (cost > bankroll) { log(`⚠️ Insufficient bankroll for $${cost.toFixed(2)} copy`); return; }
+  if (cost > bankroll) { log(`⚠️ No funds for $${cost.toFixed(2)}`); return; }
 
   const slug = t.slug || t.title || cid;
   const title = t.title || slug;
 
   if (positions[k]) {
     const p = positions[k];
-    const totalShares = round2(p.shares + copyShares);
-    p.avgPrice = round2(((p.shares * p.avgPrice) + cost) / totalShares);
-    p.shares = totalShares;
+    const totalSh = round2(p.shares + copyShares);
+    p.avgPrice = round2(((p.shares * p.avgPrice) + cost) / totalSh);
+    p.shares = totalSh;
     p.cost = round2(p.cost + cost);
     p.buys++;
   } else {
     positions[k] = {
       conditionId: cid, outcome, title, slug,
       shares: copyShares, avgPrice: price, cost,
-      buys: 1, status: 'open', openedAt: new Date().toISOString(),
-      curPrice: price,
+      buys: 1, status: 'open', openedAt: new Date().toISOString(), curPrice: price,
     };
   }
   bankroll = round2(bankroll - cost);
@@ -113,17 +112,17 @@ async function mirrorBuy(t) {
   };
   trades.push(trade);
   if (trades.length > 500) trades.shift();
+  updateBigSmall(trade);
 
-  trackBigSmall(trade);
   log(`📥 COPY BUY ${outcome.toUpperCase()} ${copyShares}sh @${price.toFixed(3)} = $${cost.toFixed(2)} (master ${masterShares}sh) [${shortSlug(slug)}]`);
   emitFn('trade', trade);
 }
 
-function trackBigSmall(trade) {
+function updateBigSmall(trade) {
   biggestBuys.push(trade);
   smallestBuys.push(trade);
-  biggestBuys.sort((a, b) => b.cost - a.cost);
-  smallestBuys.sort((a, b) => a.cost - b.cost);
+  biggestBuys.sort((a, b) => b.shares - a.shares);
+  smallestBuys.sort((a, b) => a.shares - b.shares);
   if (biggestBuys.length > 10) biggestBuys.length = 10;
   if (smallestBuys.length > 10) smallestBuys.length = 10;
 }
@@ -177,13 +176,19 @@ function settlePosition(k, won) {
   p.pnl = pnl;
   p.won = won;
   p.settledAt = new Date().toISOString();
-  log(`🏁 ${won ? 'WIN' : 'LOSS'} ${p.outcome.toUpperCase()} ${shortSlug(p.slug)} — P&L ${pnl >= 0 ? '+$' : '-$'}${Math.abs(pnl).toFixed(2)} (payout $${payout.toFixed(2)})`);
+
+  windowHistory.push({
+    slug: p.slug, side: p.outcome, shares: p.shares, avgPrice: p.avgPrice,
+    cost: p.cost, payout, pnl, won, settledAt: p.settledAt,
+  });
+  if (windowHistory.length > 100) windowHistory.shift();
+
+  log(`🏁 ${won ? '✅ WIN' : '❌ LOSS'} ${p.outcome.toUpperCase()} ${shortSlug(p.slug)} — P&L ${pnl >= 0 ? '+$' : '-$'}${Math.abs(pnl).toFixed(2)} (cost $${p.cost.toFixed(2)}, payout $${payout.toFixed(2)})`);
   recordEquity();
 }
 
 function recordEquity() {
-  const mv = markValue();
-  equityCurve.push({ t: Date.now(), equity: mv });
+  equityCurve.push({ t: Date.now(), equity: markValue() });
   if (equityCurve.length > 2000) equityCurve.shift();
 }
 
@@ -196,30 +201,52 @@ function markValue() {
   return round2(v);
 }
 
+function totalWindowsCost() {
+  return round2(windowHistory.reduce((s, w) => s + w.cost, 0));
+}
+function totalWonCost() {
+  return round2(windowHistory.filter(w => w.won).reduce((s, w) => s + w.cost, 0));
+}
+function totalLostCost() {
+  return round2(windowHistory.filter(w => !w.won).reduce((s, w) => s + w.cost, 0));
+}
+function totalWonPnl() {
+  return round2(windowHistory.filter(w => w.won).reduce((s, w) => s + w.pnl, 0));
+}
+function totalLostPnl() {
+  return round2(windowHistory.filter(w => !w.won).reduce((s, w) => s + w.pnl, 0));
+}
+
 function buildState() {
   const mv = markValue();
   const winRate = (wins + losses) > 0 ? round2((wins / (wins + losses)) * 100) : null;
-  const openPositions = Object.values(positions).filter(p => p.status === 'open');
   return {
     watchWallet: watchAddress || WATCH_WALLET,
     demoCapital: CAPITAL,
     bankroll, markValue: mv,
     realizedPnl, totalPnl: round2(mv - CAPITAL),
     wins, losses, winRate,
-    positions: openPositions,
+    positions: Object.values(positions).filter(p => p.status === 'open'),
     trades: trades.slice(-100).reverse(),
+    biggestBuy: biggestBuys[0] || null,
+    smallestBuy: smallestBuys[0] || null,
     biggestBuys: biggestBuys.slice(0, 10),
     smallestBuys: smallestBuys.slice(0, 10),
+    windowHistory: windowHistory.slice(-30).reverse(),
+    totalWindows: windowHistory.length,
+    totalWindowsCost: totalWindowsCost(),
+    totalWonCost: totalWonCost(),
+    totalLostCost: totalLostCost(),
+    totalWonPnl: totalWonPnl(),
+    totalLostPnl: totalLostPnl(),
     equityCurve,
-    masterPositions: masterPositions.slice(0, 30),
-    logs: logs.slice(-150),
+    logs: logs.slice(-200),
     config: { pollMs: POLL_MS, copyPct: COPY_PCT, capital: CAPITAL },
     uptime: Math.floor((Date.now() - startTime) / 1000),
   };
 }
 
-let lastSweep = 0;
-let lastPosPoll = 0;
+let lastSweep = 0, lastPosPoll = 0;
 
 async function mainLoop() {
   while (true) {
