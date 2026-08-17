@@ -16,7 +16,6 @@ let slogFn = () => {};
 let logs = [];
 let trades = [];
 let positions = {};
-let windowHistory = [];
 let bankroll = CAPITAL;
 let wins = 0, losses = 0;
 let realizedPnl = 0;
@@ -25,10 +24,11 @@ let watchAddress = null;
 let seenTradeIds = new Set();
 let biggestBuy = null;
 let smallestBuy = null;
-let biggestBuys = [];
-let smallestBuys = [];
 let masterPositions = [];
 let startTime = Date.now();
+
+// Per-window tracking: key = slug (unique per market/window)
+let windows = {};
 
 function log(msg) {
   const line = `[${new Date().toISOString().slice(11,19)}] ${msg}`;
@@ -41,13 +41,48 @@ async function getJSON(url, timeout = 3000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
-    const res = await fetch(url, { headers: { 'User-Agent': 'copy-bot/3.0' }, signal: ctrl.signal });
+    const res = await fetch(url, { headers: { 'User-Agent': 'copy-bot/4.0' }, signal: ctrl.signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } finally { clearTimeout(timer); }
 }
 
 function key(cid, outcome) { return cid + ':' + outcome; }
+
+function windowType(slug) {
+  if (!slug) return 'unknown';
+  if (/-5m-/i.test(slug)) return '5m';
+  if (/-15m-/i.test(slug)) return '15m';
+  if (/-1h-/i.test(slug) || /-60m-/i.test(slug)) return '1h';
+  return 'unknown';
+}
+
+function slugWindowKey(slug) {
+  if (!slug) return null;
+  const m = slug.match(/(\d{10,})/);
+  if (!m) return slug;
+  return slug.replace(/\d{10,}/, m[1]);
+}
+
+function fireOffsetSeconds(t) {
+  const wt = windowType(t.slug);
+  const wsec = wt === '5m' ? 300 : wt === '15m' ? 900 : wt === '1h' ? 3600 : null;
+  if (!wsec || !t.timestamp) return null;
+  return t.timestamp % wsec;
+}
+
+function fmtOffset(off) {
+  if (off == null) return '—';
+  const m = Math.floor(off / 60), s = Math.round(off % 60);
+  return '+' + m + ':' + String(s).padStart(2, '0');
+}
+
+function shortSlug(s) {
+  if (!s) return '';
+  const m = s.match(/(\d{10,})/);
+  if (m) return '...' + m[1].slice(-6);
+  return s.length > 20 ? s.slice(0, 20) + '...' : s;
+}
 
 async function resolveMasterWallet(input) {
   if (!input.startsWith('@')) return input.toLowerCase();
@@ -88,6 +123,8 @@ async function mirrorBuy(t) {
 
   const slug = t.slug || t.title || cid;
   const title = t.title || slug;
+  const wt = windowType(slug);
+  const offset = fireOffsetSeconds(t);
 
   if (positions[k]) {
     const p = positions[k];
@@ -96,42 +133,64 @@ async function mirrorBuy(t) {
     p.shares = totalSh;
     p.cost = round2(p.cost + cost);
     p.buys++;
+    p.masterTotalShares = round2((p.masterTotalShares || 0) + masterShares);
+    p.masterBuys = (p.masterBuys || 0) + 1;
   } else {
     positions[k] = {
       conditionId: cid, outcome, title, slug,
       shares: copyShares, avgPrice: price, cost,
       buys: 1, status: 'open', openedAt: new Date().toISOString(), curPrice: price,
+      masterTotalShares: masterShares, masterBuys: 1,
     };
   }
   bankroll = round2(bankroll - cost);
 
+  // Track per-window totals
+  const wk = slug || cid;
+  if (!windows[wk]) {
+    windows[wk] = {
+      slug: wk, type: wt, title,
+      upShares: 0, downShares: 0, upCost: 0, downCost: 0,
+      upMasterShares: 0, downMasterShares: 0,
+      upBuys: 0, downBuys: 0,
+      totalCost: 0, totalMasterShares: 0, totalBuys: 0,
+      trades: [],
+    };
+  }
+  const win = windows[wk];
+  const sideLower = outcome.toLowerCase();
+  if (sideLower === 'up') {
+    win.upShares = round2(win.upShares + copyShares);
+    win.upCost = round2(win.upCost + cost);
+    win.upMasterShares = round2(win.upMasterShares + masterShares);
+    win.upBuys++;
+  } else {
+    win.downShares = round2(win.downShares + copyShares);
+    win.downCost = round2(win.downCost + cost);
+    win.downMasterShares = round2(win.downMasterShares + masterShares);
+    win.downBuys++;
+  }
+  win.totalCost = round2(win.totalCost + cost);
+  win.totalMasterShares = round2(win.totalMasterShares + masterShares);
+  win.totalBuys++;
+
   const trade = {
     t: Math.floor(Date.now() / 1000), action: 'BUY', side: outcome,
-    price, shares: copyShares, cost, slug, title,
-    masterShares, masterPrice: price,
+    price, shares: copyShares, cost, slug, title, type: wt,
+    fireOffset: offset, masterShares, masterPrice: price,
   };
   trades.push(trade);
   if (trades.length > 500) trades.shift();
-  updateBigSmall(trade);
+  win.trades.push(trade);
 
-  log(`📥 COPY BUY ${outcome.toUpperCase()} ${copyShares}sh @${price.toFixed(3)} = $${cost.toFixed(2)} (master ${masterShares}sh) [${shortSlug(slug)}]`);
+  updateBigSmall(trade);
+  log(`📥 ${wt.toUpperCase()} COPY BUY ${outcome.toUpperCase()} ${copyShares}sh @${price.toFixed(3)} = $${cost.toFixed(2)} (master ${masterShares}sh) [fire ${fmtOffset(offset)}] [${shortSlug(slug)}]`);
   emitFn('trade', trade);
 }
 
 function updateBigSmall(trade) {
-  biggestBuys.push(trade);
-  smallestBuys.push(trade);
-  biggestBuys.sort((a, b) => b.shares - a.shares);
-  smallestBuys.sort((a, b) => a.shares - b.shares);
-  if (biggestBuys.length > 10) biggestBuys.length = 10;
-  if (smallestBuys.length > 10) smallestBuys.length = 10;
-}
-
-function shortSlug(s) {
-  if (!s) return '';
-  const m = s.match(/(\d{10,})/);
-  if (m) return '...' + m[1].slice(-6);
-  return s.length > 20 ? s.slice(0, 20) + '...' : s;
+  if (!biggestBuy || trade.shares > biggestBuy.shares) biggestBuy = trade;
+  if (!smallestBuy || trade.shares < smallestBuy.shares) smallestBuy = trade;
 }
 
 async function pollMasterPositions() {
@@ -177,13 +236,19 @@ function settlePosition(k, won) {
   p.won = won;
   p.settledAt = new Date().toISOString();
 
-  windowHistory.push({
-    slug: p.slug, side: p.outcome, shares: p.shares, avgPrice: p.avgPrice,
-    cost: p.cost, payout, pnl, won, settledAt: p.settledAt,
-  });
-  if (windowHistory.length > 100) windowHistory.shift();
+  // Mark window as resolved
+  const wk = p.slug || p.conditionId;
+  const win = windows[wk];
+  if (win) {
+    win.resolved = true;
+    win.won = won;
+    win.winner = p.outcome;
+    win.pnl = pnl;
+    win.payout = payout;
+    win.settledAt = p.settledAt;
+  }
 
-  log(`🏁 ${won ? '✅ WIN' : '❌ LOSS'} ${p.outcome.toUpperCase()} ${shortSlug(p.slug)} — P&L ${pnl >= 0 ? '+$' : '-$'}${Math.abs(pnl).toFixed(2)} (cost $${p.cost.toFixed(2)}, payout $${payout.toFixed(2)})`);
+  log(`🏁 ${won ? '✅ WIN' : '❌ LOSS'} ${p.outcome.toUpperCase()} ${shortSlug(p.slug)} — cost $${p.cost.toFixed(2)} payout $${payout.toFixed(2)} P&L ${sgn(pnl)}`);
   recordEquity();
 }
 
@@ -201,44 +266,50 @@ function markValue() {
   return round2(v);
 }
 
-function totalWindowsCost() {
-  return round2(windowHistory.reduce((s, w) => s + w.cost, 0));
+function sgn(n) { return (n > 0 ? '+$' : (n < 0 ? '-$' : '$')) + Math.abs(n).toFixed(2); }
+
+function getWindowsByType(type) {
+  return Object.values(windows).filter(w => w.type === type).sort((a, b) => {
+    const ta = a.trades[0] ? a.trades[0].t : 0;
+    const tb = b.trades[0] ? b.trades[0].t : 0;
+    return tb - ta;
+  });
 }
-function totalWonCost() {
-  return round2(windowHistory.filter(w => w.won).reduce((s, w) => s + w.cost, 0));
-}
-function totalLostCost() {
-  return round2(windowHistory.filter(w => !w.won).reduce((s, w) => s + w.cost, 0));
-}
-function totalWonPnl() {
-  return round2(windowHistory.filter(w => w.won).reduce((s, w) => s + w.pnl, 0));
-}
-function totalLostPnl() {
-  return round2(windowHistory.filter(w => !w.won).reduce((s, w) => s + w.pnl, 0));
+
+function windowSummary(w) {
+  return {
+    slug: w.slug, type: w.type, title: w.title,
+    upShares: w.upShares, downShares: w.downShares,
+    upCost: w.upCost, downCost: w.downCost,
+    upMasterShares: w.upMasterShares, downMasterShares: w.downMasterShares,
+    upBuys: w.upBuys, downBuys: w.downBuys,
+    totalCost: w.totalCost, totalMasterShares: w.totalMasterShares, totalBuys: w.totalBuys,
+    resolved: !!w.resolved, won: w.won, winner: w.winner,
+    pnl: w.pnl || 0, payout: w.payout || 0, settledAt: w.settledAt,
+    fireOffset: w.trades[0] ? w.trades[0].fireOffset : null,
+  };
 }
 
 function buildState() {
   const mv = markValue();
   const winRate = (wins + losses) > 0 ? round2((wins / (wins + losses)) * 100) : null;
+  const fiveMin = getWindowsByType('5m');
+  const fifteenMin = getWindowsByType('15m');
+  const masterTrades = masterPositions.map(p => ({
+    size: Math.abs(p.size || 0), outcome: p.outcome, title: p.title, slug: p.slug,
+    avgPrice: p.avgPrice, cashPnl: p.cashPnl, curPrice: p.curPrice,
+  }));
   return {
     watchWallet: watchAddress || WATCH_WALLET,
-    demoCapital: CAPITAL,
-    bankroll, markValue: mv,
+    demoCapital: CAPITAL, bankroll, markValue: mv,
     realizedPnl, totalPnl: round2(mv - CAPITAL),
     wins, losses, winRate,
+    biggestBuy, smallestBuy,
     positions: Object.values(positions).filter(p => p.status === 'open'),
     trades: trades.slice(-100).reverse(),
-    biggestBuy: biggestBuys[0] || null,
-    smallestBuy: smallestBuys[0] || null,
-    biggestBuys: biggestBuys.slice(0, 10),
-    smallestBuys: smallestBuys.slice(0, 10),
-    windowHistory: windowHistory.slice(-30).reverse(),
-    totalWindows: windowHistory.length,
-    totalWindowsCost: totalWindowsCost(),
-    totalWonCost: totalWonCost(),
-    totalLostCost: totalLostCost(),
-    totalWonPnl: totalWonPnl(),
-    totalLostPnl: totalLostPnl(),
+    windows5m: fiveMin.slice(0, 20).map(windowSummary),
+    windows15m: fifteenMin.slice(0, 20).map(windowSummary),
+    masterTrades,
     equityCurve,
     logs: logs.slice(-200),
     config: { pollMs: POLL_MS, copyPct: COPY_PCT, capital: CAPITAL },
