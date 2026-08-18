@@ -7,7 +7,7 @@ const WATCH_WALLET = (process.env.WATCH_WALLET || '0x251c1a283703beed41590b0875a
 const POLL_MS      = Number(process.env.POLL_INTERVAL_MS || 1000);
 const SWEEP_MS     = Number(process.env.POSITION_SWEEP_INTERVAL_MS || 15000);
 const CAPITAL      = Number(process.env.DEMO_CAPITAL || 20000);
-const COPY_PCT     = 0.05;
+const FIXED_SHARES = 10;
 
 function round2(n) { return Math.round(n * 100) / 100; }
 
@@ -27,8 +27,10 @@ let smallestBuy = null;
 let masterPositions = [];
 let startTime = Date.now();
 
-// Per-window tracking: key = slug (unique per market/window)
+// Active windows: key = slug
 let windows = {};
+// Resolved windows kept only for summary stats, removed from dashboard
+let resolvedWindows = [];
 
 function log(msg) {
   const line = `[${new Date().toISOString().slice(11,19)}] ${msg}`;
@@ -41,7 +43,7 @@ async function getJSON(url, timeout = 3000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
-    const res = await fetch(url, { headers: { 'User-Agent': 'copy-bot/4.0' }, signal: ctrl.signal });
+    const res = await fetch(url, { headers: { 'User-Agent': 'copy-bot/5.0' }, signal: ctrl.signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } finally { clearTimeout(timer); }
@@ -57,24 +59,11 @@ function windowType(slug) {
   return 'unknown';
 }
 
-function slugWindowKey(slug) {
-  if (!slug) return null;
-  const m = slug.match(/(\d{10,})/);
-  if (!m) return slug;
-  return slug.replace(/\d{10,}/, m[1]);
-}
-
 function fireOffsetSeconds(t) {
   const wt = windowType(t.slug);
   const wsec = wt === '5m' ? 300 : wt === '15m' ? 900 : wt === '1h' ? 3600 : null;
   if (!wsec || !t.timestamp) return null;
   return t.timestamp % wsec;
-}
-
-function fmtOffset(off) {
-  if (off == null) return '—';
-  const m = Math.floor(off / 60), s = Math.round(off % 60);
-  return '+' + m + ':' + String(s).padStart(2, '0');
 }
 
 function shortSlug(s) {
@@ -117,7 +106,7 @@ async function mirrorBuy(t) {
   const price = Number(t.price) || 0;
   if (!masterShares || !price) return;
 
-  const copyShares = round2(masterShares * COPY_PCT);
+  const copyShares = FIXED_SHARES;
   const cost = round2(copyShares * price);
   if (cost > bankroll) { log(`⚠️ No funds for $${cost.toFixed(2)}`); return; }
 
@@ -126,6 +115,7 @@ async function mirrorBuy(t) {
   const wt = windowType(slug);
   const offset = fireOffsetSeconds(t);
 
+  // Update position
   if (positions[k]) {
     const p = positions[k];
     const totalSh = round2(p.shares + copyShares);
@@ -154,12 +144,12 @@ async function mirrorBuy(t) {
       upMasterShares: 0, downMasterShares: 0,
       upBuys: 0, downBuys: 0,
       totalCost: 0, totalMasterShares: 0, totalBuys: 0,
-      trades: [],
+      trades: [], resolved: false,
     };
   }
   const win = windows[wk];
-  const sideLower = outcome.toLowerCase();
-  if (sideLower === 'up') {
+  const isUp = outcome.toLowerCase() === 'up' || outcome.toLowerCase().includes('up');
+  if (isUp) {
     win.upShares = round2(win.upShares + copyShares);
     win.upCost = round2(win.upCost + cost);
     win.upMasterShares = round2(win.upMasterShares + masterShares);
@@ -174,23 +164,24 @@ async function mirrorBuy(t) {
   win.totalMasterShares = round2(win.totalMasterShares + masterShares);
   win.totalBuys++;
 
-  const trade = {
-    t: Math.floor(Date.now() / 1000), action: 'BUY', side: outcome,
-    price, shares: copyShares, cost, slug, title, type: wt,
-    fireOffset: offset, masterShares, masterPrice: price,
+  const tradeRecord = {
+    t: Math.floor(Date.now() / 1000), type: wt, side: outcome.toLowerCase(),
+    shares: copyShares, price, cost, masterShares, masterPrice: price,
+    slug: shortSlug(slug), fireOffset: offset, windowSlug: wk,
   };
-  trades.push(trade);
-  if (trades.length > 500) trades.shift();
-  win.trades.push(trade);
+  trades.push(tradeRecord);
+  if (trades.length > 500) trades = trades.slice(-250);
+  win.trades.push(tradeRecord);
 
-  updateBigSmall(trade);
-  log(`📥 ${wt.toUpperCase()} COPY BUY ${outcome.toUpperCase()} ${copyShares}sh @${price.toFixed(3)} = $${cost.toFixed(2)} (master ${masterShares}sh) [fire ${fmtOffset(offset)}] [${shortSlug(slug)}]`);
-  emitFn('trade', trade);
-}
+  // Biggest / smallest tracking (by cost)
+  if (!biggestBuy || cost > biggestBuy.cost) {
+    biggestBuy = { ...tradeRecord, windowType: wt };
+  }
+  if (!smallestBuy || cost < smallestBuy.cost) {
+    smallestBuy = { ...tradeRecord, windowType: wt };
+  }
 
-function updateBigSmall(trade) {
-  if (!biggestBuy || trade.shares > biggestBuy.shares) biggestBuy = trade;
-  if (!smallestBuy || trade.shares < smallestBuy.shares) smallestBuy = trade;
+  log(`📥 COPY BUY ${outcome.toUpperCase()} ${copyShares}sh @${price.toFixed(3)} = $${cost.toFixed(2)} (master ${masterShares}sh) | window UP ${win.upShares}sh / DN ${win.downShares}sh`);
 }
 
 async function pollMasterPositions() {
@@ -203,15 +194,23 @@ async function pollMasterPositions() {
 async function sweepResolutions() {
   const openKeys = Object.keys(positions).filter(k => positions[k].status === 'open');
   if (!openKeys.length) return;
-  const cids = [...new Set(openKeys.map(k => positions[k].conditionId))];
-  for (const cid of cids) {
+
+  // Group by conditionId
+  const byCid = {};
+  for (const k of openKeys) {
+    const cid = positions[k].conditionId;
+    if (!byCid[cid]) byCid[cid] = [];
+    byCid[cid].push(k);
+  }
+
+  for (const [cid, keys] of Object.entries(byCid)) {
     try {
-      const mkts = await getJSON(`${GAMMA_API}/markets?condition_ids=${encodeURIComponent(cid)}`);
+      const mkts = await getJSON(`${GAMMA_API}/markets?condition_id=${cid}`);
       const mk = Array.isArray(mkts) ? mkts[0] : null;
       if (!mk || !mk.closed) continue;
       const prices = typeof mk.outcomePrices === 'string' ? JSON.parse(mk.outcomePrices) : (mk.outcomePrices || []);
       const outcomes = typeof mk.outcomes === 'string' ? JSON.parse(mk.outcomes) : (mk.outcomes || []);
-      for (const k of openKeys) {
+      for (const k of keys) {
         const p = positions[k];
         if (p.conditionId !== cid) continue;
         const idx = outcomes.findIndex(o => o === p.outcome || o.toLowerCase() === p.outcome.toLowerCase());
@@ -236,7 +235,7 @@ function settlePosition(k, won) {
   p.won = won;
   p.settledAt = new Date().toISOString();
 
-  // Mark window as resolved
+  // Mark window as resolved and move to resolvedWindows
   const wk = p.slug || p.conditionId;
   const win = windows[wk];
   if (win) {
@@ -246,7 +245,14 @@ function settlePosition(k, won) {
     win.pnl = pnl;
     win.payout = payout;
     win.settledAt = p.settledAt;
+    // Move to resolved list and remove from active windows
+    resolvedWindows.push({ ...win });
+    if (resolvedWindows.length > 100) resolvedWindows = resolvedWindows.slice(-50);
+    delete windows[wk];
   }
+
+  // Remove settled window logs from main log feed
+  logs = logs.filter(l => !l.includes(shortSlug(p.slug)));
 
   log(`🏁 ${won ? '✅ WIN' : '❌ LOSS'} ${p.outcome.toUpperCase()} ${shortSlug(p.slug)} — cost $${p.cost.toFixed(2)} payout $${payout.toFixed(2)} P&L ${sgn(pnl)}`);
   recordEquity();
@@ -268,14 +274,6 @@ function markValue() {
 
 function sgn(n) { return (n > 0 ? '+$' : (n < 0 ? '-$' : '$')) + Math.abs(n).toFixed(2); }
 
-function getWindowsByType(type) {
-  return Object.values(windows).filter(w => w.type === type).sort((a, b) => {
-    const ta = a.trades[0] ? a.trades[0].t : 0;
-    const tb = b.trades[0] ? b.trades[0].t : 0;
-    return tb - ta;
-  });
-}
-
 function windowSummary(w) {
   return {
     slug: w.slug, type: w.type, title: w.title,
@@ -293,8 +291,7 @@ function windowSummary(w) {
 function buildState() {
   const mv = markValue();
   const winRate = (wins + losses) > 0 ? round2((wins / (wins + losses)) * 100) : null;
-  const fiveMin = getWindowsByType('5m');
-  const fifteenMin = getWindowsByType('15m');
+  const active5m = Object.values(windows).filter(w => w.type === '5m');
   const masterTrades = masterPositions.map(p => ({
     size: Math.abs(p.size || 0), outcome: p.outcome, title: p.title, slug: p.slug,
     avgPrice: p.avgPrice, cashPnl: p.cashPnl, curPrice: p.curPrice,
@@ -307,12 +304,11 @@ function buildState() {
     biggestBuy, smallestBuy,
     positions: Object.values(positions).filter(p => p.status === 'open'),
     trades: trades.slice(-100).reverse(),
-    windows5m: fiveMin.slice(0, 20).map(windowSummary),
-    windows15m: fifteenMin.slice(0, 20).map(windowSummary),
+    windows5m: active5m.slice(0, 20).map(windowSummary),
     masterTrades,
     equityCurve,
     logs: logs.slice(-200),
-    config: { pollMs: POLL_MS, copyPct: COPY_PCT, capital: CAPITAL },
+    config: { pollMs: POLL_MS, fixedShares: FIXED_SHARES, capital: CAPITAL },
     uptime: Math.floor((Date.now() - startTime) / 1000),
   };
 }
@@ -336,7 +332,7 @@ async function init(emit, slogFnArg) {
   emitFn = emit;
   slogFn = slogFnArg;
   watchAddress = await resolveMasterWallet(WATCH_WALLET);
-  log(`🚀 Copy bot watching ${watchAddress} — ${COPY_PCT * 100}% copy — $${CAPITAL} demo`);
+  log(`🚀 Copy bot watching ${watchAddress} — ${FIXED_SHARES} fixed shares/trigger — $${CAPITAL} demo`);
   await pollMasterPositions();
   log(`👀 Master has ${masterPositions.length} open positions`);
   mainLoop();
