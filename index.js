@@ -69,8 +69,8 @@ body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:13
 </div>
 
 <div class="hdr-boxes">
-  <div class="hb big"><div class="l">\uD83D\uDD25 BIGGEST BUY</div><div class="v" id="big-v">\u2014</div><div class="d" id="big-d"></div></div>
-  <div class="hb sm"><div class="l">\uD83D\uDC8E SMALLEST BUY</div><div class="v" id="sm-v">\u2014</div><div class="d" id="sm-d"></div></div>
+  <div class="hb big"><div class="l">\uD83D\uDD25 HIGHEST CAPITAL / WINDOW</div><div class="v" id="big-v">\u2014</div><div class="d" id="big-d"></div></div>
+  <div class="hb sm"><div class="l">\uD83D\uDC8E LOWEST CAPITAL / WINDOW</div><div class="v" id="sm-v">\u2014</div><div class="d" id="sm-d"></div></div>
 </div>
 
 <div class="sg" id="stats"></div>
@@ -182,16 +182,18 @@ function render(s) {
     // Wallet
     $('wallet').textContent = 'Master: ' + s.watchWallet.slice(0, 10) + '\u2026' + s.watchWallet.slice(-6);
 
-    // Header boxes
-    if (s.biggestBuy) {
-      var b = s.biggestBuy;
-      $('big-v').textContent = b.shares + 'sh @' + b.price.toFixed(3);
-      $('big-d').textContent = '$' + b.cost.toFixed(2) + ' \u2014 ' + b.side.toUpperCase() + ' \u2014 ' + b.type + ' \u2014 ' + ts(b.t);
+    // Header boxes — highest/lowest capital deployed per window type
+    if (s.highestWindow) {
+      var hv = '', hd = '';
+      if (s.highestWindow['5m']) { var h5 = s.highestWindow['5m']; hv += '5m $' + h5.totalCost.toFixed(2); hd += '5m: UP ' + h5.upShares + 'sh / DN ' + h5.downShares + 'sh'; }
+      if (s.highestWindow['15m']) { var h15 = s.highestWindow['15m']; if (hv) hv += ' | '; hv += '15m $' + h15.totalCost.toFixed(2); if (hd) hd += ' \n'; hd += '15m: UP ' + h15.upShares + 'sh / DN ' + h15.downShares + 'sh'; }
+      if (hv) { $('big-v').textContent = hv; $('big-d').textContent = hd || '\u2014'; }
     }
-    if (s.smallestBuy) {
-      var sm = s.smallestBuy;
-      $('sm-v').textContent = sm.shares + 'sh @' + sm.price.toFixed(3);
-      $('sm-d').textContent = '$' + sm.cost.toFixed(2) + ' \u2014 ' + sm.side.toUpperCase() + ' \u2014 ' + sm.type + ' \u2014 ' + ts(sm.t);
+    if (s.lowestWindow) {
+      var lv = '', ld = '';
+      if (s.lowestWindow['5m']) { var l5 = s.lowestWindow['5m']; lv += '5m $' + l5.totalCost.toFixed(2); ld += '5m: UP ' + l5.upShares + 'sh / DN ' + l5.downShares + 'sh'; }
+      if (s.lowestWindow['15m']) { var l15 = s.lowestWindow['15m']; if (lv) lv += ' | '; lv += '15m $' + l15.totalCost.toFixed(2); if (ld) ld += ' \n'; ld += '15m: UP ' + l15.upShares + 'sh / DN ' + l15.downShares + 'sh'; }
+      if (lv) { $('sm-v').textContent = lv; $('sm-d').textContent = ld || '\u2014'; }
     }
 
     // Stats — 6 boxes including demo capital

@@ -24,6 +24,8 @@ let watchAddress = null;
 let seenTradeIds = new Set();
 let biggestBuy = null;
 let smallestBuy = null;
+let highestWindow = { '5m': null, '15m': null };
+let lowestWindow = { '5m': null, '15m': null };
 let masterPositions = [];
 let startTime = Date.now();
 
@@ -248,6 +250,19 @@ function settlePosition(k, won) {
     // Move to resolved list and remove from active windows
     resolvedWindows.push({ ...win });
     if (resolvedWindows.length > 100) resolvedWindows = resolvedWindows.slice(-50);
+    
+    // Track highest/lowest capital deployed per window type
+    const wt = win.type;
+    const wc = win.totalCost || 0;
+    if (wc > 0) {
+      if (!highestWindow[wt] || wc > highestWindow[wt].totalCost) {
+        highestWindow[wt] = { slug: win.slug, type: wt, totalCost: wc, upShares: win.upShares, downShares: win.downShares, won: win.won, settledAt: win.settledAt };
+      }
+      if (!lowestWindow[wt] || wc < lowestWindow[wt].totalCost) {
+        lowestWindow[wt] = { slug: win.slug, type: wt, totalCost: wc, upShares: win.upShares, downShares: win.downShares, won: win.won, settledAt: win.settledAt };
+      }
+    }
+    
     delete windows[wk];
   }
 
@@ -302,7 +317,7 @@ function buildState() {
     demoCapital: CAPITAL, bankroll, markValue: mv,
     realizedPnl, totalPnl: round2(mv - CAPITAL),
     wins, losses, winRate,
-    biggestBuy, smallestBuy,
+    biggestBuy, smallestBuy, highestWindow, lowestWindow,
     positions: Object.values(positions).filter(p => p.status === 'open'),
     trades: trades.slice(-100).reverse(),
     windows5m: active5m.slice(0, 20).map(windowSummary),
