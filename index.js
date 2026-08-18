@@ -166,6 +166,15 @@ function svgCurve(pts,w,h,baseline){
 
 function render(s){try{
   S=s;
+  // Seed logs from server on first render (survives page refresh)
+  if(s.logs && s.logs.length && lb.length===0){
+    lb=s.logs.slice(-200);
+    var el=$('lp');
+    if(el){el.innerHTML=lb.map(function(l){
+      var cl=l.indexOf('WIN')>=0||l.indexOf('COPY BUY')>=0?'#00ff88':l.indexOf('LOSS')>=0||l.indexOf('⚠')>=0?'#ff4444':l.indexOf('🏁')>=0?'#ffcc00':'#999';
+      return'<div style="color:'+cl+'">'+l.replace(/</g,'&lt;')+'</div>';
+    }).join('');el.scrollTop=el.scrollHeight;}
+  }
   $('wallet').textContent='Master: '+s.watchWallet.slice(0,10)+'…'+s.watchWallet.slice(-6);
 
   // Header boxes
@@ -174,6 +183,7 @@ function render(s){try{
 
   // Stats
   $('stats').innerHTML=[
+    sv('Capital','$'+s.demoCapital.toFixed(2)),
     sv('Bankroll','$'+s.bankroll.toFixed(2)),
     sv('Equity','$'+s.markValue.toFixed(2),pC(s.totalPnl)),
     sv('P&L',sg(s.totalPnl),pC(s.totalPnl)),
@@ -221,7 +231,16 @@ function render(s){try{
 function sv(l,v,c){return'<div class="s"><div class="sl">'+l+'</div><div class="sv '+(c||'')+'">'+v+'</div></div>'}
 
 var lb=[];
-socket.on('state',function(s){render(s)});
+socket.on('state',function(s){render(s);
+  // Merge server logs that aren't in local lb yet
+  if(s.logs){
+    var serverLogs=s.logs;
+    for(var i=0;i<serverLogs.length;i++){
+      if(lb.indexOf(serverLogs[i])===-1)lb.push(serverLogs[i]);
+    }
+    if(lb.length>500)lb=lb.slice(-300);
+  }
+});
 socket.on('log',function(line){
   lb.push(line);if(lb.length>400)lb.shift();
   var el=$('lp');
