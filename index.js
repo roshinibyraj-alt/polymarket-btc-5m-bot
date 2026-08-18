@@ -164,7 +164,7 @@ function svgCurve(pts,w,h,baseline){
     +'</svg>';
 }
 
-function render(s){
+function render(s){try{
   S=s;
   $('wallet').textContent='Master: '+s.watchWallet.slice(0,10)+'…'+s.watchWallet.slice(-6);
 
@@ -215,6 +215,7 @@ function render(s){
   $('pb').innerHTML=(s.positions||[]).map(function(p){
     return'<tr><td>'+p.outcome+'</td><td>'+p.shares+'</td><td>'+p.avgPrice.toFixed(3)+'</td><td>$'+p.cost.toFixed(2)+'</td><td>'+p.buys+'</td><td>'+(p.masterTotalShares||0)+'sh</td><td>'+short(p.title||p.slug)+'</td></tr>';
   }).join('')||'<tr><td colspan="7" class="empty">No open positions</td></tr>';
+}catch(e){console.error('Render error:',e)}
 }
 
 function sv(l,v,c){return'<div class="s"><div class="sl">'+l+'</div><div class="sv '+(c||'')+'">'+v+'</div></div>'}
