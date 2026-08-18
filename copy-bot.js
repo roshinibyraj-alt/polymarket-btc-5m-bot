@@ -292,6 +292,7 @@ function buildState() {
   const mv = markValue();
   const winRate = (wins + losses) > 0 ? round2((wins / (wins + losses)) * 100) : null;
   const active5m = Object.values(windows).filter(w => w.type === '5m');
+  const active15m = Object.values(windows).filter(w => w.type === '15m');
   const masterTrades = masterPositions.map(p => ({
     size: Math.abs(p.size || 0), outcome: p.outcome, title: p.title, slug: p.slug,
     avgPrice: p.avgPrice, cashPnl: p.cashPnl, curPrice: p.curPrice,
@@ -305,6 +306,7 @@ function buildState() {
     positions: Object.values(positions).filter(p => p.status === 'open'),
     trades: trades.slice(-100).reverse(),
     windows5m: active5m.slice(0, 20).map(windowSummary),
+    windows15m: active15m.slice(0, 20).map(windowSummary),
     masterTrades,
     equityCurve,
     logs: logs.slice(-200),

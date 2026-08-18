@@ -106,6 +106,14 @@ body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:13
 </div>
 
 <div class="sec">
+  <div class="sh">📈 Active 15m Windows</div>
+  <div class="card"><div class="tw"><table class="tb">
+    <tr><th>Slug</th><th>Fire</th><th>UP Shares</th><th>UP Cost</th><th>DN Shares</th><th>DN Cost</th><th>Total</th></tr>
+    <tbody id="w15"></tbody>
+  </table></div></div>
+</div>
+
+<div class="sec">
   <div class="sh">💰 Open Positions</div>
   <div class="card"><div class="tw"><table class="tb">
     <tr><th>Side</th><th>Shares</th><th>Avg Px</th><th>Cost</th><th>Buys</th><th>Master</th><th>Market</th></tr>
@@ -191,7 +199,17 @@ function render(s){
       +'<td class="tag-dn"><span class="sh-badge sh-dn">'+w.downShares+'sh</span></td>'
       +'<td>$'+w.downCost.toFixed(2)+'</td>'
       +'<td>$'+w.totalCost.toFixed(2)+'</td></tr>';
-  }).join('')||'<tr><td colspan="7" class="empty">No active windows</td></tr>';
+  }).join('')||'<tr><td colspan="7" class="empty">No active 5m windows</td></tr>';
+
+  // 15m windows
+  $('w15').innerHTML=(s.windows15m||[]).map(function(w){
+    return'<tr><td title="'+w.slug+'">'+short(w.slug)+'</td><td>'+(w.fireOffset!=null?'+'+w.fireOffset+'s':'—')+'</td>'
+      +'<td class="tag-up"><span class="sh-badge sh-up">'+w.upShares+'sh</span></td>'
+      +'<td>$'+w.upCost.toFixed(2)+'</td>'
+      +'<td class="tag-dn"><span class="sh-badge sh-dn">'+w.downShares+'sh</span></td>'
+      +'<td>$'+w.downCost.toFixed(2)+'</td>'
+      +'<td>$'+w.totalCost.toFixed(2)+'</td></tr>';
+  }).join('')||'<tr><td colspan="7" class="empty">No active 15m windows</td></tr>';
 
   // Open positions
   $('pb').innerHTML=(s.positions||[]).map(function(p){
