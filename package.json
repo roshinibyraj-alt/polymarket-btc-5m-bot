@@ -1,7 +1,7 @@
 {
-  "name": "momentum-dca-bot",
-  "version": "1.0.0",
-  "description": "Momentum DCA bot \u2014 buys both sides every ~12s with momentum-aware sizing",
+  "name": "polymarket-binary-copy-bot",
+  "version": "2.0.0",
+  "description": "Copy trading bot - 10 fixed shares per master trigger",
   "main": "index.js",
   "engines": {
     "node": ">=18.0.0"
