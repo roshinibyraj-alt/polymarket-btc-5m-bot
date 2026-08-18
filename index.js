@@ -68,14 +68,14 @@ body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:13
 </div>
 
 <div class="sec">
-  <div class="sh">\uD83D\uDCCA Current Window</div>
+  <div class="sh">\uD83D\uDCCA Current Windows</div>
   <div class="card" id="cw"><div class="empty">Waiting\u2026</div></div>
 </div>
 
 <div class="sec">
   <div class="sh">\uD83D\uDCCB History</div>
   <div class="card"><div class="tw"><table class="tb">
-    <tr><th>Window</th><th>Winner</th><th>UP</th><th>DN</th><th>Spent</th><th>Payout</th><th>P&L</th></tr>
+    <tr><th>Type</th><th>Slug</th><th>Winner</th><th>UP</th><th>DN</th><th>Spent</th><th>Payout</th><th>P&L</th></tr>
     <tbody id="hb"></tbody>
   </table></div></div>
 </div>
@@ -130,6 +130,7 @@ function render(s){
   // Stats
   $('stats').innerHTML=[
     sv('Capital','$'+s.startingCapital.toFixed(0)),
+    sv('Fees','$'+s.totalFeesPaid.toFixed(2)),
     sv('Bankroll','$'+s.bankroll.toFixed(2)),
     sv('Equity','$'+s.equity.toFixed(2),pC(s.equity-s.startingCapital)),
     sv('P&L',sgn(s.realizedPnlTotal),pC(s.realizedPnlTotal)),
@@ -142,34 +143,35 @@ function render(s){
   $('eq-val').className='v '+pC(s.equity-s.startingCapital);
   $('eq-svg').innerHTML=svgCurve(s.equityCurve,700,55,s.startingCapital);
 
-  // Current window
-  var t=s.current;
-  if(!t){$('cw').innerHTML='<div class="empty">Waiting for next window\u2026</div>';}
-  else{
+  // Current windows — 5m and 15m
+  function winHtml(t, wt) {
+    if(!t) return '<div class="empty">Waiting for next '+wt+' window\u2026</div>';
     var ph=t.phase==='trading'?'p-trading':t.phase==='waiting'?'p-waiting':'p-idle';
-    var html='<div class="r"><span>Window</span><span>'+short(t.slug)+'</span></div>'
+    return '<div style="margin-bottom:8px;border-bottom:1px solid #222;padding-bottom:6px">'
+      +'<div style="color:#00ccff;font-size:11px;margin-bottom:4px;font-weight:bold">'+wt.toUpperCase()+' WINDOW</div>'
+      +'<div class="r"><span>Slug</span><span>'+short(t.slug)+'</span></div>'
       +'<div class="r"><span>Phase</span><span class="pill '+ph+'">'+t.phase+'</span></div>'
       +'<div class="r"><span>Time Left</span><span>'+fmtMs(t.timeLeft)+'</span></div>'
       +'<div class="r"><span>UP</span><span class="tag-up">'+(t.upAsk?t.upAsk.toFixed(3):'\u2014')+' ask / '+(t.upBid?t.upBid.toFixed(3):'\u2014')+' bid</span></div>'
       +'<div class="r"><span>DOWN</span><span class="tag-dn">'+(t.downAsk?t.downAsk.toFixed(3):'\u2014')+' ask / '+(t.downBid?t.downBid.toFixed(3):'\u2014')+' bid</span></div>'
       +'<div class="r"><span>UP Bought</span><span class="tag-up">'+t.upShares+'sh / $'+t.upCost.toFixed(2)+'</span></div>'
       +'<div class="r"><span>DN Bought</span><span class="tag-dn">'+t.dnShares+'sh / $'+t.dnCost.toFixed(2)+'</span></div>'
-      +'<div class="r"><span>Total Spent</span><span>$'+t.totalSpent.toFixed(2)+' / $'+s.perWindowBudget+'</span></div>'
-      +'<div class="r"><span>Shares</span><span>'+t.totalShares+'</span></div>'
-      +'<div class="r"><span>Orders</span><span>'+t.buyCount+'</span></div>';
-    $('cw').innerHTML=html;
+      +'<div class="r"><span>Spent</span><span>$'+t.totalSpent.toFixed(2)+' / $'+t.budget+'</span></div>'
+      +'<div class="r"><span>Orders</span><span>'+t.buyCount+'</span></div>'
+      +'</div>';
   }
+  $('cw').innerHTML=winHtml(s.current5m,'5m') + winHtml(s.current15m,'15m');
 
   // History
   $('hb').innerHTML=(s.history||[]).map(function(h){
-    return'<tr><td title="'+h.slug+'">'+short(h.slug)+'</td>'
+    return'<tr><td>'+h.windowType+'</td><td title="'+h.slug+'">'+short(h.slug)+'</td>'
       +'<td>'+(h.winner?h.winner.toUpperCase():'\u2014')+'</td>'
       +'<td class="tag-up">'+h.upShares+'sh</td>'
       +'<td class="tag-dn">'+h.dnShares+'sh</td>'
       +'<td>$'+h.totalSpent.toFixed(2)+'</td>'
       +'<td>$'+h.payout.toFixed(2)+'</td>'
       +'<td class="'+pC(h.pnl)+'">'+sgn(h.pnl)+'</td></tr>';
-  }).join('')||'<tr><td colspan="7" class="empty">No history yet</td></tr>';
+  }).join('')||'<tr><td colspan="8" class="empty">No history yet</td></tr>';
   }catch(e){console.error('Render error:',e)}
 }
 

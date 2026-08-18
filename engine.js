@@ -3,15 +3,12 @@
 const GAMMA = 'https://gamma-api.polymarket.com';
 const CLOB  = 'https://clob.polymarket.com';
 
-const WINDOW_SECONDS = 300;
-const BUY_INTERVAL_MS = 12000;      // buy every ~12s (range 8-18s)
-const ENTRY_DELAY_S = 15;            // start 15s after window open
-const MIN_ORDER_SHARES = 5;
+const WINDOW_TYPES = {
+  '5m':  { seconds: 300, buyIntervalMs: 8000,  entryDelay: 15, sizes: { cheap: 40, mid: 80, strong: 150 }, budget: 1200 },
+  '15m': { seconds: 900, buyIntervalMs: 25000, entryDelay: 20, sizes: { cheap: 60, mid: 120, strong: 120 }, budget: 1300 },
+};
 
-// Three fixed size tiers (like the master wallet)
-const SIZE_CHEAP  = 40;   // when price < 0.30
-const SIZE_MID    = 80;   // default
-const SIZE_STRONG = 150;  // when price > 0.60 and trending up
+const MIN_ORDER_SHARES = 5;
 
 function round2(n) { return Math.round(n * 100) / 100; }
 
@@ -19,7 +16,6 @@ function createMomentumEngine(cfg, trader) {
   const {
     label = 'MOMENTUM-DCA',
     startingCapital = 10000,
-    perWindowBudget = 1200,
     feeTheta = 0.07,
     rebatePct = 0,
   } = cfg;
@@ -34,6 +30,7 @@ function createMomentumEngine(cfg, trader) {
     equityCurve: [{ t: Date.now(), equity: startingCapital }],
     history: [],
     current: null,
+    pending: [],  // windows waiting for resolution
     maxDrawdown: { pct: 0, dollars: 0 },
   };
 
@@ -42,7 +39,7 @@ function createMomentumEngine(cfg, trader) {
   const nowFn = () => Date.now();
   const nowSec = () => Math.floor(Date.now() / 1000);
 
-  function getJSON(url, timeout = 5000) {
+  function getJSON(url, timeout = 3000) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeout);
     return fetch(url, { signal: ctrl.signal })
@@ -55,20 +52,21 @@ function createMomentumEngine(cfg, trader) {
   }
 
   // ── Market Discovery ──
-  function freshLeg(windowTs, slugPrefix) {
+  function freshLeg(windowTs, slugPrefix, windowType) {
     const slug = `${slugPrefix}${windowTs}`;
     return {
       slug, conditionId: null, upTokenId: null, downTokenId: null,
       upAsk: null, upBid: null, downAsk: null, downBid: null,
       discovered: false, lastDiscoveryAttempt: 0,
       resolved: false, winner: null, resolutionMethod: null,
+      windowType,
     };
   }
 
   async function discoverLeg(leg) {
     if (leg.discovered) return;
     const now = nowFn();
-    if (now - leg.lastDiscoveryAttempt < 5000) return;
+    if (now - leg.lastDiscoveryAttempt < 3000) return;
     leg.lastDiscoveryAttempt = now;
     try {
       const events = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(leg.slug)}`);
@@ -132,36 +130,36 @@ function createMomentumEngine(cfg, trader) {
 
   // ── Momentum Tracking ──
   function momentumScore(leg) {
-    // Simple: higher ask = more momentum on that side
     const up = leg.upAsk || 0;
     const dn = leg.downAsk || 0;
     return { up, dn, delta: up - dn };
   }
 
-  function pickSize(price, sideMomentum, otherMomentum) {
-    // If price is cheap (<0.30), accumulate small
-    if (price < 0.30) return SIZE_CHEAP;
-    // If this side has momentum AND price > 0.60, go big
-    if (price > 0.60 && sideMomentum > otherMomentum) return SIZE_STRONG;
-    // Default
-    return SIZE_MID;
+  function pickSize(price, sideMomentum, otherMomentum, wt) {
+    const s = WINDOW_TYPES[wt].sizes;
+    if (price < 0.30) return s.cheap;
+    if (price > 0.60 && sideMomentum > otherMomentum) return s.strong;
+    return s.mid;
   }
 
   // ── Window Management ──
-  function freshTrade(windowTs) {
+  function freshTrade(windowTs, wt) {
+    const cfg = WINDOW_TYPES[wt];
+    const slugPrefix = wt === '5m' ? 'btc-updown-5m-' : 'btc-updown-15m-';
     return {
       windowTs,
-      closeAt: (windowTs + WINDOW_SECONDS) * 1000,
-      leg: freshLeg(windowTs, 'btc-updown-5m-'),
+      windowType: wt,
+      closeAt: (windowTs + cfg.seconds) * 1000,
+      entryDelayMs: cfg.entryDelay * 1000,
+      leg: freshLeg(windowTs, slugPrefix, wt),
       phase: 'waiting',
       buys: [],
-      sells: [],
-      lastUpAsk: 0, lastDnAsk: 0,
       upShares: 0, dnShares: 0,
       upCost: 0, dnCost: 0,
       totalSpent: 0,
       totalShares: 0,
       buyCount: 0,
+      lastBuyAt: 0,
       pnl: null, win: null, settled: false,
       momentumHistory: [],
     };
@@ -169,104 +167,122 @@ function createMomentumEngine(cfg, trader) {
 
   async function tick() {
     const now = nowFn();
-    const t = engine.current;
 
-    // New window?
-    const windowTs = Math.floor(nowSec() / WINDOW_SECONDS) * WINDOW_SECONDS;
-    if (!t || t.windowTs !== windowTs) {
-      // Settle previous
-      if (t && !t.settled) await settle(t);
-      engine.current = freshTrade(windowTs);
-      log(`🆕 window ${windowTs} opened — starting in ${ENTRY_DELAY_S}s`);
-    }
+    // Check ALL active windows (both 5m and 15m)
+    for (const wt of ['5m', '15m']) {
+      const cfg = WINDOW_TYPES[wt];
+      const windowTs = Math.floor(nowSec() / cfg.seconds) * cfg.seconds;
+      const key = wt;
 
-    const cur = engine.current;
-    if (cur.settled) return;
+      // Settle old windows
+      if (engine.current && engine.current[key] && engine.current[key].windowTs !== windowTs) {
+        const old = engine.current[key];
+        if (!old.settled) await settle(old);
+      }
 
-    // Discover market
-    if (!cur.leg.discovered) {
-      await discoverLeg(cur.leg);
-      return;
-    }
+      // New window
+      if (!engine.current) engine.current = {};
+      if (!engine.current[key] || engine.current[key].windowTs !== windowTs) {
+        engine.current[key] = freshTrade(windowTs, wt);
+        log(`🆕 [${wt}] window ${windowTs} opened — starting in ${cfg.entryDelay}s`);
+      }
 
-    // Refresh prices
-    await refreshLegPrices(cur.leg);
+      const t = engine.current[key];
+      if (t.settled) continue;
 
-    // Check window end
-    if (now >= cur.closeAt) {
-      await settle(cur);
-      return;
-    }
+      // Discover
+      if (!t.leg.discovered) {
+        await discoverLeg(t.leg);
+        continue;
+      }
 
-    // Wait period
-    const secsIntoWindow = (now / 1000) - windowTs;
-    if (secsIntoWindow < ENTRY_DELAY_S) {
-      cur.phase = 'waiting';
-      return;
-    }
+      // Refresh prices
+      await refreshLegPrices(t.leg);
 
-    // Check budget
-    if (cur.totalSpent >= perWindowBudget) {
-      cur.phase = 'budget-exceeded';
-      return;
-    }
+      // Window end?
+      if (now >= t.closeAt) {
+        await settle(t);
+        continue;
+      }
 
-    // Momentum analysis
-    const mom = momentumScore(cur.leg);
-    cur.momentumHistory.push({ t: now, up: mom.up, dn: mom.dn });
-    if (cur.momentumHistory.length > 30) cur.momentumHistory.shift();
+      // Entry delay
+      const secsIntoWindow = (now / 1000) - windowTs;
+      if (secsIntoWindow < cfg.entryDelay) {
+        t.phase = 'waiting';
+        continue;
+      }
 
-    // Buy BOTH sides
-    const upAsk = cur.leg.upAsk;
-    const dnAsk = cur.leg.downAsk;
+      // Budget check
+      if (t.totalSpent >= cfg.budget) {
+        t.phase = 'budget-exceeded';
+        continue;
+      }
 
-    if (upAsk != null && upAsk > 0.01 && upAsk < 0.99) {
-      const upShares = pickSize(upAsk, mom.up, mom.dn);
-      const upCost = round2(upShares * upAsk);
-      if (cur.totalSpent + upCost <= perWindowBudget && engine.bankroll >= upCost) {
-        const res = await executeBuy(cur.leg.upTokenId, upShares, upAsk);
-        if (res.ok) {
-          cur.upShares = round2(cur.upShares + res.filled);
-          cur.upCost = round2(cur.upCost + res.cost);
-          cur.totalSpent = round2(cur.totalSpent + res.cost);
-          cur.totalShares = round2(cur.totalShares + res.filled);
-          cur.buyCount++;
-          engine.bankroll = round2(engine.bankroll - res.cost);
-          cur.buys.push({ side: 'up', shares: res.filled, price: res.avgPrice, cost: res.cost, ts: now });
-          log(`📈 UP ${res.filled}sh @${res.avgPrice.toFixed(3)} = $${res.cost.toFixed(2)} (mom: ${mom.up.toFixed(2)} vs ${mom.dn.toFixed(2)})`);
+      // Buy interval check
+      if (now - t.lastBuyAt < cfg.buyIntervalMs) {
+        t.phase = 'trading';
+        continue;
+      }
+
+      // Momentum
+      const mom = momentumScore(t.leg);
+      t.momentumHistory.push({ t: now, up: mom.up, dn: mom.dn });
+      if (t.momentumHistory.length > 30) t.momentumHistory.shift();
+
+      // Buy BOTH sides
+      const upAsk = t.leg.upAsk;
+      const dnAsk = t.leg.downAsk;
+
+      // UP
+      if (upAsk != null && upAsk > 0.01 && upAsk < 0.99) {
+        const shares = pickSize(upAsk, mom.up, mom.dn, wt);
+        const cost = round2(shares * upAsk);
+        if (t.totalSpent + cost <= cfg.budget && engine.bankroll >= cost) {
+          const res = await executeBuy(t.leg.upTokenId, shares, upAsk);
+          if (res.ok) {
+            t.upShares = round2(t.upShares + res.filled);
+            t.upCost = round2(t.upCost + res.cost);
+            t.totalSpent = round2(t.totalSpent + res.cost);
+            t.totalShares = round2(t.totalShares + res.filled);
+            t.buyCount++;
+            t.lastBuyAt = now;
+            engine.bankroll = round2(engine.bankroll - res.cost);
+            t.buys.push({ side: 'up', shares: res.filled, price: res.avgPrice, cost: res.cost, ts: now });
+            log(`📈 [${wt}] UP ${res.filled}sh @${res.avgPrice.toFixed(3)} = $${res.cost.toFixed(2)}`);
+          }
         }
       }
-    }
 
-    // Re-check budget for DOWN
-    if (cur.totalSpent >= perWindowBudget) { cur.phase = 'budget-exceeded'; return; }
+      if (t.totalSpent >= cfg.budget) { t.phase = 'budget-exceeded'; continue; }
 
-    if (dnAsk != null && dnAsk > 0.01 && dnAsk < 0.99) {
-      const dnShares = pickSize(dnAsk, mom.dn, mom.up);
-      const dnCost = round2(dnShares * dnAsk);
-      if (cur.totalSpent + dnCost <= perWindowBudget && engine.bankroll >= dnCost) {
-        const res = await executeBuy(cur.leg.downTokenId, dnShares, dnAsk);
-        if (res.ok) {
-          cur.dnShares = round2(cur.dnShares + res.filled);
-          cur.dnCost = round2(cur.dnCost + res.cost);
-          cur.totalSpent = round2(cur.totalSpent + res.cost);
-          cur.totalShares = round2(cur.totalShares + res.filled);
-          cur.buyCount++;
-          engine.bankroll = round2(engine.bankroll - res.cost);
-          cur.buys.push({ side: 'down', shares: res.filled, price: res.avgPrice, cost: res.cost, ts: now });
-          log(`📉 DN ${res.filled}sh @${res.avgPrice.toFixed(3)} = $${res.cost.toFixed(2)} (mom: ${mom.dn.toFixed(2)} vs ${mom.up.toFixed(2)})`);
+      // DOWN
+      if (dnAsk != null && dnAsk > 0.01 && dnAsk < 0.99) {
+        const shares = pickSize(dnAsk, mom.dn, mom.up, wt);
+        const cost = round2(shares * dnAsk);
+        if (t.totalSpent + cost <= cfg.budget && engine.bankroll >= cost) {
+          const res = await executeBuy(t.leg.downTokenId, shares, dnAsk);
+          if (res.ok) {
+            t.dnShares = round2(t.dnShares + res.filled);
+            t.dnCost = round2(t.dnCost + res.cost);
+            t.totalSpent = round2(t.totalSpent + res.cost);
+            t.totalShares = round2(t.totalShares + res.filled);
+            t.buyCount++;
+            t.lastBuyAt = now;
+            engine.bankroll = round2(engine.bankroll - res.cost);
+            t.buys.push({ side: 'down', shares: res.filled, price: res.avgPrice, cost: res.cost, ts: now });
+            log(`📉 [${wt}] DN ${res.filled}sh @${res.avgPrice.toFixed(3)} = $${res.cost.toFixed(2)}`);
+          }
         }
       }
-    }
 
-    cur.phase = 'trading';
+      t.phase = 'trading';
+    }
   }
 
   async function settle(t) {
     if (t.settled) return;
     t.settled = true;
 
-    // Try fast resolution
     const leg = t.leg;
     if (!leg.resolved && leg.conditionId) {
       try {
@@ -287,7 +303,6 @@ function createMomentumEngine(cfg, trader) {
       } catch (_) {}
     }
 
-    // Calculate P&L
     let payout = 0;
     if (leg.winner === 'up') payout = t.upShares;
     else if (leg.winner === 'down') payout = t.dnShares;
@@ -307,7 +322,7 @@ function createMomentumEngine(cfg, trader) {
     t.winner = leg.winner;
 
     engine.history.unshift({
-      windowTs: t.windowTs, slug: leg.slug, winner: leg.winner,
+      windowTs: t.windowTs, windowType: t.windowType, slug: leg.slug, winner: leg.winner,
       upShares: t.upShares, dnShares: t.dnShares,
       upCost: t.upCost, dnCost: t.dnCost,
       totalSpent: t.totalSpent, totalShares: t.totalShares,
@@ -316,8 +331,9 @@ function createMomentumEngine(cfg, trader) {
     });
     if (engine.history.length > 200) engine.history.pop();
 
+    const wt = t.windowType;
     const summary = leg.winner ? `winner ${leg.winner.toUpperCase()}` : 'unresolved';
-    log(`🏁 [${leg.slug}] ${summary} — UP ${t.upShares}sh/$${t.upCost.toFixed(2)} DN ${t.dnShares}sh/$${t.dnCost.toFixed(2)} | spent $${t.totalSpent.toFixed(2)} payout $${payout.toFixed(2)} P&L ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`);
+    log(`🏁 [${wt}] [${leg.slug}] ${summary} — UP ${t.upShares}sh/$${t.upCost.toFixed(2)} DN ${t.dnShares}sh/$${t.dnCost.toFixed(2)} | spent $${t.totalSpent.toFixed(2)} payout $${payout.toFixed(2)} P&L ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`);
     recordEquity();
   }
 
@@ -325,7 +341,6 @@ function createMomentumEngine(cfg, trader) {
     engine.equity = round2(engine.bankroll);
     engine.equityCurve.push({ t: Date.now(), equity: engine.equity });
     if (engine.equityCurve.length > 2000) engine.equityCurve.shift();
-    // Drawdown
     const peak = engine.equityCurve.reduce((m, p) => Math.max(m, p.equity), 0);
     if (peak > 0) {
       const dd = (peak - engine.equity) / peak;
@@ -336,10 +351,10 @@ function createMomentumEngine(cfg, trader) {
   }
 
   function buildState() {
-    const t = engine.current;
+    const cur = engine.current || {};
     return {
       label, bankroll: engine.bankroll, equity: engine.equity,
-      startingCapital, perWindowBudget,
+      startingCapital,
       wins: engine.wins, losses: engine.losses,
       winRate: engine.windowsDecided > 0 ? round2((engine.wins / engine.windowsDecided) * 100) : null,
       windowsDecided: engine.windowsDecided,
@@ -347,35 +362,44 @@ function createMomentumEngine(cfg, trader) {
       totalFeesPaid: engine.totalFeesPaid, totalVolume: engine.totalVolume,
       maxDrawdown: engine.maxDrawdown,
       dryRun: !trader,
-      current: t ? {
-        slug: t.leg?.slug, phase: t.phase,
-        upAsk: t.leg?.upAsk, upBid: t.leg?.upBid,
-        downAsk: t.leg?.downAsk, downBid: t.leg?.downBid,
-        upShares: t.upShares, dnShares: t.dnShares,
-        upCost: t.upCost, dnCost: t.dnCost,
-        totalSpent: t.totalSpent, totalShares: t.totalShares,
-        buyCount: t.buyCount,
-        timeLeft: Math.max(0, t.closeAt - nowFn()),
-      } : null,
-      history: engine.history.slice(0, 30),
+      current5m: cur['5m'] ? summarizeWindow(cur['5m']) : null,
+      current15m: cur['15m'] ? summarizeWindow(cur['15m']) : null,
+      history: engine.history.slice(0, 50),
       equityCurve: engine.equityCurve,
-      config: { feeTheta, rebatePct, entryDelay: ENTRY_DELAY_S, buyInterval: BUY_INTERVAL_MS },
+      config: { feeTheta, rebatePct },
+    };
+  }
+
+  function summarizeWindow(t) {
+    const cfg = WINDOW_TYPES[t.windowType];
+    return {
+      slug: t.leg?.slug, phase: t.phase, windowType: t.windowType,
+      upAsk: t.leg?.upAsk, upBid: t.leg?.upBid,
+      downAsk: t.leg?.downAsk, downBid: t.leg?.downBid,
+      upShares: t.upShares, dnShares: t.dnShares,
+      upCost: t.upCost, dnCost: t.dnCost,
+      totalSpent: t.totalSpent, totalShares: t.totalShares,
+      buyCount: t.buyCount, budget: cfg.budget,
+      timeLeft: Math.max(0, t.closeAt - nowFn()),
     };
   }
 
   async function start() {
-    slog(`⛏ ${label} — Momentum DCA bot, fully automatic`);
-    slog(`⚙️  Capital: $${startingCapital}. Budget/window: $${perWindowBudget}. Sizes: ${SIZE_CHEAP}/${SIZE_MID}/${SIZE_STRONG}sh`);
-    slog(`⚙️  Entry delay: ${ENTRY_DELAY_S}s. Buy interval: ~${BUY_INTERVAL_MS/1000}s. Both sides always.`);
+    slog(`⛏ ${label} — Momentum DCA bot, 5m + 15m windows`);
+    slog(`⚙️  Capital: $${startingCapital}`);
+    slog(`⚙️  5m: sizes ${WINDOW_TYPES['5m'].sizes.cheap}/${WINDOW_TYPES['5m'].sizes.mid}/${WINDOW_TYPES['5m'].sizes.strong}sh, every ${WINDOW_TYPES['5m'].buyIntervalMs/1000}s, budget $${WINDOW_TYPES['5m'].budget}`);
+    slog(`⚙️  15m: sizes ${WINDOW_TYPES['15m'].sizes.cheap}/${WINDOW_TYPES['15m'].sizes.mid}/${WINDOW_TYPES['15m'].sizes.strong}sh, every ${WINDOW_TYPES['15m'].buyIntervalMs/1000}s, budget $${WINDOW_TYPES['15m'].budget}`);
     if (!trader) slog('⚠️  DEMO MODE — no trader connected');
 
+    // Run at fastest interval (5m pace = 8s)
+    const tickMs = WINDOW_TYPES['5m'].buyIntervalMs;
     while (true) {
       try {
         await tick();
       } catch (e) {
         log(`⚠️ tick error: ${e.message}`);
       }
-      await new Promise(r => setTimeout(r, BUY_INTERVAL_MS));
+      await new Promise(r => setTimeout(r, tickMs));
     }
   }
 
