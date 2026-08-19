@@ -105,6 +105,7 @@ body{font-family:'Courier New',monospace;background:#000;color:#fff;font-size:13
   <div class="card"><div class="lp" id="lp"></div></div>
 </div>
 
+<script src="/socket.io/socket.io.js"></script>
 <script>
 var socket=io({pingInterval:2000,pingTimeout:5000});
 var lb=[];var latest={};
