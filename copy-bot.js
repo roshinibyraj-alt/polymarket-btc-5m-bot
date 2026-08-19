@@ -194,7 +194,6 @@ async function sweepResolutions() {
   const openKeys = Object.keys(positions).filter(k => positions[k].status === 'open');
   if (!openKeys.length) return;
 
-  // Group by conditionId
   const byCid = {};
   for (const k of openKeys) {
     const cid = positions[k].conditionId;
@@ -202,7 +201,9 @@ async function sweepResolutions() {
     byCid[cid].push(k);
   }
 
-  for (const [cid, keys] of Object.entries(byCid)) {
+  // Cap: only check up to 5 conditionIds per sweep to avoid blocking
+  const entries = Object.entries(byCid).slice(0, 5);
+  for (const [cid, keys] of entries) {
     try {
       const mkts = await getJSON(`${GAMMA_API}/markets?condition_id=${cid}`);
       const mk = Array.isArray(mkts) ? mkts[0] : null;
@@ -250,8 +251,7 @@ function settlePosition(k, won) {
     delete windows[wk];
   }
 
-  // Remove settled window logs from main log feed
-  logs = logs.filter(l => !l.includes(shortSlug(p.slug)));
+  // Log cleanup handled by periodic cleanup()
 
   log(`🏁 ${won ? '✅ WIN' : '❌ LOSS'} ${p.outcome.toUpperCase()} ${shortSlug(p.slug)} — cost $${p.cost.toFixed(2)} payout $${payout.toFixed(2)} P&L ${sgn(pnl)}`);
   recordEquity();
@@ -315,17 +315,49 @@ function buildState() {
 }
 
 let lastSweep = 0, lastPosPoll = 0;
+let lastCleanup = 0;
+const CLEANUP_MS = 300000; // 5 minutes
+
+// Run a promise with a timeout — prevents the loop from freezing
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+  ]);
+}
+
+// Clean up old data to prevent memory leaks
+function cleanup() {
+  // Trim trades to last 200
+  if (trades.length > 200) trades = trades.slice(-200);
+  // Remove resolved windows older than 1 hour
+  const cutoff = Date.now() - 3600000;
+  for (const wk of Object.keys(windows)) {
+    const w = windows[wk];
+    if (w.resolved) delete windows[wk];
+  }
+  // Trim resolvedWindows
+  if (resolvedWindows.length > 50) resolvedWindows = resolvedWindows.slice(-25);
+  // Trim logs
+  if (logs.length > 300) logs = logs.slice(-200);
+}
 
 async function mainLoop() {
   while (true) {
+    const loopStart = Date.now();
     try {
-      await pollMasterTrades();
+      // Poll trades with 20s timeout — never let the loop freeze
+      await withTimeout(pollMasterTrades(), 20000);
       const now = Date.now();
-      if (now - lastPosPoll > 30000) { lastPosPoll = now; await pollMasterPositions(); }
-      if (now - lastSweep > SWEEP_MS) { lastSweep = now; await sweepResolutions(); recordEquity(); }
+      if (now - lastPosPoll > 30000) { lastPosPoll = now; await withTimeout(pollMasterPositions(), 15000); }
+      if (now - lastSweep > SWEEP_MS) { lastSweep = now; await withTimeout(sweepResolutions(), 15000); recordEquity(); }
+      if (now - lastCleanup > CLEANUP_MS) { lastCleanup = now; cleanup(); }
       emitFn('state', buildState());
     } catch (e) { log(`⚠️ Loop: ${e.message}`); }
-    await new Promise(r => setTimeout(r, POLL_MS));
+    // Ensure minimum tick interval even if loop was fast
+    const elapsed = Date.now() - loopStart;
+    const wait = Math.max(100, POLL_MS - elapsed);
+    await new Promise(r => setTimeout(r, wait));
   }
 }
 
