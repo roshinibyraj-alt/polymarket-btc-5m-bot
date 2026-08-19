@@ -38,7 +38,7 @@ function log(msg) {
   slogFn(line);
 }
 
-async function getJSON(url, timeout = 3000) {
+async function getJSON(url, timeout = 12000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
