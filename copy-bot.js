@@ -3,7 +3,7 @@
 const DATA_API  = 'https://data-api.polymarket.com';
 const GAMMA_API = 'https://gamma-api.polymarket.com';
 
-const WATCH_WALLET = (process.env.WATCH_WALLET || '0x251c1a283703beed41590b0875a8dcb8ddd1541f').trim();
+const WATCH_WALLET = (process.env.WATCH_WALLET || '0x32ed2e546b187ca15e2841edc82b22c713cf8ec3').trim();
 const POLL_MS      = Number(process.env.POLL_INTERVAL_MS || 1000);
 const SWEEP_MS     = Number(process.env.POSITION_SWEEP_INTERVAL_MS || 15000);
 const CAPITAL      = Number(process.env.DEMO_CAPITAL || 20000);
