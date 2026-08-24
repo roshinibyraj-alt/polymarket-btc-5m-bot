@@ -57,6 +57,8 @@ class MomentumLagEngine {
     this.socket = null;
     this.subscribedTokens = new Set();
     this.loopRunning = false;
+    this.connectionStartedAt = null;
+    this.handshakeTimer = null;
   }
 
   log(message) {
@@ -161,26 +163,69 @@ class MomentumLagEngine {
 
   connect() {
     if (!this.WebSocketImpl || this.socket) return;
+    this.connectionStartedAt = Date.now();
     try { this.socket = new this.WebSocketImpl(CLOB_WS); }
-    catch (error) { this.scheduleReconnect(); return; }
-    this.socket.onopen = () => {
+    catch (error) { this.socket = null; this.scheduleReconnect(); return; }
+    const socket = this.socket;
+    this.handshakeTimer = setTimeout(() => {
+      if (this.socket === socket && !this.connected) {
+        this.log('⏱️ CLOB handshake timeout — forcing reconnect');
+        this.reconnects++;this.closeStaleSocket();
+      }
+    }, 3500);
+    socket.onopen = () => {
+      if (this.socket !== socket) return;
+      clearTimeout(this.handshakeTimer);
       this.connected = true;
+      this.lastMessageAt = Date.now();
       this.log(`🔌 CLOB market WebSocket connected — ${this.subscribedTokens.size} tokens`);
       if (this.subscribedTokens.size) this.sendSubscription();
     };
-    this.socket.onmessage = event => this.handleMessage(String(event.data));
-    this.socket.onerror = () => {};
-    this.socket.onclose = () => {
+    socket.onmessage = event => { if (this.socket === socket) this.handleMessage(String(event.data)); };
+    socket.onerror = () => {};
+    socket.onclose = () => {
+      const hadSocket = this.socket === socket;
+      clearTimeout(this.handshakeTimer);
       this.connected = false;
       this.socket = null;
-      this.reconnects++;
-      this.log('⚠️ CLOB socket closed — reconnecting');
-      this.scheduleReconnect();
+      if (hadSocket) {
+        this.reconnects++;
+        this.log('⚠️ CLOB socket closed — reconnecting');
+        this.scheduleReconnect();
+      }
     };
   }
 
+  closeStaleSocket() {
+    const socket = this.socket;
+    this.socket = null;
+    this.connected = false;
+    if (!socket) return;
+    try { socket.terminate ? socket.terminate() : socket.close(); }
+    catch (_) { try { socket.close(); } catch (_) {} }
+  }
+
+  watchdogTick() {
+    if (!this.socket) { this.connect(); return; }
+    const now = Date.now();
+    if (this.socket.readyState === 0 && now - this.connectionStartedAt > 3500) {
+      this.log('⏱️ CLOB connection stuck — recycling');
+      this.closeStaleSocket();
+      return;
+    }
+    if (this.socket.readyState !== 1) return;
+    const silence = now - (this.lastMessageAt || this.connectionStartedAt);
+    if (silence > 4000) {
+      try { this.socket.send('PING'); } catch (_) {}
+    }
+    if (silence > 9000) {
+      this.log('⚠️ CLOB stream silent — recycling socket');
+      this.reconnects++;this.closeStaleSocket();
+    }
+  }
+
   scheduleReconnect() {
-    setTimeout(() => this.connect(), 500);
+    setTimeout(() => this.connect(), 300);
   }
 
   handleMessage(raw) {
@@ -469,15 +514,13 @@ class MomentumLagEngine {
 
   async init() {
     const start = windowStartFor(Date.now());
-    await this.discoverWindow(start, 'Current');
-    await this.discoverWindow(start + WINDOW_SECONDS, 'Next');
     this.connect();
+    await Promise.all([
+      this.discoverWindow(start, 'Current'),
+      this.discoverWindow(start + WINDOW_SECONDS, 'Next'),
+    ]);
     setInterval(() => this.rotateAndSweep(), 1000);
-    setInterval(() => {
-      if (this.connected && this.lastMessageAt && Date.now() - this.lastMessageAt > 12000) {
-        try { this.socket?.send('PING'); } catch (_) {}
-      }
-    }, 3000);
+    setInterval(() => this.watchdogTick(), 500);
     this.log(`🚀 Autonomous BTC→alt momentum bot started | ${ASSETS.join('/')} | demo $${START_BANKROLL}`);
   }
 }

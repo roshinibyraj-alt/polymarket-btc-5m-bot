@@ -43,7 +43,7 @@ body{background:var(--bg);color:#fff;font-family:Inter,ui-sans-serif,system-ui,-
 @media(max-width:1050px){.kpis{grid-template-columns:repeat(4,minmax(0,1fr))}.two-col,.markets{grid-template-columns:1fr}}
 @media(max-width:620px){h1{font-size:15px}.shell{padding:8px}.topbar{padding:10px}.kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}.chart{height:140px}.mid{font-size:26px}.config-grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(3,1fr)}.result,.feed-item{flex-wrap:wrap}}
 </style></head><body><div class="shell">
-<header class="topbar"><div class="brand"><div class="brand-icon">⚡</div><div><h1>Momentum Lag Bot</h1><div class="sub">BTC lead → ETH / SOL / XRP reaction · hold to resolution</div></div></div><div class="pills"><span class="pill" id="connection">CONNECTING</span><span class="pill live" id="mode">AUTONOMOUS DEMO</span><span class="pill" id="rate">0/s</span><span class="pill" id="uptime">00:00</span></div></header>
+<header class="topbar"><div class="brand"><div class="brand-icon">⚡</div><div><h1>Momentum Lag Bot</h1><div class="sub">BTC lead → ETH / SOL / XRP reaction · hold to resolution</div></div></div><div class="pills"><span class="pill" id="connection">UI LINK</span><span class="pill warn" id="clobStatus">CLOB CONNECTING</span><span class="pill live" id="mode">AUTONOMOUS DEMO</span><span class="pill" id="rate">0/s</span><span class="pill" id="uptime">00:00</span></div></header>
 <section class="kpis" id="kpis"></section>
 <section class="two-col"><div class="panel"><div class="panel-head"><span>Global equity curve</span><strong id="equityValue">—</strong></div><div class="chart"><svg id="equityChart" preserveAspectRatio="none"></svg></div></div><div class="panel"><div class="panel-head"><span>Strategy controls</span><strong>ACTIVE RULES</strong></div><div class="config-grid" id="configGrid"></div></div></section>
 <section class="panel" style="margin-top:8px"><div class="panel-head"><span>Live binary markets · every CLOB tick</span><strong id="tickInfo">WAITING</strong></div><div class="markets" id="marketsGrid"></div></section>
@@ -52,13 +52,14 @@ body{background:var(--bg);color:#fff;font-family:Inter,ui-sans-serif,system-ui,-
 <section class="panel"><div class="panel-head"><span>Server activity</span><strong id="socketStatus">SOCKET READY</strong></div><div class="logs" id="logsPanel"></div></section>
 </div><script src="/socket.io/socket.io.js"></script><script>
 let state=null,tickData=null,logs=[],connected=false,lastRender=0,priceHistory={};
-const $=id=>document.getElementById(id),socket=io({transports:['websocket','polling']});
-socket.on('connect',()=>{connected=true;$('connection').textContent='CLOB LIVE';$('connection').className='pill live'});
-socket.on('disconnect',()=>{connected=false;$('connection').textContent='RECONNECTING';$('connection').className='pill warn'});
+const $=id=>document.getElementById(id),socket=io({transports:['polling','websocket'],upgrade:true,reconnectionDelay:250,reconnectionDelayMax:1000,timeout:3000});
+socket.on('connect',()=>{connected=true;$('connection').textContent='UI LIVE';$('connection').className='pill live'});
+socket.on('disconnect',()=>{connected=false;$('connection').textContent='UI RECONNECT';$('connection').className='pill warn'});
 socket.on('log',line=>{logs.push(line);if(logs.length>300)logs.shift();renderLogs()});
 socket.on('tick',data=>{tickData=data;if(!state)return;requestAnimationFrame(()=>{if(tickData===data){renderLivePrices(data);lastRender=Date.now()}})});
 socket.on('state',data=>render(data));
-setInterval(()=>{if(!connected)fetch('/api/status').then(r=>r.json()).then(render).catch(()=>{})},1500);
+function refreshState(){fetch('/api/status').then(r=>r.json()).then(render).catch(()=>{})}
+refreshState();setInterval(()=>{if(!connected)refreshState()},1000);
 function money(v){if(v==null||!isFinite(v))return'—';const n=Number(v),s=n>0?'+':n<0?'-':'$';return s+'$'+Math.abs(n).toFixed(2)}
 function cash(v){return'$'+Number(v||0).toFixed(2)}function num(v){return Number(v||0).toLocaleString(undefined,{maximumFractionDigits:2})}
 function tone(v){return Number(v)>0?'green':Number(v)<0?'red':''}function price(v){return v==null?'—':Number(v).toFixed(3)}
@@ -66,6 +67,7 @@ function short(text){text=String(text||'—');return text.length>28?text.slice(0
 function rememberPrice(key,value){const now=Date.now(),list=priceHistory[key]||(priceHistory[key]=[]);list.push({t:now,p:value});while(list.length&&now-list[0].t>2500)list.shift();const cutoff=now-1800,old=list.find(x=>x.t>=cutoff);return old==null?null:value-old.p}
 function render(data){state=data;logs=data.logs&&logs.length===0?data.logs.slice():logs;
 $('mode').textContent='AUTONOMOUS DEMO · '+cash(configBase());$('uptime').textContent=clock(data.uptime||0);
+ const clob=$('clobStatus');if(data.connected){clob.textContent='CLOB LIVE';clob.className='pill live'}else{clob.textContent='CLOB CONNECTING';clob.className='pill warn'}
 const rate=Math.round((data.messageCount||0)/Math.max(1,data.uptime||1));$('rate').textContent=rate+'/s avg';$('tickInfo').textContent=num(data.tickCount)+' TICKS';
 const openPnl=(data.positions||[]).reduce((sum,p)=>sum+p.shares*((p.markPrice??p.entryPrice)-p.entryPrice),0);
 $('kpis').innerHTML=[['Equity',cash(data.markValue),'','Current marked value'],['Total P&L',money(data.totalPnl),tone(data.totalPnl),'Since launch'],['Realized P&L',money(data.realizedPnl),tone(data.realizedPnl),'Settled result'],['Open P&L',money(openPnl),tone(openPnl),'Unrealized marks'],['Bankroll',cash(data.bankroll),'','Cash available'],['Win Rate',data.winRate==null?'—':data.winRate+'%','',data.wins+'W / '+data.losses+'L'],['Trades',num(data.positions?.length||0),'','Open paper positions']].map(k=>'<article class="metric"><div class="label">'+k[0]+'</div><div class="value '+k[2]+'">'+k[1]+'</div><div class="small">'+k[3]+'</div></article>').join('');
