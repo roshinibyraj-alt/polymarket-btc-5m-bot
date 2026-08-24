@@ -1,7 +1,7 @@
 {
-  "name": "polymarket-btc-divergence-bot",
-  "version": "4.4.0",
-  "description": "BTC-led Polymarket 5m divergence paper bot with live CLOB WebSocket dashboard",
+  "name": "polymarket-btc-breakout-bot",
+  "version": "5.0.0",
+  "description": "Polymarket BTC 5-minute breakout paper bot using direct CLOB book snapshots",
   "main": "index.js",
   "engines": {
     "node": ">=18.0.0"
@@ -11,8 +11,6 @@
     "smoke": "node test/engine-smoke.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "socket.io": "^4.7.5",
-    "ws": "^8.18.0"
+    "express": "^4.19.2"
   }
 }

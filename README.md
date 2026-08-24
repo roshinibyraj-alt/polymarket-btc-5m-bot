@@ -1,17 +1,21 @@
-# Polymarket BTC Divergence Bot
+# Polymarket BTC 5m Breakout Bot
 
-Autonomous 5-minute paper bot using real CLOB order-book streams.
+Autonomous 5-minute BTC paper bot priced only by direct Polymarket CLOB order-book snapshots.
 
-## Rule
-- BTC 5-minute UP/DOWN is the signal only.
-- After a two-minute wait from window start (`ENTRY_WAIT_SECONDS=120`), if BTC UP midpoint is above `0.65`, buy any other tracked pair's UP while its midpoint is below `0.50`.
-- After the wait, if BTC DOWN midpoint is above `0.65`, buy any other tracked pair's DOWN while its midpoint is below `0.50`.
-- Each non-BTC pair may receive at most one 100-share entry per window, independently of every other pair.
-- Entries fill at the target token's live CLOB ask.
-- Expired/stale windows cannot fire, including during the rotation boundary.
-- During the final two seconds, current UP/DOWN midpoints are sampled continuously and each side's highest price is captured. If one side exceeds `0.90`, that side wins immediately and capital/P&L updates.
-- There is no price fallback. Trading and dashboard prices use only CLOB order-book WebSocket data; if CLOB fails, trading stops.
-- Expired market subscriptions are released shortly after final-price settlement so the combined socket stays small and fast.
+## Strategy
+- Trade only `btc-updown-5m-*`.
+- Poll both UP and DOWN CLOB books every 500 ms.
+- When either midpoint reaches `0.89`, immediately buy that side at its executable ask.
+- Base size is 100 shares.
+- If the held side's bid reaches `0.79` or lower, sell immediately at that bid and realize the stop-loss.
+- Otherwise hold until resolution. During the final two seconds, each side's maximum midpoint is tracked. The first side above `0.90` wins; the opposite side settles to zero.
+- Aggregate all paper trades in a window. A negative net result advances martingale; a non-negative net result resets it.
+- Martingale sequence: 100 → 210 → 441 → 926 → 1,945 shares. After the fourth losing martingale, reset to 100.
+
+## Pricing
+- Discovery uses Gamma only to resolve the exact BTC window slug into UP/DOWN CLOB token IDs.
+- All trading prices come from batched direct CLOB `/books` requests.
+- There is no alternate or fallback price source. If CLOB polling fails, trading pauses.
 
 ## Dashboard
-Every CLOB tick updates all four active-window markets' UP/DOWN bid, ask, midpoint, spread and short-window delta. Positions are marked to market continuously. The dashboard also shows discovery status, subscriptions, reconnects, execution feed, active windows, resolved results and server logs.
+The mobile-friendly black dashboard shows live bid/ask/mid/spread/quote age, active position, global equity, current martingale level, next loss size, completed-window P&L, execution feed and server logs.

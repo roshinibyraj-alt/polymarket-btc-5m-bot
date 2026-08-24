@@ -1,66 +1,60 @@
 'use strict';
 
 const GAMMA_API = process.env.GAMMA_API || 'https://gamma-api.polymarket.com';
-const CLOB_WS = process.env.CLOB_WS || 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 const CLOB_REST = process.env.CLOB_REST || 'https://clob.polymarket.com';
-const STALE_QUOTE_MS = Number(process.env.STALE_QUOTE_MS || 2500);
-const QUOTE_REFRESH_COOLDOWN_MS = Number(process.env.QUOTE_REFRESH_COOLDOWN_MS || 1500);
-const WINDOW_SECONDS = 300;
-const ASSETS = (process.env.ASSETS || 'btc,eth,sol,xrp').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-const LEAD_ASSET = (process.env.LEAD_ASSET || 'btc').toLowerCase();
-const START_BANKROLL = Number(process.env.START_BANKROLL || 5000);
-const TRADE_SHARES = Number(process.env.TRADE_SHARES || 100);
-const BTC_STRONG_PRICE = Number(process.env.BTC_STRONG_PRICE || 0.65);
-const ENTRY_WAIT_SECONDS = Number(process.env.ENTRY_WAIT_SECONDS || 120);
-const TARGET_CHEAP_PRICE = Number(process.env.TARGET_CHEAP_PRICE || 0.50);
-const MAX_FILLS_PER_MARKET = Number(process.env.MAX_FILLS_PER_MARKET || 1);
+const CLOB_POLL_MS = Number(process.env.CLOB_POLL_MS || 500);
+const CLOB_FRESH_MS = Number(process.env.CLOB_FRESH_MS || 3500);
+const WINDOW_SECONDS = Number(process.env.WINDOW_SECONDS || 300);
+const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.89);
+const STOP_PRICE = Number(process.env.STOP_PRICE || 0.79);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
-const PRICE_HISTORY_MS = Number(process.env.PRICE_HISTORY_MS || 5000);
+const BASE_SHARES = Number(process.env.BASE_SHARES || 100);
+const MARTINGALE_MULTIPLIER = Number(process.env.MARTINGALE_MULTIPLIER || 2.1);
+const MAX_MARTINGALES = Number(process.env.MAX_MARTINGALES || 4);
+const START_BANKROLL = Number(process.env.START_BANKROLL || 5000);
 const TAKER_FEE_BPS = Number(process.env.TAKER_FEE_BPS || 0);
-const SWEEP_INTERVAL_MS = Number(process.env.RESOLUTION_SWEEP_MS || 5000);
 
 function round2(value) { return Math.round(value * 100) / 100; }
 function round5(value) { return Math.round(value * 100000) / 100000; }
 function windowStartFor(timeMs) { return Math.floor(timeMs / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS; }
-function slugFor(asset, start) { return `${asset}-updown-5m-${start}`; }
+function slugFor(start) { return `btc-updown-5m-${start}`; }
+function sharesForStreak(streak) {
+  return Math.round(BASE_SHARES * Math.pow(MARTINGALE_MULTIPLIER, streak));
+}
 
-class MomentumLagEngine {
+class BtcBreakoutEngine {
   constructor(options = {}) {
-    this.WebSocketImpl = options.WebSocketImpl || require('ws');
     this.fetchImpl = options.fetchImpl || fetch;
     this.emitTick = options.onTick || (() => {});
     this.emitLog = options.onLog || (() => {});
     this.startedAt = Date.now();
     this.bankroll = START_BANKROLL;
     this.realizedPnl = 0;
+    this.totalFees = 0;
     this.wins = 0;
     this.losses = 0;
     this.tickCount = 0;
-    this.messageCount = 0;
-    this.reconnects = 0;
-    this.connected = false;
-    this.lastMessageAt = null;
-    this.equityCurve = [{ t: Date.now(), equity: START_BANKROLL }];
-    this.logs = [];
-    this.trades = [];
-    this.positions = [];
+    this.pollCount = 0;
+    this.lastPollAt = null;
+    this.lastSuccessfulPollAt = null;
+    this.lastPollErrorAt = null;
+    this.pollRunning = false;
+    this.loopRunning = false;
+    this.discoveryRunning = false;
+    this.activeWindowStart = null;
+    this.lossStreak = 0;
+    this.openPosition = null;
     this.markets = new Map();
     this.tokens = new Map();
-    this.windows = new Map();
-    this.resolvedWindows = [];
     this.history = new Map();
+    this.windowStats = new Map();
     this.discoveredWindows = new Set();
-    this.activeWindowStart = null;
-    this.socket = null;
-    this.subscribedTokens = new Set();
-    this.loopRunning = false;
-    this.firedMarketKeys = new Set();
+    this.resolvedWindows = [];
+    this.trades = [];
+    this.logs = [];
+    this.equityCurve = [{ t: Date.now(), equity: START_BANKROLL }];
     this.discoveryErrors = [];
     this.lastDiscoveryAt = null;
-    this.discoveryRunning = false;
-    this.quoteSyncRunning = false;
-    this.connectionStartedAt = null;
-    this.handshakeTimer = null;
   }
 
   log(message) {
@@ -76,218 +70,109 @@ class MomentumLagEngine {
     try { return JSON.parse(value); } catch (_) { return null; }
   }
 
-  async getJSON(url, timeout = 8000) {
+  async requestJSON(url, options = {}, timeout = 3000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
-      const response = await this.fetchImpl(url, { signal: controller.signal, headers: { 'User-Agent': 'btc-divergence-bot/1.0' } });
+      const response = await this.fetchImpl(url, {
+        ...options,
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'btc-breakout-bot/1.0', ...(options.headers || {}) },
+      });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return await response.json();
     } finally { clearTimeout(timer); }
   }
 
-  async discoverMarket(asset, start) {
-    const slug = slugFor(asset, start);
+  getJSON(url, timeout) { return this.requestJSON(url, {}, timeout); }
+
+  async discoverMarket(start) {
+    const slug = slugFor(start);
     if (this.discoveredWindows.has(slug)) return this.markets.get(slug) || null;
     let market = null;
     try {
-      const rows = await this.getJSON(`${GAMMA_API}/markets?slug=${encodeURIComponent(slug)}`);
+      const rows = await this.getJSON(`${GAMMA_API}/markets?slug=${encodeURIComponent(slug)}`, 8000);
       market = Array.isArray(rows) ? rows[0] : null;
+      this.lastDiscoveryAt = Date.now();
     } catch (error) {
-      this.discoveryErrors.unshift(`${slug}: ${error.message}`);
-      this.discoveryErrors=this.discoveryErrors.slice(0,8);
-      this.log(`⚠️ Discovery ${slug}: ${error.message}`);
+      this.addDiscoveryError(`${slug}: ${error.message}`);
       return null;
     }
-    this.lastDiscoveryAt=Date.now();
     if (!market || !market.conditionId || !market.clobTokenIds || market.closed) {
-      this.discoveryErrors.unshift(`${slug}: market unavailable/closed`);
-      this.discoveryErrors=this.discoveryErrors.slice(0,8);
+      this.addDiscoveryError(`${slug}: market unavailable/closed`);
       return null;
     }
-    this.discoveredWindows.add(slug);
     const outcomes = this.parseJson(market.outcomes) || [];
     const tokenIds = this.parseJson(market.clobTokenIds) || [];
     const upIndex = outcomes.findIndex(outcome => String(outcome).toLowerCase() === 'up');
     const downIndex = outcomes.findIndex(outcome => String(outcome).toLowerCase() === 'down');
     if (upIndex < 0 || downIndex < 0 || !tokenIds[upIndex] || !tokenIds[downIndex]) {
-      this.log(`⚠️ Invalid token mapping ${slug}`);
+      this.addDiscoveryError(`${slug}: invalid UP/DOWN token mapping`);
       return null;
     }
     const record = {
-      slug,
-      asset,
+      slug, asset: 'btc', title: market.question || slug,
       conditionId: market.conditionId,
-      title: market.question || slug,
-      windowStart: start,
-      windowEnd: start + WINDOW_SECONDS,
-      tradingClosed: false,
-      resolved: false,
-      winner: null,
-      resolutionSource: null,
-      finalUpMax: null,
-      finalDownMax: null,
-      up: this.makeToken(tokenIds[upIndex], slug, asset, 'UP'),
-      down: this.makeToken(tokenIds[downIndex], slug, asset, 'DOWN'),
+      windowStart: start, windowEnd: start + WINDOW_SECONDS,
+      tradingClosed: false, resolved: false, winner: null,
+      resolutionSource: null, finalUpMax: null, finalDownMax: null,
+      up: this.makeToken(tokenIds[upIndex], slug, 'UP'),
+      down: this.makeToken(tokenIds[downIndex], slug, 'DOWN'),
     };
     this.markets.set(slug, record);
     this.tokens.set(record.up.tokenId, record.up);
     this.tokens.set(record.down.tokenId, record.down);
-    this.windows.set(slug, this.windowSummary(record));
-    this.subscribe([record.up.tokenId, record.down.tokenId]);
-    this.log(`🎯 ${asset.toUpperCase()} 5m discovered ${slug} — WebSocket armed`);
+    this.discoveredWindows.add(slug);
+    this.log(`🎯 BTC window discovered ${slug} — CLOB books armed`);
     return record;
   }
 
-  makeToken(tokenId, slug, asset, outcome) {
+  addDiscoveryError(message) {
+    this.discoveryErrors.unshift(message);
+    this.discoveryErrors = this.discoveryErrors.slice(0, 8);
+    this.log(`⚠️ Discovery ${message}`);
+  }
+
+  makeToken(tokenId, slug, outcome) {
     return {
-      tokenId: String(tokenId), slug, asset, outcome,
+      tokenId: String(tokenId), slug, outcome,
       bid: null, ask: null, mid: null, spread: null,
-      previousMid: null, updatedAt: null,
+      updatedAt: null, refreshedAt: 0,
     };
   }
 
-  async discoverWindow(start, label) {
-    await Promise.all(ASSETS.map(asset => this.discoverMarket(asset, start)));
-    if (!this.activeWindowStart && this.hasOpenTradingMarket(start)) {
+  async discoverWindow(start, label = 'Current') {
+    const market = await this.discoverMarket(start);
+    if (market && !this.activeWindowStart && !market.tradingClosed && !market.resolved) {
       this.activeWindowStart = start;
-      this.log(`🚀 ${label} window active — ${start}`);
+      this.log(`🚀 ${label} BTC window active — ${start}`);
     }
+    return market;
   }
 
-  hasOpenTradingMarket(start) {
-    return [...this.markets.values()].some(market =>
-      market.windowStart === start && !market.tradingClosed && market.up.tokenId);
-  }
+  currentShares() { return sharesForStreak(this.lossStreak); }
 
-  subscribe(tokenIds) {
-    let added = false;
-    for (const tokenId of tokenIds.map(String)) {
-      if (!this.subscribedTokens.has(tokenId)) { this.subscribedTokens.add(tokenId); added = true; }
+  getWindowStats(start) {
+    const key = `${start}`;
+    if (!this.windowStats.has(key)) {
+      this.windowStats.set(key, {
+        windowStart: start, windowEnd: start + WINDOW_SECONDS,
+        levelUsed: this.lossStreak, plannedShares: this.currentShares(),
+        buyCount: 0, sellCount: 0, invested: 0, realizedPnl: 0,
+        status: 'PENDING', result: null, settledAt: null, nextShares: null,
+      });
     }
-    if (!added || !this.socket || this.socket.readyState !== 1) return;
-    this.sendSubscription();
-  }
-
-  sendSubscription() {
-    this.socket.send(JSON.stringify({ assets_ids: [...this.subscribedTokens], type: 'market' }));
-  }
-
-  connect() {
-    if (!this.WebSocketImpl || this.socket) return;
-    this.connectionStartedAt = Date.now();
-    try { this.socket = new this.WebSocketImpl(CLOB_WS); }
-    catch (error) { this.socket = null; this.scheduleReconnect(); return; }
-    const socket = this.socket;
-    this.handshakeTimer = setTimeout(() => {
-      if (this.socket === socket && !this.connected) {
-        this.log('⏱️ CLOB handshake timeout — forcing reconnect');
-        this.reconnects++;this.closeStaleSocket();
-      }
-    }, 3500);
-    socket.onopen = () => {
-      if (this.socket !== socket) return;
-      clearTimeout(this.handshakeTimer);
-      this.connected = true;
-      this.lastMessageAt = Date.now();
-      this.log(`🔌 CLOB market WebSocket connected — ${this.subscribedTokens.size} tokens`);
-      if (this.subscribedTokens.size) this.sendSubscription();
-    };
-    socket.onmessage = event => { if (this.socket === socket) this.handleMessage(String(event.data)); };
-    socket.onerror = () => {};
-    socket.onclose = () => {
-      const hadSocket = this.socket === socket;
-      clearTimeout(this.handshakeTimer);
-      this.connected = false;
-      this.socket = null;
-      if (hadSocket) {
-        this.reconnects++;
-        this.log('⚠️ CLOB socket closed — reconnecting');
-        this.scheduleReconnect();
-      }
-    };
-  }
-
-  closeStaleSocket() {
-    const socket = this.socket;
-    this.socket = null;
-    this.connected = false;
-    if (!socket) return;
-    try { socket.terminate ? socket.terminate() : socket.close(); }
-    catch (_) { try { socket.close(); } catch (_) {} }
-  }
-
-  watchdogTick() {
-    if (!this.socket) { this.connect(); return; }
-    const now = Date.now();
-    if (this.socket.readyState === 0 && now - this.connectionStartedAt > 3500) {
-      this.log('⏱️ CLOB connection stuck — recycling');
-      this.closeStaleSocket();
-      return;
-    }
-    if (this.socket.readyState !== 1) return;
-    const silence = now - (this.lastMessageAt || this.connectionStartedAt);
-    if (silence > 4000) {
-      try { this.socket.send('PING'); } catch (_) {}
-    }
-    if (silence > 9000) {
-      this.log('⚠️ CLOB stream silent — recycling socket');
-      this.reconnects++;this.closeStaleSocket();
-    }
-  }
-
-  scheduleReconnect() {
-    setTimeout(() => this.connect(), 300);
-  }
-
-  handleMessage(raw) {
-    let events;
-    try { events = JSON.parse(raw); } catch (_) { return; }
-    if (!Array.isArray(events)) events = [events];
-    this.messageCount++;
-    this.lastMessageAt = Date.now();
-    for (const event of events) this.processEvent(event);
-    this.tickCount++;
-    this.emitTick(this.publicMarkets(), this.messageCount);
-  }
-
-  processEvent(event) {
-    const eventType = event.event_type;
-    if (event.asset_id && Array.isArray(event.bids)) {
-      const token = this.tokens.get(String(event.asset_id));
-      if (token) {
-        this.applyBook(token, event.bids, event.asks || []);
-        const ownedMarket = this.markets.get(token.slug);
-        if (ownedMarket && Date.now() / 1000 >= ownedMarket.windowEnd) this.resolveFromFinalPrices(ownedMarket);
-        this.updatePositionMarks();this.evaluateSignals();
-      }
-      return;
-    }
-    if (Array.isArray(event.price_changes)) {
-      for (const change of event.price_changes) {
-        const token = this.tokens.get(String(change.asset_id));
-        if (!token) continue;
-        this.applyTop(token, change.best_bid, change.best_ask);
-        const ownedMarket = this.markets.get(token.slug);
-        if (ownedMarket && Date.now() / 1000 >= ownedMarket.windowEnd) this.resolveFromFinalPrices(ownedMarket);
-      }
-      this.updatePositionMarks();this.evaluateSignals();
-    }
-    void eventType;
+    return this.windowStats.get(key);
   }
 
   applyBook(token, bids, asks) {
-    const validBids = bids.filter(level => Number(level.size) > 0).map(level => ({ price: Number(level.price), size: Number(level.size) }));
-    const validAsks = asks.filter(level => Number(level.size) > 0).map(level => ({ price: Number(level.price), size: Number(level.size) }));
+    const validBids = (Array.isArray(bids) ? bids : []).filter(level => Number(level.size) > 0)
+      .map(level => ({ price: Number(level.price), size: Number(level.size) }));
+    const validAsks = (Array.isArray(asks) ? asks : []).filter(level => Number(level.size) > 0)
+      .map(level => ({ price: Number(level.price), size: Number(level.size) }));
     validBids.sort((a, b) => b.price - a.price);
     validAsks.sort((a, b) => a.price - b.price);
     this.setQuote(token, validBids[0]?.price ?? null, validAsks[0]?.price ?? null);
-  }
-
-  applyTop(token, bestBid, bestAsk) {
-    const bid = bestBid == null ? token.bid : Number(bestBid);
-    const ask = bestAsk == null ? token.ask : Number(bestAsk);
-    this.setQuote(token, bid, ask);
   }
 
   setQuote(token, bid, ask) {
@@ -304,9 +189,17 @@ class MomentumLagEngine {
     if (market) this.trackFinalPrices(market);
   }
 
+  pushHistory(tokenId, price) {
+    if (!Number.isFinite(price)) return;
+    const now = Date.now();
+    const series = this.history.get(tokenId) || [];
+    series.push({ t: now, p: price });
+    while (series.length > 2 && now - series[0].t > 5000) series.shift();
+    this.history.set(tokenId, series.slice(-240));
+  }
+
   trackFinalPrices(market) {
-    const nowSeconds = Date.now() / 1000;
-    const elapsed = nowSeconds - market.windowStart;
+    const elapsed = Date.now() / 1000 - market.windowStart;
     if (elapsed < WINDOW_SECONDS - 2) {
       market.finalUpMax = null;
       market.finalDownMax = null;
@@ -328,87 +221,149 @@ class MomentumLagEngine {
     market.resolved = true;
     market.winner = upStrong ? 'UP' : 'DOWN';
     market.resolutionSource = 'CLOB_FINAL_2S';
-    this.settleMarket(market);
+    if (this.openPosition?.slug === market.slug) {
+      const position = this.openPosition;
+      const exitPrice = position.outcome === market.winner ? 1 : 0;
+      this.closePosition(exitPrice, 'RESOLUTION');
+    }
+    this.finalizeWindowStats(market);
     return true;
   }
 
-  pushHistory(tokenId, price) {
-    if (!Number.isFinite(price)) return;
-    const now = Date.now();
-    const series = this.history.get(tokenId) || [];
-    series.push({ t: now, p: price });
-    while (series.length > 2 && now - series[0].t > PRICE_HISTORY_MS) series.shift();
-    this.history.set(tokenId, series.slice(-240));
-  }
-
-  evaluateSignals() {
-    const leadMarket = this.currentMarket(LEAD_ASSET);
-    if (!leadMarket || leadMarket.windowStart !== this.activeWindowStart) return;
-    if (Date.now() / 1000 - leadMarket.windowStart < ENTRY_WAIT_SECONDS) return;
-    if (!Number.isFinite(leadMarket.up.mid) || !Number.isFinite(leadMarket.down.mid)) return;
-    const btcUp = leadMarket.up.mid;
-    const btcDown = leadMarket.down.mid;
-    const side = btcUp > btcDown ? 'UP' : 'DOWN';
-    const btcPrice = side === 'UP' ? btcUp : btcDown;
-    if (btcPrice <= BTC_STRONG_PRICE) return;
-
-    for (const market of this.markets.values()) {
-      if (market.windowStart !== leadMarket.windowStart || market.asset === LEAD_ASSET || market.resolved) continue;
-      const token = side === 'UP' ? market.up : market.down;
-      if (!Number.isFinite(token.mid) || token.mid >= TARGET_CHEAP_PRICE) continue;
-      this.firePaperOrder(market, token, btcPrice, { btcSide: side, btcPrice, targetPrice: token.mid });
+  managePosition() {
+    const position = this.openPosition;
+    if (!position || position.status !== 'open') return false;
+    const exitBid = position.token.bid;
+    if (Number.isFinite(exitBid) && exitBid <= STOP_PRICE) {
+      this.closePosition(exitBid, 'STOP_LOSS');
+      return true;
     }
+    return false;
   }
 
-  currentMarket(asset) {
-    return [...this.markets.values()].find(market =>
-      market.asset === asset && !market.resolved && Date.now() / 1000 < market.windowEnd) || null;
+  evaluateEntry() {
+    const nowSeconds = Date.now() / 1000;
+    const start = windowStartFor(Date.now());
+    const market = this.markets.get(slugFor(start));
+    if (!market || market.tradingClosed || market.resolved ||
+        this.activeWindowStart !== start || nowSeconds >= market.windowEnd || this.openPosition) return;
+
+    const candidates = [market.up, market.down].filter(token =>
+      Number.isFinite(token.mid) && token.mid >= ENTRY_PRICE && Number.isFinite(token.ask));
+    if (!candidates.length) return;
+    candidates.sort((a, b) => b.mid - a.mid);
+    this.openPaperPosition(market, candidates[0]);
   }
 
-  firePaperOrder(market, token, btcPrice, signal) {
-    const marketKey = `${market.windowStart}:${market.slug}`;
-    if (market.asset === LEAD_ASSET || this.firedMarketKeys.has(marketKey)) return;
-    const now = Date.now();
-    if (now / 1000 >= market.windowEnd) return;
-    const fillPrice = token.ask;
-    if (!Number.isFinite(fillPrice)) return;
-    const cost = round2(TRADE_SHARES * fillPrice);
-    const fee = round2(cost * TAKER_FEE_BPS / 10000);
-    if (cost + fee > this.bankroll) return;
-    this.firedMarketKeys.add(marketKey);
-
-    const position = {
-      id: `${market.slug}-${token.outcome}-${now}`,
-      slug: market.slug, asset: market.asset, conditionId: market.conditionId,
-      outcome: token.outcome, tokenId: token.tokenId, shares: TRADE_SHARES,
-      avgPrice: fillPrice, entryPrice: fillPrice, cost, fee, fills: 1,
-      status: 'open', openedAt: new Date().toISOString(), markPrice: token.mid,
-      signal: { ...signal, elapsed: Math.floor(now / 1000 - market.windowStart) },
-    };
-    this.positions.push(position);
-    this.bankroll = round2(this.bankroll - cost - fee);
-    const trade = {
-      timestamp: now, orderType: 'PAPER-FOK', slug: market.slug, asset: market.asset,
-      outcome: token.outcome, shares: TRADE_SHARES, price: fillPrice, cost,
-      markPrice: position.markPrice, pnl: this.positionPnl(position),
-      signal: { ...signal, elapsed: Math.floor(now / 1000 - market.windowStart) },
-    };
+  pushTrade(trade) {
     this.trades.push(trade);
-    if (this.trades.length > 500) this.trades.splice(0, this.trades.length - 300);
-    this.log(`⚡ BUY ${market.asset.toUpperCase()} ${token.outcome} ${TRADE_SHARES}sh @${fillPrice.toFixed(3)} | BTC ${signal.btcSide} ${btcPrice.toFixed(3)} vs ${token.mid.toFixed(3)} | $${cost.toFixed(2)}`);
+    this.trades = this.trades.slice(-300);
+  }
+
+  openPaperPosition(market, token) {
+    const shares = this.currentShares();
+    const entryPrice = token.ask;
+    const cost = round2(shares * entryPrice);
+    const entryFee = round2(cost * TAKER_FEE_BPS / 10000);
+    if (cost + entryFee > this.bankroll) {
+      this.log(`⚠️ Entry skipped — need $${round2(cost + entryFee)}, available $${this.bankroll}`);
+      return false;
+    }
+    const stats = this.getWindowStats(market.windowStart);
+    stats.levelUsed = this.lossStreak;
+    stats.plannedShares = shares;
+    this.bankroll = round2(this.bankroll - cost - entryFee);
+    this.totalFees = round2(this.totalFees + entryFee);
+    const now = Date.now();
+    this.openPosition = {
+      id: `btc-${market.windowStart}-${now}`, slug: market.slug, asset: 'btc',
+      outcome: token.outcome, tokenId: token.tokenId, token,
+      conditionId: market.conditionId, shares, avgPrice: entryPrice, entryPrice,
+      cost, entryFee, markPrice: token.mid, fills: 1, status: 'open',
+      windowStart: market.windowStart, windowEnd: market.windowEnd,
+      openedAt: now, martingaleLevel: this.lossStreak,
+      signal: { triggerPrice: token.mid, elapsed: Math.max(0, Math.floor(now / 1000 - market.windowStart)) },
+    };
+    stats.buyCount++;
+    stats.invested = round2(stats.invested + cost + entryFee);
+    this.pushTrade({
+      timestamp: now, action: 'BUY', orderType: 'PAPER-FOK', ...pickPosition(this.openPosition),
+      price: entryPrice, pnl: null, reason: 'BREAKOUT_0.89',
+      signal: this.openPosition.signal,
+    });
+    this.log(`⚡ BUY BTC ${token.outcome} ${shares}sh @${entryPrice.toFixed(3)} | trigger ${token.mid.toFixed(3)} ≥ ${ENTRY_PRICE.toFixed(2)} | SL ${STOP_PRICE.toFixed(2)} | $${cost.toFixed(2)}`);
     this.recordEquity();
+    return true;
   }
 
-  positionPnl(position) {
-    return round2(position.shares * (position.markPrice ?? position.avgPrice) - position.cost - position.fee);
+  closePosition(exitPrice, reason) {
+    const position = this.openPosition;
+    if (!position || position.status !== 'open') return null;
+    const proceeds = round2(position.shares * exitPrice);
+    const exitFee = round2(proceeds * TAKER_FEE_BPS / 10000);
+    const pnl = round2(proceeds - exitFee - position.cost - position.entryFee);
+    this.bankroll = round2(this.bankroll + proceeds - exitFee);
+    this.totalFees = round2(this.totalFees + exitFee);
+    this.realizedPnl = round2(this.realizedPnl + pnl);
+    position.status = 'closed';
+    position.exitPrice = exitPrice;
+    position.proceeds = proceeds;
+    position.exitFee = exitFee;
+    position.pnl = pnl;
+    position.closedAt = Date.now();
+    position.reason = reason;
+    this.openPosition = null;
+    const stats = this.getWindowStats(position.windowStart);
+    stats.sellCount++;
+    stats.realizedPnl = round2(stats.realizedPnl + pnl);
+    if (stats.status === 'PENDING' && reason === 'STOP_LOSS') stats.result = 'STOPPED';
+    this.pushTrade({
+      timestamp: position.closedAt, action: 'SELL', orderType: 'PAPER-FOK', ...pickPosition(position),
+      price: exitPrice, pnl, reason,
+      signal: { exitReason: reason, elapsed: Math.floor(position.closedAt / 1000 - position.windowStart) },
+    });
+    this.log(`${reason === 'STOP_LOSS' ? '🛑 STOP' : '🏁 CLOSE'} BTC ${position.outcome} ${position.shares}sh @${exitPrice.toFixed(3)} | P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}${reason === 'STOP_LOSS' ? '' : ` · ${reason}`}`);
+    this.recordEquity();
+    return position;
   }
 
-  updatePositionMarks() {
-    for (const position of this.positions) {
-      if (position.status !== 'open') continue;
-      const market = this.markets.get(position.slug);
-      const token = position.outcome === 'UP' ? market?.up : market?.down;
-      if (Number.isFinite(token?.mid)) position.markPrice = token.mid;
+  finalizeWindowStats(market) {
+    const stats = this.getWindowStats(market.windowStart);
+    if (stats.status !== 'PENDING') return stats;
+    const net = stats.realizedPnl;
+    stats.result = net > 0 ? 'WIN' : net < 0 ? 'LOSS' : 'FLAT';
+    stats.winner = market.winner;
+    stats.resolutionSource = market.resolutionSource;
+    stats.settledAt = Date.now();
+
+    if (stats.buyCount > 0) {
+      const previousStreak = stats.levelUsed;
+      stats.previousStreak = previousStreak;
+      stats.stakeShares = sharesForStreak(previousStreak);
+      if (net < 0) {
+        this.lossStreak = previousStreak + 1;
+        if (this.lossStreak > MAX_MARTINGALES) this.lossStreak = 0;
+        this.losses++;
+      } else {
+        this.lossStreak = 0;
+        this.wins++;
+      }
+      stats.nextLevel = this.lossStreak;
+      stats.nextShares = this.currentShares();
+      this.log(`🏁 BTC ${market.windowStart} ${stats.result} · net ${net >= 0 ? '+' : '-'}$${Math.abs(net).toFixed(2)} · winner ${market.winner || 'UNKNOWN'} · next ${this.currentShares()}sh`);
+    } else {
+      stats.nextLevel = this.lossStreak;
+      stats.nextShares = this.currentShares();
+      this.log(`🏁 BTC ${market.windowStart} NO-TRADE · winner ${market.winner || 'UNKNOWN'} · next ${this.currentShares()}sh`);
+    }
+    this.resolvedWindows.unshift({ ...stats });
+    this.resolvedWindows = this.resolvedWindows.slice(0, 30);
+    return stats;
+  }
+
+  settleResolvedWindows() {
+    for (const market of this.markets.values()) {
+      if (market.resolved) this.finalizeWindowStats(market);
     }
   }
 
@@ -417,13 +372,7 @@ class MomentumLagEngine {
     this.discoveryRunning = true;
     try {
       const starts = [windowStartFor(Date.now()), windowStartFor(Date.now()) + WINDOW_SECONDS];
-      const missing = [];
-      for (const start of starts) {
-        for (const asset of ASSETS) {
-          if (!this.markets.has(slugFor(asset, start))) missing.push({ asset, start });
-        }
-      }
-      if (missing.length) await Promise.all(missing.map(item => this.discoverMarket(item.asset, item.start)));
+      await Promise.all(starts.map(start => this.markets.has(slugFor(start)) ? null : this.discoverMarket(start)));
     } finally { this.discoveryRunning = false; }
   }
 
@@ -434,16 +383,15 @@ class MomentumLagEngine {
       const start = windowStartFor(Date.now());
       if (start !== this.activeWindowStart) {
         this.activeWindowStart = null;
-        this.firedMarketKeys.clear();
+        for (const market of this.markets.values()) {
+          if (!market.resolved && Date.now() / 1000 >= market.windowEnd) this.resolveFromFinalPrices(market);
+        }
+        this.settleResolvedWindows();
         await this.discoverWindow(start, 'New');
-      }
-      for (const market of this.markets.values()) {
-        if (market.resolved || Date.now() / 1000 < market.windowEnd - 2) continue;
-        this.trackFinalPrices(market);
-        if (Date.now() / 1000 >= market.windowEnd) this.resolveFromFinalPrices(market);
+      } else {
+        this.settleResolvedWindows();
       }
       this.pruneExpiredMarkets();
-      await this.refreshStaleQuotes();
       this.recordEquity();
     } catch (error) {
       this.log(`⚠️ Loop: ${error.message}`);
@@ -451,156 +399,107 @@ class MomentumLagEngine {
   }
 
   pruneExpiredMarkets() {
-    const expiryCutoff = Date.now() / 1000 - 2;
-    const expired = [...this.markets.values()].filter(market => market.windowEnd < expiryCutoff);
+    const cutoff = Date.now() / 1000 - 10;
+    const expired = [...this.markets.values()].filter(market =>
+      market.windowEnd < cutoff && this.getWindowStats(market.windowStart).status !== 'PENDING');
     if (!expired.length) return;
-
     for (const market of expired) {
-      this.markets.delete(market.slug);
-      this.windows.delete(market.slug);
       this.tokens.delete(market.up.tokenId);
       this.tokens.delete(market.down.tokenId);
       this.history.delete(market.up.tokenId);
       this.history.delete(market.down.tokenId);
+      this.markets.delete(market.slug);
     }
-
-    this.subscribedTokens = new Set([...this.tokens.values()].map(token => token.tokenId));
-    if (this.socket?.readyState === 1) this.sendSubscription();
-    this.log(`🧹 Released ${expired.length} expired market(s) — ${this.subscribedTokens.size} CLOB tokens active`);
+    this.log(`🧹 Released ${expired.length} expired BTC book(s)`);
   }
 
-  settleMarket(market) {
-    const legs = this.positions.filter(position => position.slug === market.slug && position.status === 'open');
-    if (!legs.length) return;
-    let payout = 0, cost = 0, fees = 0;
-    for (const leg of legs) {
-      const won = leg.outcome === market.winner;
-      const legPayout = won ? leg.shares : 0;
-      payout += legPayout; cost += leg.cost; fees += leg.fee;
-      leg.status = won ? 'won' : 'lost';
-      leg.won = won; leg.payout = round2(legPayout); leg.pnl = round2(legPayout - leg.cost - leg.fee);
-      leg.markPrice = won ? 1 : 0; leg.resolvedAt = new Date().toISOString();
-    }
-    payout = round2(payout); cost = round2(cost); fees = round2(fees);
-    const pnl = round2(payout - cost - fees);
-    this.bankroll = round2(this.bankroll + payout);
-    this.realizedPnl = round2(this.realizedPnl + pnl);
-    if (pnl > 0) this.wins++; else if (pnl < 0) this.losses++;
-    const summary = { ...this.windowSummary(market), resolved: true, winner: market.winner, payout, pnl, settledAt: new Date().toISOString() };
-    this.resolvedWindows.unshift(summary);
-    this.resolvedWindows = this.resolvedWindows.slice(0, 30);
-    this.log(`🏁 [${market.resolutionSource}] ${market.asset.toUpperCase()} ${market.winner} — cost $${cost.toFixed(2)}, payout $${payout.toFixed(2)}, P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
-  }
-
-  windowSummary(market) {
-    const legs = this.positions.filter(position => position.slug === market.slug);
-    const sum = (filter, mapper) => round2(legs.filter(filter).reduce((total, leg) => total + mapper(leg), 0));
-    const openUp = legs.find(leg => leg.outcome === 'UP' && leg.status === 'open');
-    const openDown = legs.find(leg => leg.outcome === 'DOWN' && leg.status === 'open');
-    const unrealized = round2(legs.reduce((total, leg) => {
-      if (leg.status !== 'open') return total;
-      const mark = leg.outcome === 'UP' ? market.up.mid : market.down.mid;
-      return total + leg.shares * (mark ?? leg.entryPrice) - leg.cost - leg.fee;
-    }, 0));
-    return {
-      slug: market.slug, asset: market.asset, type: '5m', title: market.title,
-      windowStart: market.windowStart, windowEnd: market.windowEnd,
-      upShares: sum(leg => leg.outcome === 'UP', leg => leg.shares),
-      downShares: sum(leg => leg.outcome === 'DOWN', leg => leg.shares),
-      upCost: sum(leg => leg.outcome === 'UP', leg => leg.cost),
-      downCost: sum(leg => leg.outcome === 'DOWN', leg => leg.cost),
-      trades: legs.length, unrealized,
-      holding: Boolean(openUp || openDown),
-    };
-  }
-
-  async refreshStaleQuotes() {
-    if (this.quoteSyncRunning || this.socket?.readyState !== 1) return;
-    const now = Date.now(), currentStart = windowStartFor(now);
-    const dueTokens = [...this.tokens.values()].filter(token => {
-      const market = this.markets.get(token.slug);
-      return market?.windowStart === currentStart && !market.tradingClosed && !market.resolved &&
-        now - (token.updatedAt || 0) >= STALE_QUOTE_MS &&
-        now - (token.refreshedAt || 0) >= QUOTE_REFRESH_COOLDOWN_MS;
-    });
-    if (!dueTokens.length) return;
-    this.quoteSyncRunning = true;
-    let refreshed = 0;
+  async pollClobBooks() {
+    if (this.pollRunning) return;
+    const now = Date.now(), start = windowStartFor(now);
+    const market = this.markets.get(slugFor(start));
+    if (!market || market.resolved || market.tradingClosed) return;
+    const tokens = [market.up, market.down];
+    this.pollRunning = true;
     try {
-      await Promise.all(dueTokens.map(async token => {
-        token.refreshedAt = now;
-        try {
-          const book = await this.getJSON(`${CLOB_REST}/book?token_id=${encodeURIComponent(token.tokenId)}`, 1500);
-          this.applyBook(token, Array.isArray(book?.bids) ? book.bids : [], Array.isArray(book?.asks) ? book.asks : []);
-          refreshed++;
-        } catch (_) {}
-      }));
-      this.updatePositionMarks();
-      this.evaluateSignals();
-      if (refreshed) this.log(`♻️ CLOB book resnapshot — ${refreshed} quiet/stale token(s)`);
-    } finally { this.quoteSyncRunning = false; }
+      const books = await this.requestJSON(`${CLOB_REST}/books`, {
+        method: 'POST', body: JSON.stringify(tokens.map(token => ({ token_id: token.tokenId }))),
+      }, 2000);
+      const byToken = new Map((Array.isArray(books) ? books : []).map(book => [String(book?.asset_id || ''), book]));
+      for (const token of tokens) {
+        const book = byToken.get(token.tokenId);
+        if (book) this.applyBook(token, book.bids, book.asks);
+      }
+      this.pollCount++;
+      this.lastPollAt = now;
+      this.lastSuccessfulPollAt = Date.now();
+      if (Date.now() / 1000 >= market.windowEnd) this.resolveFromFinalPrices(market);
+      this.managePosition();
+      this.evaluateEntry();
+      this.tickCount++;
+      this.emitTick(this.publicMarkets(), this.pollCount);
+    } catch (error) {
+      if (!this.lastPollErrorAt || Date.now() - this.lastPollErrorAt >= 5000) {
+        this.log(`⚠️ CLOB book poll failed: ${error.message}`);
+        this.lastPollErrorAt = Date.now();
+      }
+    } finally { this.pollRunning = false; }
   }
 
   publicMarkets() {
-    const currentStart = windowStartFor(Date.now());
-    return [...this.markets.values()]
-      .filter(market => market.windowStart === currentStart)
-      .sort((a, b) => a.asset.localeCompare(b.asset))
-      .map(market => ({
-        slug: market.slug, asset: market.asset, title: market.title,
-        windowStart: market.windowStart, windowEnd: market.windowEnd,
-        resolved: market.resolved, winner: market.winner,
-        resolutionSource: market.resolutionSource,
-        finalUpMax: market.finalUpMax, finalDownMax: market.finalDownMax,
-        elapsed: Math.max(0, Math.floor(Date.now() / 1000 - market.windowStart)),
-        remaining: Math.max(0, market.windowEnd - Math.floor(Date.now() / 1000)),
-        up: publicToken(market.up), down: publicToken(market.down),
-      }));
+    const start = windowStartFor(Date.now());
+    const market = this.markets.get(slugFor(start));
+    if (!market) return [];
+    return [{
+      slug: market.slug, asset: market.asset, title: market.title,
+      windowStart: market.windowStart, windowEnd: market.windowEnd,
+      resolved: market.resolved, winner: market.winner, resolutionSource: market.resolutionSource,
+      finalUpMax: market.finalUpMax, finalDownMax: market.finalDownMax,
+      elapsed: Math.max(0, Math.floor(Date.now() / 1000 - market.windowStart)),
+      remaining: Math.max(0, market.windowEnd - Math.floor(Date.now() / 1000)),
+      up: publicToken(market.up), down: publicToken(market.down),
+    }];
   }
 
+  positionPnl(position) {
+    const mark = Number.isFinite(position.token?.mid) ? position.token.mid : position.markPrice;
+    return round2(position.shares * (mark ?? position.avgPrice) - position.cost - position.entryFee);
+  }
+
+  floatingPnl() { return this.openPosition ? this.positionPnl(this.openPosition) : 0; }
+
   buildState() {
-    this.updatePositionMarks();
-    const openPositions = this.positions.filter(position => position.status === 'open');
-    const openValue = round2(openPositions.reduce((sum, position) =>
-      sum + position.shares * (position.markPrice ?? position.avgPrice), 0));
-    const unrealizedPnl = round2(openPositions.reduce((sum, position) => sum + this.positionPnl(position), 0));
+    const position = this.openPosition;
+    const floating = this.floatingPnl();
+    const openValue = position ? round2(position.shares * (position.token.mid ?? position.markPrice ?? position.avgPrice)) : 0;
     const markValue = round2(this.bankroll + openValue);
-    const activeStart = windowStartFor(Date.now());
-    const activeMarkets = [...this.markets.values()].filter(market => market.windowStart === activeStart);
-    const windows = activeMarkets.map(market => this.windowSummary(market)).sort((a, b) => a.asset.localeCompare(b.asset));
-    const currentDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart))).length;
-    const nextDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart + WINDOW_SECONDS))).length;
+    const start = windowStartFor(Date.now());
     return {
       mode: 'AUTONOMOUS DEMO',
-      strategy: 'BTC >0.65 after T+120s → same-side altcoin <0.50 entries',
-      serverTime: Date.now(),
-      windowStart: activeStart,
-      connected: this.connected, tickCount: this.tickCount, messageCount: this.messageCount,
-      reconnects: this.reconnects, lastMessageAt: this.lastMessageAt,
-      subscribedTokens: this.subscribedTokens.size,
-      discovery: {
-        expectedMarkets: ASSETS.length,
-        currentDiscovered, nextDiscovered,
-        expectedTokens: ASSETS.length * 2 * (currentDiscovered === ASSETS.length && nextDiscovered === ASSETS.length ? 2 : 1),
-        errors: this.discoveryErrors,
-        lastDiscoveryAt: this.lastDiscoveryAt,
-      },
-      watchAssets: ASSETS, leadAsset: LEAD_ASSET.toUpperCase(),
-      bankroll: this.bankroll, markValue, realizedPnl: this.realizedPnl,
-      openValue, unrealizedPnl, totalPnl: round2(markValue - START_BANKROLL),
+      strategy: `BTC breakout ≥${ENTRY_PRICE.toFixed(2)} · stop ≤${STOP_PRICE.toFixed(2)} · hold for final-2s resolution`,
+      serverTime: Date.now(), windowStart: start,
+      connected: this.isClobFresh(), pollCount: this.pollCount, tickCount: this.tickCount,
+      lastPollAt: this.lastPollAt, lastSuccessfulPollAt: this.lastSuccessfulPollAt,
+      trackedTokens: this.tokens.size, bankroll: this.bankroll,
+      markValue, openValue, realizedPnl: this.realizedPnl, unrealizedPnl: floating,
+      totalFees: this.totalFees, totalPnl: round2(markValue - START_BANKROLL),
       wins: this.wins, losses: this.losses,
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
+      lossStreak: this.lossStreak, currentShares: this.currentShares(),
+      nextShares: this.lossStreak >= MAX_MARTINGALES ? BASE_SHARES : sharesForStreak(this.lossStreak + 1),
+      stakeSequence: Array.from({ length: MAX_MARTINGALES + 1 }, (_, index) => sharesForStreak(index)),
+      maxMartingales: MAX_MARTINGALES, martingaleMultiplier: MARTINGALE_MULTIPLIER,
+      position: position ? { ...position, token: undefined, pnl: this.positionPnl(position) } : null,
+      currentWindow: this.getWindowStats(start),
       markets: this.publicMarkets(),
-      positions: openPositions.slice().reverse(),
-      windows, resolvedWindows: this.resolvedWindows.slice(0, 12),
+      results: this.resolvedWindows.slice(0, 20),
       trades: this.trades.slice(-120).reverse(),
       equityCurve: this.equityCurve.slice(-1500),
       logs: this.logs.slice(-220),
+      discovery: { errors: this.discoveryErrors, lastDiscoveryAt: this.lastDiscoveryAt },
       config: {
-        tradeShares: TRADE_SHARES, btcStrongPrice: BTC_STRONG_PRICE,
-        entryWaitSeconds: ENTRY_WAIT_SECONDS,
-        targetCheapPrice: TARGET_CHEAP_PRICE, maxFillsPerMarket: MAX_FILLS_PER_MARKET,
-        resolutionPrice: RESOLUTION_PRICE, feeBps: TAKER_FEE_BPS,
+        baseShares: BASE_SHARES, entryPrice: ENTRY_PRICE, stopPrice: STOP_PRICE,
+        resolutionPrice: RESOLUTION_PRICE, martingaleMultiplier: MARTINGALE_MULTIPLIER,
+        maxMartingales: MAX_MARTINGALES, pollMs: CLOB_POLL_MS, feeBps: TAKER_FEE_BPS,
       },
       uptime: Math.floor((Date.now() - this.startedAt) / 1000),
     };
@@ -615,31 +514,34 @@ class MomentumLagEngine {
     }
   }
 
+  isClobFresh(now = Date.now()) {
+    return Boolean(this.lastSuccessfulPollAt && now - this.lastSuccessfulPollAt <= CLOB_FRESH_MS);
+  }
+
   async init() {
     const start = windowStartFor(Date.now());
-    this.connect();
-    await Promise.all([
-      this.discoverWindow(start, 'Current'),
-      this.discoverWindow(start + WINDOW_SECONDS, 'Next'),
-    ]);
+    await Promise.all([this.discoverWindow(start), this.discoverMarket(start + WINDOW_SECONDS)]);
+    await this.pollClobBooks();
     setInterval(() => this.rotateAndSweep(), 250);
-    setInterval(() => this.watchdogTick(), 500);
+    setInterval(() => this.pollClobBooks(), CLOB_POLL_MS);
     setInterval(() => this.retryDiscovery(), 1500);
-    this.log(`🚀 BTC divergence bot started | ${ASSETS.join('/')} | demo $${START_BANKROLL}`);
+    this.log(`🚀 BTC breakout bot started | CLOB books every ${CLOB_POLL_MS}ms | demo $${START_BANKROLL}`);
   }
 }
 
 function publicToken(token) {
+  return { bid: token.bid, ask: token.ask, mid: token.mid, spread: token.spread, updatedAt: token.updatedAt };
+}
+
+function pickPosition(position) {
   return {
-    bid: token.bid, ask: token.ask, mid: token.mid, spread: token.spread,
-    updatedAt: token.updatedAt,
+    id: position.id, slug: position.slug, asset: position.asset, outcome: position.outcome,
+    shares: position.shares, entryPrice: position.avgPrice, cost: position.cost,
+    martingaleLevel: position.martingaleLevel,
   };
 }
 
-module.exports = {
-  MomentumLagEngine,
-  config: {
-    ASSETS, LEAD_ASSET, START_BANKROLL, TRADE_SHARES, BTC_STRONG_PRICE,
-    ENTRY_WAIT_SECONDS, TARGET_CHEAP_PRICE, MAX_FILLS_PER_MARKET, RESOLUTION_PRICE, TAKER_FEE_BPS,
-  },
-};
+module.exports = { BtcBreakoutEngine, config: {
+  BASE_SHARES, ENTRY_PRICE, STOP_PRICE, RESOLUTION_PRICE,
+  MARTINGALE_MULTIPLIER, MAX_MARTINGALES, CLOB_POLL_MS,
+} };

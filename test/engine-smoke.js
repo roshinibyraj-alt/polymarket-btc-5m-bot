@@ -1,100 +1,77 @@
 const assert = require('node:assert/strict');
-const { MomentumLagEngine } = require('../engine');
-function windowStartFor(timeMs) { return Math.floor(timeMs / 1000 / 300) * 300; }
+const { BtcBreakoutEngine, config } = require('../engine');
 
-class FakeWebSocket { constructor() { this.readyState = 1; this.sent = []; } send(data) { this.sent.push(data); } close() { this.readyState = 3; } }
-async function fakeFetch(url) {
-  const match = String(url).match(/slug=([a-z]+)-updown-5m-(\d+)/);
-  assert.ok(match, 'unexpected discovery URL: ' + url);
-  const [asset, start] = [match[1], match[2]];
+function windowStartFor(timeMs) { return Math.floor(timeMs / 1000 / 300) * 300; }
+async function fakeFetch(url, options = {}) {
+  const text = String(url);
+  if (text.endsWith('/books')) {
+    const requests = JSON.parse(options.body);
+    const quotes = global.bookQuotes || {};
+    return { ok: true, json: async () => requests.map(({ token_id }) => ({
+      asset_id: token_id,
+      bids: quotes[token_id.split(':').pop()]?.bid ?? [],
+      asks: quotes[token_id.split(':').pop()]?.ask ?? [],
+    })) };
+  }
+  const match = text.match(/slug=btc-updown-5m-(\d+)/);
+  assert.ok(match, 'unexpected URL: ' + text);
+  const start = match[1];
   return { ok: true, json: async () => [{
-    conditionId: '0x' + asset, question: asset.toUpperCase() + ' test', closed: false,
-    outcomes: '["Up","Down"]', clobTokenIds: `["${asset}-${start}-up","${asset}-${start}-down"]`,
+    conditionId: '0xbtc' + start, question: 'BTC test', closed: false,
+    outcomes: '["Up","Down"]', clobTokenIds: `["btc:${start}:up","btc:${start}:down"]`,
   }] };
 }
-function round2(value) { return Math.round(value * 100) / 100; }
 
 (async () => {
-  const logs = [];
-  const engine = new MomentumLagEngine({ WebSocketImpl: FakeWebSocket, fetchImpl: fakeFetch, onLog: line => logs.push(line), onTick: () => {} });
-  engine.connect();
   const start = windowStartFor(Date.now());
-  for (const asset of ['btc', 'eth', 'sol', 'xrp']) await engine.discoverMarket(asset, start);
-  await engine.discoverMarket('btc', start + 300);
-  assert.equal(engine.publicMarkets().length, 4, 'dashboard must expose only current-window books');
+  const engine = new BtcBreakoutEngine({ fetchImpl: fakeFetch, onTick: () => {}, onLog: () => {} });
+  await engine.discoverMarket(start);
   engine.activeWindowStart = start;
-  const market = slug => engine.markets.get(`${slug}-updown-5m-${start}`);
+  const market = engine.markets.get(`btc-updown-5m-${start}`);
+  global.bookQuotes = {
+    up: { bid: [{ price: .89, size: 100 }], ask: [{ price: .91, size: 100 }] },
+    down: { bid: [{ price: .07, size: 100 }], ask: [{ price: .09, size: 100 }] },
+  };
+  engine.applyBook(market.up, global.bookQuotes.up.bid, global.bookQuotes.up.ask);
+  engine.applyBook(market.down, global.bookQuotes.down.bid, global.bookQuotes.down.ask);
+  engine.evaluateEntry();
+  assert.equal(engine.openPosition.outcome, 'UP');
+  assert.equal(engine.openPosition.shares, 100);
+  assert.equal(engine.openPosition.cost, 91);
 
-  const activationClock = Date.now;
-  try {
-    Date.now = () => (start + 119) * 1000;
-    engine.applyTop(market('btc').up, 0.65, 0.67);
-    engine.applyTop(market('btc').down, 0.19, 0.21);
-    engine.applyTop(market('eth').up, 0.44, 0.46);
-    engine.applyTop(market('sol').up, 0.44, 0.46);
-    engine.evaluateSignals();
-    assert.equal(engine.positions.length, 0, 'signals before the two-minute wait must not trigger');
+  global.bookQuotes.up = { bid: [{ price: .79, size: 100 }], ask: [{ price: .81, size: 100 }] };
+  engine.applyBook(market.up, global.bookQuotes.up.bid, global.bookQuotes.up.ask);
+  engine.managePosition();
+  assert.equal(engine.openPosition, null);
+  let stats = engine.getWindowStats(start);
+  assert.equal(stats.result, 'STOPPED');
+  assert.equal(stats.realizedPnl, -12);
 
-    Date.now = () => (start + 121) * 1000;
-    engine.applyTop(market('btc').up, 0.64, 0.66);
-    engine.evaluateSignals();
-    assert.equal(engine.positions.length, 0, 'BTC midpoint at the threshold must not trigger');
+  market.finalUpMax = .92; market.finalDownMax = .06; market.resolved = false;
+  engine.resolveFromFinalPrices(market);
+  stats = engine.getWindowStats(start);
+  assert.equal(stats.result, 'LOSS');
+  assert.equal(engine.lossStreak, 1);
+  assert.equal(engine.currentShares(), 210);
 
-    engine.applyTop(market('btc').up, 0.65, 0.67);
-    engine.evaluateSignals();
-    assert.equal(engine.positions.length, 2, 'ETH and SOL each get an independent fill after the wait');
-  } finally {
-    Date.now = activationClock;
+  engine.lossStreak = 4;
+  assert.equal(engine.buildState().nextShares, 100, 'fourth losing martingale resets next stake');
+  engine.lossStreak = 1;
+
+  for (let streak = 0; streak <= 4; streak++) {
+    const expected = [100, 210, 441, 926, 1945][streak];
+    assert.equal(sharesForStreakPublic(engine, streak), expected);
   }
-  const eth = engine.positions.find(p => p.asset === 'eth');
-  const sol = engine.positions.find(p => p.asset === 'sol');
-  assert.equal(eth.outcome, 'UP');assert.equal(eth.cost, 46);
-  assert.equal(sol.outcome, 'UP');assert.equal(sol.cost, 46);
-
-  engine.evaluateSignals();
-  assert.equal(engine.positions.length, 2, 'each pair is locked after its first fill');
-  assert.ok(engine.firedMarketKeys.has(`${start}:eth-updown-5m-${start}`));
-
-  engine.activeWindowStart = start + 300;
-  engine.applyTop(market('eth').up, 0.43, 0.47);engine.evaluateSignals();
-  assert.equal(engine.positions.length, 2, 'stale windows cannot trade after rotation');
-  engine.activeWindowStart = start;
-
-  engine.applyTop(market('eth').up, 0.48, 0.52);engine.updatePositionMarks();
-  assert.equal(eth.markPrice, 0.50);assert.equal(engine.positionPnl(eth), 4);
-
-  const originalNow = Date.now;Date.now = () => (start + 300) * 1000;
-  engine.applyTop(market('xrp').up, 0.43, 0.47);engine.evaluateSignals();
-  Date.now = originalNow;
-  assert.equal(engine.positions.length, 2, 'expired windows never fire');
-
-  market('eth').finalUpMax = 0.93;market('eth').finalDownMax = 0.07;market('eth').resolved = false;
-  engine.resolveFromFinalPrices(market('eth'));
-  assert.equal(market('eth').winner, 'UP');
-  assert.equal(market('eth').resolutionSource, 'CLOB_FINAL_2S');
-  assert.equal(round2(engine.realizedPnl), 54);
-  assert.equal(round2(engine.bankroll), 5008);
-  assert.equal(engine.wins, 1);assert.equal(engine.losses, 0);
-
-  for (const asset of ['btc', 'eth', 'sol', 'xrp']) await engine.discoverMarket(asset, start + 300);
-  assert.equal(engine.subscribedTokens.size, 16, 'current and next markets are armed');
-  const expiredTokenId = market('eth').up.tokenId;
-  const originalClock = Date.now;
-  Date.now = () => (start + 303) * 1000;
-  engine.pruneExpiredMarkets();
-  Date.now = originalClock;
-  assert.equal(engine.markets.size, 4, 'only the next live window remains');
-  assert.equal(engine.subscribedTokens.size, 8, 'expired CLOB tokens are unsubscribed');
-  const replacement = JSON.parse(engine.socket.sent.at(-1));
-  assert.equal(replacement.assets_ids.length, 8, 'socket receives the compact token set');
-  assert.equal(replacement.assets_ids.includes(expiredTokenId), false);
 
   console.log(JSON.stringify({
-    pairsFilled: engine.positions.length,
-    fills: engine.positions.map(p => `${p.asset}:${p.outcome}:${p.shares}sh@$${p.cost}`),
-    floatingPnl: [engine.positionPnl(eth), engine.positionPnl(sol)],
-    payout: eth.payout, realizedPnl: engine.realizedPnl, bankroll: engine.bankroll,
-    triggerLogs: logs.filter(line => line.includes('BUY')),
+    entry: '100 SH @0.91', stop: '-$12', nextAfterLoss: engine.currentShares(),
+    sequence: [config.BASE_SHARES, 210, 441, 926, 1945],
+    resolutionSource: stats.resolutionSource,
   }, null, 2));
-  console.log('ONE-FILL-PER-PAIR CLOB SMOKE PASS');
+  console.log('BTC BREAKOUT CLOB POLLING SMOKE PASS');
+
+  function sharesForStreakPublic(instance, streak) {
+    instance.lossStreak = streak;
+    return instance.currentShares();
+  }
 })().catch(error => { console.error(error); process.exitCode = 1; });
