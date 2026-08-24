@@ -9,7 +9,7 @@ const START_BANKROLL = Number(process.env.START_BANKROLL || 5000);
 const TRADE_SHARES = Number(process.env.TRADE_SHARES || 100);
 const BTC_STRONG_PRICE = Number(process.env.BTC_STRONG_PRICE || 0.75);
 const TARGET_CHEAP_PRICE = Number(process.env.TARGET_CHEAP_PRICE || 0.50);
-const ENTRY_REPEAT_MS = Number(process.env.ENTRY_REPEAT_MS || 500);
+const MAX_FILLS_PER_WINDOW_SIDE = Number(process.env.MAX_FILLS_PER_WINDOW_SIDE || 1);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
 const PRICE_HISTORY_MS = Number(process.env.PRICE_HISTORY_MS || 5000);
 const TAKER_FEE_BPS = Number(process.env.TAKER_FEE_BPS || 0);
@@ -52,6 +52,7 @@ class MomentumLagEngine {
     this.socket = null;
     this.subscribedTokens = new Set();
     this.loopRunning = false;
+    this.firedWindowSides = new Map();
     this.discoveryErrors = [];
     this.lastDiscoveryAt = null;
     this.discoveryRunning = false;
@@ -360,40 +361,25 @@ class MomentumLagEngine {
   }
 
   firePaperOrder(market, token, btcPrice, signal) {
-    const cooldownKey = keyFor(market.slug, token.outcome);
-    const lastFire = this.cooldowns.get(cooldownKey) || 0;
+    const windowSideKey = `${market.windowStart}:${token.outcome}`;
+    if ((this.firedWindowSides.get(windowSideKey) || 0) >= MAX_FILLS_PER_WINDOW_SIDE) return;
     const now = Date.now();
-    if (now - lastFire < ENTRY_REPEAT_MS) return;
     const fillPrice = token.ask;
     if (!Number.isFinite(fillPrice)) return;
     const cost = round2(TRADE_SHARES * fillPrice);
     const fee = round2(cost * TAKER_FEE_BPS / 10000);
     if (cost + fee > this.bankroll) return;
-    this.cooldowns.set(cooldownKey, now);
+    this.firedWindowSides.set(windowSideKey, (this.firedWindowSides.get(windowSideKey) || 0) + 1);
 
-    let position = this.positions.find(candidate =>
-      candidate.slug === market.slug && candidate.outcome === token.outcome && candidate.status === 'open');
-    if (position) {
-      const totalShares = round2(position.shares + TRADE_SHARES);
-      position.avgPrice = round5(((position.shares * position.avgPrice) + cost) / totalShares);
-      position.entryPrice = position.avgPrice;
-      position.shares = totalShares;
-      position.cost = round2(position.cost + cost);
-      position.fee = round2(position.fee + fee);
-      position.fills++;
-    } else {
-      position = {
-        id: `${market.slug}-${token.outcome}`,
-        slug: market.slug, asset: market.asset, conditionId: market.conditionId,
-        outcome: token.outcome, tokenId: token.tokenId, shares: TRADE_SHARES,
-        avgPrice: fillPrice, entryPrice: fillPrice, cost, fee, fills: 1,
-        status: 'open', openedAt: new Date().toISOString(), markPrice: token.mid,
-        signal: { ...signal, elapsed: Math.floor(now / 1000 - market.windowStart) },
-      };
-      this.positions.push(position);
-    }
-    position.markPrice = token.mid ?? fillPrice;
-    position.lastFillAt = new Date().toISOString();
+    const position = {
+      id: `${market.slug}-${token.outcome}-${now}`,
+      slug: market.slug, asset: market.asset, conditionId: market.conditionId,
+      outcome: token.outcome, tokenId: token.tokenId, shares: TRADE_SHARES,
+      avgPrice: fillPrice, entryPrice: fillPrice, cost, fee, fills: 1,
+      status: 'open', openedAt: new Date().toISOString(), markPrice: token.mid,
+      signal: { ...signal, elapsed: Math.floor(now / 1000 - market.windowStart) },
+    };
+    this.positions.push(position);
     this.bankroll = round2(this.bankroll - cost - fee);
     const trade = {
       timestamp: now, orderType: 'PAPER-FOK', slug: market.slug, asset: market.asset,
@@ -442,6 +428,7 @@ class MomentumLagEngine {
       const start = windowStartFor(Date.now());
       if (start !== this.activeWindowStart) {
         this.activeWindowStart = null;
+        this.firedWindowSides = new Map([...this.firedWindowSides].filter(([key]) => Number(key.split(':')[0]) >= start));
         await this.discoverWindow(start, 'New');
       }
       for (const market of this.markets.values()) {
@@ -574,7 +561,7 @@ class MomentumLagEngine {
       logs: this.logs.slice(-220),
       config: {
         tradeShares: TRADE_SHARES, btcStrongPrice: BTC_STRONG_PRICE,
-        targetCheapPrice: TARGET_CHEAP_PRICE, entryRepeatMs: ENTRY_REPEAT_MS,
+        targetCheapPrice: TARGET_CHEAP_PRICE, maxFillsPerWindowSide: MAX_FILLS_PER_WINDOW_SIDE,
         resolutionPrice: RESOLUTION_PRICE, feeBps: TAKER_FEE_BPS,
       },
       uptime: Math.floor((Date.now() - this.startedAt) / 1000),
@@ -615,6 +602,6 @@ module.exports = {
   MomentumLagEngine,
   config: {
     ASSETS, LEAD_ASSET, START_BANKROLL, TRADE_SHARES, BTC_STRONG_PRICE,
-    TARGET_CHEAP_PRICE, ENTRY_REPEAT_MS, RESOLUTION_PRICE, TAKER_FEE_BPS,
+    TARGET_CHEAP_PRICE, MAX_FILLS_PER_WINDOW_SIDE, RESOLUTION_PRICE, TAKER_FEE_BPS,
   },
 };

@@ -1,6 +1,6 @@
 {
   "name": "polymarket-btc-divergence-bot",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "description": "BTC-led Polymarket 5m divergence paper bot with live CLOB WebSocket dashboard",
   "main": "index.js",
   "engines": {
