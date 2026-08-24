@@ -4,12 +4,12 @@ function windowStartFor(timeMs) { return Math.floor(timeMs / 1000 / 300) * 300; 
 
 class FakeWebSocket { constructor() { this.readyState = 1; this.sent = []; } send(data) { this.sent.push(data); } close() { this.readyState = 3; } }
 async function fakeFetch(url) {
-  const match = String(url).match(/slug=([a-z]+)-updown-5m-\d+/);
+  const match = String(url).match(/slug=([a-z]+)-updown-5m-(\d+)/);
   assert.ok(match, 'unexpected discovery URL: ' + url);
-  const asset = match[1];
+  const [asset, start] = [match[1], match[2]];
   return { ok: true, json: async () => [{
     conditionId: '0x' + asset, question: asset.toUpperCase() + ' test', closed: false,
-    outcomes: '["Up","Down"]', clobTokenIds: `["${asset}-up","${asset}-down"]`,
+    outcomes: '["Up","Down"]', clobTokenIds: `["${asset}-${start}-up","${asset}-${start}-down"]`,
   }] };
 }
 function round2(value) { return Math.round(value * 100) / 100; }
@@ -17,6 +17,7 @@ function round2(value) { return Math.round(value * 100) / 100; }
 (async () => {
   const logs = [];
   const engine = new MomentumLagEngine({ WebSocketImpl: FakeWebSocket, fetchImpl: fakeFetch, onLog: line => logs.push(line), onTick: () => {} });
+  engine.connect();
   const start = windowStartFor(Date.now());
   for (const asset of ['btc', 'eth', 'sol', 'xrp']) await engine.discoverMarket(asset, start);
   await engine.discoverMarket('btc', start + 300);
@@ -24,12 +25,16 @@ function round2(value) { return Math.round(value * 100) / 100; }
   engine.activeWindowStart = start;
   const market = slug => engine.markets.get(`${slug}-updown-5m-${start}`);
 
-  engine.applyTop(market('btc').up, 0.79, 0.81);
+  engine.applyTop(market('btc').up, 0.64, 0.66);
   engine.applyTop(market('btc').down, 0.19, 0.21);
   engine.applyTop(market('eth').up, 0.44, 0.46);
   engine.applyTop(market('sol').up, 0.44, 0.46);
   engine.evaluateSignals();
 
+  assert.equal(engine.positions.length, 0, 'BTC midpoint at the threshold must not trigger');
+
+  engine.applyTop(market('btc').up, 0.65, 0.67);
+  engine.evaluateSignals();
   assert.equal(engine.positions.length, 2, 'ETH and SOL each get an independent fill');
   const eth = engine.positions.find(p => p.asset === 'eth');
   const sol = engine.positions.find(p => p.asset === 'sol');
@@ -60,6 +65,19 @@ function round2(value) { return Math.round(value * 100) / 100; }
   assert.equal(round2(engine.realizedPnl), 54);
   assert.equal(round2(engine.bankroll), 5008);
   assert.equal(engine.wins, 1);assert.equal(engine.losses, 0);
+
+  for (const asset of ['btc', 'eth', 'sol', 'xrp']) await engine.discoverMarket(asset, start + 300);
+  assert.equal(engine.subscribedTokens.size, 16, 'current and next markets are armed');
+  const expiredTokenId = market('eth').up.tokenId;
+  const originalClock = Date.now;
+  Date.now = () => (start + 303) * 1000;
+  engine.pruneExpiredMarkets();
+  Date.now = originalClock;
+  assert.equal(engine.markets.size, 4, 'only the next live window remains');
+  assert.equal(engine.subscribedTokens.size, 8, 'expired CLOB tokens are unsubscribed');
+  const replacement = JSON.parse(engine.socket.sent.at(-1));
+  assert.equal(replacement.assets_ids.length, 8, 'socket receives the compact token set');
+  assert.equal(replacement.assets_ids.includes(expiredTokenId), false);
 
   console.log(JSON.stringify({
     pairsFilled: engine.positions.length,

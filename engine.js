@@ -7,7 +7,7 @@ const ASSETS = (process.env.ASSETS || 'btc,eth,sol,xrp').split(',').map(s => s.t
 const LEAD_ASSET = (process.env.LEAD_ASSET || 'btc').toLowerCase();
 const START_BANKROLL = Number(process.env.START_BANKROLL || 5000);
 const TRADE_SHARES = Number(process.env.TRADE_SHARES || 100);
-const BTC_STRONG_PRICE = Number(process.env.BTC_STRONG_PRICE || 0.75);
+const BTC_STRONG_PRICE = Number(process.env.BTC_STRONG_PRICE || 0.65);
 const TARGET_CHEAP_PRICE = Number(process.env.TARGET_CHEAP_PRICE || 0.50);
 const MAX_FILLS_PER_MARKET = Number(process.env.MAX_FILLS_PER_MARKET || 1);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
@@ -436,10 +436,30 @@ class MomentumLagEngine {
         this.trackFinalPrices(market);
         if (Date.now() / 1000 >= market.windowEnd) this.resolveFromFinalPrices(market);
       }
+      this.pruneExpiredMarkets();
       this.recordEquity();
     } catch (error) {
       this.log(`⚠️ Loop: ${error.message}`);
     } finally { this.loopRunning = false; }
+  }
+
+  pruneExpiredMarkets() {
+    const expiryCutoff = Date.now() / 1000 - 2;
+    const expired = [...this.markets.values()].filter(market => market.windowEnd < expiryCutoff);
+    if (!expired.length) return;
+
+    for (const market of expired) {
+      this.markets.delete(market.slug);
+      this.windows.delete(market.slug);
+      this.tokens.delete(market.up.tokenId);
+      this.tokens.delete(market.down.tokenId);
+      this.history.delete(market.up.tokenId);
+      this.history.delete(market.down.tokenId);
+    }
+
+    this.subscribedTokens = new Set([...this.tokens.values()].map(token => token.tokenId));
+    if (this.socket?.readyState === 1) this.sendSubscription();
+    this.log(`🧹 Released ${expired.length} expired market(s) — ${this.subscribedTokens.size} CLOB tokens active`);
   }
 
   settleMarket(market) {
@@ -518,7 +538,7 @@ class MomentumLagEngine {
     const nextDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart + WINDOW_SECONDS))).length;
     return {
       mode: 'AUTONOMOUS DEMO',
-      strategy: 'BTC >0.75 signal → same-side altcoin <0.50 entries',
+      strategy: 'BTC >0.65 signal → same-side altcoin <0.50 entries',
       serverTime: Date.now(),
       connected: this.connected, tickCount: this.tickCount, messageCount: this.messageCount,
       reconnects: this.reconnects, lastMessageAt: this.lastMessageAt,
