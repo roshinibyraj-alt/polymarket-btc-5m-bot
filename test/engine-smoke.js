@@ -1,72 +1,66 @@
 const assert = require('node:assert/strict');
 const { MomentumLagEngine } = require('../engine');
 
-class FakeWebSocket {
-  constructor() { this.readyState = 1; this.sent = []; }
-  send(data) { this.sent.push(data); }
-  close() { this.readyState = 3; }
-}
-
+class FakeWebSocket { constructor() { this.readyState = 1; this.sent = []; } send(data) { this.sent.push(data); } close() { this.readyState = 3; } }
 async function fakeFetch(url) {
-  const match = String(url).match(/slug=([a-z]+-updown-5m-\d+)/);
-  if (!match) throw new Error('unexpected ' + url);
-  const asset = match[1].split('-')[0];
+  const match = String(url).match(/slug=([a-z]+)-updown-5m-\d+/);
+  assert.ok(match, 'unexpected Gamma URL: ' + url);
+  const asset = match[1];
   return { ok: true, json: async () => [{
-    conditionId: '0x' + asset, question: asset.toUpperCase() + ' test',
-    outcomes: '["Up","Down"]', clobTokenIds: `["${asset}-up","${asset}-down"]`, closed: false,
+    conditionId: '0x' + asset, question: asset.toUpperCase() + ' test', closed: false,
+    outcomes: '["Up","Down"]', clobTokenIds: `["${asset}-up","${asset}-down"]`,
   }] };
 }
+function round2(value) { return Math.round(value * 100) / 100; }
 
 (async () => {
-  const ticks = [];
-  const lines = [];
-  const engine = new MomentumLagEngine({
-    WebSocketImpl: FakeWebSocket, fetchImpl: fakeFetch,
-    onTick: markets => ticks.push(markets), onLog: line => lines.push(line),
-  });
+  const logs = [];
+  const engine = new MomentumLagEngine({ WebSocketImpl: FakeWebSocket, fetchImpl: fakeFetch, onLog: line => logs.push(line), onTick: () => {} });
   const start = Math.floor(Date.now() / 1000) - 100;
-  await engine.discoverMarket('btc', start);
-  await engine.discoverMarket('eth', start);
-  assert.equal(engine.markets.size, 2);
-  assert.equal(engine.tokens.size, 4);
+  for (const asset of ['btc', 'eth', 'sol', 'xrp']) await engine.discoverMarket(asset, start);
   engine.activeWindowStart = start;
-  engine.connect();
-  engine.socket.onopen();
-  assert.deepEqual(engine.socket.sent[0], JSON.stringify({ assets_ids: [...engine.subscribedTokens], type: 'market' }));
+  const market = slug => engine.markets.get(`${slug}-updown-5m-${start}`);
 
-  engine.applyTop(engine.markets.get(slugFor('btc', start)).up, 0.50, 0.52);
-  engine.applyTop(engine.markets.get(slugFor('eth', start)).up, 0.50, 0.51);
-  engine.applyTop(engine.markets.get(slugFor('btc', start)).up, 0.56, 0.58);
-  for (const series of engine.history.values()) if (series.length) series[0].t -= 2500;
+  engine.applyTop(market('btc').up, 0.79, 0.81);
+  engine.applyTop(market('btc').down, 0.19, 0.21);
+  engine.applyTop(market('eth').up, 0.44, 0.46);
+  engine.applyTop(market('eth').down, 0.54, 0.56);
+  engine.applyTop(market('sol').up, 0.54, 0.56);
+  engine.applyTop(market('xrp').up, 0.58, 0.60);
   engine.evaluateSignals();
 
-  assert.equal(engine.positions.length, 1);
-  const position = engine.positions[0];
-  assert.equal(position.asset, 'eth');
-  assert.equal(position.outcome, 'UP');
-  assert.equal(position.entryPrice, 0.51);
-  assert.ok(position.shares > 50);
-  assert.equal(round2(engine.bankroll), round2(5000 - position.cost));
-  assert.equal(engine.trades[0].orderType, 'PAPER-FOK');
+  assert.equal(engine.positions.length, 1, 'only the cheap ETH side should fire');
+  let position = engine.positions[0];
+  assert.equal(position.asset, 'eth');assert.equal(position.outcome, 'UP');
+  assert.equal(position.shares, 100);assert.equal(position.cost, 46);assert.equal(engine.bankroll, 4954);
 
   engine.evaluateSignals();
-  assert.equal(engine.positions.length, 1, 'cooldown must block immediate duplicate');
+  assert.equal(position.shares, 100, '500ms repeat spacing must block immediate duplicate');
+  position.lastFillAt = position.lastFillAt;
+  engine.cooldowns.set(`eth-updown-5m-${start}:UP`, Date.now() - 501);
+  engine.evaluateSignals();
+  assert.equal(position.shares, 200);assert.equal(position.fills, 2);assert.equal(position.cost, 92);
 
-  const market = engine.markets.get(slugFor('eth', start));
-  market.resolved = true; market.winner = 'UP'; market.tradingClosed = true;
-  engine.settleMarket(market);
-  const payout = round2(position.shares);
-  assert.equal(round2(engine.realizedPnl), round2(payout - position.cost));
-  assert.equal(engine.wins, 1);
-  assert.equal(engine.losses, 0);
-  assert.equal(engine.resolvedWindows[0].winner, 'UP');
+  engine.applyTop(market('eth').up, 0.48, 0.52);
+  engine.updatePositionMarks();
+  assert.equal(position.markPrice, 0.50);
+  assert.equal(engine.positionPnl(position), 8);
+
+  market('eth').finalUpMax = 0.93;
+  market('eth').finalDownMax = 0.07;
+  market('eth').resolved = false;
+  engine.resolveFromFinalPrices(market('eth'));
+  assert.equal(market('eth').winner, 'UP');
+  assert.equal(market('eth').resolutionSource, 'CLOB_FINAL_2S');
+  assert.equal(round2(engine.realizedPnl), 108);
+  assert.equal(round2(engine.bankroll), 5108);
+  assert.equal(engine.wins, 1);assert.equal(engine.losses, 0);
+
   console.log(JSON.stringify({
-    shares: position.shares, cost: position.cost, payout,
-    realizedPnl: engine.realizedPnl, bankroll: engine.bankroll,
-    logs: lines.filter(line => line.includes('BUY') || line.includes('🏁')),
+    fills: position.fills, shares: position.shares, cost: position.cost,
+    floatingBeforeSettlement: engine.positionPnl({ ...position, status: 'open', markPrice: 0.5 }),
+    payout: position.payout, realizedPnl: engine.realizedPnl, bankroll: engine.bankroll,
+    triggerLogs: logs.filter(line => line.includes('BUY')),
   }, null, 2));
-  console.log('ENGINE SMOKE PASS');
+  console.log('DIVERGENCE ENGINE SMOKE PASS');
 })().catch(error => { console.error(error); process.exitCode = 1; });
-
-function slugFor(asset, start) { return `${asset}-updown-5m-${start}`; }
-function round2(value) { return Math.round(value * 100) / 100; }
