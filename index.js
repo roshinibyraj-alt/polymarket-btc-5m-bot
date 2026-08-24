@@ -10,7 +10,10 @@ const io = new Server(server, { pingInterval: 2000, pingTimeout: 5000 });
 const port = process.env.PORT || 8080;
 const engine = new MomentumLagEngine({
   onTick: markets => io.emit('tick', { t: Date.now(), markets }),
-  onLog: line => io.emit('log', line),
+  onLog: line => {
+    console.log(line);
+    io.emit('log', line);
+  },
 });
 
 app.get('/healthz', (_, response) => response.sendStatus(200));
