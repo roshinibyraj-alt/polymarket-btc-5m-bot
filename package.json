@@ -1,14 +1,14 @@
 {
   "name": "polymarket-btc-breakout-bot",
-  "version": "5.0.3",
-  "description": "Polymarket BTC 5-minute breakout paper bot using direct CLOB top-of-book snapshots",
+  "version": "6.0.0",
+  "description": "Deterministic BTC five-minute breakout paper bot using strict CLOB top-of-book pricing",
   "main": "index.js",
   "engines": {
     "node": ">=18.0.0"
   },
   "scripts": {
     "start": "node index.js",
-    "smoke": "node test/engine-smoke.js"
+    "smoke": "node --check engine.js && node --check index.js && node test/engine-smoke.js"
   },
   "dependencies": {
     "express": "^4.19.2"

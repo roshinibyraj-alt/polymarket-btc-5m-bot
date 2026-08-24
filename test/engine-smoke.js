@@ -1,104 +1,105 @@
+'use strict';
+
 const assert = require('node:assert/strict');
 const { BtcBreakoutEngine, config } = require('../engine');
 
-function windowStartFor(timeMs) { return Math.floor(timeMs / 1000 / 300) * 300; }
-async function fakeFetch(url, options = {}) {
-  const text = String(url);
-  if (text.endsWith('/prices')) {
-    const requests = JSON.parse(options.body);
-    const quotes = global.bookQuotes || {};
-    const result = {};
-    for (const request of requests) {
-      const sideQuotes = quotes[request.token_id.split(':').pop()];
-      result[request.token_id] ||= {};
-      result[request.token_id][request.side] = String((request.side === 'BUY' ? sideQuotes?.ask : sideQuotes?.bid)?.[0]?.price ?? 0);
-    }
-    return { ok: true, json: async () => result };
+function windowStartFor(timeMs) {
+  return Math.floor(timeMs / 1000 / 300) * 300;
+}
+
+function quotes(upBid, upAsk, downBid, downAsk) {
+  return { up: { bid: upBid, ask: upAsk }, down: { bid: downBid, ask: downAsk } };
+}
+
+function clobPayload(market, book) {
+  const result = {};
+  for (const token of [market.up, market.down]) {
+    result[token.tokenId] = {
+      BUY: String(book[token.outcome.toLowerCase()].bid),
+      SELL: String(book[token.outcome.toLowerCase()].ask),
+    };
   }
+  return result;
+}
+
+async function fakeFetch(url) {
+  const text = String(url);
+  if (text.endsWith('/prices')) return { ok: true, json: async () => global.bookPayload || {} };
   const match = text.match(/slug=btc-updown-5m-(\d+)/);
-  assert.ok(match, 'unexpected URL: ' + text);
-  const start = match[1];
-  return { ok: true, json: async () => [{
-    conditionId: '0xbtc' + start, question: 'BTC test', closed: false,
-    outcomes: '["Up","Down"]', clobTokenIds: `["btc:${start}:up","btc:${start}:down"]`,
-  }] };
+  assert.ok(match, `unexpected URL: ${text}`);
+  const start = Number(match[1]);
+  return {
+    ok: true,
+    json: async () => [{
+      conditionId: `0xbtc${start}`,
+      question: `BTC test ${start}`,
+      closed: false,
+      outcomes: '["Up","Down"]',
+      clobTokenIds: `["btc:${start}:up","btc:${start}:down"]`,
+    }],
+  };
 }
 
 (async () => {
-  const start = windowStartFor(Date.now());
+  const start = windowStartFor(Date.now()) + 3000;
+  const nextStart = start + 300;
   const engine = new BtcBreakoutEngine({ fetchImpl: fakeFetch, onTick: () => {}, onLog: () => {} });
   await engine.discoverMarket(start);
-  engine.activeWindowStart = start;
-  const market = engine.markets.get(`btc-updown-5m-${start}`);
-  global.bookQuotes = {
-    up: { bid: [{ price: .89, size: 100 }], ask: [{ price: .91, size: 100 }] },
-    down: { bid: [{ price: .07, size: 100 }], ask: [{ price: .09, size: 100 }] },
-  };
-  engine.applyBook(market.up, global.bookQuotes.up.bid, global.bookQuotes.up.ask);
-  engine.applyBook(market.down, global.bookQuotes.down.bid, global.bookQuotes.down.ask);
-  engine.evaluateEntry();
-  assert.equal(engine.openPosition.outcome, 'UP');
-  assert.equal(engine.openPosition.shares, 100);
-  assert.equal(engine.openPosition.cost, 91);
+  await engine.discoverMarket(nextStart);
+  const firstMarket = engine.markets.get(`btc-updown-5m-${start}`);
+  const secondMarket = engine.markets.get(`btc-updown-5m-${nextStart}`);
+  assert.ok(firstMarket && secondMarket);
 
-  global.bookQuotes.up = { bid: [{ price: .79, size: 100 }], ask: [{ price: .81, size: 100 }] };
-  engine.applyBook(market.up, global.bookQuotes.up.bid, global.bookQuotes.up.ask);
-  engine.managePosition();
-  assert.equal(engine.openPosition, null);
-  let stats = engine.getWindowStats(start);
-  assert.equal(stats.result, 'STOPPED');
-  assert.equal(stats.realizedPnl, -12);
+  global.bookPayload = clobPayload(firstMarket, quotes(.89, .91, .07, .09));
+  engine.processQuotes(firstMarket, global.bookPayload, 1);
+  assert.equal(engine.openPosition?.outcome, 'UP', 'first qualifying tick must fire immediately');
+  assert.equal(engine.openPosition?.shares, config.BASE_SHARES);
+  assert.equal(engine.openPosition?.signal.triggerSource, 'ASK');
 
-  market.finalUpMax = .92; market.finalDownMax = .06; market.resolved = false;
-  engine.resolveFromFinalPrices(market);
-  stats = engine.getWindowStats(start);
-  assert.equal(stats.result, 'LOSS');
+  engine.settleWindow(firstMarket);
+  assert.equal(engine.openPosition, null, 'first window must release its lifecycle');
   assert.equal(engine.lossStreak, 1);
   assert.equal(engine.currentShares(), 210);
 
-  engine.lossStreak = 4;
-  assert.equal(engine.buildState().nextShares, 100, 'fourth losing martingale resets next stake');
-  engine.lossStreak = 1;
+  global.bookPayload = clobPayload(secondMarket, quotes(.08, .10, .88, .90));
+  engine.processQuotes(secondMarket, global.bookPayload, 2);
+  assert.equal(engine.openPosition?.slug, secondMarket.slug, 'next window must be tradeable');
+  assert.equal(engine.openPosition?.outcome, 'DOWN');
+  assert.equal(engine.openPosition?.shares, 210);
+  assert.equal(engine.tradedThisWindow, true);
 
-  for (let streak = 0; streak <= 4; streak++) {
-    const expected = [100, 210, 441, 926, 1945][streak];
-    assert.equal(sharesForStreakPublic(engine, streak), expected);
-  }
+  engine.applyQuote(secondMarket.down, .79, .81);
+  engine.manageStop(engine.openPosition);
+  assert.equal(engine.openPosition, null, 'stop loss must close immediately');
+  engine.settleWindow(secondMarket);
+  assert.equal(engine.getWindowStats(nextStart).result, 'LOSS');
+  assert.ok(Math.abs(engine.getWindowStats(nextStart).realizedPnl + 23.1) < .001);
+  assert.equal(engine.lossStreak, 2);
+  assert.equal(engine.currentShares(), 441);
 
-  global.bookQuotes = {
-    up: { bid: [{ price: .89, size: 100 }], ask: [{ price: .91, size: 100 }] },
-    down: { bid: [{ price: .07, size: 100 }], ask: [{ price: .09, size: 100 }] },
-  };
-  const reactionEngine = new BtcBreakoutEngine({ fetchImpl: fakeFetch, onTick: () => {}, onLog: () => {} });
-  await reactionEngine.discoverMarket(start);
-  reactionEngine.activeWindowStart = start;
-  const reactionMarket = reactionEngine.markets.get(`btc-updown-5m-${start}`);
-  await reactionEngine.pollClobBooks();
-  assert.equal(reactionEngine.openPosition?.outcome, 'UP', 'first qualifying CLOB snapshot must enter immediately');
-  assert.equal(reactionEngine.pollCount, 1);
+  const resolver = new BtcBreakoutEngine({ fetchImpl: fakeFetch, onTick: () => {}, onLog: () => {} });
+  await resolver.discoverMarket(start);
+  const resolveMarket = resolver.markets.get(`btc-updown-5m-${start}`);
+  resolver.applyQuote(resolveMarket.up, .91, .93);
+  resolver.applyQuote(resolveMarket.down, .05, .07);
+  resolveMarket.finalUpMax = .915;
+  resolveMarket.finalDownMax = .06;
+  resolver.settleWindow(resolveMarket);
+  assert.equal(resolveMarket.winner, 'UP');
+  assert.equal(resolveMarket.resolutionSource, 'CLOB_FINAL_2S');
 
-  global.bookQuotes = {
-    up: { bid: [{ price: .87, size: 100 }], ask: [{ price: .89, size: 100 }] },
-    down: { bid: [{ price: .09, size: 100 }], ask: [{ price: .11, size: 100 }] },
-  };
-  const touchEngine = new BtcBreakoutEngine({ fetchImpl: fakeFetch, onTick: () => {}, onLog: () => {} });
-  await touchEngine.discoverMarket(start);
-  touchEngine.activeWindowStart = start;
-  await touchEngine.pollClobBooks();
-  assert.equal(touchEngine.openPosition?.outcome, 'UP', 'ask touch at 0.89 must enter immediately');
-  assert.equal(touchEngine.openPosition?.avgPrice, .89);
-  assert.equal(touchEngine.openPosition?.signal.triggerSource, 'ASK');
-  assert.equal(touchEngine.openPosition?.signal.mid, .88);
+  resolver.lossStreak = config.MAX_MARTINGALES;
+  assert.equal(resolver.buildState().nextShares, config.BASE_SHARES);
 
   console.log(JSON.stringify({
-    entry: '100 SH @0.91', stop: '-$12', nextAfterLoss: engine.currentShares(),
-    sequence: [config.BASE_SHARES, 210, 441, 926, 1945],
-    resolutionSource: stats.resolutionSource,
-  }, null, 2));
-  console.log('BTC BREAKOUT CLOB POLLING SMOKE PASS');
-
-  function sharesForStreakPublic(instance, streak) {
-    instance.lossStreak = streak;
-    return instance.currentShares();
-  }
-})().catch(error => { console.error(error); process.exitCode = 1; });
+    firstEntry: '100 SH @0.91',
+    stopPnl: '-$12.00',
+    nextWindowEntry: '210 DOWN SH @0.90',
+    nextStopPnl: '-$23.10',
+    sequence: [100, 210, 441, 926, 1945],
+  }));
+  console.log('BTC BREAKOUT ROLLOVER SMOKE PASS');
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
