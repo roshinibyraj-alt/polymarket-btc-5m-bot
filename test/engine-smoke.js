@@ -1,10 +1,11 @@
 const assert = require('node:assert/strict');
 const { MomentumLagEngine } = require('../engine');
+function windowStartFor(timeMs) { return Math.floor(timeMs / 1000 / 300) * 300; }
 
 class FakeWebSocket { constructor() { this.readyState = 1; this.sent = []; } send(data) { this.sent.push(data); } close() { this.readyState = 3; } }
 async function fakeFetch(url) {
   const match = String(url).match(/slug=([a-z]+)-updown-5m-\d+/);
-  assert.ok(match, 'unexpected Gamma URL: ' + url);
+  assert.ok(match, 'unexpected discovery URL: ' + url);
   const asset = match[1];
   return { ok: true, json: async () => [{
     conditionId: '0x' + asset, question: asset.toUpperCase() + ' test', closed: false,
@@ -16,59 +17,56 @@ function round2(value) { return Math.round(value * 100) / 100; }
 (async () => {
   const logs = [];
   const engine = new MomentumLagEngine({ WebSocketImpl: FakeWebSocket, fetchImpl: fakeFetch, onLog: line => logs.push(line), onTick: () => {} });
-  const start = Math.floor(Date.now() / 1000) - 100;
+  const start = windowStartFor(Date.now());
   for (const asset of ['btc', 'eth', 'sol', 'xrp']) await engine.discoverMarket(asset, start);
+  await engine.discoverMarket('btc', start + 300);
+  assert.equal(engine.publicMarkets().length, 4, 'dashboard must expose only current-window books');
   engine.activeWindowStart = start;
   const market = slug => engine.markets.get(`${slug}-updown-5m-${start}`);
 
   engine.applyTop(market('btc').up, 0.79, 0.81);
   engine.applyTop(market('btc').down, 0.19, 0.21);
   engine.applyTop(market('eth').up, 0.44, 0.46);
-  engine.applyTop(market('eth').down, 0.54, 0.56);
   engine.applyTop(market('sol').up, 0.44, 0.46);
-  engine.applyTop(market('xrp').up, 0.58, 0.60);
   engine.evaluateSignals();
 
-  assert.equal(engine.positions.length, 1, 'only the first cheap ETH side should fire');
-  let position = engine.positions[0];
-  assert.equal(position.asset, 'eth');assert.equal(position.outcome, 'UP');
-  assert.equal(position.shares, 100);assert.equal(position.cost, 46);
+  assert.equal(engine.positions.length, 2, 'ETH and SOL each get an independent fill');
+  const eth = engine.positions.find(p => p.asset === 'eth');
+  const sol = engine.positions.find(p => p.asset === 'sol');
+  assert.equal(eth.outcome, 'UP');assert.equal(eth.cost, 46);
+  assert.equal(sol.outcome, 'UP');assert.equal(sol.cost, 46);
 
-  engine.applyTop(market('sol').up, 0.43, 0.47);
   engine.evaluateSignals();
-  assert.equal(engine.positions.length, 1, 'UP is locked for the whole window');
-  assert.equal(position.shares, 100);assert.equal(position.cost, 46);
+  assert.equal(engine.positions.length, 2, 'each pair is locked after its first fill');
+  assert.ok(engine.firedMarketKeys.has(`${start}:eth-updown-5m-${start}`));
 
-  const nextStart=start+300;await engine.discoverMarket('btc',nextStart);engine.activeWindowStart=nextStart;
-  engine.applyTop(market('eth').up,0.43,0.47);engine.evaluateSignals();
-  assert.equal(engine.positions.length,1,'stale active signal must not trade after rotation');
-  engine.activeWindowStart=start;
+  engine.activeWindowStart = start + 300;
+  engine.applyTop(market('eth').up, 0.43, 0.47);engine.evaluateSignals();
+  assert.equal(engine.positions.length, 2, 'stale windows cannot trade after rotation');
+  engine.activeWindowStart = start;
 
-  engine.applyTop(market('eth').up, 0.48, 0.52);
-  engine.updatePositionMarks();
-  assert.equal(position.markPrice, 0.50);
-  assert.equal(engine.positionPnl(position), 4);
+  engine.applyTop(market('eth').up, 0.48, 0.52);engine.updatePositionMarks();
+  assert.equal(eth.markPrice, 0.50);assert.equal(engine.positionPnl(eth), 4);
 
-  const originalNow=Date.now;Date.now=()=>(start+300)*1000;
-  engine.applyTop(market('xrp').up,0.43,0.47);engine.evaluateSignals();
-  Date.now=originalNow;
-  assert.equal(engine.positions.length,1,'expired windows must never fire');
+  const originalNow = Date.now;Date.now = () => (start + 300) * 1000;
+  engine.applyTop(market('xrp').up, 0.43, 0.47);engine.evaluateSignals();
+  Date.now = originalNow;
+  assert.equal(engine.positions.length, 2, 'expired windows never fire');
 
-  market('eth').finalUpMax = 0.93;
-  market('eth').finalDownMax = 0.07;
-  market('eth').resolved = false;
+  market('eth').finalUpMax = 0.93;market('eth').finalDownMax = 0.07;market('eth').resolved = false;
   engine.resolveFromFinalPrices(market('eth'));
   assert.equal(market('eth').winner, 'UP');
   assert.equal(market('eth').resolutionSource, 'CLOB_FINAL_2S');
   assert.equal(round2(engine.realizedPnl), 54);
-  assert.equal(round2(engine.bankroll), 5054);
+  assert.equal(round2(engine.bankroll), 5008);
   assert.equal(engine.wins, 1);assert.equal(engine.losses, 0);
 
   console.log(JSON.stringify({
-    positions: engine.positions.length, shares: position.shares, cost: position.cost,
-    floatingBeforeSettlement: engine.positionPnl({ ...position, status: 'open', markPrice: 0.5 }),
-    payout: position.payout, realizedPnl: engine.realizedPnl, bankroll: engine.bankroll,
+    pairsFilled: engine.positions.length,
+    fills: engine.positions.map(p => `${p.asset}:${p.outcome}:${p.shares}sh@$${p.cost}`),
+    floatingPnl: [engine.positionPnl(eth), engine.positionPnl(sol)],
+    payout: eth.payout, realizedPnl: engine.realizedPnl, bankroll: engine.bankroll,
     triggerLogs: logs.filter(line => line.includes('BUY')),
   }, null, 2));
-  console.log('ONE-FILL-PER-SIDE SMOKE PASS');
+  console.log('ONE-FILL-PER-PAIR CLOB SMOKE PASS');
 })().catch(error => { console.error(error); process.exitCode = 1; });
