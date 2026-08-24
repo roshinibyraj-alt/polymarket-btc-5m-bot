@@ -4,7 +4,7 @@ Autonomous 5-minute BTC paper bot priced only by direct Polymarket CLOB order-bo
 
 ## Strategy
 - Trade only `btc-updown-5m-*`.
-- Poll both UP and DOWN CLOB books every 500 ms.
+- Poll both UP/DOWN top-of-book CLOB prices every 100 ms.
 - When either midpoint reaches `0.89`, immediately buy that side at its executable ask.
 - Base size is 100 shares.
 - If the held side's bid reaches `0.79` or lower, sell immediately at that bid and realize the stop-loss.
@@ -14,7 +14,7 @@ Autonomous 5-minute BTC paper bot priced only by direct Polymarket CLOB order-bo
 
 ## Pricing
 - Discovery uses Gamma only to resolve the exact BTC window slug into UP/DOWN CLOB token IDs.
-- All trading prices come from batched direct CLOB `/books` requests.
+- All trading prices come from batched direct CLOB `/prices` top-of-book requests.
 - There is no alternate or fallback price source. If CLOB polling fails, trading pauses.
 
 ## Dashboard

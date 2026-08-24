@@ -1,7 +1,7 @@
 {
   "name": "polymarket-btc-breakout-bot",
-  "version": "5.0.0",
-  "description": "Polymarket BTC 5-minute breakout paper bot using direct CLOB book snapshots",
+  "version": "5.0.2",
+  "description": "Polymarket BTC 5-minute breakout paper bot using direct CLOB top-of-book snapshots",
   "main": "index.js",
   "engines": {
     "node": ">=18.0.0"

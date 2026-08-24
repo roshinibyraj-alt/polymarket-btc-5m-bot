@@ -4,14 +4,16 @@ const { BtcBreakoutEngine, config } = require('../engine');
 function windowStartFor(timeMs) { return Math.floor(timeMs / 1000 / 300) * 300; }
 async function fakeFetch(url, options = {}) {
   const text = String(url);
-  if (text.endsWith('/books')) {
+  if (text.endsWith('/prices')) {
     const requests = JSON.parse(options.body);
     const quotes = global.bookQuotes || {};
-    return { ok: true, json: async () => requests.map(({ token_id }) => ({
-      asset_id: token_id,
-      bids: quotes[token_id.split(':').pop()]?.bid ?? [],
-      asks: quotes[token_id.split(':').pop()]?.ask ?? [],
-    })) };
+    const result = {};
+    for (const request of requests) {
+      const sideQuotes = quotes[request.token_id.split(':').pop()];
+      result[request.token_id] ||= {};
+      result[request.token_id][request.side] = String((request.side === 'BUY' ? sideQuotes?.ask : sideQuotes?.bid)?.[0]?.price ?? 0);
+    }
+    return { ok: true, json: async () => result };
   }
   const match = text.match(/slug=btc-updown-5m-(\d+)/);
   assert.ok(match, 'unexpected URL: ' + text);
@@ -62,6 +64,18 @@ async function fakeFetch(url, options = {}) {
     const expected = [100, 210, 441, 926, 1945][streak];
     assert.equal(sharesForStreakPublic(engine, streak), expected);
   }
+
+  global.bookQuotes = {
+    up: { bid: [{ price: .89, size: 100 }], ask: [{ price: .91, size: 100 }] },
+    down: { bid: [{ price: .07, size: 100 }], ask: [{ price: .09, size: 100 }] },
+  };
+  const reactionEngine = new BtcBreakoutEngine({ fetchImpl: fakeFetch, onTick: () => {}, onLog: () => {} });
+  await reactionEngine.discoverMarket(start);
+  reactionEngine.activeWindowStart = start;
+  const reactionMarket = reactionEngine.markets.get(`btc-updown-5m-${start}`);
+  await reactionEngine.pollClobBooks();
+  assert.equal(reactionEngine.openPosition?.outcome, 'UP', 'first qualifying CLOB snapshot must enter immediately');
+  assert.equal(reactionEngine.pollCount, 1);
 
   console.log(JSON.stringify({
     entry: '100 SH @0.91', stop: '-$12', nextAfterLoss: engine.currentShares(),

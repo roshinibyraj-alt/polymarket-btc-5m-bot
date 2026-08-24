@@ -2,8 +2,9 @@
 
 const GAMMA_API = process.env.GAMMA_API || 'https://gamma-api.polymarket.com';
 const CLOB_REST = process.env.CLOB_REST || 'https://clob.polymarket.com';
-const CLOB_POLL_MS = Number(process.env.CLOB_POLL_MS || 500);
-const CLOB_FRESH_MS = Number(process.env.CLOB_FRESH_MS || 3500);
+const CLOB_POLL_MS = Number(process.env.CLOB_POLL_MS || 100);
+const CLOB_FRESH_MS = Number(process.env.CLOB_FRESH_MS || 900);
+const MAX_BOOK_REQUESTS_IN_FLIGHT = Number(process.env.MAX_BOOK_REQUESTS_IN_FLIGHT || 3);
 const WINDOW_SECONDS = Number(process.env.WINDOW_SECONDS || 300);
 const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.89);
 const STOP_PRICE = Number(process.env.STOP_PRICE || 0.79);
@@ -38,7 +39,9 @@ class BtcBreakoutEngine {
     this.lastPollAt = null;
     this.lastSuccessfulPollAt = null;
     this.lastPollErrorAt = null;
-    this.pollRunning = false;
+    this.pollSequence = 0;
+    this.appliedPollSequence = 0;
+    this.pollInFlight = 0;
     this.loopRunning = false;
     this.discoveryRunning = false;
     this.activeWindowStart = null;
@@ -414,20 +417,23 @@ class BtcBreakoutEngine {
   }
 
   async pollClobBooks() {
-    if (this.pollRunning) return;
+    if (this.pollInFlight >= MAX_BOOK_REQUESTS_IN_FLIGHT) return;
     const now = Date.now(), start = windowStartFor(now);
     const market = this.markets.get(slugFor(start));
     if (!market || market.resolved || market.tradingClosed) return;
     const tokens = [market.up, market.down];
-    this.pollRunning = true;
+    const sequence = ++this.pollSequence;
+    this.pollInFlight++;
     try {
-      const books = await this.requestJSON(`${CLOB_REST}/books`, {
-        method: 'POST', body: JSON.stringify(tokens.map(token => ({ token_id: token.tokenId }))),
-      }, 2000);
-      const byToken = new Map((Array.isArray(books) ? books : []).map(book => [String(book?.asset_id || ''), book]));
+      const quotes = await this.requestJSON(`${CLOB_REST}/prices`, {
+        method: 'POST',
+        body: JSON.stringify(tokens.flatMap(token => [{ token_id: token.tokenId, side: 'BUY' }, { token_id: token.tokenId, side: 'SELL' }])),
+      }, 900);
+      if (sequence <= this.appliedPollSequence) return;
+      this.appliedPollSequence = sequence;
       for (const token of tokens) {
-        const book = byToken.get(token.tokenId);
-        if (book) this.applyBook(token, book.bids, book.asks);
+        const quote = quotes?.[token.tokenId];
+        this.setQuote(token, Number(quote?.SELL), Number(quote?.BUY));
       }
       this.pollCount++;
       this.lastPollAt = now;
@@ -442,7 +448,7 @@ class BtcBreakoutEngine {
         this.log(`⚠️ CLOB book poll failed: ${error.message}`);
         this.lastPollErrorAt = Date.now();
       }
-    } finally { this.pollRunning = false; }
+    } finally { this.pollInFlight--; }
   }
 
   publicMarkets() {
