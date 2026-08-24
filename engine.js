@@ -244,7 +244,7 @@ class MomentumLagEngine {
     this.lastMessageAt = Date.now();
     for (const event of events) this.processEvent(event);
     this.tickCount++;
-    this.emitTick(this.publicMarkets());
+    this.emitTick(this.publicMarkets(), this.messageCount);
   }
 
   processEvent(event) {
@@ -542,6 +542,7 @@ class MomentumLagEngine {
       mode: 'AUTONOMOUS DEMO',
       strategy: 'BTC >0.65 after T+120s → same-side altcoin <0.50 entries',
       serverTime: Date.now(),
+      windowStart: activeStart,
       connected: this.connected, tickCount: this.tickCount, messageCount: this.messageCount,
       reconnects: this.reconnects, lastMessageAt: this.lastMessageAt,
       subscribedTokens: this.subscribedTokens.size,
