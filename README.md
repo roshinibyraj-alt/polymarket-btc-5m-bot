@@ -4,8 +4,8 @@ Autonomous 5-minute paper bot using real CLOB order-book streams.
 
 ## Rule
 - BTC 5-minute UP/DOWN is the signal only.
-- If BTC UP midpoint is above `0.65`, buy any other tracked pair's UP while its midpoint is below `0.50`.
-- If BTC DOWN midpoint is above `0.65`, buy any other tracked pair's DOWN while its midpoint is below `0.50`.
+- After a two-minute wait from window start (`ENTRY_WAIT_SECONDS=120`), if BTC UP midpoint is above `0.65`, buy any other tracked pair's UP while its midpoint is below `0.50`.
+- After the wait, if BTC DOWN midpoint is above `0.65`, buy any other tracked pair's DOWN while its midpoint is below `0.50`.
 - Each non-BTC pair may receive at most one 100-share entry per window, independently of every other pair.
 - Entries fill at the target token's live CLOB ask.
 - Expired/stale windows cannot fire, including during the rotation boundary.

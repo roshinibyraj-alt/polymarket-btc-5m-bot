@@ -25,17 +25,27 @@ function round2(value) { return Math.round(value * 100) / 100; }
   engine.activeWindowStart = start;
   const market = slug => engine.markets.get(`${slug}-updown-5m-${start}`);
 
-  engine.applyTop(market('btc').up, 0.64, 0.66);
-  engine.applyTop(market('btc').down, 0.19, 0.21);
-  engine.applyTop(market('eth').up, 0.44, 0.46);
-  engine.applyTop(market('sol').up, 0.44, 0.46);
-  engine.evaluateSignals();
+  const activationClock = Date.now;
+  try {
+    Date.now = () => (start + 119) * 1000;
+    engine.applyTop(market('btc').up, 0.65, 0.67);
+    engine.applyTop(market('btc').down, 0.19, 0.21);
+    engine.applyTop(market('eth').up, 0.44, 0.46);
+    engine.applyTop(market('sol').up, 0.44, 0.46);
+    engine.evaluateSignals();
+    assert.equal(engine.positions.length, 0, 'signals before the two-minute wait must not trigger');
 
-  assert.equal(engine.positions.length, 0, 'BTC midpoint at the threshold must not trigger');
+    Date.now = () => (start + 121) * 1000;
+    engine.applyTop(market('btc').up, 0.64, 0.66);
+    engine.evaluateSignals();
+    assert.equal(engine.positions.length, 0, 'BTC midpoint at the threshold must not trigger');
 
-  engine.applyTop(market('btc').up, 0.65, 0.67);
-  engine.evaluateSignals();
-  assert.equal(engine.positions.length, 2, 'ETH and SOL each get an independent fill');
+    engine.applyTop(market('btc').up, 0.65, 0.67);
+    engine.evaluateSignals();
+    assert.equal(engine.positions.length, 2, 'ETH and SOL each get an independent fill after the wait');
+  } finally {
+    Date.now = activationClock;
+  }
   const eth = engine.positions.find(p => p.asset === 'eth');
   const sol = engine.positions.find(p => p.asset === 'sol');
   assert.equal(eth.outcome, 'UP');assert.equal(eth.cost, 46);

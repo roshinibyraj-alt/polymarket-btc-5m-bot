@@ -8,6 +8,7 @@ const LEAD_ASSET = (process.env.LEAD_ASSET || 'btc').toLowerCase();
 const START_BANKROLL = Number(process.env.START_BANKROLL || 5000);
 const TRADE_SHARES = Number(process.env.TRADE_SHARES || 100);
 const BTC_STRONG_PRICE = Number(process.env.BTC_STRONG_PRICE || 0.65);
+const ENTRY_WAIT_SECONDS = Number(process.env.ENTRY_WAIT_SECONDS || 120);
 const TARGET_CHEAP_PRICE = Number(process.env.TARGET_CHEAP_PRICE || 0.50);
 const MAX_FILLS_PER_MARKET = Number(process.env.MAX_FILLS_PER_MARKET || 1);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
@@ -339,6 +340,7 @@ class MomentumLagEngine {
   evaluateSignals() {
     const leadMarket = this.currentMarket(LEAD_ASSET);
     if (!leadMarket || leadMarket.windowStart !== this.activeWindowStart) return;
+    if (Date.now() / 1000 - leadMarket.windowStart < ENTRY_WAIT_SECONDS) return;
     if (!Number.isFinite(leadMarket.up.mid) || !Number.isFinite(leadMarket.down.mid)) return;
     const btcUp = leadMarket.up.mid;
     const btcDown = leadMarket.down.mid;
@@ -538,7 +540,7 @@ class MomentumLagEngine {
     const nextDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart + WINDOW_SECONDS))).length;
     return {
       mode: 'AUTONOMOUS DEMO',
-      strategy: 'BTC >0.65 signal → same-side altcoin <0.50 entries',
+      strategy: 'BTC >0.65 after T+120s → same-side altcoin <0.50 entries',
       serverTime: Date.now(),
       connected: this.connected, tickCount: this.tickCount, messageCount: this.messageCount,
       reconnects: this.reconnects, lastMessageAt: this.lastMessageAt,
@@ -563,6 +565,7 @@ class MomentumLagEngine {
       logs: this.logs.slice(-220),
       config: {
         tradeShares: TRADE_SHARES, btcStrongPrice: BTC_STRONG_PRICE,
+        entryWaitSeconds: ENTRY_WAIT_SECONDS,
         targetCheapPrice: TARGET_CHEAP_PRICE, maxFillsPerMarket: MAX_FILLS_PER_MARKET,
         resolutionPrice: RESOLUTION_PRICE, feeBps: TAKER_FEE_BPS,
       },
@@ -604,6 +607,6 @@ module.exports = {
   MomentumLagEngine,
   config: {
     ASSETS, LEAD_ASSET, START_BANKROLL, TRADE_SHARES, BTC_STRONG_PRICE,
-    TARGET_CHEAP_PRICE, MAX_FILLS_PER_MARKET, RESOLUTION_PRICE, TAKER_FEE_BPS,
+    ENTRY_WAIT_SECONDS, TARGET_CHEAP_PRICE, MAX_FILLS_PER_MARKET, RESOLUTION_PRICE, TAKER_FEE_BPS,
   },
 };
