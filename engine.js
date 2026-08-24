@@ -340,7 +340,8 @@ class MomentumLagEngine {
 
   evaluateSignals() {
     const leadMarket = this.currentMarket(LEAD_ASSET);
-    if (!leadMarket || !Number.isFinite(leadMarket.up.mid) || !Number.isFinite(leadMarket.down.mid)) return;
+    if (!leadMarket || leadMarket.windowStart !== this.activeWindowStart) return;
+    if (!Number.isFinite(leadMarket.up.mid) || !Number.isFinite(leadMarket.down.mid)) return;
     const btcUp = leadMarket.up.mid;
     const btcDown = leadMarket.down.mid;
     const side = btcUp > btcDown ? 'UP' : 'DOWN';
@@ -357,13 +358,14 @@ class MomentumLagEngine {
 
   currentMarket(asset) {
     return [...this.markets.values()].find(market =>
-      market.asset === asset && !market.resolved && Date.now() / 1000 < market.windowEnd + 3) || null;
+      market.asset === asset && !market.resolved && Date.now() / 1000 < market.windowEnd) || null;
   }
 
   firePaperOrder(market, token, btcPrice, signal) {
     const windowSideKey = `${market.windowStart}:${token.outcome}`;
     if ((this.firedWindowSides.get(windowSideKey) || 0) >= MAX_FILLS_PER_WINDOW_SIDE) return;
     const now = Date.now();
+    if (now / 1000 >= market.windowEnd) return;
     const fillPrice = token.ask;
     if (!Number.isFinite(fillPrice)) return;
     const cost = round2(TRADE_SHARES * fillPrice);
@@ -432,7 +434,9 @@ class MomentumLagEngine {
         await this.discoverWindow(start, 'New');
       }
       for (const market of this.markets.values()) {
-        if (!market.resolved && Date.now() / 1000 >= market.windowEnd) this.resolveFromFinalPrices(market);
+        if (market.resolved || Date.now() / 1000 < market.windowEnd - 2) continue;
+        this.trackFinalPrices(market);
+        if (Date.now() / 1000 >= market.windowEnd) this.resolveFromFinalPrices(market);
       }
       const pending = [...this.markets.values()].filter(market =>
         !market.resolved && Date.now() / 1000 >= market.windowEnd + 1 &&

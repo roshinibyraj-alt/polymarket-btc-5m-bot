@@ -8,7 +8,8 @@ Autonomous 5-minute paper bot using real CLOB order-book streams.
 - If BTC DOWN midpoint is above `0.75`, buy any other tracked pair's DOWN while its midpoint is below `0.50`.
 - Maximum one 100-share FOK-style paper entry per side direction per window: at most one UP fill and one DOWN fill.
 - Entries fill at the target token's live CLOB ask.
-- During the final two seconds, the highest UP and DOWN midpoints are captured. If one side exceeds `0.90`, that side wins immediately and capital/P&L updates.
+- Expired/stale windows cannot fire, including during the rotation boundary.
+- During the final two seconds, current UP/DOWN midpoints are sampled continuously and each side's highest price is captured. If one side exceeds `0.90`, that side wins immediately and capital/P&L updates.
 - If the final-two-second rule cannot determine a winner, Gamma resolution remains authoritative.
 
 ## Dashboard

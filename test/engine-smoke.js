@@ -39,10 +39,20 @@ function round2(value) { return Math.round(value * 100) / 100; }
   assert.equal(engine.positions.length, 1, 'UP is locked for the whole window');
   assert.equal(position.shares, 100);assert.equal(position.cost, 46);
 
+  const nextStart=start+300;await engine.discoverMarket('btc',nextStart);engine.activeWindowStart=nextStart;
+  engine.applyTop(market('eth').up,0.43,0.47);engine.evaluateSignals();
+  assert.equal(engine.positions.length,1,'stale active signal must not trade after rotation');
+  engine.activeWindowStart=start;
+
   engine.applyTop(market('eth').up, 0.48, 0.52);
   engine.updatePositionMarks();
   assert.equal(position.markPrice, 0.50);
   assert.equal(engine.positionPnl(position), 4);
+
+  const originalNow=Date.now;Date.now=()=>(start+300)*1000;
+  engine.applyTop(market('xrp').up,0.43,0.47);engine.evaluateSignals();
+  Date.now=originalNow;
+  assert.equal(engine.positions.length,1,'expired windows must never fire');
 
   market('eth').finalUpMax = 0.93;
   market('eth').finalDownMax = 0.07;
