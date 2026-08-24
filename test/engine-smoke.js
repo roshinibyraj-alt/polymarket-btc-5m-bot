@@ -77,6 +77,19 @@ async function fakeFetch(url, options = {}) {
   assert.equal(reactionEngine.openPosition?.outcome, 'UP', 'first qualifying CLOB snapshot must enter immediately');
   assert.equal(reactionEngine.pollCount, 1);
 
+  global.bookQuotes = {
+    up: { bid: [{ price: .87, size: 100 }], ask: [{ price: .89, size: 100 }] },
+    down: { bid: [{ price: .09, size: 100 }], ask: [{ price: .11, size: 100 }] },
+  };
+  const touchEngine = new BtcBreakoutEngine({ fetchImpl: fakeFetch, onTick: () => {}, onLog: () => {} });
+  await touchEngine.discoverMarket(start);
+  touchEngine.activeWindowStart = start;
+  await touchEngine.pollClobBooks();
+  assert.equal(touchEngine.openPosition?.outcome, 'UP', 'ask touch at 0.89 must enter immediately');
+  assert.equal(touchEngine.openPosition?.avgPrice, .89);
+  assert.equal(touchEngine.openPosition?.signal.triggerSource, 'ASK');
+  assert.equal(touchEngine.openPosition?.signal.mid, .88);
+
   console.log(JSON.stringify({
     entry: '100 SH @0.91', stop: '-$12', nextAfterLoss: engine.currentShares(),
     sequence: [config.BASE_SHARES, 210, 441, 926, 1945],

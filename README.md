@@ -5,7 +5,7 @@ Autonomous 5-minute BTC paper bot priced only by direct Polymarket CLOB order-bo
 ## Strategy
 - Trade only `btc-updown-5m-*`.
 - Poll both UP/DOWN top-of-book CLOB prices every 100 ms.
-- When either midpoint reaches `0.89`, immediately buy that side at its executable ask.
+- On any single CLOB tick, if either side's bid, ask, or midpoint touches `0.89`, immediately buy that side by market order at its executable ask. No next-tick confirmation is required.
 - Base size is 100 shares.
 - If the held side's bid reaches `0.79` or lower, sell immediately at that bid and realize the stop-loss.
 - Otherwise hold until resolution. During the final two seconds, each side's maximum midpoint is tracked. The first side above `0.90` wins; the opposite side settles to zero.

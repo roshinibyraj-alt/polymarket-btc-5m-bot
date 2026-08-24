@@ -251,11 +251,14 @@ class BtcBreakoutEngine {
     if (!market || market.tradingClosed || market.resolved ||
         this.activeWindowStart !== start || nowSeconds >= market.windowEnd || this.openPosition) return;
 
-    const candidates = [market.up, market.down].filter(token =>
-      Number.isFinite(token.mid) && token.mid >= ENTRY_PRICE && Number.isFinite(token.ask));
+    const candidates = [market.up, market.down].map(token => {
+      const prices = [token.bid, token.ask, token.mid].filter(value => Number.isFinite(value));
+      return { token, triggerPrice: prices.length ? Math.max(...prices) : null };
+    }).filter(candidate =>
+      Number.isFinite(candidate.triggerPrice) && candidate.triggerPrice >= ENTRY_PRICE && Number.isFinite(candidate.token.ask));
     if (!candidates.length) return;
-    candidates.sort((a, b) => b.mid - a.mid);
-    this.openPaperPosition(market, candidates[0]);
+    candidates.sort((a, b) => b.triggerPrice - a.triggerPrice);
+    this.openPaperPosition(market, candidates[0].token, candidates[0].triggerPrice);
   }
 
   pushTrade(trade) {
@@ -263,7 +266,7 @@ class BtcBreakoutEngine {
     this.trades = this.trades.slice(-300);
   }
 
-  openPaperPosition(market, token) {
+  openPaperPosition(market, token, triggerPrice) {
     const shares = this.currentShares();
     const entryPrice = token.ask;
     const cost = round2(shares * entryPrice);
@@ -285,7 +288,12 @@ class BtcBreakoutEngine {
       cost, entryFee, markPrice: token.mid, fills: 1, status: 'open',
       windowStart: market.windowStart, windowEnd: market.windowEnd,
       openedAt: now, martingaleLevel: this.lossStreak,
-      signal: { triggerPrice: token.mid, elapsed: Math.max(0, Math.floor(now / 1000 - market.windowStart)) },
+      signal: {
+        triggerPrice,
+        triggerSource: triggerPrice === token.bid ? 'BID' : triggerPrice === token.ask ? 'ASK' : 'MID',
+        bid: token.bid, ask: token.ask, mid: token.mid,
+        elapsed: Math.max(0, Math.floor(now / 1000 - market.windowStart)),
+      },
     };
     stats.buyCount++;
     stats.invested = round2(stats.invested + cost + entryFee);
@@ -294,7 +302,7 @@ class BtcBreakoutEngine {
       price: entryPrice, pnl: null, reason: 'BREAKOUT_0.89',
       signal: this.openPosition.signal,
     });
-    this.log(`⚡ BUY BTC ${token.outcome} ${shares}sh @${entryPrice.toFixed(3)} | trigger ${token.mid.toFixed(3)} ≥ ${ENTRY_PRICE.toFixed(2)} | SL ${STOP_PRICE.toFixed(2)} | $${cost.toFixed(2)}`);
+    this.log(`⚡ BUY BTC ${token.outcome} ${shares}sh @${entryPrice.toFixed(3)} | TOUCH ${this.openPosition.signal.triggerSource} ${triggerPrice.toFixed(3)} ≥ ${ENTRY_PRICE.toFixed(2)} | SL ${STOP_PRICE.toFixed(2)} | ${cost.toFixed(2)}`);
     this.recordEquity();
     return true;
   }
@@ -481,7 +489,7 @@ class BtcBreakoutEngine {
     const start = windowStartFor(Date.now());
     return {
       mode: 'AUTONOMOUS DEMO',
-      strategy: `BTC breakout ≥${ENTRY_PRICE.toFixed(2)} · stop ≤${STOP_PRICE.toFixed(2)} · hold for final-2s resolution`,
+      strategy: `BTC single-tick touch ≥${ENTRY_PRICE.toFixed(2)} · market fill · stop ≤${STOP_PRICE.toFixed(2)} · final-2s resolution`,
       serverTime: Date.now(), windowStart: start,
       connected: this.isClobFresh(), pollCount: this.pollCount, tickCount: this.tickCount,
       lastPollAt: this.lastPollAt, lastSuccessfulPollAt: this.lastSuccessfulPollAt,
