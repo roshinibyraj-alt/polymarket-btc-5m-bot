@@ -1,60 +1,26 @@
-# Polymarket Binary Copy-Trading Bot
+# Polymarket Momentum Lag Bot
 
-Mirrors a master Polymarket **binary** (up/down) trader in **paper/demo**
-mode using public APIs — no wallet or keys needed. Includes a **learning
-model** that fingerprints the master's strategy from its real on-chain
-trade history.
+Autonomous demo bot modeled on the observed master behavior:
 
-## What it does
+- Discovers the exact active and next 5-minute UP/DOWN markets for BTC, ETH, SOL and XRP.
+- Uses one public CLOB market WebSocket for all tokens; no polling for price discovery.
+- Treats BTC as the lead. A sharp BTC repricing fires only lagging ETH/SOL/XRP sides.
+- Buys paper FOK at the live ask, holds through resolution, then verifies winners with Gamma.
+- Every CLOB tick updates each market's UP/DOWN bid, ask, mid, spread and short-window delta in the dashboard.
 
-- Watches `WATCH_WALLET` (default `0x251c1a283703beed41590b0875a8dcb8ddd1541f`).
-- Polls the master's trades every `POLL_INTERVAL_MS` (5s) and mirrors
-  each **BUY/SELL** in paper at the master's own price and size
-  (× `MIRROR_SCALE`, default 1).
-- When a mirrored binary market resolves, the paper position settles at
-  **$1/share (won)** or **$0 (lost)** — no manual redemption needed.
-- Mirrors the master's current open positions on start
-  (`MIRROR_EXISTING_ON_START`), so paper equity starts at the same point.
-- Runs the **learning model** (`learn-model.js`) every
-  `LEARN_REFRESH_MS` (10 min) over the master's full activity feed and
-  reports the strategy fingerprint on the dashboard:
-  market mix (5m/15m), sides, stake sizes, entry prices, entry timing,
-  buys per window, per-window win rate, edge per window, repeat-vs-fade,
-  and named behavior labels (hold-to-resolution, ladder buyer,
-  winner-chaser, dip buyer, profitable/breakeven/losing).
+## Controls
 
-## API
+| Environment | Default | Meaning |
+|---|---:|---|
+| `ASSETS` | `btc,eth,sol,xrp` | Tracked/followed markets |
+| `LEAD_ASSET` | `btc` | Momentum leader |
+| `START_BANKROLL` | `5000` | Demo cash |
+| `BASE_NOTIONAL` | `40` | Base paper order notional |
+| `MAX_COST_PER_SIDE` | `180` | Maximum deployed per market side/window |
+| `MAX_TRADES_PER_SIDE` | `6` | Rapid-fire tranche limit |
+| `LEAD_THRESHOLD` | `0.030` | Required 2.2s BTC move |
+| `FOLLOWER_MAX_MOVE` | `0.014` | Follower must still be lagging |
+| `MIN_ENTRY_PRICE` / `MAX_ENTRY_PRICE` | `0.40 / 0.90` | Master-style quote range |
+| `NO_NEW_ENTRIES_AFTER` | `255` | No new entries in final 45 seconds |
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /` | Dashboard |
-| `GET /api/status` | Full bot state (master + mirror + learning) |
-| `GET /api/learn` | Learning fingerprint JSON |
-| `POST /api/pause` / `POST /api/resume` | Pause / resume mirroring |
-| `POST /api/set-mode` | Requests live mode (not implemented — demo only) |
-| `GET /healthz` | Health check |
-
-## Env knobs
-
-- `WATCH_WALLET` — master address (`0x…`) or profile `@username`.
-- `POLL_INTERVAL_MS` (5000), `POSITION_SWEEP_INTERVAL_MS` (30000),
-  `LEARN_REFRESH_MS` (600000).
-- `DEMO_CAPITAL` (20000) — paper starting bankroll.
-- `MIRROR_SCALE` (1) — bot shares = master shares × scale.
-- `MIRROR_FIXED_SHARES` — if set, flat share size per trade instead.
-- `MAX_POSITION_USDC` (20000) — skip buys that push a mirrored window's
-  cost above this.
-- `MIRROR_EXISTING_ON_START` (true).
-
-## Run
-
-```bash
-npm install
-npm start          # dashboard on :8080 + mirror loop
-```
-
-## Honesty
-
-The learning model reports the master's **actual** numbers — realized
-P&L, current open P&L, win rate, and edge per window — including when
-the master is losing money. Paper mirroring is not financial advice.
+This is deliberately a paper-trading implementation. It does not submit live orders or require a private key.

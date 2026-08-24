@@ -1,16 +1,18 @@
 {
-  "name": "polymarket-binary-copy-bot",
-  "version": "2.0.0",
-  "description": "Copy trading bot - 10 fixed shares per master trigger",
+  "name": "polymarket-momentum-lag-bot",
+  "version": "3.0.0",
+  "description": "Autonomous BTC-led Polymarket 5m momentum lag bot with WebSocket dashboard",
   "main": "index.js",
   "engines": {
     "node": ">=18.0.0"
   },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "smoke": "node test/engine-smoke.js"
   },
   "dependencies": {
     "express": "^4.19.2",
-    "socket.io": "^4.7.5"
+    "socket.io": "^4.7.5",
+    "ws": "^8.18.0"
   }
 }
