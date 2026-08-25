@@ -164,12 +164,25 @@ class BtcBreakoutEngine {
   }
 
   ensureWindowMarkets() {
-    const start = windowStartFor(Date.now());
-    const nextStart = start + WINDOW_SECONDS;
-    this.discoverMarket(start).catch(() => {});
-    this.discoverMarket(nextStart).catch(() => {});
-    if (start !== this.currentStart) {
-      this.currentStart = start;
+    const currentStart = windowStartFor(Date.now());
+    const nextStart = currentStart + WINDOW_SECONDS;
+    for (const start of [currentStart, nextStart]) {
+      const slug = slugFor(start);
+      if (!this.markets.has(slug) && !this.discoveryJobs.has(slug)) {
+        this.discoverMarket(start).catch(() => {});
+      }
+    }
+  }
+
+  pruneOldMarkets(currentStart) {
+    for (const [slug, market] of this.markets) {
+      if (market.windowEnd < currentStart - WINDOW_SECONDS) {
+        this.tokens.delete(market.up.tokenId);
+        this.tokens.delete(market.down.tokenId);
+        this.priceHistory.delete(market.up.tokenId);
+        this.priceHistory.delete(market.down.tokenId);
+        this.markets.delete(slug);
+      }
     }
   }
 
@@ -490,6 +503,9 @@ class BtcBreakoutEngine {
     const previous = this.markets.get(slugFor(this.currentStart));
     if (previous && !previous.settled) {
       this.settleWindow(previous);
+    } else if (this.openPosition?.windowStart === this.currentStart) {
+      const mark = Number.isFinite(this.openPosition.token.mid) ? this.openPosition.token.mid : this.openPosition.entryPrice;
+      this.closePosition(this.openPosition, mark, 'WINDOW_ROLLOVER');
     }
     this.currentStart = start;
     this.tradedThisWindow = false;
@@ -500,6 +516,8 @@ class BtcBreakoutEngine {
     this.windowEntries = [];
     this.lastFlipKey = null;
     this.monitoringActive = false;
+    this.ensureWindowMarkets();
+    this.pruneOldMarkets(start);
     return this.markets.get(slugFor(start)) || null;
   }
 
