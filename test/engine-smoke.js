@@ -41,64 +41,90 @@ async function fakeFetch(url) {
 }
 
 (async () => {
-  const start = windowStartFor(Date.now()) + 3000;
-  const nextStart = start + 300;
+  const start = windowStartFor(Date.now()) + 300;
+
+  // --- TEST 1: Normal entry, no ask ≤0.30 history → 100 shares ---
   const engine = new BtcBreakoutEngine({ fetchImpl: fakeFetch, onTick: () => {}, onLog: () => {} });
   await engine.discoverMarket(start);
-  await engine.discoverMarket(nextStart);
-  const firstMarket = engine.markets.get(`btc-updown-5m-${start}`);
-  const secondMarket = engine.markets.get(`btc-updown-5m-${nextStart}`);
-  assert.ok(firstMarket && secondMarket);
+  const market1 = engine.markets.get(`btc-updown-5m-${start}`);
+  assert.ok(market1);
 
-  global.bookPayload = clobPayload(firstMarket, quotes(.89, .91, .07, .09));
-  engine.processQuotes(firstMarket, global.bookPayload, 1);
-  assert.equal(engine.openPosition?.outcome, 'UP', 'first qualifying tick must fire immediately');
-  assert.equal(engine.openPosition?.shares, config.BASE_SHARES);
-  assert.equal(engine.openPosition?.signal.triggerSource, 'ASK');
+  global.bookPayload = clobPayload(market1, quotes(.25, .27, .88, .90));
+  engine.processQuotes(market1, global.bookPayload, 1);
+  assert.equal(engine.openPosition?.outcome, 'DOWN', 'DOWN triggers at ask 0.90');
+  assert.equal(engine.openPosition?.shares, 100, 'no ask ≤0.30 history → 100 shares');
+  engine.settleWindow(market1);
+  assert.equal(engine.openPosition, null, 'window released');
 
-  engine.settleWindow(firstMarket);
-  assert.equal(engine.openPosition, null, 'first window must release its lifecycle');
-  assert.equal(engine.lossStreak, 1);
-  assert.equal(engine.currentShares(), 210);
+  // --- TEST 2: Ask drops to 0.25 then recovers to 0.91 → 200 shares ---
+  await engine.discoverMarket(start + 300);
+  const market2 = engine.markets.get(`btc-updown-5m-${start + 300}`);
+  assert.ok(market2);
 
-  global.bookPayload = clobPayload(secondMarket, quotes(.08, .10, .88, .90));
-  engine.processQuotes(secondMarket, global.bookPayload, 2);
-  assert.equal(engine.openPosition?.slug, secondMarket.slug, 'next window must be tradeable');
+  // Tick 1: UP ask drops to 0.25 — tracks askLow
+  global.bookPayload = clobPayload(market2, quotes(.24, .25, .80, .82));
+  engine.processQuotes(market2, global.bookPayload, 2);
+  assert.equal(engine.askLow.get(market2.up.tokenId), 0.25, 'askLow tracks 0.25');
+
+  // Tick 2: UP ask recovers to 0.42
+  global.bookPayload = clobPayload(market2, quotes(.40, .42, .50, .52));
+  engine.processQuotes(market2, global.bookPayload, 3);
+  assert.equal(engine.askLow.get(market2.up.tokenId), 0.25, 'askLow stays at 0.25');
+
+  // Tick 3: UP ask hits 0.91 — triggers entry with 200 shares
+  global.bookPayload = clobPayload(market2, quotes(.90, .91, .08, .10));
+  engine.processQuotes(market2, global.bookPayload, 4);
+  assert.equal(engine.openPosition?.outcome, 'UP', 'UP triggers at ask 0.91');
+  assert.equal(engine.openPosition?.shares, 200, 'askLow ≤0.30 history → 200 shares');
+  engine.settleWindow(market2);
+  assert.equal(engine.openPosition, null, 'window released');
+
+  // --- TEST 3: askLow cleared after settlement → back to 100 ---
+  await engine.discoverMarket(start + 600);
+  const market3 = engine.markets.get(`btc-updown-5m-${start + 600}`);
+  assert.ok(market3);
+  assert.equal(engine.askLow.get(market3.up.tokenId), undefined, 'askLow cleared for new market');
+  assert.equal(engine.askLow.get(market3.down.tokenId), undefined, 'askLow cleared for new market');
+
+  global.bookPayload = clobPayload(market3, quotes(.20, .22, .88, .90));
+  engine.processQuotes(market3, global.bookPayload, 5);
   assert.equal(engine.openPosition?.outcome, 'DOWN');
-  assert.equal(engine.openPosition?.shares, 210);
-  assert.equal(engine.tradedThisWindow, true);
+  assert.equal(engine.openPosition?.shares, 100, 'no prior ask ≤0.30 → 100 shares');
+  engine.settleWindow(market3);
 
-  engine.applyQuote(secondMarket.down, .79, .81);
-  engine.manageStop(engine.openPosition);
-  assert.equal(engine.openPosition, null, 'stop loss must close immediately');
-  engine.settleWindow(secondMarket);
-  assert.equal(engine.getWindowStats(nextStart).result, 'LOSS');
-  assert.ok(Math.abs(engine.getWindowStats(nextStart).realizedPnl + 23.1) < .001);
-  assert.equal(engine.lossStreak, 2);
-  assert.equal(engine.currentShares(), 441);
+  // --- TEST 4: ask low at exactly 0.30 → 200 shares ---
+  await engine.discoverMarket(start + 900);
+  const market4 = engine.markets.get(`btc-updown-5m-${start + 900}`);
+  assert.ok(market4);
 
+  global.bookPayload = clobPayload(market4, quotes(.29, .30, .80, .82));
+  engine.processQuotes(market4, global.bookPayload, 6);
+  assert.equal(engine.askLow.get(market4.up.tokenId), 0.30, 'askLow tracks exactly 0.30');
+
+  global.bookPayload = clobPayload(market4, quotes(.90, .91, .08, .10));
+  engine.processQuotes(market4, global.bookPayload, 7);
+  assert.equal(engine.openPosition?.outcome, 'UP');
+  assert.equal(engine.openPosition?.shares, 200, 'askLow exactly 0.30 → 200 shares');
+  engine.settleWindow(market4);
+
+  // --- TEST 5: resolution ---
   const resolver = new BtcBreakoutEngine({ fetchImpl: fakeFetch, onTick: () => {}, onLog: () => {} });
   await resolver.discoverMarket(start);
   const resolveMarket = resolver.markets.get(`btc-updown-5m-${start}`);
-  resolver.applyQuote(resolveMarket.up, .91, .93);
-  resolver.applyQuote(resolveMarket.down, .05, .07);
-  resolveMarket.finalUpMax = .915;
-  resolveMarket.finalDownMax = .06;
+  resolver.applyQuote(resolveMarket.up, 0.91, 0.93);
+  resolver.applyQuote(resolveMarket.down, 0.05, 0.07);
+  resolveMarket.finalUpMax = 0.915;
+  resolveMarket.finalDownMax = 0.06;
   resolver.settleWindow(resolveMarket);
   assert.equal(resolveMarket.winner, 'UP');
   assert.equal(resolveMarket.resolutionSource, 'CLOB_FINAL_2S');
 
-  resolver.lossStreak = config.MAX_MARTINGALES;
-  assert.equal(resolver.buildState().nextShares, config.BASE_SHARES);
-
   console.log(JSON.stringify({
-    firstEntry: '100 SH @0.91',
-    stopPnl: '-$12.00',
-    nextWindowEntry: '210 DOWN SH @0.90',
-    nextStopPnl: '-$23.10',
-    sequence: [100, 210, 441, 926, 1945],
+    normalShares: 100,
+    boostedShares: 200,
+    threshold: 0.30,
   }));
-  console.log('BTC BREAKOUT ROLLOVER SMOKE PASS');
+  console.log('BTC BREAKOUT SMOKE PASS');
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;

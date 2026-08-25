@@ -72,7 +72,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
  <div class="box"><div class="label">Equity / Total PNL</div><div id="equity" class="value">—</div><div id="totalPnl" class="dim">—</div></div>
  <div class="box"><div class="label">Realized / Floating</div><div id="realized" class="value">—</div><div id="floating" class="dim">—</div></div>
  <div class="box"><div class="label">Win / Loss / Rate</div><div id="record" class="value">—</div><div id="streak" class="dim">—</div></div>
- <div class="box"><div class="label">Current / Next Stake</div><div id="stake" class="value">—</div><div id="sequence" class="dim">—</div></div>
+ <div class="box"><div class="label">Shares Rule</div><div id="stake" class="value">—</div><div id="sequence" class="dim">—</div></div>
 </section>
 <main class="main">
  <section class="panel">
@@ -107,8 +107,8 @@ function render(s){
  $('realized').textContent=cash(s.realizedPnl);$('realized').className='value '+cls(s.realizedPnl);
  $('floating').textContent=(s.unrealizedPnl>=0?'+':'')+cash(s.unrealizedPnl)+' FLOATING';
  $('record').textContent=s.wins+'W / '+s.losses+'L';$('streak').textContent=(s.winRate==null?'—':s.winRate+'%')+' WIN RATE';
- $('stake').textContent=shares(s.currentShares)+' SH';$('stake').className='value';
- $('sequence').textContent='NEXT LOSS '+shares(s.nextShares)+' · M'+s.lossStreak;
+ $('stake').textContent='ASK≤0.30→200 · ASK>0.30→100';$('stake').className='value';
+ $('sequence').textContent='BASE '+s.config.baseShares+' SH';
  const m=s.market;if(m){
   $('slug').textContent=m.slug.toUpperCase();$('source').textContent=m.settled?('WINNER '+(m.winner||'UNKNOWN')):'CLOB TOP OF BOOK';
   $('clock').innerHTML=String(Math.floor(m.remaining/60)).padStart(2,'0')+':'+String(m.remaining%60).padStart(2,'0')+'<small>T+'+m.elapsed+'S</small>';
@@ -120,13 +120,13 @@ function render(s){
  }
  const p=s.position;$('positionStatus').textContent=p?p.outcome+' OPEN':'FLAT';
  if(!p){$('positionPanel').innerHTML='<div class="empty">NO OPEN POSITION</div>'}else{
-  $('positionPanel').innerHTML='<div class="position-name">'+p.outcome+' · '+shares(p.shares)+' SH</div><div class="pnl '+cls(p.pnl)+'">'+(p.pnl>=0?'+':'')+cash(p.pnl)+'</div><div class="dim">ENTRY '+price(p.entryPrice)+' · COST '+cash(p.cost)+' · MARK '+price(p.tokenMid??p.signal?.mid)+'</div><div class="dim">T+'+(p.signal?.elapsed||0)+'S · '+p.signal?.triggerSource+' TRIGGER '+price(p.signal?.triggerPrice)+' · M'+p.martingaleLevel+'</div>';
+  $('positionPanel').innerHTML='<div class="position-name">'+p.outcome+' · '+shares(p.shares)+' SH</div><div class="pnl '+cls(p.pnl)+'">'+(p.pnl>=0?'+':'')+cash(p.pnl)+'</div><div class="dim">ENTRY '+price(p.entryPrice)+' · COST '+cash(p.cost)+' · MARK '+price(p.tokenMid??p.signal?.mid)+'</div><div class="dim">T+'+(p.signal?.elapsed||0)+'S · '+p.signal?.triggerSource+' TRIGGER '+price(p.signal?.triggerPrice)+'</div>';
  }
  drawChart(s.equityCurve,s.totalPnl);renderResults(s.results);renderTrades(s.trades);renderLogs(s.logs);
 }
 function drawChart(curve,total){if(!curve||curve.length<2){if(caches.chart!=='empty'){caches.chart='empty';$('chart').innerHTML=''}return}const values=curve.map(point=>point.equity),low=Math.min(...values),high=Math.max(...values),range=(high-low)||1,color=total>=0?'#00ff85':'#ff4a68',points=curve.map((point,index)=>[(index/(curve.length-1))*500,95-(point.equity-low)/range*90]);const signature='chart:'+curve.length+':'+values.at(-1)+':'+total;if(caches.chart===signature)return;caches.chart=signature;$('chart').innerHTML='<path d="M'+points.map(point=>point[0].toFixed(1)+','+point[1].toFixed(1)).join(' L')+'" fill="none" stroke="'+color+'" stroke-width="3"/>'}
-function renderResults(rows){$('resultCount').textContent=rows.length+' SETTLED';const signature=rows.map(row=>row.windowStart+':'+row.result+':'+row.realizedPnl).join('|');if(caches.results===signature)return;caches.results=signature;$('results').innerHTML=!rows.length?'<div class="empty">NO COMPLETED WINDOWS</div>':rows.map(row=>'<article class="result"><div><div>'+(row.result||'PENDING')+' · WINNER '+(row.winner||'—')+'</div><div class="dim">'+new Date(row.windowStart*1000).toLocaleTimeString()+' · '+row.resolutionSource+'</div></div><div class="'+cls(row.realizedPnl)+'">'+cash(row.realizedPnl)+'<div class="dim">NEXT '+shares(row.nextShares)+'</div></div></article>').join('')}
-function renderTrades(rows){$('tradeCount').textContent=rows.length;const signature='trades:'+rows.map(trade=>trade.timestamp+trade.action+trade.price).join('|');if(caches.trades===signature)return;caches.trades=signature;$('trades').innerHTML=!rows.length?'<div class="empty">WAITING FOR TRADE</div>':rows.slice(0,40).map(trade=>'<article class="trade-item"><div><span class="'+(trade.action==='BUY'?'buy':'sell')+'">'+trade.action+' '+trade.outcome+' '+shares(trade.shares)+' SH</span><div class="dim">@'+price(trade.price)+' · '+trade.reason+' · M'+trade.martingaleLevel+'</div></div><div class="'+cls(trade.pnl)+'">'+(trade.action==='BUY'?cash(trade.cost):(trade.pnl>=0?'+':'')+cash(trade.pnl))+'</div></article>').join('')}
+function renderResults(rows){$('resultCount').textContent=rows.length+' SETTLED';const signature=rows.map(row=>row.windowStart+':'+row.result+':'+row.realizedPnl).join('|');if(caches.results===signature)return;caches.results=signature;$('results').innerHTML=!rows.length?'<div class="empty">NO COMPLETED WINDOWS</div>':rows.map(row=>'<article class="result"><div><div>'+(row.result||'PENDING')+' · WINNER '+(row.winner||'—')+'</div><div class="dim">'+new Date(row.windowStart*1000).toLocaleTimeString()+' · '+row.resolutionSource+'</div></div><div class="'+cls(row.realizedPnl)+'">'+cash(row.realizedPnl)+'</div></article>').join('')}
+function renderTrades(rows){$('tradeCount').textContent=rows.length;const signature='trades:'+rows.map(trade=>trade.timestamp+trade.action+trade.price).join('|');if(caches.trades===signature)return;caches.trades=signature;$('trades').innerHTML=!rows.length?'<div class="empty">WAITING FOR TRADE</div>':rows.slice(0,40).map(trade=>'<article class="trade-item"><div><span class="'+(trade.action==='BUY'?'buy':'sell')+'">'+trade.action+' '+trade.outcome+' '+shares(trade.shares)+' SH</span><div class="dim">@'+price(trade.price)+' · '+trade.reason+'</div></div><div class="'+cls(trade.pnl)+'">'+(trade.action==='BUY'?cash(trade.cost):(trade.pnl>=0?'+':'')+cash(trade.pnl))+'</div></article>').join('')}
 function renderLogs(input){const signature=input.join('\u0000');if(caches.logs===signature)return;caches.logs=signature;const logs=input.slice(-240);$('logsPanel').innerHTML=logs.map(line=>'<div class="'+(line.includes('BUY')?'log-buy':line.includes('STOP')||line.includes('FAIL')?'log-loss':'')+'">'+line+'</div>').join('');$('logsPanel').scrollTop=$('logsPanel').scrollHeight}
 async function refresh(){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),850);try{const response=await fetch('/api/status',{cache:'no-store',signal:controller.signal});render(await response.json())}catch(error){$('uiLink').textContent='UI RETRY';$('uiLink').className='pill warn'}finally{clearTimeout(timer);setTimeout(refresh,100)}}
 refresh();

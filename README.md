@@ -10,8 +10,7 @@ A deterministic five-minute BTC paper bot with one strict lifecycle per UTC-alig
 - Close immediately when held-side bid reaches `0.79` or lower.
 - Track each side's maximum midpoint during the final two seconds.
 - The first side strictly above `0.90` during the final two seconds wins. If neither side meets that rule by window end, an open paper position is marked to its last CLOB midpoint so it can never block the next window.
-- A losing window advances martingale: 100 → 210 → 441 → 926 → 1,945 shares.
-- A win or flat trading window resets to 100 shares. After the fourth martingale loss, reset to 100 shares.
+- Each side's ask price history is tracked during the window. If the triggering side's ask ever dropped to `≤0.30` before hitting the trigger, buy `200 shares`. Otherwise buy `100 shares`.
 
 ## Window Rollover
 Discovery is deduplicated and starts for both current and next windows. At rollover the prior market is settled, its position/statistics are finalized, and the new current slug is used immediately. A missing or failed discovery never reuses stale prices or another market.

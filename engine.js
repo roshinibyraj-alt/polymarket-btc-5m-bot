@@ -7,8 +7,6 @@ const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.89);
 const STOP_PRICE = Number(process.env.STOP_PRICE || 0.79);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
 const BASE_SHARES = Number(process.env.BASE_SHARES || 100);
-const MARTINGALE_MULTIPLIER = Number(process.env.MARTINGALE_MULTIPLIER || 2.1);
-const MAX_MARTINGALES = Number(process.env.MAX_MARTINGALES || 4);
 const START_BANKROLL = Number(process.env.START_BANKROLL || 5000);
 const TAKER_FEE_BPS = Number(process.env.TAKER_FEE_BPS || 0);
 const CLOB_POLL_MS = Math.max(50, Number(process.env.CLOB_POLL_MS || 100));
@@ -21,9 +19,6 @@ function windowStartFor(timeMs) {
   return Math.floor(timeMs / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS;
 }
 function slugFor(start) { return `btc-updown-5m-${start}`; }
-function sharesForStreak(streak) {
-  return Math.round(BASE_SHARES * Math.pow(MARTINGALE_MULTIPLIER, streak));
-}
 
 class BtcBreakoutEngine {
   constructor(options = {}) {
@@ -36,7 +31,7 @@ class BtcBreakoutEngine {
     this.totalFees = 0;
     this.wins = 0;
     this.losses = 0;
-    this.lossStreak = 0;
+    this.askLow = new Map();
     this.currentStart = windowStartFor(Date.now());
     this.tradedThisWindow = false;
     this.openPosition = null;
@@ -178,8 +173,7 @@ class BtcBreakoutEngine {
       this.windowStats.set(key, {
         windowStart: start,
         windowEnd: start + WINDOW_SECONDS,
-        levelUsed: this.lossStreak,
-        plannedShares: this.currentShares(),
+        plannedShares: BASE_SHARES,
         buyCount: 0,
         sellCount: 0,
         invested: 0,
@@ -188,14 +182,11 @@ class BtcBreakoutEngine {
         winner: null,
         resolutionSource: null,
         settledAt: null,
-        nextLevel: null,
-        nextShares: null,
       });
     }
     return this.windowStats.get(key);
   }
 
-  currentShares() { return sharesForStreak(this.lossStreak); }
 
   applyQuote(token, bidValue, askValue) {
     const bid = Number.isFinite(bidValue) && bidValue > 0 && bidValue <= 1 ? bidValue : null;
@@ -209,6 +200,10 @@ class BtcBreakoutEngine {
     series.push({ t: Date.now(), p: token.mid });
     while (series.length > 2 && Date.now() - series[0].t > 5000) series.shift();
     this.priceHistory.set(token.tokenId, series.slice(-120));
+    if (Number.isFinite(ask)) {
+      const prevLow = this.askLow.get(token.tokenId);
+      if (prevLow == null || ask < prevLow) this.askLow.set(token.tokenId, ask);
+    }
   }
 
   trackFinalPrices(market, elapsed) {
@@ -254,8 +249,8 @@ class BtcBreakoutEngine {
   }
 
   enterPosition(market, token, triggerPrice) {
-
-    const shares = this.currentShares();
+    const askLow = this.askLow.get(token.tokenId);
+    const shares = (Number.isFinite(askLow) && askLow <= 0.30) ? 200 : BASE_SHARES;
     const entryPrice = token.ask;
     const cost = round2(shares * entryPrice);
     const entryFee = round2(cost * TAKER_FEE_BPS / 10000);
@@ -265,7 +260,6 @@ class BtcBreakoutEngine {
       return false;
     }
     const stats = this.getWindowStats(market.windowStart);
-    stats.levelUsed = this.lossStreak;
     stats.plannedShares = shares;
     this.bankroll = round2(this.bankroll - cost - entryFee);
     this.totalFees = round2(this.totalFees + entryFee);
@@ -283,7 +277,6 @@ class BtcBreakoutEngine {
       status: 'OPEN',
       openedAt: now,
       windowStart: market.windowStart,
-      martingaleLevel: this.lossStreak,
       signal: {
         triggerPrice,
         triggerSource: triggerPrice === token.bid ? 'BID' : triggerPrice === token.ask ? 'ASK' : 'MID',
@@ -338,7 +331,6 @@ class BtcBreakoutEngine {
       pnl,
       reason,
       orderType: 'CLOB-MARKET-PAPER',
-      martingaleLevel: position.martingaleLevel,
       signal: position.signal,
     });
     this.trades = this.trades.slice(-200);
@@ -347,6 +339,8 @@ class BtcBreakoutEngine {
   settleWindow(market) {
     if (market.settled) return;
     market.settled = true;
+    this.askLow.delete(market.up.tokenId);
+    this.askLow.delete(market.down.tokenId);
     if (market.windowStart === this.currentStart || this.openPosition?.windowStart === market.windowStart) this.tradedThisWindow = false;
     if (!Number.isFinite(market.finalUpMax) && Number.isFinite(market.up.mid)) market.finalUpMax = market.up.mid;
     if (!Number.isFinite(market.finalDownMax) && Number.isFinite(market.down.mid)) market.finalDownMax = market.down.mid;
@@ -381,20 +375,15 @@ class BtcBreakoutEngine {
     stats.resolutionSource = market.resolutionSource;
     stats.settledAt = Date.now();
     if (stats.buyCount > 0) {
-      const previousStreak = stats.levelUsed;
       if (net < 0) {
         this.losses += 1;
-        this.lossStreak = previousStreak + 1 > MAX_MARTINGALES ? 0 : previousStreak + 1;
       } else {
         this.wins += 1;
-        this.lossStreak = 0;
       }
     }
-    stats.nextLevel = this.lossStreak;
-    stats.nextShares = this.currentShares();
     this.results.unshift({ ...stats });
     this.results = this.results.slice(0, 40);
-    this.log(`WINDOW ${market.slug} ${stats.result} winner ${market.winner || 'UNKNOWN'} net $${net.toFixed(2)} next ${this.currentShares()} SH`);
+    this.log(`WINDOW ${market.slug} ${stats.result} winner ${market.winner || 'UNKNOWN'} net $${net.toFixed(2)}`);
     return stats;
   }
 
@@ -531,7 +520,7 @@ class BtcBreakoutEngine {
     const markValue = round2(this.bankroll + openValue);
     return {
       version: '6.0.0',
-      strategy: `ONE-TICK TOUCH >=${ENTRY_PRICE.toFixed(2)} | MARKET FILL | STOP <=${STOP_PRICE.toFixed(2)} | FINAL-2S >${RESOLUTION_PRICE.toFixed(2)}`,
+      strategy: `UP/DOWN BOTH SIDES · ASK<=0.30 → 200 SH · ASK>0.30 → 100 SH · ENTRY >=${ENTRY_PRICE.toFixed(2)} · STOP <=${STOP_PRICE.toFixed(2)} · FINAL-2S >${RESOLUTION_PRICE.toFixed(2)}`,
       serverTime: Date.now(),
       connected: this.isClobFresh(),
       marketReady: Boolean(market),
@@ -550,11 +539,7 @@ class BtcBreakoutEngine {
       wins: this.wins,
       losses: this.losses,
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
-      lossStreak: this.lossStreak,
-      currentShares: this.currentShares(),
-      nextShares: this.lossStreak >= MAX_MARTINGALES ? BASE_SHARES : sharesForStreak(this.lossStreak + 1),
-      stakeSequence: Array.from({ length: MAX_MARTINGALES + 1 }, (_, index) => sharesForStreak(index)),
-      maxMartingales: MAX_MARTINGALES,
+      askLow: Object.fromEntries([...this.askLow].map(([k, v]) => [k, v])),
       tradedThisWindow: this.tradedThisWindow,
       position: position ? { ...position, token: undefined, pnl: floating } : null,
       market: market ? this.publicMarket(market) : null,
@@ -568,8 +553,6 @@ class BtcBreakoutEngine {
         entryPrice: ENTRY_PRICE,
         stopPrice: STOP_PRICE,
         resolutionPrice: RESOLUTION_PRICE,
-        martingaleMultiplier: MARTINGALE_MULTIPLIER,
-        maxMartingales: MAX_MARTINGALES,
         pollMs: CLOB_POLL_MS,
         feeBps: TAKER_FEE_BPS,
       },
@@ -606,7 +589,6 @@ class BtcBreakoutEngine {
 module.exports = {
   BtcBreakoutEngine,
   config: {
-    BASE_SHARES, ENTRY_PRICE, STOP_PRICE, RESOLUTION_PRICE,
-    MARTINGALE_MULTIPLIER, MAX_MARTINGALES, CLOB_POLL_MS,
+    BASE_SHARES, ENTRY_PRICE, STOP_PRICE, RESOLUTION_PRICE, CLOB_POLL_MS,
   },
 };
