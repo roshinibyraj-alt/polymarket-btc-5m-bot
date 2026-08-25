@@ -5,7 +5,7 @@ const CLOB_REST = process.env.CLOB_REST || 'https://clob.polymarket.com';
 const WINDOW_SECONDS = Number(process.env.WINDOW_SECONDS || 300);
 const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.60);
 const PRICE_TOLERANCE = Number(process.env.PRICE_TOLERANCE || 0.02);
-const TARGET_PROFIT = Number(process.env.TARGET_PROFIT || 50);
+const TARGET_PROFIT = Number(process.env.TARGET_PROFIT || 10);
 const WAIT_AFTER_OPEN = Number(process.env.WAIT_AFTER_OPEN || 60);
 const MAX_WINDOW_INVESTMENT = Number(process.env.MAX_WINDOW_INVESTMENT || 2000);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
@@ -206,14 +206,14 @@ class BtcBreakoutEngine {
     return this.windowStats.get(key);
   }
 
-  profitPerShare() {
+  profitPerShare(entryPrice) {
     const entryFeeRate = TAKER_FEE_BPS / 10000;
     const exitFeeRate = TAKER_FEE_BPS / 10000;
-    return round5((1.00 - exitFeeRate) - ENTRY_PRICE * (1 + entryFeeRate));
+    return round5((1.00 - exitFeeRate) - entryPrice * (1 + entryFeeRate));
   }
 
-  calculateShares() {
-    const pps = this.profitPerShare();
+  calculateShares(entryPrice) {
+    const pps = this.profitPerShare(entryPrice);
     if (pps <= 0) return 100;
     return Math.ceil((TARGET_PROFIT + this.windowSunkCost) / pps);
   }
@@ -293,8 +293,8 @@ class BtcBreakoutEngine {
   }
 
   enterPosition(market, token, triggerPrice) {
-    const shares = this.calculateShares();
     const entryPrice = token.ask;
+    const shares = this.calculateShares(entryPrice);
     const cost = round2(shares * entryPrice);
     const entryFee = round2(cost * TAKER_FEE_BPS / 10000);
     if (cost + entryFee > this.bankroll) {
@@ -352,8 +352,8 @@ class BtcBreakoutEngine {
       this.closePosition(this.openPosition, 0, 'FLIP_ABANDONED');
     }
     this.windowFlipCount += 1;
-    const shares = this.calculateShares();
     const entryPrice = token.ask;
+    const shares = this.calculateShares(entryPrice);
     const cost = round2(shares * entryPrice);
     const entryFee = round2(cost * TAKER_FEE_BPS / 10000);
     if (cost + entryFee > this.bankroll) {

@@ -61,7 +61,7 @@ async function fakeFetch(url) {
   engine.applyQuote(market.down, 0.79, 0.81);
   assert.equal(engine.evaluateEntry(market), false, 'ask=0.81 above 0.60 must NOT trigger');
 
-  // --- TEST 4: ask=0.60 triggers → 125 shares ---
+  // --- TEST 4: ask=0.60 triggers → 25 shares ---
   engine.tradedThisWindow = false;
   engine.openPosition = null;
   engine.monitoringActive = false;
@@ -69,8 +69,8 @@ async function fakeFetch(url) {
   engine.applyQuote(market.down, 0.39, 0.41);
   assert.equal(engine.evaluateEntry(market), true, 'fires at ask=0.60');
   assert.equal(engine.openPosition?.outcome, 'UP');
-  assert.equal(engine.openPosition?.shares, 125, '125 shares');
-  assert.equal(engine.accumUpShares, 125);
+  assert.equal(engine.openPosition?.shares, 25, '25 shares for $10 target');
+  assert.equal(engine.accumUpShares, 25);
 
   // --- TEST 5: Flip — opposite ask=0.60 ---
   engine.applyQuote(market.up, 0.30, 0.32);
@@ -97,7 +97,7 @@ async function fakeFetch(url) {
   const flip1Shares = engine.openPosition.shares;
   assert.equal(engine.evaluateFlip(market), true, 'second flip');
   assert.equal(engine.windowFlipCount, 2);
-  assert.ok(engine.openPosition.shares > flip1Shares);
+  assert.ok(engine.openPosition.shares > flip1Shares, 'flip grows');
 
   // --- TEST 9: Resolution ---
   engine.settleWindow(market);
@@ -111,7 +111,7 @@ async function fakeFetch(url) {
 
   console.log(JSON.stringify({
     trigger: 'ask <= 0.60 && ask >= 0.50',
-    entryShares: 125,
+    entryShares: 25,
     maxInvestment: `$${config.MAX_WINDOW_INVESTMENT}`,
   }));
   console.log('BTC FLIP BOT SMOKE PASS');
