@@ -4,8 +4,10 @@ const GAMMA_API = process.env.GAMMA_API || 'https://gamma-api.polymarket.com';
 const CLOB_REST = process.env.CLOB_REST || 'https://clob.polymarket.com';
 const WINDOW_SECONDS = Number(process.env.WINDOW_SECONDS || 300);
 const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.60);
+const PRICE_TOLERANCE = Number(process.env.PRICE_TOLERANCE || 0.02);
 const TARGET_PROFIT = Number(process.env.TARGET_PROFIT || 50);
 const WAIT_AFTER_OPEN = Number(process.env.WAIT_AFTER_OPEN || 60);
+const MAX_WINDOW_INVESTMENT = Number(process.env.MAX_WINDOW_INVESTMENT || 2000);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
 const START_BANKROLL = Number(process.env.START_BANKROLL || 5000);
 const TAKER_FEE_BPS = Number(process.env.TAKER_FEE_BPS || 0);
@@ -248,7 +250,7 @@ class BtcBreakoutEngine {
     }
     const candidates = [market.up, market.down].map(token => {
       return { token, ask: token.ask };
-    }).filter(candidate => Number.isFinite(candidate.ask) && candidate.ask <= ENTRY_PRICE);
+    }).filter(candidate => Number.isFinite(candidate.ask) && Math.abs(candidate.ask - ENTRY_PRICE) <= PRICE_TOLERANCE);
     if (!candidates.length) return false;
     candidates.sort((left, right) => left.ask - right.ask);
     this.enterPosition(market, candidates[0].token, candidates[0].ask);
@@ -265,7 +267,7 @@ class BtcBreakoutEngine {
     if (!Number.isFinite(flipToken.ask)) return false;
     const flipKey = `${market.windowStart}:${flipToken.tokenId}`;
     if (flipKey === this.lastFlipKey) return false;
-    if (flipToken.ask > ENTRY_PRICE) return false;
+    if (Math.abs(flipToken.ask - ENTRY_PRICE) > PRICE_TOLERANCE) return false;
     this.lastFlipKey = flipKey;
     this.flipPosition(market, flipToken);
     return true;
@@ -279,6 +281,11 @@ class BtcBreakoutEngine {
     if (cost + entryFee > this.bankroll) {
       this.tradedThisWindow = true;
       this.log(`ENTRY SKIPPED need $${round2(cost + entryFee)} available $${this.bankroll}`);
+      return false;
+    }
+    if (this.windowSunkCost + cost + entryFee > MAX_WINDOW_INVESTMENT) {
+      this.tradedThisWindow = true;
+      this.log(`ENTRY SKIPPED max window investment $${MAX_WINDOW_INVESTMENT} would be exceeded`);
       return false;
     }
     const stats = this.getWindowStats(market.windowStart);
@@ -332,6 +339,10 @@ class BtcBreakoutEngine {
     const entryFee = round2(cost * TAKER_FEE_BPS / 10000);
     if (cost + entryFee > this.bankroll) {
       this.log(`FLIP SKIPPED need $${round2(cost + entryFee)} available $${this.bankroll}`);
+      return false;
+    }
+    if (this.windowSunkCost + cost + entryFee > MAX_WINDOW_INVESTMENT) {
+      this.log(`FLIP SKIPPED max window investment $${MAX_WINDOW_INVESTMENT} would be exceeded`);
       return false;
     }
     const stats = this.getWindowStats(market.windowStart);
@@ -625,8 +636,10 @@ class BtcBreakoutEngine {
       discoveryErrors: this.discoveryErrors,
       config: {
         entryPrice: ENTRY_PRICE,
+        priceTolerance: PRICE_TOLERANCE,
         targetProfit: TARGET_PROFIT,
         waitAfterOpen: WAIT_AFTER_OPEN,
+        maxWindowInvestment: MAX_WINDOW_INVESTMENT,
         resolutionPrice: RESOLUTION_PRICE,
         pollMs: CLOB_POLL_MS,
         feeBps: TAKER_FEE_BPS,
@@ -664,6 +677,6 @@ class BtcBreakoutEngine {
 module.exports = {
   BtcBreakoutEngine,
   config: {
-    ENTRY_PRICE, TARGET_PROFIT, WAIT_AFTER_OPEN, RESOLUTION_PRICE, CLOB_POLL_MS,
+    ENTRY_PRICE, PRICE_TOLERANCE, TARGET_PROFIT, WAIT_AFTER_OPEN, MAX_WINDOW_INVESTMENT, RESOLUTION_PRICE, CLOB_POLL_MS,
   },
 };

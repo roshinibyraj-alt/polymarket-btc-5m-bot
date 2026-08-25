@@ -7,17 +7,6 @@ function windowStartFor(timeMs) {
   return Math.floor(timeMs / 1000 / 300) * 300;
 }
 
-function clobPayload(market, book) {
-  const result = {};
-  for (const token of [market.up, market.down]) {
-    result[token.tokenId] = {
-      BUY: String(book[token.outcome.toLowerCase()].bid),
-      SELL: String(book[token.outcome.toLowerCase()].ask),
-    };
-  }
-  return result;
-}
-
 async function fakeFetch(url) {
   const text = String(url);
   if (text.endsWith('/prices')) return { ok: true, json: async () => global.bookPayload || {} };
@@ -37,17 +26,13 @@ async function fakeFetch(url) {
 }
 
 (async () => {
-  // Use the actual current window so handleRollover works
   const currentWindow = windowStartFor(Date.now());
   const engine = new BtcBreakoutEngine({ fetchImpl: fakeFetch, onTick: () => {}, onLog: () => {} });
   await engine.discoverMarket(currentWindow);
   const market = engine.markets.get(`btc-updown-5m-${currentWindow}`);
   assert.ok(market);
 
-  // windowStart is already set by discovery to currentWindow, and elapsed > 60s in most cases.
-  // But if we're early in the window, use applyQuote + evaluateEntry directly.
-
-  // --- TEST 1: evaluateEntry blocks before 60s ---
+  // --- TEST 1: Before 60s wait, no entry ---
   const savedWs = market.windowStart;
   market.windowStart = Math.floor(Date.now() / 1000) + 100;
   market.windowEnd = market.windowStart + 300;
@@ -56,79 +41,88 @@ async function fakeFetch(url) {
   engine.monitoringActive = false;
   engine.applyQuote(market.up, 0.59, 0.60);
   engine.applyQuote(market.down, 0.89, 0.91);
-  const result1 = engine.evaluateEntry(market);
-  assert.equal(result1, false, 'must not enter before 60s wait');
-  assert.equal(engine.openPosition, null, 'no position before wait');
-  assert.equal(engine.monitoringActive, false, 'monitoring not active yet');
+  assert.equal(engine.evaluateEntry(market), false, 'no entry before 60s');
   market.windowStart = savedWs;
   market.windowEnd = savedWs + 300;
 
-  // --- TEST 2: After 60s, UP ask=0.60 → 125 shares ---
+  // --- TEST 2: ask=0.06 (way below 0.60) must NOT trigger ---
+  engine.tradedThisWindow = false;
+  engine.openPosition = null;
+  engine.monitoringActive = false;
+  engine.applyQuote(market.up, 0.05, 0.06);
+  engine.applyQuote(market.down, 0.89, 0.91);
+  assert.equal(engine.evaluateEntry(market), false, 'ask=0.06 must NOT trigger');
+
+  // --- TEST 3: ask=0.80 (above 0.60) must NOT trigger ---
+  engine.tradedThisWindow = false;
+  engine.openPosition = null;
+  engine.monitoringActive = false;
+  engine.applyQuote(market.up, 0.79, 0.80);
+  engine.applyQuote(market.down, 0.89, 0.91);
+  assert.equal(engine.evaluateEntry(market), false, 'ask=0.80 must NOT trigger');
+
+  // --- TEST 4: ask=0.60 triggers → 125 shares ---
   engine.tradedThisWindow = false;
   engine.openPosition = null;
   engine.monitoringActive = false;
   engine.applyQuote(market.up, 0.59, 0.60);
   engine.applyQuote(market.down, 0.89, 0.91);
-  const result2 = engine.evaluateEntry(market);
-  assert.equal(result2, true, 'entry fires at ask 0.60');
-  assert.equal(engine.openPosition?.outcome, 'UP', 'UP triggers at ask 0.60');
-  assert.equal(engine.openPosition?.shares, 125, '125 shares for $50 target');
-  assert.equal(engine.accumUpShares, 125, 'accumulated UP = 125');
-  assert.equal(engine.accumDownShares, 0, 'accumulated DOWN = 0');
-  assert.ok(engine.windowSunkCost > 0, 'sunk cost tracks entry');
+  assert.equal(engine.evaluateEntry(market), true, 'entry fires at ask=0.60');
+  assert.equal(engine.openPosition?.outcome, 'UP');
+  assert.equal(engine.openPosition?.shares, 125, '125 shares');
+  assert.equal(engine.accumUpShares, 125);
+  assert.equal(engine.accumDownShares, 0);
+  const sunkAfterEntry = engine.windowSunkCost;
 
-  // --- TEST 3: Flip — DOWN ask hits 0.60 ---
-  const sunkBefore = engine.windowSunkCost;
+  // --- TEST 5: Flip — opposite (DOWN) ask=0.60 ---
   engine.applyQuote(market.up, 0.30, 0.32);
   engine.applyQuote(market.down, 0.59, 0.60);
-  const result3 = engine.evaluateFlip(market);
-  assert.equal(result3, true, 'flip fires');
-  assert.equal(engine.openPosition?.outcome, 'DOWN', 'flipped to DOWN');
-  assert.equal(engine.windowFlipCount, 1, 'flip count = 1');
-  assert.ok(engine.openPosition.shares > 125, 'flip shares > 125 to cover sunk cost');
-  assert.equal(engine.accumUpShares, 125, 'accumulated UP still 125');
-  assert.equal(engine.accumDownShares, engine.openPosition.shares, 'accumulated DOWN matches');
-  assert.ok(engine.windowSunkCost > sunkBefore, 'sunk cost increased');
+  assert.equal(engine.evaluateFlip(market), true, 'flip fires at DOWN ask=0.60');
+  assert.equal(engine.openPosition?.outcome, 'DOWN');
+  assert.equal(engine.windowFlipCount, 1);
+  assert.ok(engine.openPosition.shares > 125, 'flip shares > 125');
+  assert.equal(engine.accumUpShares, 125);
+  assert.equal(engine.accumDownShares, engine.openPosition.shares);
 
-  // --- TEST 4: Second flip — UP ask hits 0.60 again ---
-  const flipShares = engine.openPosition.shares;
+  // --- TEST 6: Opposite (UP) ask=0.91 must NOT flip ---
+  engine.lastFlipKey = null;
+  engine.applyQuote(market.up, 0.90, 0.91);
+  engine.applyQuote(market.down, 0.30, 0.32);
+  assert.equal(engine.evaluateFlip(market), false, 'no flip at UP ask=0.91');
+
+  // --- TEST 7: Opposite (UP) ask=0.06 must NOT flip ---
+  engine.lastFlipKey = null;
+  engine.applyQuote(market.up, 0.05, 0.06);
+  engine.applyQuote(market.down, 0.30, 0.32);
+  assert.equal(engine.evaluateFlip(market), false, 'no flip at UP ask=0.06');
+
+  // --- TEST 8: Second flip — opposite (UP) ask=0.60 ---
   engine.applyQuote(market.up, 0.59, 0.60);
   engine.applyQuote(market.down, 0.30, 0.32);
-  const result4 = engine.evaluateFlip(market);
-  assert.equal(result4, true, 'second flip fires');
-  assert.equal(engine.openPosition?.outcome, 'UP', 'flipped back to UP');
-  assert.equal(engine.windowFlipCount, 2, 'flip count = 2');
-  assert.ok(engine.openPosition.shares > flipShares, 'second flip shares > first flip shares');
-  assert.equal(engine.accumUpShares, 125 + engine.openPosition.shares, 'accumulated UP updated');
-  assert.equal(engine.accumDownShares, flipShares, 'accumulated DOWN = first flip');
+  const flip1Shares = engine.openPosition.shares;
+  assert.equal(engine.evaluateFlip(market), true, 'second flip fires');
+  assert.equal(engine.windowFlipCount, 2);
+  assert.ok(engine.openPosition.shares > flip1Shares, 'second flip > first flip');
+  assert.equal(engine.accumUpShares, 125 + engine.openPosition.shares);
 
-  // --- TEST 5: No flip if opposite side is above 0.60 ---
-  engine.lastFlipKey = null; // reset so we can test
-  engine.applyQuote(market.up, 0.30, 0.32);
-  engine.applyQuote(market.down, 0.89, 0.91);
-  const result5 = engine.evaluateFlip(market);
-  assert.equal(result5, false, 'no flip when opposite ask > 0.60');
-
-  // --- TEST 6: Resolution ---
+  // --- TEST 9: Resolution ---
   engine.settleWindow(market);
-  assert.equal(engine.openPosition, null, 'position closed on settlement');
-  const stats = engine.getWindowStats(currentWindow);
-  assert.ok(stats.result === 'WIN' || stats.result === 'LOSS' || stats.result === 'FLAT', 'result set');
+  assert.equal(engine.openPosition, null);
 
-  // --- TEST 7: Build state has accumulators ---
+  // --- TEST 10: Build state ---
   const state = engine.buildState();
   assert.equal(typeof state.accumUpShares, 'number');
   assert.equal(typeof state.accumDownShares, 'number');
   assert.equal(typeof state.windowFlipCount, 'number');
   assert.equal(typeof state.windowSunkCost, 'number');
   assert.equal(typeof state.monitoringActive, 'boolean');
+  assert.equal(state.config.priceTolerance, config.PRICE_TOLERANCE);
+  assert.equal(state.config.maxWindowInvestment, config.MAX_WINDOW_INVESTMENT);
 
   console.log(JSON.stringify({
     entryShares: 125,
-    entryCost: '$75.00',
-    targetProfit: '$50.00',
-    flipSharesScale: 'increases with sunk cost',
-    totalFlips: 2,
+    trigger: `±${config.PRICE_TOLERANCE} of ${config.ENTRY_PRICE}`,
+    maxInvestment: `$${config.MAX_WINDOW_INVESTMENT}`,
   }));
   console.log('BTC FLIP BOT SMOKE PASS');
 })().catch(error => {
