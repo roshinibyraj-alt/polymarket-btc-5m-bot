@@ -260,17 +260,14 @@ class BtcBreakoutEngine {
       this.monitoringActive = true;
       this.log(`MONITORING ACTIVE after ${WAIT_AFTER_OPEN}s wait`);
     }
-    const MIN_TRIGGER = ENTRY_PRICE - 0.10;
+    const TRIGGER = ENTRY_PRICE - 0.02;
     const candidates = [market.up, market.down].map(token => {
-      return { token, ask: token.ask };
-    }).filter(candidate =>
-      Number.isFinite(candidate.ask) &&
-      candidate.ask <= ENTRY_PRICE &&
-      candidate.ask >= MIN_TRIGGER,
-    );
+      const best = token.mid ?? token.ask ?? token.bid;
+      return { token, price: best };
+    }).filter(c => Number.isFinite(c.price) && c.price >= TRIGGER);
     if (!candidates.length) return false;
-    candidates.sort((left, right) => left.ask - right.ask);
-    this.enterPosition(market, candidates[0].token, candidates[0].ask);
+    candidates.sort((a, b) => a.price - b.price);
+    this.enterPosition(market, candidates[0].token, candidates[0].price);
     return true;
   }
 
@@ -281,18 +278,15 @@ class BtcBreakoutEngine {
     if (elapsed < WAIT_AFTER_OPEN) return false;
     const currentOutcome = this.openPosition.outcome;
     const flipToken = currentOutcome === 'UP' ? market.down : market.up;
-    if (!Number.isFinite(flipToken.ask)) return false;
-    const MIN_TRIGGER = ENTRY_PRICE - 0.10;
-    if (flipToken.ask > ENTRY_PRICE || flipToken.ask < MIN_TRIGGER) return false;
-    const flipKey = `${market.windowStart}:${flipToken.tokenId}`;
-    if (flipKey === this.lastFlipKey) return false;
-    this.lastFlipKey = flipKey;
+    const price = flipToken.mid ?? flipToken.ask ?? flipToken.bid;
+    if (!Number.isFinite(price)) return false;
+    if (price < ENTRY_PRICE - 0.02) return false;
     this.flipPosition(market, flipToken);
     return true;
   }
 
   enterPosition(market, token, triggerPrice) {
-    const entryPrice = token.ask;
+    const entryPrice = token.mid ?? token.ask ?? token.bid;
     const shares = this.calculateShares(0);
     const cost = round2(shares * entryPrice);
     const entryFee = round2(cost * TAKER_FEE_BPS / 10000);
@@ -348,7 +342,7 @@ class BtcBreakoutEngine {
 
   flipPosition(market, token) {
     this.windowFlipCount += 1;
-    const entryPrice = token.ask;
+    const entryPrice = token.mid ?? token.ask ?? token.bid;
     const shares = this.calculateShares(this.windowFlipCount);
     const cost = round2(shares * entryPrice);
     const entryFee = round2(cost * TAKER_FEE_BPS / 10000);
