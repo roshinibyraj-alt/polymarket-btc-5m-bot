@@ -212,12 +212,9 @@ class BtcBreakoutEngine {
     return round5((1.00 - exitFeeRate) - entryPrice * (1 + entryFeeRate));
   }
 
-  calculateShares(entryPrice, accumThisSide = 0) {
-    const pps = this.profitPerShare(entryPrice);
-    if (pps <= 0) return 100;
-    const needed = TARGET_PROFIT + this.windowSunkCost - accumThisSide;
-    if (needed <= 0) return 0;
-    return Math.ceil(needed / pps);
+  calculateShares(flipNumber = 0) {
+    const DOUBLING = [20, 40, 80, 160, 320, 640, 1280];
+    return DOUBLING[Math.min(flipNumber, DOUBLING.length - 1)];
   }
 
   applyQuote(token, bidValue, askValue) {
@@ -296,8 +293,7 @@ class BtcBreakoutEngine {
 
   enterPosition(market, token, triggerPrice) {
     const entryPrice = token.ask;
-    const accumThisSide = token.outcome === 'UP' ? this.accumUpShares : this.accumDownShares;
-    const shares = this.calculateShares(entryPrice, accumThisSide);
+    const shares = this.calculateShares(0);
     const cost = round2(shares * entryPrice);
     const entryFee = round2(cost * TAKER_FEE_BPS / 10000);
     if (cost + entryFee > this.bankroll) {
@@ -353,12 +349,7 @@ class BtcBreakoutEngine {
   flipPosition(market, token) {
     this.windowFlipCount += 1;
     const entryPrice = token.ask;
-    const accumThisSide = token.outcome === 'UP' ? this.accumUpShares : this.accumDownShares;
-    const shares = this.calculateShares(entryPrice, accumThisSide);
-    if (shares <= 0) {
-      this.log(`FLIP SKIPPED - already have enough ${token.outcome} shares`);
-      return false;
-    }
+    const shares = this.calculateShares(this.windowFlipCount);
     const cost = round2(shares * entryPrice);
     const entryFee = round2(cost * TAKER_FEE_BPS / 10000);
     if (cost + entryFee > this.bankroll) {
