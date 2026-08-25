@@ -6,7 +6,7 @@ const WINDOW_SECONDS = Number(process.env.WINDOW_SECONDS || 300);
 const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.60);
 const PRICE_TOLERANCE = Number(process.env.PRICE_TOLERANCE || 0.02);
 const TARGET_PROFIT = Number(process.env.TARGET_PROFIT || 10);
-const WAIT_AFTER_OPEN = Number(process.env.WAIT_AFTER_OPEN || 60);
+const WAIT_AFTER_OPEN = 0;
 const MAX_WINDOW_INVESTMENT = Number(process.env.MAX_WINDOW_INVESTMENT || 2000);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
 const START_BANKROLL = Number(process.env.START_BANKROLL || 5000);
@@ -656,7 +656,7 @@ class BtcBreakoutEngine {
     const drawdown = round2(this.peakEquity - markValue);
     return {
       version: '7.0.0',
-      strategy: `WAIT ${WAIT_AFTER_OPEN}s · ENTRY @${ENTRY_PRICE.toFixed(2)} · MAX 4 FLIPS · DOUBLING 20→320 · TARGET $${TARGET_PROFIT}`,
+      strategy: `ENTRY @${ENTRY_PRICE.toFixed(2)} · MAX 4 FLIPS · DOUBLING 20→320 · TARGET $${TARGET_PROFIT}`,
       serverTime: Date.now(),
       connected: this.isClobFresh(),
       marketReady: Boolean(market),
