@@ -212,10 +212,12 @@ class BtcBreakoutEngine {
     return round5((1.00 - exitFeeRate) - entryPrice * (1 + entryFeeRate));
   }
 
-  calculateShares(entryPrice) {
+  calculateShares(entryPrice, accumThisSide = 0) {
     const pps = this.profitPerShare(entryPrice);
     if (pps <= 0) return 100;
-    return Math.ceil((TARGET_PROFIT + this.windowSunkCost) / pps);
+    const needed = TARGET_PROFIT + this.windowSunkCost - accumThisSide;
+    if (needed <= 0) return 0;
+    return Math.ceil(needed / pps);
   }
 
   applyQuote(token, bidValue, askValue) {
@@ -294,7 +296,8 @@ class BtcBreakoutEngine {
 
   enterPosition(market, token, triggerPrice) {
     const entryPrice = token.ask;
-    const shares = this.calculateShares(entryPrice);
+    const accumThisSide = token.outcome === 'UP' ? this.accumUpShares : this.accumDownShares;
+    const shares = this.calculateShares(entryPrice, accumThisSide);
     const cost = round2(shares * entryPrice);
     const entryFee = round2(cost * TAKER_FEE_BPS / 10000);
     if (cost + entryFee > this.bankroll) {
@@ -348,12 +351,14 @@ class BtcBreakoutEngine {
   }
 
   flipPosition(market, token) {
-    if (this.openPosition) {
-      this.closePosition(this.openPosition, 0, 'FLIP_ABANDONED');
-    }
     this.windowFlipCount += 1;
     const entryPrice = token.ask;
-    const shares = this.calculateShares(entryPrice);
+    const accumThisSide = token.outcome === 'UP' ? this.accumUpShares : this.accumDownShares;
+    const shares = this.calculateShares(entryPrice, accumThisSide);
+    if (shares <= 0) {
+      this.log(`FLIP SKIPPED - already have enough ${token.outcome} shares`);
+      return false;
+    }
     const cost = round2(shares * entryPrice);
     const entryFee = round2(cost * TAKER_FEE_BPS / 10000);
     if (cost + entryFee > this.bankroll) {
@@ -454,18 +459,49 @@ class BtcBreakoutEngine {
     if (upStrong !== downStrong) {
       market.winner = upStrong ? 'UP' : 'DOWN';
       market.resolutionSource = 'CLOB_FINAL_2S';
+      const winningShares = market.winner === 'UP' ? this.accumUpShares : this.accumDownShares;
+      const payout = round2(winningShares);
+      const exitFee = round2(payout * TAKER_FEE_BPS / 10000);
+      const net = round2(payout - exitFee - this.windowSunkCost);
+      this.bankroll = round2(this.bankroll + payout - exitFee);
+      this.totalFees = round2(this.totalFees + exitFee);
+      this.realizedPnl = round2(this.realizedPnl + net);
       const position = this.openPosition;
       if (position?.slug === market.slug) {
-        this.closePosition(position, position.outcome === market.winner ? 1 : 0, 'WINDOW_RESOLUTION');
+        position.status = 'CLOSED';
+        position.exitPrice = 1;
+        position.pnl = net;
+        position.proceeds = payout;
+        position.closedAt = Date.now();
+        position.closeReason = 'WINDOW_RESOLUTION';
+        const stats = this.getWindowStats(market.windowStart);
+        stats.sellCount += 1;
+        stats.realizedPnl = round2(stats.realizedPnl + net);
+        this.pushTrade('SELL', position, 1, net, 'WINDOW_RESOLUTION');
+        this.log(`SETTLE ${market.winner} WON ${winningShares} SH PAYOUT $${payout.toFixed(2)} SUNK $${this.windowSunkCost.toFixed(2)} NET ${net >= 0 ? '+' : '-'}$${Math.abs(net).toFixed(2)}`);
+      } else {
+        this.log(`SETTLE ${market.winner} WON ${winningShares} SH PAYOUT $${payout.toFixed(2)} SUNK $${this.windowSunkCost.toFixed(2)} NET ${net >= 0 ? '+' : '-'}$${Math.abs(net).toFixed(2)} (no openPosition)`);
       }
+      this.openPosition = null;
     } else {
       market.winner = null;
       market.resolutionSource = 'NO_SIDE_ABOVE_090';
+      const losingShares = this.accumUpShares + this.accumDownShares;
+      const totalLoss = round2(-this.windowSunkCost);
+      this.realizedPnl = round2(this.realizedPnl + totalLoss);
+      this.log(`SETTLE INDETERMINATE ${losingShares} SH LOST $${this.windowSunkCost.toFixed(2)}`);
       const position = this.openPosition;
       if (position?.slug === market.slug) {
-        const mark = Number.isFinite(position.token.mid) ? position.token.mid : position.entryPrice;
-        this.closePosition(position, mark, 'INDETERMINATE_WINDOW_END');
+        position.status = 'CLOSED';
+        position.exitPrice = 0;
+        position.pnl = totalLoss;
+        position.closedAt = Date.now();
+        position.closeReason = 'INDETERMINATE_WINDOW_END';
+        const stats = this.getWindowStats(market.windowStart);
+        stats.sellCount += 1;
+        this.pushTrade('SELL', position, 0, totalLoss, 'INDETERMINATE_WINDOW_END');
       }
+      this.openPosition = null;
     }
     this.finalizeStats(market);
   }
@@ -504,8 +540,13 @@ class BtcBreakoutEngine {
     if (previous && !previous.settled) {
       this.settleWindow(previous);
     } else if (this.openPosition?.windowStart === this.currentStart) {
-      const mark = Number.isFinite(this.openPosition.token.mid) ? this.openPosition.token.mid : this.openPosition.entryPrice;
-      this.closePosition(this.openPosition, mark, 'WINDOW_ROLLOVER');
+      const rolloverMarket = this.markets.get(slugFor(this.currentStart));
+      if (rolloverMarket && !rolloverMarket.settled) {
+        this.settleWindow(rolloverMarket);
+      } else {
+        const mark = Number.isFinite(this.openPosition.token.mid) ? this.openPosition.token.mid : this.openPosition.entryPrice;
+        this.closePosition(this.openPosition, mark, 'WINDOW_ROLLOVER');
+      }
     }
     this.currentStart = start;
     this.tradedThisWindow = false;
