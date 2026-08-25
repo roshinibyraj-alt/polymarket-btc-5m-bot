@@ -215,7 +215,7 @@ class BtcBreakoutEngine {
   }
 
   calculateShares(flipNumber = 0) {
-    const DOUBLING = [20, 40, 80, 160, 320];
+    const DOUBLING = [20, 40, 80];
     return DOUBLING[Math.min(flipNumber, DOUBLING.length - 1)];
   }
 
@@ -300,7 +300,7 @@ class BtcBreakoutEngine {
     if (elapsed < WAIT_AFTER_OPEN) return false;
     const currentOutcome = this.openPosition.outcome;
     const flipToken = currentOutcome === 'UP' ? market.down : market.up;
-    if (this.windowFlipCount >= 4) return false;
+    if (this.windowFlipCount >= 2) return false;
     const price = flipToken.mid ?? flipToken.ask ?? flipToken.bid;
     if (!Number.isFinite(price)) return false;
     if (price < ENTRY_PRICE - 0.02) return false;
@@ -367,7 +367,7 @@ class BtcBreakoutEngine {
   }
 
   flipPosition(market, token) {
-    if (this.windowFlipCount >= 4) return false;
+    if (this.windowFlipCount >= 2) return false;
     this.windowFlipCount += 1;
     const CEILING = 0.99;
     const shares = this.calculateShares(this.windowFlipCount);
@@ -695,7 +695,7 @@ class BtcBreakoutEngine {
     const drawdown = round2(this.peakEquity - markValue);
     return {
       version: '7.0.0',
-      strategy: `GTC@0.99 · ENTRY ~${ENTRY_PRICE.toFixed(2)} · MAX 4 FLIPS · DOUBLING 20→320 · TARGET $${TARGET_PROFIT} · BOOK SWEEP`,
+      strategy: `GTC@0.99 · ENTRY ~${ENTRY_PRICE.toFixed(2)} · MAX 2 FLIPS · DOUBLING 20→80 · TARGET $${TARGET_PROFIT} · BOOK SWEEP`,
       serverTime: Date.now(),
       connected: this.isClobFresh(),
       marketReady: Boolean(market),
