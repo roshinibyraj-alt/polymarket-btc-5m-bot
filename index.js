@@ -111,6 +111,8 @@ function render(s){
  $('record').textContent=s.wins+'W / '+s.losses+'L';$('streak').textContent=(s.winRate==null?'—':s.winRate+'%')+' WIN RATE';
  $('flipCount').textContent=s.windowFlipCount+' FLIPS';$('flipCount').className='value';
  $('sunkCost').textContent='SUNK '+cash(s.windowSunkCost)+' · '+(s.monitoringActive?'MONITORING':'WAITING');
+ $('accumUp').textContent=s.accumUpShares+' SH';$('accumUp').className='value';
+ $('accumDown').textContent=s.accumDownShares+' SH';$('accumDown').className='value';
  const m=s.market;if(m){
   $('slug').textContent=m.slug.toUpperCase();$('source').textContent=m.settled?('WINNER '+(m.winner||'UNKNOWN')):'CLOB TOP OF BOOK';
   $('clock').innerHTML=String(Math.floor(m.remaining/60)).padStart(2,'0')+':'+String(m.remaining%60).padStart(2,'0')+'<small>T+'+m.elapsed+'S</small>';
