@@ -64,6 +64,7 @@ class BtcBreakoutEngine {
     this.accumDownShares = 0;
     this.lastFlipKey = null;
     this.monitoringActive = false;
+    this.peakEquity = START_BANKROLL;
   }
 
   log(message) {
@@ -213,7 +214,7 @@ class BtcBreakoutEngine {
   }
 
   calculateShares(flipNumber = 0) {
-    const DOUBLING = [20, 40, 80, 160, 320, 640, 1280];
+    const DOUBLING = [20, 40, 80, 160, 320];
     return DOUBLING[Math.min(flipNumber, DOUBLING.length - 1)];
   }
 
@@ -278,6 +279,7 @@ class BtcBreakoutEngine {
     if (elapsed < WAIT_AFTER_OPEN) return false;
     const currentOutcome = this.openPosition.outcome;
     const flipToken = currentOutcome === 'UP' ? market.down : market.up;
+    if (this.windowFlipCount >= 4) return false;
     const price = flipToken.mid ?? flipToken.ask ?? flipToken.bid;
     if (!Number.isFinite(price)) return false;
     if (price < ENTRY_PRICE - 0.02) return false;
@@ -341,6 +343,7 @@ class BtcBreakoutEngine {
   }
 
   flipPosition(market, token) {
+    if (this.windowFlipCount >= 4) return false;
     this.windowFlipCount += 1;
     const entryPrice = token.mid ?? token.ask ?? token.bid;
     const shares = this.calculateShares(this.windowFlipCount);
@@ -650,9 +653,10 @@ class BtcBreakoutEngine {
     const floating = position ? this.positionPnl(position) : 0;
     const openValue = position ? round2(position.shares * (position.token.mid ?? position.entryPrice)) : 0;
     const markValue = round2(this.bankroll + openValue);
+    const drawdown = round2(this.peakEquity - markValue);
     return {
       version: '7.0.0',
-      strategy: `WAIT ${WAIT_AFTER_OPEN}s · ENTRY @${ENTRY_PRICE.toFixed(2)} · FLIP UNLIMITED · TARGET $${TARGET_PROFIT}`,
+      strategy: `WAIT ${WAIT_AFTER_OPEN}s · ENTRY @${ENTRY_PRICE.toFixed(2)} · MAX 4 FLIPS · DOUBLING 20→320 · TARGET $${TARGET_PROFIT}`,
       serverTime: Date.now(),
       connected: this.isClobFresh(),
       marketReady: Boolean(market),
@@ -694,12 +698,15 @@ class BtcBreakoutEngine {
         pollMs: CLOB_POLL_MS,
         feeBps: TAKER_FEE_BPS,
       },
+      peakEquity: this.peakEquity,
+      drawdown: drawdown,
       uptime: Math.floor((Date.now() - this.startedAt) / 1000),
     };
   }
 
   recordEquity() {
     const state = this.buildState();
+    if (state.markValue > this.peakEquity) this.peakEquity = state.markValue;
     const last = this.equityCurve.at(-1);
     if (!last || Date.now() - last.t >= 1000 || Math.abs(last.equity - state.markValue) > 0.001) {
       this.equityCurve.push({ t: Date.now(), equity: state.markValue });

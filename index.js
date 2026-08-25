@@ -73,6 +73,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
  <div class="box"><div class="label">Realized / Floating</div><div id="realized" class="value">—</div><div id="floating" class="dim">—</div></div>
  <div class="box"><div class="label">Win / Loss / Rate</div><div id="record" class="value">—</div><div id="streak" class="dim">—</div></div>
  <div class="box"><div class="label">Flips / Sunk</div><div id="flipCount" class="value">—</div><div id="sunkCost" class="dim">—</div></div>
+ <div class="box" style="border-color:#8b6914"><div class="label" style="color:#ffd700">📉 DRAWDOWN FROM PEAK</div><div id="drawdown" class="value" style="color:#ffd700">$0.00</div><div id="peakEq" class="dim">—</div></div>
  <div class="box" style="border-color:#084b31"><div class="label" style="color:var(--up)">▲ ACCUMULATED UP</div><div id="accumUp" class="value" style="color:var(--up)">0 SH</div><div id="accumUpCost" class="dim">—</div></div>
  <div class="box" style="border-color:#5c1622"><div class="label" style="color:var(--down)">▼ ACCUMULATED DOWN</div><div id="accumDown" class="value" style="color:var(--down)">0 SH</div><div id="accumDownCost" class="dim">—</div></div>
 </section>
@@ -113,6 +114,9 @@ function render(s){
  $('sunkCost').textContent='SUNK '+cash(s.windowSunkCost)+' · '+(s.monitoringActive?'MONITORING':'WAITING');
  $('accumUp').textContent=s.accumUpShares+' SH';$('accumUp').className='value';
  $('accumDown').textContent=s.accumDownShares+' SH';$('accumDown').className='value';
+ $('drawdown').textContent=(s.drawdown>0?'-$':'+$')+Math.abs(s.drawdown).toFixed(2);
+ $('drawdown').className='value '+(s.drawdown>0?'loss':'');
+ $('peakEq').textContent='PEAK '+cash(s.peakEquity);
  const m=s.market;if(m){
   $('slug').textContent=m.slug.toUpperCase();$('source').textContent=m.settled?('WINNER '+(m.winner||'UNKNOWN')):'CLOB TOP OF BOOK';
   $('clock').innerHTML=String(Math.floor(m.remaining/60)).padStart(2,'0')+':'+String(m.remaining%60).padStart(2,'0')+'<small>T+'+m.elapsed+'S</small>';
