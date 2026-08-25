@@ -110,6 +110,7 @@ class BtcBreakoutEngine {
     const token = {
       tokenId: String(tokenId), slug, outcome,
       bid: null, ask: null, mid: null, spread: null, updatedAt: null,
+      bookAsks: [],
     };
     this.tokens.set(token.tokenId, token);
     return token;
@@ -218,6 +219,26 @@ class BtcBreakoutEngine {
     return DOUBLING[Math.min(flipNumber, DOUBLING.length - 1)];
   }
 
+  simulateGtcBookFill(token, shares, ceiling = 0.99) {
+    const asks = token.bookAsks || [];
+    let remaining = shares;
+    let totalCost = 0;
+    const levels = [];
+    for (const level of asks) {
+      if (level.price > ceiling) break;
+      if (remaining <= 0) break;
+      const fill = Math.min(level.size, remaining);
+      const cost = round2(fill * level.price);
+      levels.push({ price: level.price, size: fill, cost });
+      totalCost += cost;
+      remaining -= fill;
+    }
+    const filled = shares - remaining;
+    if (filled <= 0) return null;
+    const avgPrice = round5(totalCost / filled);
+    return { avgPrice, filled, totalCost: round2(totalCost), levels };
+  }
+
   applyQuote(token, bidValue, askValue) {
     const bid = Number.isFinite(bidValue) && bidValue > 0 && bidValue <= 1 ? bidValue : null;
     const ask = Number.isFinite(askValue) && askValue > 0 && askValue <= 1 ? askValue : null;
@@ -288,9 +309,12 @@ class BtcBreakoutEngine {
   }
 
   enterPosition(market, token, triggerPrice) {
-    const entryPrice = token.mid ?? token.ask ?? token.bid;
+    const CEILING = 0.99;
     const shares = this.calculateShares(0);
-    const cost = round2(shares * entryPrice);
+    const sweep = this.simulateGtcBookFill(token, shares, CEILING);
+    if (!sweep) return false;
+    const entryPrice = sweep.avgPrice;
+    const cost = sweep.totalCost;
     const entryFee = round2(cost * TAKER_FEE_BPS / 10000);
     if (cost + entryFee > this.bankroll) {
       this.tradedThisWindow = true;
@@ -337,7 +361,7 @@ class BtcBreakoutEngine {
     stats.buyCount += 1;
     stats.invested = round2(stats.invested + cost + entryFee);
     this.pushTrade('BUY', this.openPosition, entryPrice, null, 'ENTRY_0.60');
-    this.log(`BUY BTC ${token.outcome} ${shares} SH @${entryPrice.toFixed(3)} TARGET $${TARGET_PROFIT} cost $${cost.toFixed(2)} sunk $${this.windowSunkCost.toFixed(2)}`);
+    this.log(`⚡ GTC BUY BTC ${token.outcome} ${shares} SH avg:${entryPrice.toFixed(3)} (sweep ${sweep.filled}sh levels:${sweep.levels.length}) TARGET $${TARGET_PROFIT} cost $${cost.toFixed(2)} sunk $${this.windowSunkCost.toFixed(2)}`);
     this.recordEquity();
     return true;
   }
@@ -345,9 +369,12 @@ class BtcBreakoutEngine {
   flipPosition(market, token) {
     if (this.windowFlipCount >= 4) return false;
     this.windowFlipCount += 1;
-    const entryPrice = token.mid ?? token.ask ?? token.bid;
+    const CEILING = 0.99;
     const shares = this.calculateShares(this.windowFlipCount);
-    const cost = round2(shares * entryPrice);
+    const sweep = this.simulateGtcBookFill(token, shares, CEILING);
+    if (!sweep) { this.windowFlipCount -= 1; return false; }
+    const entryPrice = sweep.avgPrice;
+    const cost = sweep.totalCost;
     const entryFee = round2(cost * TAKER_FEE_BPS / 10000);
     if (cost + entryFee > this.bankroll) {
       this.log(`FLIP SKIPPED need $${round2(cost + entryFee)} available $${this.bankroll}`);
@@ -390,7 +417,7 @@ class BtcBreakoutEngine {
     stats.buyCount += 1;
     stats.invested = round2(stats.invested + cost + entryFee);
     this.pushTrade('BUY', this.openPosition, entryPrice, null, `FLIP_${this.windowFlipCount}`);
-    this.log(`FLIP #${this.windowFlipCount} BTC ${token.outcome} ${shares} SH @${entryPrice.toFixed(3)} TARGET $${TARGET_PROFIT} cost $${cost.toFixed(2)} sunk $${this.windowSunkCost.toFixed(2)}`);
+    this.log(`⚡ GTC FLIP #${this.windowFlipCount} BTC ${token.outcome} ${shares} SH avg:${entryPrice.toFixed(3)} (sweep ${sweep.filled}sh levels:${sweep.levels.length}) TARGET $${TARGET_PROFIT} cost $${cost.toFixed(2)} sunk $${this.windowSunkCost.toFixed(2)}`);
     this.recordEquity();
     return true;
   }
@@ -429,7 +456,7 @@ class BtcBreakoutEngine {
       cost: position.cost,
       pnl,
       reason,
-      orderType: 'CLOB-MARKET-PAPER',
+      orderType: 'PAPER-GTC@0.99',
       signal: position.signal,
     });
     this.trades = this.trades.slice(-200);
@@ -553,9 +580,24 @@ class BtcBreakoutEngine {
   processQuotes(market, quotes, sequence) {
     if (sequence <= this.appliedPollSequence) return;
     this.appliedPollSequence = sequence;
-    for (const token of [market.up, market.down]) {
-      const quote = quotes?.[token.tokenId];
-      this.applyQuote(token, Number(quote?.BUY), Number(quote?.SELL));
+    if (Array.isArray(quotes)) {
+      const byToken = new Map(quotes.map(book => [String(book?.asset_id || ''), book]));
+      for (const token of [market.up, market.down]) {
+        const book = byToken.get(token.tokenId);
+        if (book) {
+          const bids = (book.bids || []).filter(l => Number(l.size) > 0).map(l => ({ price: Number(l.price), size: Number(l.size) }));
+          const asks = (book.asks || []).filter(l => Number(l.size) > 0).map(l => ({ price: Number(l.price), size: Number(l.size) }));
+          bids.sort((a, b) => b.price - a.price);
+          asks.sort((a, b) => a.price - b.price);
+          token.bookAsks = asks;
+          this.applyQuote(token, bids[0]?.price ?? null, asks[0]?.price ?? null);
+        }
+      }
+    } else {
+      for (const token of [market.up, market.down]) {
+        const quote = quotes?.[token.tokenId];
+        this.applyQuote(token, Number(quote?.BUY), Number(quote?.SELL));
+      }
     }
     this.pollCount += 1;
     this.tickCount += 1;
@@ -597,14 +639,11 @@ class BtcBreakoutEngine {
     const sequence = this.pollSequence;
     try {
       this.ensureWindowMarkets();
-      const quotes = await this.requestJSON(`${CLOB_REST}/prices`, {
+      const books = await this.requestJSON(`${CLOB_REST}/books`, {
         method: 'POST',
-        body: JSON.stringify([market.up, market.down].flatMap(token => [
-          { token_id: token.tokenId, side: 'BUY' },
-          { token_id: token.tokenId, side: 'SELL' },
-        ])),
+        body: JSON.stringify([market.up, market.down].map(token => ({ token_id: token.tokenId }))),
       }, CLOB_TIMEOUT_MS);
-      this.processQuotes(market, quotes, sequence);
+      this.processQuotes(market, books, sequence);
     } catch (error) {
       this.lastError = error.message;
       if (!this.lastPollErrorAt || Date.now() - this.lastPollErrorAt > 5000) {
@@ -656,7 +695,7 @@ class BtcBreakoutEngine {
     const drawdown = round2(this.peakEquity - markValue);
     return {
       version: '7.0.0',
-      strategy: `ENTRY @${ENTRY_PRICE.toFixed(2)} · MAX 4 FLIPS · DOUBLING 20→320 · TARGET $${TARGET_PROFIT}`,
+      strategy: `GTC@0.99 · ENTRY ~${ENTRY_PRICE.toFixed(2)} · MAX 4 FLIPS · DOUBLING 20→320 · TARGET $${TARGET_PROFIT} · BOOK SWEEP`,
       serverTime: Date.now(),
       connected: this.isClobFresh(),
       marketReady: Boolean(market),
