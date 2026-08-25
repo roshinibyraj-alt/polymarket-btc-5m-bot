@@ -18,7 +18,7 @@ const dashboard = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BTC 5-Minute Breakout</title>
+<title>Flipper</title>
 <style>
 *{box-sizing:border-box}
 :root{--bg:#000;--panel:#070707;--line:#222;--muted:#9d9d9d;--up:#00ff85;--down:#ff4a68;--amber:#ffc400}
@@ -65,7 +65,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 </head>
 <body><div class="wrap">
 <header class="topbar">
- <div class="brand"><div class="btc">₿</div><div><h1>BTC 5-Minute Breakout</h1><div class="sub">ENTRY @0.60 · WAIT 60s · FLIP UNLIMITED · TARGET $50 · FINAL-2S WINNER &gt;0.90</div></div></div>
+ <div class="brand"><div class="btc">₿</div><div><h1>Flipper</h1><div class="sub">GTC@0.99 book sweep · ENTRY ~0.60 · 4 FLIPS · DOUBLING 20→320 · CLOB polling &gt;0.90</div></div></div>
  <div class="status"><span id="uiLink" class="pill warn">UI LINK</span><span id="clobLink" class="pill warn">CLOB WAIT</span><span id="marketLink" class="pill warn">MARKET WAIT</span><span id="rate" class="pill">0/S</span></div>
 </header>
 <section class="metrics">
