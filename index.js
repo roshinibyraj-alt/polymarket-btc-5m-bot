@@ -34,7 +34,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 .status{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:5px}
 .pill{border:1px solid var(--line);padding:4px 7px;font-size:10px;white-space:nowrap}
 .live{color:var(--up);border-color:#084b31}.warn{color:var(--amber);border-color:#5a4300}.bad{color:var(--down);border-color:#5c1622}
-.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
 .box,.panel{background:var(--panel);border:1px solid var(--line);padding:9px}
 .label{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px}
 .value{font-size:18px;margin-top:2px}.value.positive{color:var(--up)}.value.negative{color:var(--down)}
@@ -109,8 +109,8 @@ function render(s){
  $('realized').textContent=cash(s.realizedPnl);$('realized').className='value '+cls(s.realizedPnl);
  $('floating').textContent=(s.unrealizedPnl>=0?'+':'')+cash(s.unrealizedPnl)+' FLOATING';
  $('record').textContent=s.wins+'W / '+s.losses+'L';$('streak').textContent=(s.winRate==null?'—':s.winRate+'%')+' WIN RATE';
- $('stake').textContent='ASK≤0.30→200 · ASK>0.30→100';$('stake').className='value';
- $('sequence').textContent='BASE '+s.config.baseShares+' SH';
+ $('flipCount').textContent=s.windowFlipCount+' FLIPS';$('flipCount').className='value';
+ $('sunkCost').textContent='SUNK '+cash(s.windowSunkCost)+' · '+(s.monitoringActive?'MONITORING':'WAITING');
  const m=s.market;if(m){
   $('slug').textContent=m.slug.toUpperCase();$('source').textContent=m.settled?('WINNER '+(m.winner||'UNKNOWN')):'CLOB TOP OF BOOK';
   $('clock').innerHTML=String(Math.floor(m.remaining/60)).padStart(2,'0')+':'+String(m.remaining%60).padStart(2,'0')+'<small>T+'+m.elapsed+'S</small>';

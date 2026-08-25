@@ -248,9 +248,14 @@ class BtcBreakoutEngine {
       this.monitoringActive = true;
       this.log(`MONITORING ACTIVE after ${WAIT_AFTER_OPEN}s wait`);
     }
+    const MIN_TRIGGER = ENTRY_PRICE - 0.10;
     const candidates = [market.up, market.down].map(token => {
       return { token, ask: token.ask };
-    }).filter(candidate => Number.isFinite(candidate.ask) && Math.abs(candidate.ask - ENTRY_PRICE) <= PRICE_TOLERANCE);
+    }).filter(candidate =>
+      Number.isFinite(candidate.ask) &&
+      candidate.ask <= ENTRY_PRICE &&
+      candidate.ask >= MIN_TRIGGER,
+    );
     if (!candidates.length) return false;
     candidates.sort((left, right) => left.ask - right.ask);
     this.enterPosition(market, candidates[0].token, candidates[0].ask);
@@ -265,9 +270,10 @@ class BtcBreakoutEngine {
     const currentOutcome = this.openPosition.outcome;
     const flipToken = currentOutcome === 'UP' ? market.down : market.up;
     if (!Number.isFinite(flipToken.ask)) return false;
+    const MIN_TRIGGER = ENTRY_PRICE - 0.10;
+    if (flipToken.ask > ENTRY_PRICE || flipToken.ask < MIN_TRIGGER) return false;
     const flipKey = `${market.windowStart}:${flipToken.tokenId}`;
     if (flipKey === this.lastFlipKey) return false;
-    if (Math.abs(flipToken.ask - ENTRY_PRICE) > PRICE_TOLERANCE) return false;
     this.lastFlipKey = flipKey;
     this.flipPosition(market, flipToken);
     return true;
