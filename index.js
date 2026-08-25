@@ -65,14 +65,16 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 </head>
 <body><div class="wrap">
 <header class="topbar">
- <div class="brand"><div class="btc">₿</div><div><h1>BTC 5-Minute Breakout</h1><div class="sub">CLOB BOOKS ONLY · ONE-TICK ENTRY ≥0.89 · STOP ≤0.79 · FINAL-2S WINNER &gt;0.90</div></div></div>
+ <div class="brand"><div class="btc">₿</div><div><h1>BTC 5-Minute Breakout</h1><div class="sub">ENTRY @0.60 · WAIT 60s · FLIP UNLIMITED · TARGET $50 · FINAL-2S WINNER &gt;0.90</div></div></div>
  <div class="status"><span id="uiLink" class="pill warn">UI LINK</span><span id="clobLink" class="pill warn">CLOB WAIT</span><span id="marketLink" class="pill warn">MARKET WAIT</span><span id="rate" class="pill">0/S</span></div>
 </header>
 <section class="metrics">
  <div class="box"><div class="label">Equity / Total PNL</div><div id="equity" class="value">—</div><div id="totalPnl" class="dim">—</div></div>
  <div class="box"><div class="label">Realized / Floating</div><div id="realized" class="value">—</div><div id="floating" class="dim">—</div></div>
  <div class="box"><div class="label">Win / Loss / Rate</div><div id="record" class="value">—</div><div id="streak" class="dim">—</div></div>
- <div class="box"><div class="label">Shares Rule</div><div id="stake" class="value">—</div><div id="sequence" class="dim">—</div></div>
+ <div class="box"><div class="label">Flips / Sunk</div><div id="flipCount" class="value">—</div><div id="sunkCost" class="dim">—</div></div>
+ <div class="box" style="border-color:#084b31"><div class="label" style="color:var(--up)">▲ ACCUMULATED UP</div><div id="accumUp" class="value" style="color:var(--up)">0 SH</div><div id="accumUpCost" class="dim">—</div></div>
+ <div class="box" style="border-color:#5c1622"><div class="label" style="color:var(--down)">▼ ACCUMULATED DOWN</div><div id="accumDown" class="value" style="color:var(--down)">0 SH</div><div id="accumDownCost" class="dim">—</div></div>
 </section>
 <main class="main">
  <section class="panel">
@@ -118,7 +120,7 @@ function render(s){
   $('upFinal').textContent=m.finalUpMax==null?'':'FINAL MAX '+price(m.finalUpMax);
   $('downFinal').textContent=m.finalDownMax==null?'':'FINAL MAX '+price(m.finalDownMax);
  }
- const p=s.position;$('positionStatus').textContent=p?p.outcome+' OPEN':'FLAT';
+ const p=s.position;$('positionStatus').textContent=p?p.outcome+' · '+shares(p.shares)+' SH':'FLAT';
  if(!p){$('positionPanel').innerHTML='<div class="empty">NO OPEN POSITION</div>'}else{
   $('positionPanel').innerHTML='<div class="position-name">'+p.outcome+' · '+shares(p.shares)+' SH</div><div class="pnl '+cls(p.pnl)+'">'+(p.pnl>=0?'+':'')+cash(p.pnl)+'</div><div class="dim">ENTRY '+price(p.entryPrice)+' · COST '+cash(p.cost)+' · MARK '+price(p.tokenMid??p.signal?.mid)+'</div><div class="dim">T+'+(p.signal?.elapsed||0)+'S · '+p.signal?.triggerSource+' TRIGGER '+price(p.signal?.triggerPrice)+'</div>';
  }

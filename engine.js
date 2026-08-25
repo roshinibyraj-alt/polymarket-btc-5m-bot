@@ -3,10 +3,10 @@
 const GAMMA_API = process.env.GAMMA_API || 'https://gamma-api.polymarket.com';
 const CLOB_REST = process.env.CLOB_REST || 'https://clob.polymarket.com';
 const WINDOW_SECONDS = Number(process.env.WINDOW_SECONDS || 300);
-const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.89);
-const STOP_PRICE = Number(process.env.STOP_PRICE || 0.79);
+const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.60);
+const TARGET_PROFIT = Number(process.env.TARGET_PROFIT || 50);
+const WAIT_AFTER_OPEN = Number(process.env.WAIT_AFTER_OPEN || 60);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
-const BASE_SHARES = Number(process.env.BASE_SHARES || 100);
 const START_BANKROLL = Number(process.env.START_BANKROLL || 5000);
 const TAKER_FEE_BPS = Number(process.env.TAKER_FEE_BPS || 0);
 const CLOB_POLL_MS = Math.max(50, Number(process.env.CLOB_POLL_MS || 100));
@@ -31,7 +31,6 @@ class BtcBreakoutEngine {
     this.totalFees = 0;
     this.wins = 0;
     this.losses = 0;
-    this.askLow = new Map();
     this.currentStart = windowStartFor(Date.now());
     this.tradedThisWindow = false;
     this.openPosition = null;
@@ -56,6 +55,13 @@ class BtcBreakoutEngine {
     this.lastPollErrorAt = null;
     this.lastError = null;
     this.timers = [];
+    this.windowEntries = [];
+    this.windowSunkCost = 0;
+    this.windowFlipCount = 0;
+    this.accumUpShares = 0;
+    this.accumDownShares = 0;
+    this.lastFlipKey = null;
+    this.monitoringActive = false;
   }
 
   log(message) {
@@ -86,7 +92,7 @@ class BtcBreakoutEngine {
         signal: controller.signal,
         headers: {
           'Content-Type': 'application/json',
-          'User-Agent': 'btc-breakout-bot/2.0',
+          'User-Agent': 'btc-flip-bot/3.0',
           ...(options.headers || {}),
         },
       });
@@ -156,15 +162,13 @@ class BtcBreakoutEngine {
   }
 
   ensureWindowMarkets() {
-    const currentStart = windowStartFor(Date.now());
-    const nextStart = currentStart + WINDOW_SECONDS;
-    for (const start of [currentStart, nextStart]) {
-      const slug = slugFor(start);
-      if (!this.markets.has(slug) && !this.discoveryJobs.has(slug)) {
-        this.discoverMarket(start).catch(() => {});
-      }
+    const start = windowStartFor(Date.now());
+    const nextStart = start + WINDOW_SECONDS;
+    this.discoverMarket(start).catch(() => {});
+    this.discoverMarket(nextStart).catch(() => {});
+    if (start !== this.currentStart) {
+      this.currentStart = start;
     }
-    return currentStart;
   }
 
   getWindowStats(start) {
@@ -173,7 +177,7 @@ class BtcBreakoutEngine {
       this.windowStats.set(key, {
         windowStart: start,
         windowEnd: start + WINDOW_SECONDS,
-        plannedShares: BASE_SHARES,
+        plannedShares: 0,
         buyCount: 0,
         sellCount: 0,
         invested: 0,
@@ -187,6 +191,17 @@ class BtcBreakoutEngine {
     return this.windowStats.get(key);
   }
 
+  profitPerShare() {
+    const entryFeeRate = TAKER_FEE_BPS / 10000;
+    const exitFeeRate = TAKER_FEE_BPS / 10000;
+    return round5((1.00 - exitFeeRate) - ENTRY_PRICE * (1 + entryFeeRate));
+  }
+
+  calculateShares() {
+    const pps = this.profitPerShare();
+    if (pps <= 0) return 100;
+    return Math.ceil((TARGET_PROFIT + this.windowSunkCost) / pps);
+  }
 
   applyQuote(token, bidValue, askValue) {
     const bid = Number.isFinite(bidValue) && bidValue > 0 && bidValue <= 1 ? bidValue : null;
@@ -200,10 +215,6 @@ class BtcBreakoutEngine {
     series.push({ t: Date.now(), p: token.mid });
     while (series.length > 2 && Date.now() - series[0].t > 5000) series.shift();
     this.priceHistory.set(token.tokenId, series.slice(-120));
-    if (Number.isFinite(ask)) {
-      const prevLow = this.askLow.get(token.tokenId);
-      if (prevLow == null || ask < prevLow) this.askLow.set(token.tokenId, ask);
-    }
   }
 
   trackFinalPrices(market, elapsed) {
@@ -226,31 +237,42 @@ class BtcBreakoutEngine {
     return round2(position.shares * mark - position.cost - position.entryFee);
   }
 
-  manageStop(position) {
-    if (!Number.isFinite(position.token.bid) || position.token.bid > STOP_PRICE) return false;
-    this.closePosition(position, position.token.bid, 'STOP_LOSS');
+  evaluateEntry(market) {
+    if (this.tradedThisWindow || this.openPosition) return false;
+    const nowSeconds = Date.now() / 1000;
+    const elapsed = nowSeconds - market.windowStart;
+    if (elapsed < WAIT_AFTER_OPEN) return false;
+    if (!this.monitoringActive) {
+      this.monitoringActive = true;
+      this.log(`MONITORING ACTIVE after ${WAIT_AFTER_OPEN}s wait`);
+    }
+    const candidates = [market.up, market.down].map(token => {
+      return { token, ask: token.ask };
+    }).filter(candidate => Number.isFinite(candidate.ask) && candidate.ask <= ENTRY_PRICE);
+    if (!candidates.length) return false;
+    candidates.sort((left, right) => left.ask - right.ask);
+    this.enterPosition(market, candidates[0].token, candidates[0].ask);
     return true;
   }
 
-  evaluateEntry(market) {
-    if (this.tradedThisWindow || this.openPosition) return false;
-    const candidates = [market.up, market.down].map(token => {
-      const values = [token.bid, token.ask, token.mid].filter(Number.isFinite);
-      return { token, triggerPrice: values.length ? Math.max(...values) : null };
-    }).filter(candidate =>
-      Number.isFinite(candidate.triggerPrice) &&
-      candidate.triggerPrice >= ENTRY_PRICE &&
-      Number.isFinite(candidate.token.ask),
-    );
-    if (!candidates.length) return false;
-    candidates.sort((left, right) => right.triggerPrice - left.triggerPrice);
-    this.enterPosition(market, candidates[0].token, candidates[0].triggerPrice);
+  evaluateFlip(market) {
+    if (!this.openPosition) return false;
+    const nowSeconds = Date.now() / 1000;
+    const elapsed = nowSeconds - market.windowStart;
+    if (elapsed < WAIT_AFTER_OPEN) return false;
+    const currentOutcome = this.openPosition.outcome;
+    const flipToken = currentOutcome === 'UP' ? market.down : market.up;
+    if (!Number.isFinite(flipToken.ask)) return false;
+    const flipKey = `${market.windowStart}:${flipToken.tokenId}`;
+    if (flipKey === this.lastFlipKey) return false;
+    if (flipToken.ask > ENTRY_PRICE) return false;
+    this.lastFlipKey = flipKey;
+    this.flipPosition(market, flipToken);
     return true;
   }
 
   enterPosition(market, token, triggerPrice) {
-    const askLow = this.askLow.get(token.tokenId);
-    const shares = (Number.isFinite(askLow) && askLow <= 0.30) ? 200 : BASE_SHARES;
+    const shares = this.calculateShares();
     const entryPrice = token.ask;
     const cost = round2(shares * entryPrice);
     const entryFee = round2(cost * TAKER_FEE_BPS / 10000);
@@ -263,6 +285,7 @@ class BtcBreakoutEngine {
     stats.plannedShares = shares;
     this.bankroll = round2(this.bankroll - cost - entryFee);
     this.totalFees = round2(this.totalFees + entryFee);
+    this.windowSunkCost = round2(this.windowSunkCost + cost + entryFee);
     const now = Date.now();
     this.openPosition = {
       id: `btc-${market.windowStart}-${now}`,
@@ -279,18 +302,72 @@ class BtcBreakoutEngine {
       windowStart: market.windowStart,
       signal: {
         triggerPrice,
-        triggerSource: triggerPrice === token.bid ? 'BID' : triggerPrice === token.ask ? 'ASK' : 'MID',
+        triggerSource: 'ENTRY_0.60',
         bid: token.bid,
         ask: token.ask,
         mid: token.mid,
         elapsed: Math.max(0, Math.floor(now / 1000 - market.windowStart)),
       },
     };
+    if (token.outcome === 'UP') this.accumUpShares += shares;
+    else this.accumDownShares += shares;
+    this.windowEntries.push({ ...this.openPosition, signal: { ...this.openPosition.signal } });
     this.tradedThisWindow = true;
     stats.buyCount += 1;
     stats.invested = round2(stats.invested + cost + entryFee);
-    this.pushTrade('BUY', this.openPosition, entryPrice, null, 'BREAKOUT_0.89');
-    this.log(`BUY BTC ${token.outcome} ${shares} SH @${entryPrice.toFixed(3)} touch ${this.openPosition.signal.triggerSource} ${triggerPrice.toFixed(3)} stop ${STOP_PRICE.toFixed(2)} cost $${cost.toFixed(2)}`);
+    this.pushTrade('BUY', this.openPosition, entryPrice, null, 'ENTRY_0.60');
+    this.log(`BUY BTC ${token.outcome} ${shares} SH @${entryPrice.toFixed(3)} TARGET $${TARGET_PROFIT} cost $${cost.toFixed(2)} sunk $${this.windowSunkCost.toFixed(2)}`);
+    this.recordEquity();
+    return true;
+  }
+
+  flipPosition(market, token) {
+    if (this.openPosition) {
+      this.closePosition(this.openPosition, 0, 'FLIP_ABANDONED');
+    }
+    this.windowFlipCount += 1;
+    const shares = this.calculateShares();
+    const entryPrice = token.ask;
+    const cost = round2(shares * entryPrice);
+    const entryFee = round2(cost * TAKER_FEE_BPS / 10000);
+    if (cost + entryFee > this.bankroll) {
+      this.log(`FLIP SKIPPED need $${round2(cost + entryFee)} available $${this.bankroll}`);
+      return false;
+    }
+    const stats = this.getWindowStats(market.windowStart);
+    this.bankroll = round2(this.bankroll - cost - entryFee);
+    this.totalFees = round2(this.totalFees + entryFee);
+    this.windowSunkCost = round2(this.windowSunkCost + cost + entryFee);
+    const now = Date.now();
+    this.openPosition = {
+      id: `btc-${market.windowStart}-flip${this.windowFlipCount}-${now}`,
+      slug: market.slug,
+      outcome: token.outcome,
+      tokenId: token.tokenId,
+      token,
+      shares,
+      entryPrice,
+      cost,
+      entryFee,
+      status: 'OPEN',
+      openedAt: now,
+      windowStart: market.windowStart,
+      signal: {
+        triggerPrice: entryPrice,
+        triggerSource: `FLIP_${this.windowFlipCount}`,
+        bid: token.bid,
+        ask: token.ask,
+        mid: token.mid,
+        elapsed: Math.max(0, Math.floor(now / 1000 - market.windowStart)),
+      },
+    };
+    if (token.outcome === 'UP') this.accumUpShares += shares;
+    else this.accumDownShares += shares;
+    this.windowEntries.push({ ...this.openPosition, signal: { ...this.openPosition.signal } });
+    stats.buyCount += 1;
+    stats.invested = round2(stats.invested + cost + entryFee);
+    this.pushTrade('BUY', this.openPosition, entryPrice, null, `FLIP_${this.windowFlipCount}`);
+    this.log(`FLIP #${this.windowFlipCount} BTC ${token.outcome} ${shares} SH @${entryPrice.toFixed(3)} TARGET $${TARGET_PROFIT} cost $${cost.toFixed(2)} sunk $${this.windowSunkCost.toFixed(2)}`);
     this.recordEquity();
     return true;
   }
@@ -313,9 +390,8 @@ class BtcBreakoutEngine {
     const stats = this.getWindowStats(position.windowStart);
     stats.sellCount += 1;
     stats.realizedPnl = round2(stats.realizedPnl + pnl);
-    if (reason === 'STOP_LOSS' && stats.result === 'PENDING') stats.result = 'STOPPED';
     this.pushTrade('SELL', position, exitPrice, pnl, reason);
-    this.log(`${reason === 'STOP_LOSS' ? 'STOP' : 'CLOSE'} BTC ${position.outcome} ${position.shares} SH @${exitPrice.toFixed(3)} PNL ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
+    this.log(`${reason} BTC ${position.outcome} ${position.shares} SH @${exitPrice.toFixed(3)} PNL ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
     this.recordEquity();
     return position;
   }
@@ -339,9 +415,8 @@ class BtcBreakoutEngine {
   settleWindow(market) {
     if (market.settled) return;
     market.settled = true;
-    this.askLow.delete(market.up.tokenId);
-    this.askLow.delete(market.down.tokenId);
     if (market.windowStart === this.currentStart || this.openPosition?.windowStart === market.windowStart) this.tradedThisWindow = false;
+    this.monitoringActive = false;
     if (!Number.isFinite(market.finalUpMax) && Number.isFinite(market.up.mid)) market.finalUpMax = market.up.mid;
     if (!Number.isFinite(market.finalDownMax) && Number.isFinite(market.down.mid)) market.finalDownMax = market.down.mid;
     const upStrong = market.finalUpMax > RESOLUTION_PRICE;
@@ -375,15 +450,20 @@ class BtcBreakoutEngine {
     stats.resolutionSource = market.resolutionSource;
     stats.settledAt = Date.now();
     if (stats.buyCount > 0) {
-      if (net < 0) {
-        this.losses += 1;
-      } else {
-        this.wins += 1;
-      }
+      if (net < 0) this.losses += 1;
+      else this.wins += 1;
     }
+    stats.flipCount = this.windowFlipCount;
+    stats.sunkCost = this.windowSunkCost;
+    stats.accumUpShares = this.accumUpShares;
+    stats.accumDownShares = this.accumDownShares;
     this.results.unshift({ ...stats });
     this.results = this.results.slice(0, 40);
-    this.log(`WINDOW ${market.slug} ${stats.result} winner ${market.winner || 'UNKNOWN'} net $${net.toFixed(2)}`);
+    this.log(`WINDOW ${market.slug} ${stats.result} winner ${market.winner || 'UNKNOWN'} net $${net.toFixed(2)} flips ${this.windowFlipCount} up:${this.accumUpShares} down:${this.accumDownShares}`);
+    this.windowSunkCost = 0;
+    this.windowFlipCount = 0;
+    this.windowEntries = [];
+    this.lastFlipKey = null;
     return stats;
   }
 
@@ -391,29 +471,19 @@ class BtcBreakoutEngine {
     const start = windowStartFor(nowMs);
     if (start === this.currentStart) return this.markets.get(slugFor(start));
     const previous = this.markets.get(slugFor(this.currentStart));
-    if (previous) {
+    if (previous && !previous.settled) {
       this.settleWindow(previous);
-    } else if (this.openPosition?.windowStart === this.currentStart) {
-      const mark = Number.isFinite(this.openPosition.token.mid) ? this.openPosition.token.mid : this.openPosition.entryPrice;
-      this.closePosition(this.openPosition, mark, 'WINDOW_ROLLOVER');
     }
     this.currentStart = start;
     this.tradedThisWindow = false;
-    this.ensureWindowMarkets();
-    this.pruneOldMarkets(start);
-    return this.markets.get(slugFor(start));
-  }
-
-  pruneOldMarkets(currentStart) {
-    for (const [slug, market] of this.markets) {
-      if (market.windowEnd < currentStart - WINDOW_SECONDS) {
-        this.tokens.delete(market.up.tokenId);
-        this.tokens.delete(market.down.tokenId);
-        this.priceHistory.delete(market.up.tokenId);
-        this.priceHistory.delete(market.down.tokenId);
-        this.markets.delete(slug);
-      }
-    }
+    this.accumUpShares = 0;
+    this.accumDownShares = 0;
+    this.windowSunkCost = 0;
+    this.windowFlipCount = 0;
+    this.windowEntries = [];
+    this.lastFlipKey = null;
+    this.monitoringActive = false;
+    return this.markets.get(slugFor(start)) || null;
   }
 
   processQuotes(market, quotes, sequence) {
@@ -434,8 +504,7 @@ class BtcBreakoutEngine {
     if (nowSeconds >= market.windowEnd) {
       this.settleWindow(market);
     } else if (this.openPosition?.slug === market.slug) {
-      this.manageStop(this.openPosition);
-      if (!this.openPosition) this.evaluateEntry(market);
+      this.evaluateFlip(market);
     } else {
       this.evaluateEntry(market);
     }
@@ -450,18 +519,20 @@ class BtcBreakoutEngine {
       market = this.handleRollover();
     } catch (error) {
       this.lastError = error.message;
-    }
-    if (!market) {
-      this.ensureWindowMarkets();
+      this.log(`ROLLOVER FAIL ${error.message}`);
       return;
     }
-    if (market.settled || Date.now() / 1000 >= market.windowEnd) {
+    if (!market || market.settled) return;
+    const nowSeconds = Date.now() / 1000;
+    if (nowSeconds >= market.windowEnd) {
       this.settleWindow(market);
       return;
     }
-    const sequence = ++this.pollSequence;
     this.pollInFlight += 1;
+    this.pollSequence += 1;
+    const sequence = this.pollSequence;
     try {
+      this.ensureWindowMarkets();
       const quotes = await this.requestJSON(`${CLOB_REST}/prices`, {
         method: 'POST',
         body: JSON.stringify([market.up, market.down].flatMap(token => [
@@ -519,8 +590,8 @@ class BtcBreakoutEngine {
     const openValue = position ? round2(position.shares * (position.token.mid ?? position.entryPrice)) : 0;
     const markValue = round2(this.bankroll + openValue);
     return {
-      version: '6.0.0',
-      strategy: `UP/DOWN BOTH SIDES · ASK<=0.30 → 200 SH · ASK>0.30 → 100 SH · ENTRY >=${ENTRY_PRICE.toFixed(2)} · STOP <=${STOP_PRICE.toFixed(2)} · FINAL-2S >${RESOLUTION_PRICE.toFixed(2)}`,
+      version: '7.0.0',
+      strategy: `WAIT ${WAIT_AFTER_OPEN}s · ENTRY @${ENTRY_PRICE.toFixed(2)} · FLIP UNLIMITED · TARGET $${TARGET_PROFIT}`,
       serverTime: Date.now(),
       connected: this.isClobFresh(),
       marketReady: Boolean(market),
@@ -539,7 +610,11 @@ class BtcBreakoutEngine {
       wins: this.wins,
       losses: this.losses,
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
-      askLow: Object.fromEntries([...this.askLow].map(([k, v]) => [k, v])),
+      accumUpShares: this.accumUpShares,
+      accumDownShares: this.accumDownShares,
+      windowFlipCount: this.windowFlipCount,
+      windowSunkCost: this.windowSunkCost,
+      monitoringActive: this.monitoringActive,
       tradedThisWindow: this.tradedThisWindow,
       position: position ? { ...position, token: undefined, pnl: floating } : null,
       market: market ? this.publicMarket(market) : null,
@@ -549,9 +624,9 @@ class BtcBreakoutEngine {
       logs: this.logs.slice(-160),
       discoveryErrors: this.discoveryErrors,
       config: {
-        baseShares: BASE_SHARES,
         entryPrice: ENTRY_PRICE,
-        stopPrice: STOP_PRICE,
+        targetProfit: TARGET_PROFIT,
+        waitAfterOpen: WAIT_AFTER_OPEN,
         resolutionPrice: RESOLUTION_PRICE,
         pollMs: CLOB_POLL_MS,
         feeBps: TAKER_FEE_BPS,
@@ -577,7 +652,7 @@ class BtcBreakoutEngine {
       setInterval(() => { this.pollOnce().catch(() => {}); }, CLOB_POLL_MS),
       setInterval(() => this.recordEquity(), 1000),
     ];
-    this.log(`BOT STARTED CLOB ONLY ${CLOB_POLL_MS}MS BANKROLL $${START_BANKROLL}`);
+    this.log(`BOT STARTED CLOB ONLY ${CLOB_POLL_MS}MS BANKROLL $${START_BANKROLL} TARGET $${TARGET_PROFIT}`);
   }
 
   close() {
@@ -589,6 +664,6 @@ class BtcBreakoutEngine {
 module.exports = {
   BtcBreakoutEngine,
   config: {
-    BASE_SHARES, ENTRY_PRICE, STOP_PRICE, RESOLUTION_PRICE, CLOB_POLL_MS,
+    ENTRY_PRICE, TARGET_PROFIT, WAIT_AFTER_OPEN, RESOLUTION_PRICE, CLOB_POLL_MS,
   },
 };
