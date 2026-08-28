@@ -28,7 +28,12 @@ class BtcBreakoutEngine {
     this.onTick = options.onTick || (() => {});
     this.onLog = options.onLog || (() => {});
     this.startedAt = Date.now();
-    this.bankroll = START_BANKROLL;
+    this.name = options.name || 'BTCFlip';
+    this.shareLadder = options.shareLadder || [20, 40, 80];
+    this.maxFlips = options.maxFlips ?? (this.shareLadder.length - 1);
+    this.maxFlips = Math.min(this.maxFlips, this.shareLadder.length - 1);
+    this.bankroll = options.bankroll ?? START_BANKROLL;
+    this.initialBankroll = this.bankroll;
     this.realizedPnl = 0;
     this.totalFees = 0;
     this.wins = 0;
@@ -44,7 +49,7 @@ class BtcBreakoutEngine {
     this.results = [];
     this.trades = [];
     this.logs = [];
-    this.equityCurve = [{ t: Date.now(), equity: START_BANKROLL }];
+    this.equityCurve = [{ t: Date.now(), equity: this.bankroll }];
     this.discoveryErrors = [];
     this.lastDiscoveryAt = null;
     this.pollCount = 0;
@@ -64,7 +69,7 @@ class BtcBreakoutEngine {
     this.accumDownShares = 0;
     this.lastFlipKey = null;
     this.monitoringActive = false;
-    this.peakEquity = START_BANKROLL;
+    this.peakEquity = this.bankroll;
   }
 
   log(message) {
@@ -215,8 +220,7 @@ class BtcBreakoutEngine {
   }
 
   calculateShares(flipNumber = 0) {
-    const DOUBLING = [20, 40, 80];
-    return DOUBLING[Math.min(flipNumber, DOUBLING.length - 1)];
+    return this.shareLadder[Math.min(flipNumber, this.shareLadder.length - 1)];
   }
 
   simulateGtcBookFill(token, shares, ceiling = 0.99) {
@@ -300,7 +304,7 @@ class BtcBreakoutEngine {
     if (elapsed < WAIT_AFTER_OPEN) return false;
     const currentOutcome = this.openPosition.outcome;
     const flipToken = currentOutcome === 'UP' ? market.down : market.up;
-    if (this.windowFlipCount >= 2) return false;
+    if (this.windowFlipCount >= this.maxFlips) return false;
     const price = flipToken.mid ?? flipToken.ask ?? flipToken.bid;
     if (!Number.isFinite(price)) return false;
     if (price < ENTRY_PRICE - 0.02) return false;
@@ -367,7 +371,7 @@ class BtcBreakoutEngine {
   }
 
   flipPosition(market, token) {
-    if (this.windowFlipCount >= 2) return false;
+    if (this.windowFlipCount >= this.maxFlips) return false;
     this.windowFlipCount += 1;
     const CEILING = 0.99;
     const shares = this.calculateShares(this.windowFlipCount);
@@ -694,8 +698,11 @@ class BtcBreakoutEngine {
     const markValue = round2(this.bankroll + openValue);
     const drawdown = round2(this.peakEquity - markValue);
     return {
-      version: '7.0.0',
-      strategy: `GTC@0.99 · ENTRY ~${ENTRY_PRICE.toFixed(2)} · MAX 2 FLIPS · DOUBLING 20→80 · TARGET $${TARGET_PROFIT} · BOOK SWEEP`,
+      version: '7.1.0',
+      name: this.name,
+      shareLadder: this.shareLadder,
+      maxFlips: this.maxFlips,
+      strategy: `GTC@0.99 · ENTRY ~${ENTRY_PRICE.toFixed(2)} · SIZING ${this.shareLadder.join('→')} · MAX ${this.maxFlips} FLIPS · TARGET $${TARGET_PROFIT} · BOOK SWEEP`,
       serverTime: Date.now(),
       connected: this.isClobFresh(),
       marketReady: Boolean(market),
@@ -710,7 +717,7 @@ class BtcBreakoutEngine {
       realizedPnl: this.realizedPnl,
       unrealizedPnl: floating,
       totalFees: this.totalFees,
-      totalPnl: round2(markValue - START_BANKROLL),
+      totalPnl: round2(markValue - this.initialBankroll),
       wins: this.wins,
       losses: this.losses,
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
@@ -728,6 +735,9 @@ class BtcBreakoutEngine {
       logs: this.logs.slice(-160),
       discoveryErrors: this.discoveryErrors,
       config: {
+        name: this.name,
+        shareLadder: this.shareLadder,
+        maxFlips: this.maxFlips,
         entryPrice: ENTRY_PRICE,
         priceTolerance: PRICE_TOLERANCE,
         targetProfit: TARGET_PROFIT,
@@ -761,7 +771,7 @@ class BtcBreakoutEngine {
       setInterval(() => { this.pollOnce().catch(() => {}); }, CLOB_POLL_MS),
       setInterval(() => this.recordEquity(), 1000),
     ];
-    this.log(`BOT STARTED CLOB ONLY ${CLOB_POLL_MS}MS BANKROLL $${START_BANKROLL} TARGET $${TARGET_PROFIT}`);
+    this.log(`BOT STARTED [${this.name}] CLOB ONLY ${CLOB_POLL_MS}MS BANKROLL $${this.bankroll} TARGET $${TARGET_PROFIT} LADDER ${this.shareLadder.join('->')} MAXFLIPS ${this.maxFlips}`);
   }
 
   close() {

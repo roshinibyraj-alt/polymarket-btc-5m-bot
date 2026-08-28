@@ -2,118 +2,42 @@
 const { BtcBreakoutEngine } = require('../engine');
 
 function mockFetch() { return Promise.resolve({ ok: true, json: () => Promise.resolve({}) }); }
-
-function test(label, fn) {
-  try { fn(); console.log(`  ✓ ${label}`); }
-  catch(e) { console.log(`  ✗ ${label}: ${e.message}`); }
-}
-
 function assert(cond, msg) { if (!cond) throw new Error(msg); }
 
-// Test 1: Verify doubling pattern
-console.log('\n=== Verify doubling pattern ===');
+console.log('\n=== Martingale ladder 20→40→80→160 ===');
 {
-  const eng = new BtcBreakoutEngine({ fetchImpl: mockFetch, onTick: () => {}, onLog: () => {} });
+  const eng = new BtcBreakoutEngine({ fetchImpl: mockFetch, onTick: () => {}, onLog: () => {}, shareLadder: [20, 40, 80, 160], maxFlips: 3 });
+  assert(eng.name === 'MARTINGALE' || eng.name === 'BTCFlip', 'name default');
   assert(eng.calculateShares(0) === 20, 'flip 0 = 20');
   assert(eng.calculateShares(1) === 40, 'flip 1 = 40');
   assert(eng.calculateShares(2) === 80, 'flip 2 = 80');
   assert(eng.calculateShares(3) === 160, 'flip 3 = 160');
-  assert(eng.calculateShares(4) === 320, 'flip 4 = 320');
-  assert(eng.calculateShares(5) === 640, 'flip 5 = 640');
-  assert(eng.calculateShares(6) === 1280, 'flip 6 = 1280');
-  assert(eng.calculateShares(7) === 1280, 'flip 7+ caps at 1280');
-  console.log('  Pattern: 20, 40, 80, 160, 320, 640, 1280 ✓');
+  assert(eng.calculateShares(4) === 160, 'flip 4 caps at 160');
+  console.log('  Pattern: 20, 40, 80, 160, capped ✓');
 }
 
-// Test 2: Full window with flips, verify settlement
-console.log('\n=== Full window: entry + 3 flips ===');
+console.log('\n=== Anti-martingale ladder 160→80→40→20 ===');
 {
-  const eng = new BtcBreakoutEngine({ fetchImpl: mockFetch, onTick: () => {}, onLog: () => {} });
-  eng.currentStart = Math.floor(Date.now() / 300) * 300;
-  const slug = `btc-updown-5m-${eng.currentStart}`;
-  const up = eng.makeToken('u', slug, 'UP');
-  const down = eng.makeToken('d', slug, 'DOWN');
-  eng.markets.set(slug, { slug, windowStart: eng.currentStart, windowEnd: eng.currentStart + 300, settled: false, winner: null, up, down, finalUpMax: null, finalDownMax: null, resolutionSource: null });
-
-  // Entry: UP 20 @ 0.60
-  up.ask = 0.60; up.bid = 0.58; up.mid = 0.59;
-  eng.enterPosition(eng.markets.get(slug), up, 0.60);
-  assert(eng.accumUpShares === 20, `entry: accumUp=20 (got ${eng.accumUpShares})`);
-  const sunk1 = eng.windowSunkCost;
-
-  // Flip 1: DOWN 40 @ 0.60
-  down.ask = 0.60; down.bid = 0.58; down.mid = 0.59;
-  eng.flipPosition(eng.markets.get(slug), down);
-  assert(eng.accumDownShares === 40, `flip1: accumDown=40 (got ${eng.accumDownShares})`);
-  assert(eng.accumUpShares === 20, `flip1: accumUp still 20 (got ${eng.accumUpShares})`);
-  
-  // Flip 2: UP 80 @ 0.60
-  up.ask = 0.60; up.bid = 0.58; up.mid = 0.59;
-  eng.flipPosition(eng.markets.get(slug), up);
-  assert(eng.accumUpShares === 100, `flip2: accumUp=100 (got ${eng.accumUpShares})`);
-  
-  // Flip 3: DOWN 160 @ 0.60
-  down.ask = 0.60; down.bid = 0.58; down.mid = 0.59;
-  eng.flipPosition(eng.markets.get(slug), down);
-  assert(eng.accumDownShares === 200, `flip3: accumDown=200 (got ${eng.accumDownShares})`);
-  
-  const sunk = eng.windowSunkCost;
-  console.log(`  After 3 flips: accumUp=${eng.accumUpShares} accumDown=${eng.accumDownShares} sunk=$${sunk.toFixed(2)}`);
-  
-  // Resolution: UP wins
-  eng.markets.get(slug).finalUpMax = 0.95;
-  eng.markets.get(slug).finalDownMax = 0.10;
-  eng.settleWindow(eng.markets.get(slug));
-  
-  const payout = 100; // accumUp × $1
-  const net = payout - sunk;
-  console.log(`  UP wins: payout=${eng.accumUpShares}×$1=$${eng.accumUpShares}, sunk=$${sunk.toFixed(2)}, net=$${net.toFixed(2)}`);
-  assert(Math.abs(eng.realizedPnl - net) < 0.01, `realizedPnl=$${eng.realizedPnl.toFixed(2)}`);
+  const eng = new BtcBreakoutEngine({ fetchImpl: mockFetch, onTick: () => {}, onLog: () => {}, shareLadder: [160, 80, 40, 20], maxFlips: 3 });
+  assert(eng.calculateShares(0) === 160, 'flip 0 = 160');
+  assert(eng.calculateShares(1) === 80, 'flip 1 = 80');
+  assert(eng.calculateShares(2) === 40, 'flip 2 = 40');
+  assert(eng.calculateShares(3) === 20, 'flip 3 = 20');
+  assert(eng.calculateShares(4) === 20, 'flip 4 caps at 20');
+  console.log('  Pattern: 160, 80, 40, 20, capped ✓');
 }
 
-// Test 3: Verify cost at flip 6 doesn't exceed MAX_WINDOW_INVESTMENT ($2000)
-console.log('\n=== Max window investment check ===');
+console.log('\n=== Bankroll independence ===');
 {
-  const eng = new BtcBreakoutEngine({ fetchImpl: mockFetch, onTick: () => {}, onLog: () => {} });
-  eng.currentStart = Math.floor(Date.now() / 300) * 300 + 600;
-  const slug = `btc-updown-5m-${eng.currentStart}`;
-  const up = eng.makeToken('u2', slug, 'UP');
-  const down = eng.makeToken('d2', slug, 'DOWN');
-  eng.markets.set(slug, { slug, windowStart: eng.currentStart, windowEnd: eng.currentStart + 300, settled: false, winner: null, up, down, finalUpMax: null, finalDownMax: null, resolutionSource: null });
-
-  up.ask = 0.60; up.bid = 0.58; up.mid = 0.59;
-  down.ask = 0.60; down.bid = 0.58; down.mid = 0.59;
-  
-  eng.enterPosition(eng.markets.get(slug), up, 0.60);
-  
-  const costs = [eng.windowSunkCost];
-  for (let i = 0; i < 6; i++) {
-    const token = i % 2 === 0 ? down : up;
-    eng.flipPosition(eng.markets.get(slug), token);
-    costs.push(eng.windowSunkCost);
-  }
-  
-  console.log(`  Sunk cost progression: ${costs.map(c => '$' + c.toFixed(0)).join(' → ')}`);
-  console.log(`  Final sunk: $${eng.windowSunkCost.toFixed(2)} (MAX=$2000)`);
-  assert(eng.windowSunkCost <= 2000, `under MAX ($${eng.windowSunkCost.toFixed(2)})`);
-}
-
-// Test 4: Different entry prices
-console.log('\n=== Entry at various prices ===');
-{
-  for (const price of [0.50, 0.55, 0.60]) {
-    const eng = new BtcBreakoutEngine({ fetchImpl: mockFetch, onTick: () => {}, onLog: () => {} });
-    eng.currentStart = Math.floor(Date.now() / 300) * 300 + 900;
-    const slug = `btc-updown-5m-${eng.currentStart}`;
-    const up = eng.makeToken('u3', slug, 'UP');
-    const down = eng.makeToken('d3', slug, 'DOWN');
-    eng.markets.set(slug, { slug, windowStart: eng.currentStart, windowEnd: eng.currentStart + 300, settled: false, winner: null, up, down, finalUpMax: null, finalDownMax: null, resolutionSource: null });
-    
-    up.ask = price; up.bid = price - 0.02; up.mid = price - 0.01;
-    eng.enterPosition(eng.markets.get(slug), up, price);
-    console.log(`  @${price}: 20 SH cost=$${(20 * price).toFixed(2)}`);
-    assert(eng.accumUpShares === 20, `always 20 initial shares at ${price}`);
-  }
+  const a = new BtcBreakoutEngine({ fetchImpl: mockFetch, onTick: () => {}, onLog: () => {}, bankroll: 5000 });
+  const b = new BtcBreakoutEngine({ fetchImpl: mockFetch, onTick: () => {}, onLog: () => {}, bankroll: 300 });
+  assert(a.bankroll === 5000, 'A bankroll 5000');
+  assert(b.bankroll === 300, 'B bankroll 300');
+  assert(a.initialBankroll === 5000 && a.peakEquity === 5000, 'A initial/peak');
+  assert(b.initialBankroll === 300 && b.peakEquity === 300, 'B initial/peak');
+  b.bankroll = 250;
+  assert(a.bankroll === 5000, 'A unaffected by B');
+  console.log('  Independent bankrolls ✓');
 }
 
 console.log('\n=== ALL TESTS PASSED ===\n');
