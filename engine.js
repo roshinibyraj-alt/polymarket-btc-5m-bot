@@ -3,7 +3,7 @@
 const GAMMA_API = process.env.GAMMA_API || 'https://gamma-api.polymarket.com';
 const CLOB_REST = process.env.CLOB_REST || 'https://clob.polymarket.com';
 const MARKET_SLUG = process.env.MARKET_SLUG || 'crint-zaf-zwe-2026-08-29';
-const SA_INDEX = Number(process.env.SA_INDEX || 0); // index of South Africa outcome in outcomes array
+const OUTCOME_INDEX = Number(process.env.OUTCOME_INDEX || 1); // index in outcomes array (1 = Zimbabwe)
 const TOTAL_CAPITAL = Number(process.env.TOTAL_CAPITAL || 1000);
 const BUCKET_COUNT = Number(process.env.BUCKET_COUNT || 4);
 const SPACING = Number(process.env.SPACING || 0.02);   // distance between adjacent buckets
@@ -11,7 +11,7 @@ const PUSH = Number(process.env.PUSH || 0.02);         // below/above live price
 const CLOB_POLL_MS = Math.max(100, Number(process.env.CLOB_POLL_MS || 300));
 const CLOB_TIMEOUT_MS = Math.max(400, Number(process.env.CLOB_TIMEOUT_MS || 1500));
 const CLOB_FRESH_MS = Math.max(CLOB_POLL_MS, Number(process.env.CLOB_FRESH_MS || 1500));
-const PYRAMID_STEP = Number(process.env.PYRAMID_STEP || 0.03);   // deploy pyramid on every +STEP up-move of SA price
+const REANCHOR_MS = Number(process.env.REANCHOR_MS || 300000);   // re-anchor a bucket if its buy hasn't filled in this long
 
 function round2(value) { return Math.round(value * 100) / 100; }
 function round5(value) { return Math.round(value * 100000) / 100000; }
@@ -61,17 +61,6 @@ class SportsBucketEngine {
     this.totalFees = 0;
     this.roundTrips = 0;
     this.peakEquity = this.initialCapital;
-    // Aggressive pyramid (Option 4): scalp profits feed a hold pool that is
-    // deployed into SA held shares on every +PYRAMID_STEP up-move, held to $1.00.
-    this.pyramid = {
-      pool: 0,             // cash awaiting deployment
-      lastStep: null,      // last mid price at which we pyramided in (anchor)
-      heldShares: 0,
-      heldCost: 0,
-      heldEntry: null,
-      totalDeployed: 0,
-      entries: [],
-    };
     this.timers = [];
   }
 
@@ -84,6 +73,7 @@ class SportsBucketEngine {
       initialBankroll: bankroll,
       state: 'FLAT',            // FLAT | BUY_PLACED | HELD
       restingBuy: null,         // resting BUY limit price (re-anchors upward only)
+      placedAt: 0,              // when the current resting buy was placed (for 5-min re-anchor)
       order: null,              // { side: 'BUY'|'SELL', price, shares }
       entryPrice: null,         // locked entry when HELD
       shares: 0,
@@ -142,8 +132,8 @@ class SportsBucketEngine {
           throw new Error('market unavailable or not tradable');
         }
         if (market.closed) throw new Error('market is closed');
-        const outcome = String(outcomes[SA_INDEX] ?? 'South Africa');
-        const tokenId = String(clobTokenIds[SA_INDEX]);
+        const outcome = String(outcomes[OUTCOME_INDEX] ?? 'Zimbabwe');
+        const tokenId = String(clobTokenIds[OUTCOME_INDEX]);
         this.market = {
           slug: this.slug,
           title: market.question || market.title || this.slug,
@@ -232,45 +222,6 @@ class SportsBucketEngine {
     for (const bucket of this.buckets) {
       this.manageBucket(bucket, anchor);
     }
-    this.managePyramid();
-  }
-
-  // Aggressive pyramid: on every new +PYRAMID_STEP up-move of SA's live mid,
-  // deploy the whole accumulated pool (scalp profits) into SA held shares at
-  // market. Held shares ride to resolution at $1.00 if South Africa wins.
-  managePyramid() {
-    const mid = this.token?.mid;
-    if (mid == null) return;
-    if (this.pyramid.lastStep == null) {
-      this.pyramid.lastStep = mid; // anchor the first step to the opening mid
-      return;
-    }
-    if (mid < this.pyramid.lastStep + PYRAMID_STEP) return;
-    if (this.pyramid.pool <= 0) return;
-    const price = this.token.ask ?? mid;
-    if (!Number.isFinite(price) || price <= 0 || price >= 1) return;
-    const budget = this.pyramid.pool;
-    const shares = Math.floor(budget / price);
-    if (shares < 1) return;
-    const cost = round2(shares * price);
-    this.pyramid.heldShares += shares;
-    this.pyramid.heldCost = round2(this.pyramid.heldCost + cost);
-    this.pyramid.heldEntry = price;
-    this.pyramid.pool = round2(this.pyramid.pool - cost);
-    this.pyramid.lastStep = mid;
-    this.pyramid.totalDeployed = round2(this.pyramid.totalDeployed + cost);
-    this.pyramid.entries.push({ timestamp: Date.now(), price, shares, cost });
-    this.trades.unshift({
-      timestamp: Date.now(),
-      action: 'PYRAMID',
-      shares,
-      price,
-      cost,
-      reason: `+${(PYRAMID_STEP * 100).toFixed(0)}c up-step @ ${price.toFixed(2)}`,
-    });
-    this.log(`🧗 PYRAMID +${(PYRAMID_STEP * 100).toFixed(0)}c step → ${shares} SH @ ${price.toFixed(2)} = $${cost.toFixed(2)} · total ${this.pyramid.heldShares} SH held`);
-    this.recordEquity();
-    this.onTick(this.buildState());
   }
 
   manageBucket(bucket, anchor) {
@@ -280,12 +231,23 @@ class SportsBucketEngine {
         // Target BUY level just below live price at this bucket's depth slot.
         const target = round2(anchor - this.push - bucket.depth);
         if (target <= 0.01) return;
+        const now = Date.now();
+        // If the resting buy hasn't filled within REANCHOR_MS, force a fresh
+        // re-anchor to the current live-derived level so stale orders don't sit
+        // far from the market.
+        const stale = bucket.state === 'BUY_PLACED' && bucket.placedAt > 0 && (now - bucket.placedAt) >= REANCHOR_MS;
+        if (stale) {
+          this.log(`🔁 BUCKET ${bucket.id} RE-ANCHOR ${(bucket.restingBuy ?? target).toFixed(2)} → ${target.toFixed(2)} (no fill in ${Math.round(REANCHOR_MS / 60000)}min)`);
+          bucket.restingBuy = null;
+        }
         // Re-anchor the resting BUY upward only: keep it resting to catch dips,
         // but raise it toward the market when the price rallies.
         const placed = bucket.restingBuy != null ? bucket.restingBuy : target;
-        const buyPrice = Math.max(placed, target);
+        const buyPrice = Math.round(Math.max(placed, target) * 100) / 100;
+        const isFresh = bucket.restingBuy === null;
         bucket.state = 'BUY_PLACED';
         bucket.restingBuy = buyPrice;
+        if (isFresh) bucket.placedAt = now;
         bucket.order = { side: 'BUY', price: buyPrice, shares: null };
         // Fill when CLOB best ask crosses at/below our resting limit.
         if (this.token.ask != null && this.token.ask <= buyPrice) {
@@ -318,6 +280,7 @@ class SportsBucketEngine {
     bucket.bankroll = round2(bucket.bankroll - bucket.cost);
     bucket.state = 'HELD';
     bucket.restingBuy = null;
+    bucket.placedAt = 0;
     bucket.order = null;
     bucket.lastEvent = Date.now();
     this.trades.unshift({
@@ -338,10 +301,7 @@ class SportsBucketEngine {
     const shares = bucket.shares;
     const proceeds = round2(shares * price);
     const gross = round2(proceeds - bucket.cost);
-    // Aggressive pyramid: restore the bucket's invested capital so it keeps
-    // scalping, and sweep the ENTIRE scalp profit into the pyramid hold pool.
-    bucket.bankroll = round2(bucket.bankroll + bucket.cost);
-    if (gross > 0) this.pyramid.pool = round2(this.pyramid.pool + gross);
+    bucket.bankroll = round2(bucket.bankroll + proceeds);
     bucket.entryPrice = null;
     bucket.shares = 0;
     bucket.cost = 0;
@@ -349,6 +309,7 @@ class SportsBucketEngine {
     bucket.roundTrips += 1;
     bucket.state = 'FLAT';
     bucket.restingBuy = null;
+    bucket.placedAt = 0;
     bucket.order = null;
     bucket.lastEvent = Date.now();
     this.realizedPnl = round2(this.realizedPnl + gross);
@@ -381,10 +342,6 @@ class SportsBucketEngine {
         value += bucket.bankroll;
       }
     }
-    if (this.pyramid.heldShares > 0 && this.token?.mid != null) {
-      value += round2(this.pyramid.heldShares * this.token.mid);
-    }
-    value += this.pyramid.pool;
     return round2(value);
   }
 
@@ -395,7 +352,7 @@ class SportsBucketEngine {
     return {
       version: '1.0.0',
       name: this.name,
-      strategy: `SPORTS PYRAMID · ${this.market?.title || this.slug} · ${this.bucketCount} BUCKETS x $${round2(this.initialCapital / this.bucketCount)} SCALP ±${this.push.toFixed(2)} → PYRAMID +${(PYRAMID_STEP * 100).toFixed(0)}c STEPS · HOLD SA TO $1`,
+      strategy: `SPORTS SCALPER · ${this.market?.title || this.slug} · TRADING ${this.market?.outcome || 'Zimbabwe'} · ${this.bucketCount} BUCKETS x $${round2(this.initialCapital / this.bucketCount)} · LIMIT ±${this.push.toFixed(2)} · SPACING ${this.spacing.toFixed(2)} · RE-ANCHOR ${Math.round(REANCHOR_MS / 60000)}min`,
       serverTime: Date.now(),
       connected: this.isClobFresh(),
       marketReady: Boolean(this.market),
@@ -422,21 +379,12 @@ class SportsBucketEngine {
       totalPnl: round2(mark - this.initialCapital),
       roundTrips: this.roundTrips,
       totalFees: 0,
-      pyramid: {
-        pool: round2(this.pyramid.pool),
-        lastStep: this.pyramid.lastStep,
-        heldShares: this.pyramid.heldShares,
-        heldCost: round2(this.pyramid.heldCost),
-        heldEntry: this.pyramid.heldEntry,
-        totalDeployed: round2(this.pyramid.totalDeployed),
-        nextStep: this.pyramid.lastStep != null ? round2(this.pyramid.lastStep + PYRAMID_STEP) : null,
-        entries: this.pyramid.entries.slice(-20),
-      },
       buckets: this.buckets.map(bucket => ({
         id: bucket.id,
         state: bucket.state,
         depth: round2(bucket.depth),
         restingBuy: bucket.restingBuy,
+        placedAt: bucket.placedAt,
         bankroll: round2(bucket.bankroll),
         initialBankroll: round2(bucket.initialBankroll),
         order: bucket.order ? { ...bucket.order, shares: bucket.order.shares } : null,
@@ -460,7 +408,6 @@ class SportsBucketEngine {
         bucketCapital: round2(this.initialCapital / this.bucketCount),
         spacing: this.spacing,
         push: this.push,
-        pyramidStep: PYRAMID_STEP,
         pollMs: CLOB_POLL_MS,
       },
     };
@@ -495,6 +442,6 @@ class SportsBucketEngine {
 module.exports = {
   SportsBucketEngine,
   config: {
-    MARKET_SLUG, SA_INDEX, TOTAL_CAPITAL, BUCKET_COUNT, SPACING, PUSH, PYRAMID_STEP, CLOB_POLL_MS,
+    MARKET_SLUG, OUTCOME_INDEX, TOTAL_CAPITAL, BUCKET_COUNT, SPACING, PUSH, REANCHOR_MS, CLOB_POLL_MS,
   },
 };

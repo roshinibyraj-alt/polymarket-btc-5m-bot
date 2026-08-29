@@ -14,7 +14,7 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 
 const engine = new SportsBucketEngine({
-  name: 'CricketPyramid',
+  name: 'SportsBuckets',
   onLog: line => console.log(`[BUCKET] ${line}`),
 });
 
@@ -27,7 +27,7 @@ const dashboard = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sports Pyramid Bot</title>
+<title>Sports Bucket Bot</title>
 <style>
 *{box-sizing:border-box}
 :root{--bg:#000;--panel:#070707;--line:#222;--muted:#9d9d9d;--up:#00ff85;--down:#ff4a68;--amber:#ffc400;--blue:#38d6ff}
@@ -74,7 +74,7 @@ h1{font-size:18px;margin:0;text-transform:uppercase;letter-spacing:.4px}
 <body>
 <div class="wrap">
 <div class="topbar">
- <div class="brand"><div class="logo">🎱</div><div><h1>Sports Pyramid Bot</h1><div class="sub" id="strategy">LOADING…</div></div></div>
+ <div class="brand"><div class="logo">🎱</div><div><h1>Sports Bucket Bot</h1><div class="sub" id="strategy">LOADING…</div></div></div>
  <div class="status">
   <span class="pill" id="uiLink">UI…</span>
   <span class="pill" id="connLink">CONN…</span>
@@ -87,9 +87,6 @@ h1{font-size:18px;margin:0;text-transform:uppercase;letter-spacing:.4px}
  <div class="bigcard"><div class="market-title">Realized PnL</div><div class="live-price" id="realPnl">—</div><div class="quote" id="roundTrips">—</div></div>
 </div>
 <svg class="chart" id="chart"></svg>
-<div class="pricebar" id="pyramidBar">
- <div class="bigcard" style="grid-column:span 3"><div class="market-title">🧗 AGGRESSIVE PYRAMID · SA HOLD</div><div class="quote" id="pyramidSummary">LOGGING…</div></div>
-</div>
 <div class="buckets" id="buckets"></div>
 <div class="panels">
  <div class="panel"><div class="section-head"><span>TRADE FEED</span><span id="tradeCount">0</span></div><div class="list" id="trades"><div class="empty">WAITING FOR TRADE</div></div></div>
@@ -122,19 +119,12 @@ function renderBuckets(list){
   return '<div class="bucket"><div class="bucket-head"><span class="bucket-name">BUCKET '+b.id+'</span><span class="bucket-state '+b.state+'">'+b.state+'</span></div><div class="metrics"><div class="box"><div class="label">Capital</div><div class="value">'+cash(b.bankroll)+'</div></div><div class="box"><div class="label">Round Trips</div><div class="value">'+b.roundTrips+'</div></div></div><div class="box" style="margin-top:6px"><div class="label">Order</div>'+order+(held||'<div class="dim">FLAT · next BUY @ '+(anchor0==null?'—':price(anchor0-0.02-b.depth))+'</div>')+'</div></div>';
  }).join('');
 }
-function renderPyramid(p){
- const box=$('pyramidSummary');if(!box)return;
- const next=p&&p.nextStep!=null?'NEXT +'+((p.config&&p.config.pyramidStep)||0.03)+'c @ '+price(p.nextStep):'—';
- const entries=(p&&p.entries||[]);
- const held=p&&p.heldShares||0;const val=(p&&p.markMid||null);
- box.innerHTML='POOL <b>'+cash((p&&p.pool)||0)+'</b> · HELD <b>'+shares(held)+' SH</b> · DEPLOYED '+cash((p&&p.totalDeployed)||0)+' · '+entries.length+' ENTRIES · '+next;
-}
 let anchor0=null;
 function renderTrades(rows){
  $('tradeCount').textContent=rows.length;
  const sig='tr:'+rows.map(t=>t.timestamp+t.action+t.bucket+t.price).join('|');
  if(caches[sig])return;caches[sig]=1;
- $('trades').innerHTML=!rows.length?'<div class="empty">WAITING FOR TRADE</div>':rows.map(t=>'<article class="trade-item"><div><span class="'+(t.action==='BUY'?'buy':'sell')+'">'+t.action+(t.bucket?' B'+t.bucket:'')+' '+shares(t.shares)+' SH</span><div class="dim">@'+price(t.price)+(t.reason?' · '+t.reason:'')+'</div></div><div class="'+cls(t.pnl||t.cost||0)+'">'+(t.action==='BUY'?cash(t.cost):cash(t.pnl))+ '</div></article>').join('');
+ $('trades').innerHTML=!rows.length?'<div class="empty">WAITING FOR TRADE</div>':rows.map(t=>'<article class="trade-item"><div><span class="'+(t.action==='BUY'?'buy':'sell')+'">'+t.action+' B'+t.bucket+' '+shares(t.shares)+' SH</span><div class="dim">@'+price(t.price)+(t.reason?' · '+t.reason:'')+'</div></div><div class="'+cls(t.pnl||t.cost||0)+'">'+(t.action==='BUY'?cash(t.cost):cash(t.pnl))+ '</div></article>').join('');
 }
 function renderLogs(input){
  const sig='lg:'+(input||[]).length;if(caches[sig])return;caches[sig]=1;
@@ -161,8 +151,6 @@ async function refresh(){
   $('realPnl').textContent=cash(d.realizedPnl);
   $('roundTrips').textContent=d.roundTrips+' ROUND TRIPS';
   drawChart(d.equityCurve,d.totalPnl);
-  const pyr=d.pyramid||{}; pyr.config=d.config; if(d.token) pyr.markMid=d.token.mid;
-  renderPyramid(pyr);
   renderBuckets(d.buckets||[]);
   renderTrades(d.trades||[]);
   renderLogs(d.logs||[]);
@@ -175,6 +163,6 @@ refresh();
 app.get('/', (_, res) => res.type('html').send(dashboard));
 
 app.listen(port, '0.0.0.0', () => {
-  console.log(`Sports Pyramid Bot listening on :${port}`);
+  console.log(`Sports Bucket Bot listening on :${port}`);
   engine.init();
 });

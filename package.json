@@ -1,7 +1,7 @@
 {
-  "name": "polymarket-sports-pyramid-bot",
-  "version": "1.1.0",
-  "description": "Paper SA cricket bot: 4x$250 +/-0.02 scalp buckets feed an aggressive +0.03 pyramid that holds SA shares to $1.00 win",
+  "name": "polymarket-sports-bucket-bot",
+  "version": "1.2.0",
+  "description": "Paper cricket scalper: 4x$250 buckets on Zimbabwe (crint-zaf-zwe), +/-0.02 round-trips, 5-min re-anchor, no overlap",
   "main": "index.js",
   "engines": {
     "node": ">=18.0.0"
