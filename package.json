@@ -1,7 +1,7 @@
 {
-  "name": "polymarket-sports-bucket-bot",
-  "version": "1.0.0",
-  "description": "Paper sports scalper: 4 buckets of $250 scale South Africa (crint-zaf-zwe) with \u00b10.02 limit round-trips, 0.02 spacing, dynamic re-anchor",
+  "name": "polymarket-sports-pyramid-bot",
+  "version": "1.1.0",
+  "description": "Paper SA cricket bot: 4x$250 +/-0.02 scalp buckets feed an aggressive +0.03 pyramid that holds SA shares to $1.00 win",
   "main": "index.js",
   "engines": {
     "node": ">=18.0.0"
