@@ -1,40 +1,38 @@
-# Polymarket BTC 5m Momentum Bot (paper)
+# Polymarket BTC 5m Limit-Hedge Bot (paper)
 
-Paper/demo trading bot for the Polymarket **BTC Up/Down 5-minute** market, modelled on the momentum-near-close strategy. No wallet, no private key — every fill is simulated on the live CLOB order book.
+Paper/demo trading bot for the Polymarket **BTC Up/Down 5-minute** market. No wallet, no private key — every fill is simulated on the live CLOB order book.
 
 ## Strategy
-1. Bot discovers the active `btc-updown-5m-<bucket>` market via Gamma (slug lookup) — prices always come from the CLOB order book (`POST /books`), no Gamma price fallback.
-2. On (re)start, the bot waits for the **next full window** before trading.
-3. Entry is gated to roughly **120s left** in the window (default ±30s tolerance, never earlier than 60s left).
-4. Momentum confirmation: BTC must have moved **$70–100** in the active 5m interval (Binance 1m candles + tick price).
-5. Trigger: the side whose **best ask reaches ≥ 0.70** is entered (follows momentum). If both sides are ≥ 0.70, the **stronger side** (higher ask) is picked.
-6. Safety guards: skip if spread > 0.03, top-of-book ask notional < $30, stale quotes (>8s), or after API failures.
-7. One trade per window. Optional stop-loss at `STOP_LOSS_PCT` below entry; otherwise position exits before **20s left** if marketable, else **holds to resolution** (paper settlement via final observed CLOB mid).
+1. At the start of each window, the bot places **two resting limit buy orders @ 0.40** — one on UP, one on DOWN (100 shares each).
+2. A side fills when its CLOB ask reaches ≤ 0.40 (natural limit fill).
+3. The **first side to fill** immediately gets a **resting limit sell @ 0.60** (take-profit).
+4. When that TP limit sell fills, the **other side is already/also filled at 0.40** (binary: if UP is 0.60, DOWN is 0.40) and is **held to resolution** — its exit is by resolution, not TP — but its **stop-loss stays 0.25**.
+5. **Stop-loss = market order** @ 0.25. If **any side hits SL**, the window is **paused**: all pending orders cancelled, no more entries that window.
+6. **Up to two bets per window** (both 0.40 sides can fill; one TP's, the other rides to resolution).
+
+### Order types
+- **Entry:** limit buy @ 0.40
+- **TP:** limit sell @ 0.60 (first-filled side only)
+- **SL:** market order @ 0.25 (any side)
 
 ## Config (env vars)
 | Var | Default | Meaning |
 | --- | --- | --- |
-| `PROFILE` | `conservative` | `conservative` (5/8) or `aggressive` (5/15) sizing reference |
-| `THRESHOLD` | `0.70` | Trigger on best ask ≥ threshold |
-| `STAKE_USD` | `5` | Paper stake per trade |
-| `MAX_NOTIONAL` | `8` | Hard cap per trade (conservative) |
-| `STOP_LOSS_PCT` | `0.25` | Stop-loss below entry; `0` disables |
-| `ENTRY_TARGET_LEFT` | `120` | Target seconds left for entry |
-| `ENTRY_TOLERANCE` | `30` | ± tolerance on the entry target |
-| `MIN_ENTRY_LEFT` | `60` | Never enter earlier than this |
-| `EXIT_BEFORE_SEC` | `20` | Try to exit before this many seconds left |
-| `MOVE_MIN_USD` / `MOVE_MAX_USD` | `70` / `100` | Impulse confirmation range (BTC USD move) |
-| `SPREAD_GUARD` | `0.03` | Skip if spread wider |
-| `MIN_TOP_NOTIONAL` | `30` | Skip if top ask notional thinner |
-| `STALE_GUARD_MS` | `8000` | Skip if quote older |
+| `ENTRY_PRICE` | `0.40` | Limit buy entry level |
+| `TP_PRICE` | `0.60` | Limit sell TP level |
+| `SL_PRICE` | `0.25` | Market-order stop-loss level |
+| `SHARES` | `100` | Shares per side (cost = shares × entry) |
 | `CLOB_POLL_MS` | `300` | CLOB polling interval |
+
+## Pricing
+Gamma is used **only** to resolve the slug into the UP/DOWN CLOB token IDs; all prices come from the CLOB order book (`POST /books`). Pure paper simulation — limit fills when best ask ≤ entry / bid ≥ TP, market SL exits at the quoted mid. No fees modelled.
 
 ## Run
 ```bash
 npm install
 npm start          # http://localhost:3000
-npm run smoke      # syntax checks
+npm run smoke      # engine+index syntax + internal window simulation
 ```
 
 ## Dashboard
-Live BTC price + impulse, window countdown, UP/DOWN bid/ask/mid/depth, open position (entry/mark/unrealized), bankroll/equity/realized PnL, drawdown from peak, lifetime equity curve, trade feed and logs.
+Live BTC 5m UP/DOWN bid/ask/mid, window countdown, both 0.40 limit-buy orders + 0.60 TP order status, open positions (entry/mark/unrealized, TP vs held-to-resolution), bankroll/equity/realized PnL, wins/losses, drawdown, pause status, trade feed, logs, lifetime equity chart.

@@ -1,14 +1,14 @@
 {
-  "name": "polymarket-btc-momentum-bot",
+  "name": "polymarket-limit-hedge-bot",
   "version": "3.0.0",
-  "description": "Paper BTC 5m momentum bot: follow momentum into close (~120s left, ask >= 0.70), stop-loss + early exit, CLOB order books",
+  "description": "Paper BTC 5m limit-hedge bot: limit-buy both sides @0.40, limit TP @0.60, market SL @0.25, one side holds to resolution",
   "main": "index.js",
   "engines": {
     "node": ">=18.0.0"
   },
   "scripts": {
     "start": "node index.js",
-    "smoke": "node --check engine.js && node --check index.js"
+    "smoke": "node --check engine.js && node --check index.js && node smoke.js"
   },
   "dependencies": {
     "express": "^4.19.2"

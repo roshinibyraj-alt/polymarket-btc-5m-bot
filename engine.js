@@ -1,42 +1,32 @@
 'use strict';
 
-// ── Config ──────────────────────────────────────────────────
-const GAMMA_API   = process.env.GAMMA_API || 'https://gamma-api.polymarket.com';
-const CLOB_REST   = process.env.CLOB_REST || 'https://clob.polymarket.com';
-const BINANCE_API = process.env.BINANCE_API || 'https://api.binance.com';
-const WINDOW_SECONDS = 300;
+// ── Config (env-overridable) ───────────────────────────────
+const GAMMA_API = process.env.GAMMA_API || 'https://gamma-api.polymarket.com';
+const CLOB_REST = process.env.CLOB_REST || 'https://clob.polymarket.com';
 
-const PROFILE         = process.env.PROFILE || 'conservative';   // conservative | aggressive
-const THRESHOLD       = Number(process.env.THRESHOLD || 0.70);   // trigger on best ask >= threshold
-const STAKE_USD       = Number(process.env.STAKE_USD || 5);      // paper stake per trade
-const MAX_NOTIONAL    = Number(process.env.MAX_NOTIONAL || 8);   // hard cap per trade
-const STOP_LOSS_PCT   = Number(process.env.STOP_LOSS_PCT || 0.25); // 0 = disabled
-const ENTRY_TARGET_LEFT = Number(process.env.ENTRY_TARGET_LEFT || 120); // ~2 min left
-const ENTRY_TOLERANCE   = Number(process.env.ENTRY_TOLERANCE || 30);    // +/- tolerance on target
-const MIN_ENTRY_LEFT    = Number(process.env.MIN_ENTRY_LEFT || 60);     // never enter earlier than this
-const EXIT_BEFORE_SEC   = Number(process.env.EXIT_BEFORE_SEC || 20);    // exit before end (if position could be closed)
-const MOVE_MIN_USD      = Number(process.env.MOVE_MIN_USD || 70);       // impulse confirmation min
-const MOVE_MAX_USD      = Number(process.env.MOVE_MAX_USD || 100);      // impulse confirmation max ref
-const SPREAD_GUARD      = Number(process.env.SPREAD_GUARD || 0.03);     // skip if spread > this
-const MIN_TOP_NOTIONAL  = Number(process.env.MIN_TOP_NOTIONAL || 30);   // skip if top ask notional < this
-const STALE_GUARD_MS    = Number(process.env.STALE_GUARD_MS || 8000);   // skip if quote stale
+const WINDOW_SECONDS = 300;                     // BTC 5m windows
+
+const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.40);
+const TP_PRICE    = Number(process.env.TP_PRICE    || 0.60);
+const SL_PRICE    = Number(process.env.SL_PRICE    || 0.25);
+const SHARES      = Number(process.env.SHARES      || 100);
 
 const CLOB_POLL_MS   = Math.max(100, Number(process.env.CLOB_POLL_MS || 300));
 const CLOB_FRESH_MS  = Math.max(CLOB_POLL_MS, Number(process.env.CLOB_FRESH_MS || 1500));
-const CLOB_TIMEOUT_MS = Math.max(400, Number(process.env.CLOB_TIMEOUT_MS || 1500));
+const CLOB_TIMEOUT_MS= Math.max(400, Number(process.env.CLOB_TIMEOUT_MS || 1500));
 
-// ── Helpers ─────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────
 function round2(v) { return Math.round(v * 100) / 100; }
 function round5(v) { return Math.round(v * 100000) / 100000; }
 function windowStartFor(ms) { return Math.floor(ms / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS; }
 function slugFor(start) { return `btc-updown-5m-${start}`; }
 
-class BtcMomentumEngine {
+class LimitHedgeEngine {
   constructor(options = {}) {
     this.fetchImpl = options.fetchImpl || fetch;
     this.onTick = options.onTick || (() => {});
     this.onLog = options.onLog || (() => {});
-    this.name = options.name || 'Momentum5m';
+    this.name = options.name || 'LimitHedge5m';
     this.startedAt = Date.now();
 
     this.bankroll = options.bankroll ?? 1000;
@@ -46,29 +36,25 @@ class BtcMomentumEngine {
     this.losses = 0;
     this.peakEquity = this.bankroll;
 
-    // Market state
-    this.markets = new Map();        // slug -> market
-    this.tokens = new Map();         // tokenId -> token
+    this.markets = new Map();          // slug -> market record
+    this.tokens = new Map();           // tokenId -> token
     this.discoveryJobs = new Map();
     this.currentStart = windowStartFor(Date.now());
 
-    // Binance impulse data
-    this.binanceCandles = [];
-    this.tickHistory = [];
-    this.candleFetching = false;
-    this.candleFetchedAt = 0;
-    this.tickFetching = false;
-    this.tickFetchedAt = 0;
-
-    // Position
-    this.openPosition = null;        // one at a time
-    this.trades = [];
+    // Per-window trading state
+    this.windowOrdersPlacedFor = null; // windowStart for which entry limits are out
+    this.entryOrders = [];             // {outcome, price, status, placedAt}
+    this.tpOrders = [];                // {outcome, price, status, placedAt}
+    this.positions = [];               // open positions (both sides possible)
     this.results = [];
+    this.trades = [];
+    this.windowPaused = false;
+    this.pauseReason = null;
+
     this.logs = [];
     this.equityCurve = [{ t: Date.now(), equity: this.bankroll }];
 
-    this.startedAtMs = Date.now();
-    this.entryWindow = null;
+    this.entryWindow = null;           // first tradeable window (wait for next on restart)
     this.pollInFlight = 0;
     this.lastPollAt = null;
     this.lastSuccessfulPollAt = null;
@@ -101,7 +87,7 @@ class BtcMomentumEngine {
         signal: controller.signal,
         headers: {
           'Content-Type': 'application/json',
-          'User-Agent': 'btc-momentum-bot/1.0',
+          'User-Agent': 'limit-hedge-bot/1.0',
           ...(options.headers || {}),
         },
       });
@@ -157,7 +143,7 @@ class BtcMomentumEngine {
     const token = {
       tokenId: String(tokenId), slug, outcome,
       bid: null, ask: null, mid: null, spread: null,
-      topAskNotional: 0, updatedAt: null, bookAsks: [],
+      topAskNotional: 0, updatedAt: null, bookAsks: [], bookBids: [],
     };
     this.tokens.set(token.tokenId, token);
     return token;
@@ -165,10 +151,13 @@ class BtcMomentumEngine {
 
   // ── CLOB polling ──────────────────────────────────────────
   applyBook(token, bids, asks) {
+    const validBids = (bids || []).filter(l => Number(l.size) > 0).map(l => ({ price: Number(l.price), size: Number(l.size) }));
+    validBids.sort((a, b) => b.price - a.price);
     const validAsks = (asks || []).filter(l => Number(l.size) > 0).map(l => ({ price: Number(l.price), size: Number(l.size) }));
     validAsks.sort((a, b) => a.price - b.price);
+    token.bookBids = validBids;
     token.bookAsks = validAsks;
-    const bestBid = (bids || []).filter(l => Number(l.size) > 0).map(l => Number(l.price)).sort((a, b) => b - a)[0] ?? null;
+    const bestBid = validBids[0]?.price ?? null;
     const bestAsk = validAsks[0]?.price ?? null;
     const topAskNotional = validAsks[0] ? round2(validAsks[0].price * validAsks[0].size) : 0;
     const cleanBid = Number.isFinite(bestBid) && bestBid > 0 && bestBid <= 1 ? bestBid : null;
@@ -185,11 +174,8 @@ class BtcMomentumEngine {
     const now = Date.now();
     const cs = windowStartFor(now);
     const markets = [this.markets.get(slugFor(cs)), this.markets.get(slugFor(cs + WINDOW_SECONDS))].filter(Boolean);
-    const tokens = markets.flatMap(m => [m.up, m.down]).filter(t => t && !this.positionFor(markets.find(mm => mm.slug === t.slug)?.slug));
-    if (!tokens.length) {
-      this.lastPollAt = Date.now();
-      return;
-    }
+    const tokens = markets.flatMap(m => [m.up, m.down]);
+    if (!tokens.length) { this.lastPollAt = Date.now(); return; }
     this.pollInFlight += 1;
     try {
       const books = await this.requestJSON(`${CLOB_REST}/books`, {
@@ -217,234 +203,172 @@ class BtcMomentumEngine {
     }
   }
 
-  positionFor(slug) {
-    return this.openPosition && this.openPosition.slug === slug ? this.openPosition : null;
-  }
-
-  // ── Binance impulse ───────────────────────────────────────
-  async fetchBinanceCandles(limit = 25) {
-    if (this.candleFetching) return;
+  // ── Strategy ──────────────────────────────────────────────
+  ensureWindowOrders(market) {
     const now = Date.now();
-    if (now - this.candleFetchedAt < 5000) return;
-    this.candleFetching = true;
-    try {
-      const data = await this.requestJSON(`${BINANCE_API}/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=${limit}`, {}, 6000);
-      if (Array.isArray(data) && data.length > 0) {
-        this.binanceCandles = data.map(c => ({
-          openTime: Number(c[0]) / 1000,
-          open: Number(c[1]), high: Number(c[2]), low: Number(c[3]), close: Number(c[4]),
-          volume: Number(c[5]),
-        }));
-        this.candleFetchedAt = now;
-      }
-    } catch (_) {} finally { this.candleFetching = false; }
-  }
+    if (this.windowOrdersPlacedFor === market.windowStart) return;
+    this.windowOrdersPlacedFor = market.windowStart;
+    this.windowPaused = false;
+    this.pauseReason = null;
+    this.entryOrders = [];
+    this.tpOrders = [];
 
-  async fetchBinanceTick() {
-    if (this.tickFetching) return;
-    const now = Date.now();
-    if (now - this.tickFetchedAt < 300) return;
-    this.tickFetching = true;
-    try {
-      const data = await this.requestJSON(`${BINANCE_API}/api/v3/ticker/price?symbol=BTCUSDT`, {}, 4000);
-      const price = Number(data?.price);
-      if (Number.isFinite(price)) {
-        this.tickHistory.push({ t: now, p: price });
-        if (this.tickHistory.length > 300) this.tickHistory.shift();
-        this.tickFetchedAt = now;
-      }
-    } catch (_) {} finally { this.tickFetching = false; }
-  }
-
-  // Window open price for impulse calculation (from candles)
-  openPriceFor(windowStart) {
-    const candles = this.binanceCandles;
-    if (!candles || !candles.length) return null;
-    for (const c of candles) {
-      if (c.openTime <= windowStart && c.openTime + 60 > windowStart) return c.open;
-    }
-    return candles[0]?.open ?? null;
-  }
-
-  latestPrice() {
-    const tick = this.tickHistory[this.tickHistory.length - 1];
-    if (tick) return tick.p;
-    const last = this.binanceCandles[this.binanceCandles.length - 1];
-    return last?.close ?? null;
-  }
-
-  impulseUsd(windowStart) {
-    const open = this.openPriceFor(windowStart);
-    const current = this.latestPrice();
-    if (open == null || current == null || open <= 0) return null;
-    return round2(current - open);
-  }
-
-  // ── Momentum-near-close strategy ──────────────────────────
-  evaluateEntry() {
-    const now = Date.now();
-    const cs = windowStartFor(now);
-    // Same as the RecoverBot/MartingaleBot: never enter the window the bot started in.
-    if (this.entryWindow != null && cs < this.entryWindow) return;
-    const elapsed = Math.floor(now / 1000) - cs;
-    const remaining = WINDOW_SECONDS - elapsed;
-    if (remaining <= 0) return;
-
-    // Entry window: ~120s left ± tolerance, never before 60s left.
-    const targetOk = remaining >= (ENTRY_TARGET_LEFT - ENTRY_TOLERANCE) && remaining <= (ENTRY_TARGET_LEFT + ENTRY_TOLERANCE);
-    if (remaining > ENTRY_TARGET_LEFT + ENTRY_TOLERANCE) return;   // too early
-    if (remaining < MIN_ENTRY_LEFT) return;                         // too late
-
-    // One trade per window.
-    const market = this.markets.get(slugFor(cs));
-    if (!market || market.settled) return;
-    if (this.positionFor(market.slug)) return;
-    if (this.trades.some(t => t.slug === market.slug && t.type === 'BUY')) return;
-
-    // Safety guards.
-    const nowMs = Date.now();
-    if (this.isStale(market) || this.isStale(market.up) || this.isStale(market.down)) return;
-    if (this.spreadTooWide(market)) return;
-    if (this.liquidityTooThin(market)) return;
-    if (!this.impulseOk(cs)) return;
-
-    // Trigger: best ask >= threshold, pick stronger side (follow momentum).
-    const upAsk = market.up.ask;
-    const downAsk = market.down.ask;
-    if (upAsk == null || downAsk == null) return;
-    const upFire = upAsk >= THRESHOLD;
-    const downFire = downAsk >= THRESHOLD;
-    if (!upFire && !downFire) return;
-
-    let outcome;
-    if (upFire && downFire) outcome = upAsk >= downAsk ? 'UP' : 'DOWN';
-    else outcome = upFire ? 'UP' : 'DOWN';
-    this.executeBuy(market, outcome, (outcome === 'UP' ? market.up : market.down).ask, cs);
-  }
-
-  isStale(x) {
-    if (!x?.updatedAt) return true;
-    return Date.now() - x.updatedAt > STALE_GUARD_MS;
-  }
-  spreadTooWide(market) {
-    const sides = [market.up, market.down].filter(t => t.spread != null);
-    if (!sides.length) return true;
-    const maxSpread = Math.max(...sides.map(t => t.spread));
-    return maxSpread > SPREAD_GUARD;
-  }
-  liquidityTooThin(market) {
-    const sides = [market.up, market.down];
-    const hasDepth = sides.some(t => t.topAskNotional != null && t.topAskNotional >= MIN_TOP_NOTIONAL);
-    return !hasDepth;
-  }
-  impulseOk(cs) {
-    const move = this.impulseUsd(cs);
-    if (move == null) return false;
-    return Math.abs(move) >= MOVE_MIN_USD;
-  }
-
-  executeBuy(market, outcome, price, windowStart) {
-    const token = outcome === 'UP' ? market.up : market.down;
-    const budget = Math.min(STAKE_USD, MAX_NOTIONAL);
-    if (budget <= 0 || price <= 0 || price >= 1) return;
-    const shares = Math.max(1, Math.floor(budget / price));
-    const cost = round2(shares * price);
-    if (cost > this.bankroll) return;
-    this.bankroll = round2(this.bankroll - cost);
-    const impulse = this.impulseUsd(windowStart) ?? 0;
-    this.openPosition = {
-      slug: market.slug, market, token, outcome,
-      shares, entryPrice: price, cost, windowStart, windowEnd: market.windowEnd,
-      openedAt: Date.now(),
-    };
-    this.trades.push({ timestamp: Date.now(), type: 'BUY', slug: market.slug, outcome, shares, price, cost, reason: `ask ${price.toFixed(2)} ≥ ${THRESHOLD} · impulse $${impulse.toFixed(0)} · ${Math.floor((market.windowEnd - Date.now() / 1000))}s left` });
-    this.log(`⚡ BUY ${outcome} ${shares}sh @ ${price.toFixed(2)} · cost $${cost.toFixed(2)} · impulse $${impulse.toFixed(0)} · ${Math.floor(market.windowEnd - Date.now() / 1000)}s left`);
-    this.recordEquity();
-    this.onTick(this.buildState());
-    this.evaluateExit(true);
-  }
-
-  // ── Exit ──────────────────────────────────────────────────
-  evaluateExit(force = false) {
-    const p = this.openPosition;
-    if (!p) return;
-    const now = Date.now();
-    const remainingS = p.windowEnd - now / 1000;
-
-    // Stop-loss: exit if price falls below entry * (1 - stop_loss_pct)
-    if (STOP_LOSS_PCT > 0 && p.token.mid != null) {
-      const stopPrice = p.entryPrice * (1 - STOP_LOSS_PCT);
-      if (p.token.mid <= stopPrice) { this.sellPosition('STOP_LOSS'); return; }
-    }
-    // Exit before end (exit_before_sec)
-    if (remainingS <= EXIT_BEFORE_SEC && p.token.mid != null) {
-      this.sellPosition('EXIT_BEFORE_END');
+    if (this.entryWindow != null && market.windowStart < this.entryWindow) {
+      this.log(`⏳ Window ${market.windowStart} skipped (entryWindow ${this.entryWindow})`);
       return;
     }
-    // Fill exit for stops on the paper bot: use best bid when it crosses a
-    // conservative exit level (avoid waiting for resolution if possible).
-    if (force) return;
+
+    this.entryOrders.push({ outcome: 'UP',   price: ENTRY_PRICE, status: 'RESTING', placedAt: now });
+    this.entryOrders.push({ outcome: 'DOWN', price: ENTRY_PRICE, status: 'RESTING', placedAt: now });
+    this.log(`📌 WINDOW ${market.slug.slice(-10)} — LIMIT BUY UP+DOWN @ ${ENTRY_PRICE.toFixed(2)} × ${SHARES}sh each`);
+    this.onTick(this.buildState());
   }
 
-  sellPosition(reason) {
-    const p = this.openPosition;
-    if (!p) return;
-    const exitPrice = p.token.mid ?? p.entryPrice;
-    const proceeds = round2(p.shares * exitPrice);
-    const pnl = round2(proceeds - p.cost);
-    const won = pnl >= 0;
-    if (won) this.wins++; else this.losses++;
+  evaluate() {
+    const now = Date.now();
+    const nowS = now / 1000;
+    const cs = windowStartFor(now);
+    const market = this.markets.get(slugFor(cs));
+
+    // Resolve any open position whose own window has ended (handles rollover).
+    // NOTE: windowStart/windowEnd are stored in SECONDS (from windowStartFor).
+    this.resolveExpired(market, nowS);
+
+    if (!market) return;
+    this.ensureWindowOrders(market);
+    if (this.windowOrdersPlacedFor !== market.windowStart) return; // waiting for next window
+
+    // Fill resting limit buys at 0.40 (natural fills, both sides independent)
+    if (!this.windowPaused) this.fillEntryOrders(market);
+
+    // TP limit sells: first-filled side gets a resting sell @ 0.60
+    if (!this.windowPaused) this.fillTpOrders(market);
+
+    // Stop-loss (market order): any open position mark <= SL → sell + pause window
+    if (this.checkStopLosses(market)) this.pauseWindow(market);
+
+    this.recordEquity();
+    this.onTick(this.buildState());
+  }
+
+  sellPosition(position, price, reason, extra = {}) {
+    const proceeds = round2(position.shares * price);
+    const pnl = round2(proceeds - position.cost);
+    if (pnl >= 0) this.wins++; else this.losses++;
     this.bankroll = round2(this.bankroll + proceeds);
     this.realizedPnl = round2(this.realizedPnl + pnl);
-    p.pnl = pnl; p.exitReason = reason; p.exitPrice = exitPrice; p.closedAt = Date.now();
-    this.results.unshift({ ...p, market: undefined, token: undefined });
+    position.pnl = pnl;
+    position.exitPrice = price;
+    position.exitReason = reason;
+    position.closedAt = Date.now();
+    position.won = extra.won != null ? extra.won : pnl > 0;
+    this.results.unshift({ ...position, market: undefined, token: undefined });
     this.results = this.results.slice(0, 50);
-    this.trades.push({ timestamp: Date.now(), type: 'SELL', slug: p.slug, outcome: p.outcome, shares: p.shares, price: exitPrice, pnl, reason });
-    this.log(`💰 ${reason} ${p.outcome} @ ${exitPrice.toFixed(3)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
-    this.openPosition = null;
+    this.trades.push({ timestamp: Date.now(), type: 'SELL', slug: position.slug, outcome: position.outcome, shares: position.shares, price, pnl, reason, ...extra });
+    this.log(`💰 ${reason} ${position.outcome} @ ${price.toFixed(3)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · ${position.shares}sh`);
     this.recordEquity();
     this.onTick(this.buildState());
   }
 
-  // ── Resolution (polymarket close price, paper) ────────────
-  resolveMarket() {
-    const p = this.openPosition;
-    if (!p) return;
-    const nowS = Date.now() / 1000;
-    if (nowS < p.windowEnd) return;
-    // Use the final-observed CLOB value: whichever side's mid is closer to 1
-    // wins (either UP or DOWN). This is the paper analog of the last-2s rule.
-    const upMid = p.market.up.mid, downMid = p.market.down.mid;
-    let winner = null;
-    if (upMid != null || downMid != null) {
-      const up = upMid ?? 0, down = downMid ?? 0;
-      if (up >= 0.5 && up >= down) winner = 'UP';
-      else if (down > up) winner = 'DOWN';
-    }
-    if (!winner) winner = p.outcome; // absolute edge: never leave unresolved
+  fillEntryOrders(market) {
+    for (const order of this.entryOrders) {
+      if (order.status !== 'RESTING') continue;
+      const token = order.outcome === 'UP' ? market.up : market.down;
+      if (token.ask == null) continue;
+      if (token.ask <= ENTRY_PRICE) {
+        const cost = round2(SHARES * ENTRY_PRICE);
+        if (cost > this.bankroll) { order.status = 'SKIPPED'; this.log(`⚠️  skip ${order.outcome} — bankroll $${this.bankroll} < cost $${cost}`); continue; }
+        const isFirstFill = !this.positions.some(p => p.hasTp);
+        order.status = 'FILLED';
+        order.filledAt = Date.now();
+        this.bankroll = round2(this.bankroll - cost);
+        const position = {
+          slug: market.slug, outcome: order.outcome, market,
+          shares: SHARES, entryPrice: ENTRY_PRICE, cost,
+          openedAt: Date.now(), exitReason: null, exitPrice: null, pnl: null, hasTp: isFirstFill,
+        };
+        this.positions.push(position);
+        this.trades.push({ timestamp: Date.now(), type: 'BUY', slug: market.slug, outcome: order.outcome, shares: SHARES, price: ENTRY_PRICE, cost, reason: `LIMIT FILL ask ${token.ask.toFixed(2)} ≤ 0.40` });
+        this.log(`✅ BUY ${order.outcome} ${SHARES}sh @ ${ENTRY_PRICE.toFixed(2)} · cost $${cost.toFixed(2)} · ask was ${token.ask.toFixed(2)}`);
 
-    const won = p.outcome === winner;
-    const payout = won ? p.shares : 0;
-    const pnl = round2(payout - p.cost);
-    if (won) this.wins++; else this.losses++;
-    this.bankroll = round2(this.bankroll + payout);
-    this.realizedPnl = round2(this.realizedPnl + pnl);
-    p.pnl = pnl; p.exitReason = 'RESOLUTION'; p.exitPrice = won ? 1 : 0; p.won = won; p.resolvedWinner = winner; p.closedAt = Date.now();
-    this.results.unshift({ ...p, market: undefined, token: undefined });
-    this.results = this.results.slice(0, 50);
-    this.trades.push({ timestamp: Date.now(), type: 'RESOLVED', slug: p.slug, outcome: p.outcome, shares: p.shares, price: won ? 1 : 0, pnl, reason: `winner ${winner}` });
-    this.log(`🏁 RESOLUTION ${winner} · ${p.outcome} ${won ? 'WIN' : 'LOSS'} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
-    this.openPosition = null;
-    this.recordEquity();
-    this.onTick(this.buildState());
+        // First filled side → immediately place TP limit sell @ 0.60
+        if (isFirstFill) {
+          this.tpOrders.push({ outcome: order.outcome, price: TP_PRICE, status: 'RESTING', placedAt: Date.now() });
+          this.log(`🎯 TP LIMIT SELL ${order.outcome} @ ${TP_PRICE.toFixed(2)} placed (${SHARES}sh)`);
+        }
+      }
+    }
+  }
+
+  fillTpOrders(market) {
+    for (const order of this.tpOrders) {
+      if (order.status !== 'RESTING') continue;
+      const token = order.outcome === 'UP' ? market.up : market.down;
+      if (token.bid == null) continue;
+      if (token.bid >= TP_PRICE) {
+        const pos = this.positions.find(p => p.outcome === order.outcome && p.exitReason == null);
+
+        order.status = 'FILLED';
+        order.filledAt = Date.now();
+        this.log(`🎯 TP HIT ${order.outcome} — LIMIT SELL @ ${TP_PRICE.toFixed(2)} (bid ${token.bid.toFixed(2)})`);
+        this.sellPosition(pos, TP_PRICE, 'TP', {});
+      }
+    }
+  }
+
+  checkStopLosses(market) {
+    let hit = false;
+    for (const pos of this.positions) {
+      if (pos.exitReason != null) continue;
+      const token = pos.outcome === 'UP' ? market.up : market.down;
+      if (token.mid == null) continue;
+      pos.markPrice = token.mid;
+      if (token.mid <= SL_PRICE) {
+        this.log(`🛑 SL ${pos.outcome} — mid ${token.mid.toFixed(3)} ≤ ${SL_PRICE.toFixed(2)}`);
+        this.sellPosition(pos, token.mid, 'SL', {});
+        hit = true;
+        break; // one SL → pause window
+      }
+    }
+    return hit;
+  }
+
+  pauseWindow(market) {
+    this.windowPaused = true;
+    this.pauseReason = `SL ${SL_PRICE.toFixed(2)} hit — window paused`;
+    for (const o of this.entryOrders) if (o.status === 'RESTING') o.status = 'CANCELLED';
+    for (const o of this.tpOrders) if (o.status === 'RESTING') o.status = 'CANCELLED';
+    this.log('🛑 SL hit — window PAUSED · pending orders cancelled · held side stays to resolution');
+  }
+
+  resolveExpired(market, nowS) {
+    const open = this.positions.filter(p => p.exitReason == null);
+    for (const pos of open) {
+      if (nowS < pos.market.windowEnd) continue;
+      const m = pos.market;
+      const upMid = m.up.mid, downMid = m.down.mid;
+      let winner = null;
+      if (upMid != null && downMid != null) winner = upMid >= downMid ? 'UP' : 'DOWN';
+      else if (upMid != null) winner = upMid >= 0.5 ? 'UP' : 'DOWN';
+      else if (downMid != null) winner = downMid >= 0.5 ? 'DOWN' : 'UP';
+      if (!winner) winner = 'UP';
+      const won = pos.outcome === winner;
+      const payout = won ? pos.shares : 0;
+      const exitPrice = won ? 1 : 0;
+      this.sellPosition(pos, exitPrice, 'RESOLUTION', { winner, won });
+      this.log(`🏁 WINDOW ${m.slug.slice(-10)} RESOLVED → ${winner} · ${pos.outcome} ${won ? 'WIN' : 'LOSS'} · payout $${payout.toFixed(2)}`);
+    }
   }
 
   // ── State / equity ────────────────────────────────────────
   markValue() {
     let value = this.bankroll;
-    const p = this.openPosition;
-    if (p) {
-      const mark = p.token.mid ?? p.entryPrice;
+    const cs = windowStartFor(Date.now());
+    const market = this.markets.get(slugFor(cs));
+    for (const p of this.positions) {
+      if (p.exitReason != null) continue;
+      const token = p.outcome === 'UP' ? p.market?.up : p.market?.down;
+      const mark = token?.mid ?? p.entryPrice;
       value += round2(p.shares * mark);
     }
     return round2(value);
@@ -472,13 +396,16 @@ class BtcMomentumEngine {
     const cs = windowStartFor(Date.now());
     const now = Date.now();
     const market = this.markets.get(slugFor(cs));
-    const p = this.openPosition;
-    const sysRemaining = market ? market.windowEnd - Math.floor(now / 1000) : null;
-    const impulse = market ? this.impulseUsd(cs) : null;
+    const open = this.positions.filter(p => p.exitReason == null);
+    const openUnrealized = open.reduce((s, p) => {
+      const token = p.outcome === 'UP' ? market?.up : market?.down;
+      const mark = token?.mid ?? p.entryPrice;
+      return s + round2(p.shares * mark - p.cost);
+    }, 0);
     return {
       version: '3.0.0',
       name: this.name,
-      strategy: `MOMENTUM INTO CLOSE · ENTER ~${ENTRY_TARGET_LEFT}s LEFT (±${ENTRY_TOLERANCE}) · ASK ≥ ${THRESHOLD} · IMPULSE $${MOVE_MIN_USD}-${MOVE_MAX_USD} · STAKE $${STAKE_USD}`,
+      strategy: `LIMIT HEDGE · BUY BOTH SIDES @ 0.40 (${SHARES}sh) · TP 0.60 LIMIT SELL · SL 0.25 MARKET · MAX 2 BETS`,
       serverTime: now,
       connected: this.isClobFresh(),
       lastError: this.lastError,
@@ -488,22 +415,29 @@ class BtcMomentumEngine {
       bankroll: this.bankroll,
       markValue: this.markValue(),
       realizedPnl: this.realizedPnl,
+      unrealizedPnl: round2(openUnrealized),
       totalPnl: round2(this.markValue() - this.initialBankroll),
       wins: this.wins, losses: this.losses,
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       entryWindow: this.entryWindow,
       waitingForWindow: this.entryWindow != null && cs < this.entryWindow,
+      windowPaused: this.windowPaused,
+      pauseReason: this.pauseReason,
       currentWindow: market ? this.publicMarket(market) : null,
-      windowRemaining: sysRemaining,
-      impulseUsd: impulse,
-      btcPrice: this.latestPrice(),
-      position: p ? {
-        outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost,
-        markPrice: p.token.mid ?? p.entryPrice,
-        unrealized: round2(p.shares * (p.token.mid ?? p.entryPrice) - p.cost),
-        remaining: Math.max(0, p.windowEnd - Math.floor(now / 1000)),
-        reason: p.reason,
-      } : null,
+      windowRemaining: market ? Math.max(0, market.windowEnd - Math.floor(now / 1000)) : null,
+      entryOrders: this.entryOrders.map(o => ({ ...o })),
+      tpOrders: this.tpOrders.map(o => ({ ...o })),
+      positions: open.map(p => {
+        const token = p.outcome === 'UP' ? market?.up : market?.down;
+        const mark = token?.mid ?? p.entryPrice;
+        return {
+          outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost,
+          markPrice: mark, unrealized: round2(p.shares * mark - p.cost),
+          remaining: market ? Math.max(0, market.windowEnd - Math.floor(now / 1000)) : null,
+          hasTp: p.hasTp,
+        };
+      }),
+      tradeCount: this.trades.length,
       trades: this.trades.slice(-60).reverse(),
       results: this.results.slice(0, 30),
       equityCurve: this.equityCurve.slice(-1000),
@@ -512,11 +446,8 @@ class BtcMomentumEngine {
       drawdown: round2(this.peakEquity - this.markValue()),
       uptime: Math.floor((now - this.startedAt) / 1000),
       config: {
-        profile: PROFILE, threshold: THRESHOLD, stakeUsd: STAKE_USD, maxNotional: MAX_NOTIONAL,
-        stopLossPct: STOP_LOSS_PCT, entryTargetLeft: ENTRY_TARGET_LEFT, entryTolerance: ENTRY_TOLERANCE,
-        minEntryLeft: MIN_ENTRY_LEFT, exitBeforeSec: EXIT_BEFORE_SEC, moveMinUsd: MOVE_MIN_USD, moveMaxUsd: MOVE_MAX_USD,
-        spreadGuard: SPREAD_GUARD, minTopNotional: MIN_TOP_NOTIONAL, staleGuardMs: STALE_GUARD_MS,
-        pollMs: CLOB_POLL_MS,
+        entryPrice: ENTRY_PRICE, tpPrice: TP_PRICE, slPrice: SL_PRICE, shares: SHARES,
+        pollMs: CLOB_POLL_MS, bankroll: this.initialBankroll,
       },
     };
   }
@@ -534,21 +465,16 @@ class BtcMomentumEngine {
   // ── Main loop ─────────────────────────────────────────────
   async init() {
     const start = windowStartFor(Date.now());
-    // Wait for next full window on (re)start (same behavior as other bots).
-    this.entryWindow = start + WINDOW_SECONDS;
-    this.log(`⏳ Started mid-window ${start} — begin trading at next window ${this.entryWindow}`);
+    this.entryWindow = start + WINDOW_SECONDS; // wait for next full window
+    this.log(`⏳ Started mid-window ${start} — trading begins at next window ${this.entryWindow}`);
     await Promise.all([this.discoverWindow(start), this.discoverWindow(start + WINDOW_SECONDS)]);
     this.timers = [
       setInterval(() => { this.pollClob().catch(() => {}); }, CLOB_POLL_MS),
-      setInterval(() => this.fetchBinanceTick().catch(() => {}), 200),
-      setInterval(() => this.fetchBinanceCandles().catch(() => {}), 5000),
       setInterval(() => { this.discoverWindow(windowStartFor(Date.now())).catch(() => {}); this.discoverWindow(windowStartFor(Date.now()) + WINDOW_SECONDS).catch(() => {}); }, 5000),
-      setInterval(() => this.evaluateEntry(), 200),
-      setInterval(() => this.evaluateExit(), 200),
-      setInterval(() => this.resolveMarket(), 250),
+      setInterval(() => this.evaluate(), 200),
       setInterval(() => this.recordEquity(), 1000),
     ];
-    this.log(`🚀 MomentumBot started | enter ~${ENTRY_TARGET_LEFT}s left · ask ≥ ${THRESHOLD} · stake $${STAKE_USD} · impulse $${MOVE_MIN_USD}+`);
+    this.log(`🚀 LimitHedge started | BUY UP+DOWN @ ${ENTRY_PRICE} × ${SHARES}sh · TP ${TP_PRICE} limit · SL ${SL_PRICE} market`);
   }
 
   close() {
@@ -557,4 +483,4 @@ class BtcMomentumEngine {
   }
 }
 
-module.exports = { BtcMomentumEngine, config: { PROFILE, THRESHOLD, STAKE_USD, MAX_NOTIONAL, STOP_LOSS_PCT, ENTRY_TARGET_LEFT, ENTRY_TOLERANCE, MIN_ENTRY_LEFT, EXIT_BEFORE_SEC, MOVE_MIN_USD, MOVE_MAX_USD, SPREAD_GUARD, MIN_TOP_NOTIONAL, STALE_GUARD_MS, CLOB_POLL_MS } };
+module.exports = { LimitHedgeEngine, config: { ENTRY_PRICE, TP_PRICE, SL_PRICE, SHARES, CLOB_POLL_MS } };
