@@ -1,34 +1,40 @@
-# Polymarket Cricket Bucket Bot
+# Polymarket BTC 5m Momentum Bot (paper)
 
-Paper (demo) scalping bot for the **Zimbabwe** outcome of `crint-zaf-zwe-2026-08-29` (SA vs Zimbabwe, live T20 cricket).
+Paper/demo trading bot for the Polymarket **BTC Up/Down 5-minute** market, modelled on the momentum-near-close strategy. No wallet, no private key — every fill is simulated on the live CLOB order book.
 
 ## Strategy
-- **Capital:** $1,000 demo, split into **4 buckets of $250** each.
-- Each bucket independently places a **limit buy 0.02 below the live price**.
-- The 4 buckets are stacked **0.02 apart** (bucket 1 closest to live, bucket 4 deepest, e.g. live 0.60 → buys 0.58 / 0.56 / 0.54 / 0.52).
-- Buy levels re-anchor upward toward the market on rallies (catch dips); if a bucket's buy **hasn't filled within 5 minutes**, it is forcibly **re-anchored** to the current live level.
-- Individual bucket depths are fixed and spaced, so re-anchored buckets **never overlap**.
-- Once filled, the bucket places a **limit sell at entry + 0.02**; on exit the whole bucket reinvests into a fresh buy.
+1. Bot discovers the active `btc-updown-5m-<bucket>` market via Gamma (slug lookup) — prices always come from the CLOB order book (`POST /books`), no Gamma price fallback.
+2. On (re)start, the bot waits for the **next full window** before trading.
+3. Entry is gated to roughly **120s left** in the window (default ±30s tolerance, never earlier than 60s left).
+4. Momentum confirmation: BTC must have moved **$70–100** in the active 5m interval (Binance 1m candles + tick price).
+5. Trigger: the side whose **best ask reaches ≥ 0.70** is entered (follows momentum). If both sides are ≥ 0.70, the **stronger side** (higher ask) is picked.
+6. Safety guards: skip if spread > 0.03, top-of-book ask notional < $30, stale quotes (>8s), or after API failures.
+7. One trade per window. Optional stop-loss at `STOP_LOSS_PCT` below entry; otherwise position exits before **20s left** if marketable, else **holds to resolution** (paper settlement via final observed CLOB mid).
 
 ## Config (env vars)
 | Var | Default | Meaning |
 | --- | --- | --- |
-| `MARKET_SLUG` | `crint-zaf-zwe-2026-08-29` | Gamma slug |
-| `OUTCOME_INDEX` | `1` | Index of the traded outcome (1 = Zimbabwe) |
-| `TOTAL_CAPITAL` | `1000` | Total demo capital |
-| `BUCKET_COUNT` | `4` | Parallel buckets |
-| `SPACING` / `PUSH` | `0.02` | Bucket separation / entry–exit offsets |
-| `REANCHOR_MS` | `300000` | Re-anchor a bucket if its buy hasn't filled in 5 min |
+| `PROFILE` | `conservative` | `conservative` (5/8) or `aggressive` (5/15) sizing reference |
+| `THRESHOLD` | `0.70` | Trigger on best ask ≥ threshold |
+| `STAKE_USD` | `5` | Paper stake per trade |
+| `MAX_NOTIONAL` | `8` | Hard cap per trade (conservative) |
+| `STOP_LOSS_PCT` | `0.25` | Stop-loss below entry; `0` disables |
+| `ENTRY_TARGET_LEFT` | `120` | Target seconds left for entry |
+| `ENTRY_TOLERANCE` | `30` | ± tolerance on the entry target |
+| `MIN_ENTRY_LEFT` | `60` | Never enter earlier than this |
+| `EXIT_BEFORE_SEC` | `20` | Try to exit before this many seconds left |
+| `MOVE_MIN_USD` / `MOVE_MAX_USD` | `70` / `100` | Impulse confirmation range (BTC USD move) |
+| `SPREAD_GUARD` | `0.03` | Skip if spread wider |
+| `MIN_TOP_NOTIONAL` | `30` | Skip if top ask notional thinner |
+| `STALE_GUARD_MS` | `8000` | Skip if quote older |
 | `CLOB_POLL_MS` | `300` | CLOB polling interval |
 
-## Pricing
-Gamma is used **only** to resolve the slug into the Zimbabwe CLOB token ID; all prices come from the CLOB order book (`POST /books`). Pure paper limit simulation — BUY fills when best ask ≤ limit, SELL fills when best bid ≥ limit. No wallet/private key.
-
-## Dashboard
-Live Zimbabwe bid/ask/mid, total equity, realized PnL, drawdown from peak, lifetime equity curve, 4 bucket cards (capital, state, resting buy, entry/sell), trade feed, logs.
-
+## Run
 ```bash
 npm install
 npm start          # http://localhost:3000
 npm run smoke      # syntax checks
 ```
+
+## Dashboard
+Live BTC price + impulse, window countdown, UP/DOWN bid/ask/mid/depth, open position (entry/mark/unrealized), bankroll/equity/realized PnL, drawdown from peak, lifetime equity curve, trade feed and logs.
