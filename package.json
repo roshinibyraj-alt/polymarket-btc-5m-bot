@@ -1,14 +1,14 @@
 {
-  "name": "polymarket-btc-breakout-bot",
-  "version": "6.0.0",
-  "description": "Deterministic BTC five-minute breakout paper bot using strict CLOB top-of-book pricing",
+  "name": "polymarket-sports-bucket-bot",
+  "version": "1.0.0",
+  "description": "Paper sports scalper: 4 buckets of $250 scale South Africa (crint-zaf-zwe) with \u00b10.02 limit round-trips, 0.02 spacing, dynamic re-anchor",
   "main": "index.js",
   "engines": {
     "node": ">=18.0.0"
   },
   "scripts": {
     "start": "node index.js",
-    "smoke": "node --check engine.js && node --check index.js && node test/engine-smoke.js"
+    "smoke": "node --check engine.js && node --check index.js"
   },
   "dependencies": {
     "express": "^4.19.2"

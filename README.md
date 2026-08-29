@@ -1,26 +1,43 @@
-# Polymarket BTC 5m Flip Bot
+# Polymarket Sports Bucket Bot
 
-A deterministic five-minute BTC paper bot that targets $50 profit per window by entering at 0.60 and flipping on opposite-side triggers.
+A paper (demo) scalping bot for Polymarket sports markets. Trades the **South Africa** outcome of `crint-zaf-zwe-2026-08-29` (South Africa vs Zimbabwe, live T20 cricket).
 
 ## Strategy
-- Trade only the current `btc-updown-5m-*` market.
-- Wait 60 seconds after window opens before monitoring.
-- After 60s, buy whichever side's ask price reaches 0.60 (UP or DOWN).
-- Initial size: 125 shares ($75 cost, $50 profit if wins at $1.00).
-- After entry, monitor the opposite side. If the opposite side's ask hits 0.60, flip: close the current position (assumed zero) and open on the new side.
-- Share size recalculates on every flip to cover all sunk costs plus $50 target profit.
-- Flips are unlimited — the bot keeps flipping as long as the opposite side hits 0.60.
-- Hold final position to resolution. The first side strictly above 0.90 during the final two seconds wins.
-- Dashboard shows real-time accumulated UP and DOWN share counts.
+- **Capital:** $1,000 demo, split into **4 buckets of $250** each.
+- Each bucket independently places a **limit buy 0.02 below the live price**.
+- The 4 buckets are stacked **0.02 apart** (bucket 1 closest to live, bucket 4 deepest).
+- Buy levels track the live CLOB price (dynamic re-anchor). When the ask crosses a bucket's limit, the bucket fills.
+- Once filled, the bucket places a **limit sell at entry + 0.02**. When the bid crosses, it sells, realizes the profit, and the whole bucket is reinvested in the next buy.
+- All 4 buckets cycle independently and in parallel.
 
-## Math
-- Profit per share at 0.60 entry: $0.40 (1.00 - 0.60, ignoring fees)
-- Initial shares: ceil(50 / 0.40) = 125
-- Flip shares: ceil((50 + total sunk cost) / 0.40)
-- With fees: profit per share = (1 - exit_fee_rate) - 0.60 × (1 + entry_fee_rate)
+## Example (live price 0.60)
+- Buy limits: 0.58, 0.56, 0.54, 0.52 (each 0.02 apart, below live).
+- On fill at 0.56 → sell limit at 0.58 → profit = shares × 0.02.
 
-## Window Rollover
-Discovery is deduplicated and starts for both current and next windows. At rollover the prior market is settled, statistics finalized, and accumulators reset. A missing or failed discovery never reuses stale prices.
+## Configuration (env vars)
+| Var | Default | Meaning |
+| --- | --- | --- |
+| `MARKET_SLUG` | `crint-zaf-zwe-2026-08-29` | Gamma slug for discovery |
+| `SA_INDEX` | `0` | Index of South Africa outcome |
+| `TOTAL_CAPITAL` | `1000` | Total demo capital |
+| `BUCKET_COUNT` | `4` | Number of parallel buckets |
+| `SPACING` | `0.02` | Distance between adjacent bucket levels |
+| `PUSH` | `0.02` | Entry offset below live / exit offset above entry |
+| `CLOB_POLL_MS` | `300` | CLOB polling interval |
 
 ## Pricing
-Gamma is used only to resolve the exact slug into UP/DOWN CLOB token IDs. All prices come from batched CLOB `/prices` requests. There is no alternate price source.
+- Gamma is used **only** to resolve the slug into the South Africa CLOB token ID.
+- All prices come from the CLOB order book (`POST /books`). Pure limit-order simulation: BUY fills when best ask ≤ limit, SELL fills when best bid ≥ limit.
+- Paper trading only — no wallet, no private key, no real orders.
+
+## Dashboard
+- Live SA bid/ask/mid, total equity, realized PnL, drawdown from peak, lifetime equity curve.
+- 4 bucket cards showing capital, state (FLAT / BUY_PLACED / HELD), open order, entry/sell levels.
+- Trade feed and logs.
+
+## Run
+```bash
+npm install
+npm start          # http://localhost:3000
+npm run smoke      # syntax checks
+```
