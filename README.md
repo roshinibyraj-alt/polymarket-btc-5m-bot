@@ -2,15 +2,17 @@
 
 Paper/demo trading bot for the Polymarket **BTC Up/Down 5-minute** market. No wallet, no private key — every fill is simulated on the live CLOB order book.
 
-## Strategy (intra-window stop-loss flip)
+## Strategy (intra-window stop-loss flip with carry-over martingale)
 - **Demo capital:** $1,000 (configurable via `START_BANKROLL`).
 - **Wait gate:** after a window opens the bot waits **7s** before any order.
-- **First entry:** once the wait elapses, whichever side's **ask reaches 0.70** fires immediately (no previous-tick-below requirement). **Slippage ceiling 0.99**: the fill is taken at the actual observed ask, never above 0.99.
-- **Sizing:** base = **1% of current capital** in shares (at 0.70). Every re-entry after a stop-loss = **2× the previous position's shares** — doubling is **unlimited** (14 → 28 → 56 → 112 → …).
+- **Entry:** once the wait elapses, whichever side's **ask reaches 0.70** fires immediately (no previous-tick-below requirement). **Slippage ceiling 0.99**: the fill is taken at the actual observed ask, never above 0.99.
+- **Sizing:** the window start size is **base = 1% of current capital** in shares (at 0.70), unless a carried martingale is active (then the carried size is the start).
 - **Stop loss:** while holding, if the held side's price drops to **0.50**, the bot sells immediately at 0.50.
-- **Re-entry after SL:** once stopped out, the bot waits for **any side** to reach **0.65** and fires with double the shares. This repeats for every stop-loss (flip is unlimited, side is whichever crosses the level first).
-- **Hold to resolution:** if a position never hits the stop-loss it is held until the window resolves; the winning side pays 1.0, the losing side 0.
-- **Next window:** after a window resolves, base is recalculated as 1% of the updated capital.
+- **Martingale (capped):** after each stop-loss the bot waits for **any side** to reach **0.65** and fires with **2× the previous position's shares**. This is capped at **2 martingale steps per window** — max 3 entries per window: `S → 2S → 4S`.
+- **Carry-over (on loss):** if the **last martingale** (the max 4S bet) hits stop-loss or loses at resolution, that size carries to the **next window** as the start size — escalating window to window until a win:
+  `14 → 28 → 56`, lose ⇒ `56 → 112 → 224`, lose ⇒ `224 → 448 → 896` …
+- **Hold to resolution (win):** if a position never hits the stop-loss it is held until the window resolves. A clean win (no SL + resolution win) **resets the carry** — the next window starts at base again.
+- **Next window:** after a window resolves, base is recalculated as 1% of the updated capital (carry overrides it when active).
 
 ## Config (env vars)
 | Var | Default | Meaning |
@@ -19,6 +21,7 @@ Paper/demo trading bot for the Polymarket **BTC Up/Down 5-minute** market. No wa
 | `SL_PRICE` | `0.50` | Stop-loss level (market sell) |
 | `REENTRY_PRICE` | `0.65` | Re-entry fires when any side's ask reaches this |
 | `WAIT_SECONDS` | `7` | Wait after window open before trading |
+| `MAX_MARTINGALE` | `2` | Max martingale steps per window (base + 2 = 3 entries max) |
 | `SLIP_CEILING` | `0.99` | Max accepted fill price (slippage ceiling) |
 | `BASE_PCT` | `0.01` | Base = this fraction of capital (in shares at entry price) |
 | `MARTINGALE_X` | `2` | Each re-entry = previous shares × this |
@@ -36,4 +39,4 @@ npm run smoke      # engine+index syntax + internal window simulation
 ```
 
 ## Dashboard
-Live BTC 5m UP/DOWN bid/ask/mid, window countdown, wait countdown, entry/status, base/next shares, SL/re-entry info, open positions (entry/mark/unrealized), bankroll/equity/realized PnL, wins/losses, drawdown, trade feed, logs, lifetime equity chart.
+Live BTC 5m UP/DOWN bid/ask/mid, window countdown, wait countdown, current start size (base or carry), martingale steps used / max, entry/status, next shares, open positions (entry/mark/unrealized), bankroll/equity/realized PnL, wins/losses, drawdown, trade feed, logs, lifetime equity chart.
