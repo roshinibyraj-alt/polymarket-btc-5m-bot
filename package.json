@@ -1,7 +1,7 @@
 {
-  "name": "polymarket-limit-hedge-bot",
-  "version": "3.0.0",
-  "description": "Paper BTC 5m limit-hedge bot: limit-buy both sides @0.40, limit TP @0.60, market SL @0.25, one side holds to resolution",
+  "name": "polymarket-flip-bot",
+  "version": "4.0.0",
+  "description": "BTC 5m intra-window flip bot (paper): fire whichever side ticks 0.55, alternate UP<->DOWN, 2x martingale each flip, base = 1% of capital, hold to resolution",
   "main": "index.js",
   "engines": {
     "node": ">=18.0.0"

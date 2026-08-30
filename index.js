@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { LimitHedgeEngine } = require('./engine');
+const { FlipBotEngine } = require('./engine');
 
 process.on('unhandledRejection', (reason) => {
   console.error('[FATAL] unhandledRejection:', reason);
@@ -13,9 +13,9 @@ process.on('uncaughtException', (err) => {
 const app = express();
 const port = Number(process.env.PORT || 3000);
 
-const engine = new LimitHedgeEngine({
-  name: 'LimitHedge5m',
-  onLog: line => console.log(`[HEDGE] ${line}`),
+const engine = new FlipBotEngine({
+  name: 'FlipBot5m',
+  onLog: line => console.log(`[FLIP] ${line}`),
 });
 
 app.disable('x-powered-by');
@@ -27,7 +27,7 @@ const dashboard = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LimitHedge — BTC 5m</title>
+<title>FlipBot — BTC 5m</title>
 <style>
 *{box-sizing:border-box}
 :root{--bg:#000;--panel:#070707;--line:#222;--muted:#9d9d9d;--up:#00ff85;--down:#ff4a68;--amber:#ffc400;--blue:#38d6ff}
@@ -75,7 +75,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 </head>
 <body><div class="wrap">
 <header class="topbar">
-<div class="brand"><div class="btc">₿</div><div><h1>LimitHedgeBot</h1><div class="sub" id="strategy">LOADING…</div></div></div>
+<div class="brand"><div class="btc">₿</div><div><h1>FlipBot</h1><div class="sub" id="strategy">LOADING…</div></div></div>
 <div class="status"><span id="waitPill" class="pill warn">WAIT —</span><span id="statusPill" class="pill bad">OFFLINE</span><span id="tickPill" class="pill">TICKS 0</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
 <div class="metrics">
@@ -86,6 +86,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div class="box"><div class="label">Unrealized</div><div class="value" id="unrealizedPnl">$0</div></div>
 <div class="box"><div class="label">Window</div><div class="value" id="windowTime">—</div><div class="small" id="entryHint"></div></div>
 <div class="box"><div class="label">Wins / Losses</div><div class="value" id="winLoss">0 / 0</div><div class="small" id="winRate"></div></div>
+<div class="box"><div class="label">Flip # / Latest</div><div class="value" id="flipInfo">0 / —</div><div class="small" id="baseInfo">BASE 0 SH</div></div>
 <div class="box"><div class="label">Max Drawdown</div><div class="value neg" id="maxDrawdown">$0.00</div></div>
 </div>
 <div class="two-col">
@@ -95,8 +96,8 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div id="marketBody"><div class="empty">Waiting for market...</div></div>
 </div>
 <div class="box" style="margin-bottom:8px">
-<div class="section-head"><span>Limit Orders (0.40 entry / 0.60 TP)</span></div>
-<div id="orderBody"><div class="empty">No orders yet</div></div>
+<div class="section-head"><span>Flip Engine — fire @ 0.55, alternate UP↔DOWN, ×2 per flip</span></div>
+<div id="orderBody"><div class="empty">No flips yet this window</div></div>
 </div>
 <div class="box" id="posBox" style="margin-bottom:8px;display:none">
 <div class="section-head"><span>Open Positions</span></div>
@@ -146,13 +147,14 @@ b.innerHTML='<div class="clock">'+r+'s<small> T+'+e+'s · entry @ window start</
 +'<div class="quote-row"><span>Bid</span><span>'+prc(m.down.bid)+'</span></div>'
 +'<div class="quote-row"><span>Ask</span><span>'+prc(m.down.ask)+'</span></div>'
 +(m.down.spread!=null?'<div class="spread">SPR '+prc(m.down.spread)+'</div>':'')+'</div></div>'}
-function renderOrders(entries, tps){const b=$('orderBody');const items=(entries||[]).map(o=>'<div class="order '+(o.status==='FILLED'?'fill':o.status==='CANCELLED'?'cancel':'rest')+'"><div>'+(o.outcome==='UP'?'▲ UP':'▼ DOWN')+' BUY @ 0.40 × '+num(S.config?S.config.shares:0)+'sh</div><div class="dim">STATUS '+o.status+'</div></div>');
-(tps||[]).forEach(o=>{items.push('<div class="order '+(o.status==='FILLED'?'fill':o.status==='CANCELLED'?'cancel':'rest')+'"><div>'+(o.outcome==='UP'?'▲ UP':'▼ DOWN')+' TP SELL @ 0.60</div><div class="dim">STATUS '+o.status+'</div></div>')});
-b.innerHTML=items.length?items.join(''):'<div class="empty">No orders yet — waiting for window start</div>'}
+function renderOrders(flips){const b=$('orderBody');if(!flips||!flips.length){b.innerHTML='<div class="empty">No flips yet — waiting for a side to tick 0.55</div>';return}
+b.innerHTML='<div class="orders">'+flips.map((f,i)=>{const cls=f.outcome==='UP'?'up':'down';
+return '<div class="order fill"><div>'+(i===0?'#1 (base) ':'')+(f.outcome==='UP'?'▲ UP':'▼ DOWN')+' '+num(f.shares)+' SH @ '+prc(f.entryPrice)+'</div>'
++'<div class="dim">COST '+cash(f.cost)+' · FLIP #'+(f.flipNo||(i+1))+'</div></div>'}).join('')+'</div>'}
 function renderPositions(list){const box=$('posBox'),b=$('posBody');if(!list||!list.length){box.style.display='none';return}box.style.display='block';
 b.innerHTML=list.map(p=>{const cls=p.outcome==='UP'?'pos-up':'pos-down';const mark=p.markPrice!=null?p.markPrice:p.entryPrice;
 return '<div class="box" style="margin-bottom:6px"><div class="section-head"><span>'+(p.outcome==='UP'?'▲ UP':'▼ DOWN')+' '+num(p.shares)+' SH</span><span class="'+tone(p.unrealized)+'">'+money(p.unrealized)+'</span></div>'
-+'<div class="dim">ENTRY '+prc(p.entryPrice)+' · MARK '+prc(mark)+' · COST '+cash(p.cost)+(p.hasTp?' · TP @ 0.60 (limit)':' · HOLD TO RESOLUTION')+'</div>'
++'<div class="dim">FLIP #'+(p.flipNo||0)+' · ENTRY '+prc(p.entryPrice)+' · MARK '+prc(mark)+' · COST '+cash(p.cost)+' · HOLD TO RESOLUTION</div>'
 +'<div class="dim">'+num(p.shares)+' × '+prc(mark)+' = '+cash(p.shares*mark)+' · '+p.remaining+'s left</div></div>'}).join('')}
 function renderResults(a){const b=$('resBody'),ct=$('resCount');ct.textContent=a.length;
 b.innerHTML=!a.length?'<div class="empty">NO RESOLVED POSITIONS YET</div>':a.map(r=>{const side=r.outcome==='UP'?'▲ UP':'▼ DOWN';const cls=r.pnl>=0?'buy':'sell';const lbl=r.exitReason||'';return '<div class="result"><div><span class="'+cls+'">'+side+' '+lbl+'</span><div class="dim">'+new Date(r.closedAt).toLocaleTimeString()+' · '+num(r.shares)+'sh @ '+prc(r.entryPrice)+' · '+(r.win?'WIN':'')+(r.won!=null?(r.won?'WIN':'LOSS'):'')+'</div></div><div class="'+cls+'">'+money(r.pnl)+'</div></div>'}).join('')}
@@ -162,10 +164,12 @@ return '<div class="trade-item"><div><span class="'+cls+'">'+ESC(tr.type)+' '+si
 +'<div class="dim">'+new Date(tr.timestamp).toLocaleTimeString()+' · '+num(tr.shares)+'sh @ '+prc(tr.price)+(tr.reason?' · '+ESC(tr.reason):'')+'</div></div>'
 +'<div style="text-align:right">'+cash(tr.cost)+(tr.pnl!=null?'<div class="'+cls+'">'+money(tr.pnl)+'</div>':'')+'</div></div>'}).join('')}
 function renderLogs(a){const b=$('logBody'),ct=$('logCount');ct.textContent=a.length+' LINES';b.innerHTML=a.slice(-50).map(l=>{let c='';if(l.includes('WIN'))c='log-win';else if(l.includes('LOSS'))c='log-loss';else if(l.includes('TP'))c='log-tp';else if(l.includes('🎯')||l.includes('🛑')||l.includes('🏁'))c='log-info';return '<div class="'+c+'">'+ESC(l)+'</div>'}).join('')}
-function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div class="mini"><div class="label">Entry (limit)</div><div class="value">'+c.entryPrice.toFixed(2)+'</div></div>'
-+'<div class="mini"><div class="label">TP (limit)</div><div class="value">'+c.tpPrice.toFixed(2)+'</div></div>'
-+'<div class="mini"><div class="label">SL (market)</div><div class="value">'+c.slPrice.toFixed(2)+'</div></div>'
-+'<div class="mini"><div class="label">Shares</div><div class="value">'+num(c.shares)+'</div></div>'}
+function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div class="mini"><div class="label">Trade Price</div><div class="value">'+c.tradePrice.toFixed(2)+'</div></div>'
++'<div class="mini"><div class="label">Base (1% cap)</div><div class="value">'+num(c.baseShares)+' sh</div></div>'
++'<div class="mini"><div class="label">Martingale</div><div class="value">x'+c.martingaleX+' per flip</div></div>'
++'<div class="mini"><div class="label">Next Flip</div><div class="value">'+num(c.nextShares)+' sh</div></div>'
++'<div class="mini"><div class="label">Slippage Cap</div><div class="value">+'+(c.slippageCap? c.slippageCap.toFixed(2):'0.05')+'</div></div>'
++'<div class="mini"><div class="label">Demo Capital</div><div class="value">'+cash(c.bankroll)+'</div></div>'}
 function renderChart(c){const svg=$('equityChart');if(!c||!c.length){svg.innerHTML='';return}
 const v=c.map(p=>p.equity),lo=Math.min(...v),hi=Math.max(...v),rng=(hi-lo)||1;const W=700,H=120,P=12;
 const pts=c.map((p,i)=>[i/Math.max(1,c.length-1)*W,H-P-(p.equity-lo)/rng*(H-P*2)]);
@@ -179,14 +183,16 @@ const up=d.unrealizedPnl||0;const ue=$('unrealizedPnl');ue.textContent=money(up)
 $('winLoss').textContent=(d.wins||0)+' / '+(d.losses||0);$('winRate').textContent=d.winRate!=null?'Win '+d.winRate+'%':'';
 $('maxDrawdown').textContent=cash(d.drawdown||0);
 $('windowTime').textContent=d.windowRemaining!=null?d.windowRemaining+'s':'—';
-const eh=$('entryHint');if(d.windowPaused){eh.textContent='⛔ '+ESC(d.pauseReason||'PAUSED')}else if(d.waitingForWindow){eh.textContent='WAITING FOR NEXT WINDOW'}else{eh.textContent='PLACE BUY UP+DOWN @ 0.40';}
+const eh=$('entryHint');if(d.windowPaused){eh.textContent='⛔ '+ESC(d.pauseReason||'PAUSED')}else if(d.waitingForWindow){eh.textContent='WAITING FOR NEXT WINDOW'}else{eh.textContent='NEXT FLIP: '+(d.latestSide?((d.latestSide==='UP'?'▼ DOWN':'▲ UP')+' @ 0.55'):'EITHER SIDE @ 0.55');}
 eh.style.color=d.windowPaused?'#ff4a68':'';
+const fi=$('flipInfo');if(fi){const lat=d.latestSide||'—';fi.textContent=(d.flips||0)+' / '+(lat==='—'?'—':(lat==='UP'?'UP':'DOWN'));fi.className='value '+(lat==='UP'?'pos':lat==='DOWN'?'neg':'');}
+const bi=$('baseInfo');if(bi){bi.textContent='BASE '+num(d.baseShares||0)+' SH · NEXT '+num(d.nextShares||0)+' SH';}
 const wp=$('waitPill');if(wp){if(d.windowPaused){wp.textContent='PAUSED';wp.className='pill bad'}else if(d.waitingForWindow){const ww=Math.max(0,Math.ceil((d.entryWindow-Math.floor(Date.now()/1000))));wp.textContent='WAIT '+ww+'s';wp.className='pill warn'}else{wp.textContent='TRADING';wp.className='pill live'}};$('tickPill').textContent='TICKS '+(d.tickCount||0);
 $('uptimePill').textContent=uptimeFmt(d.uptime||0);
 const sp=$('statusPill');if(d.connected){sp.textContent='● LIVE';sp.className='pill live'}else{sp.textContent='● OFFLINE';sp.className='pill bad'}
 const m=d.currentWindow;if(m){$('windowTitle').textContent=m.remaining+'s LEFT'}else{$('windowTitle').textContent=''}
 }
-function fullRender(d){Object.assign(S,d);$('strategy').textContent=d.strategy||'';renderKpi(d);renderMarket(d.currentWindow);renderOrders(d.entryOrders,d.tpOrders);renderPositions(d.positions);renderResults(d.results);renderFeed(d.trades);renderLogs(d.logs);renderConfig(d.config);renderChart(d.equityCurve)}
+function fullRender(d){Object.assign(S,d);$('strategy').textContent=d.strategy||'';renderKpi(d);renderMarket(d.currentWindow);renderOrders(d.positions||[]);renderPositions(d.positions);renderResults(d.results);renderFeed(d.trades);renderLogs(d.logs);renderConfig(d.config);renderChart(d.equityCurve)}
 async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});const d=await r.json();fullRender(d)}catch(e){const sp=$('statusPill');if(sp){sp.textContent='● OFFLINE';sp.className='pill bad'}}}
 setInterval(poll,700);poll();
 </script></body></html>`;
@@ -194,6 +200,6 @@ setInterval(poll,700);poll();
 app.get('/', (_, res) => res.type('html').send(dashboard));
 
 app.listen(port, '0.0.0.0', () => {
-  console.log(`LimitHedgeBot listening on :${port}`);
+  console.log(`FlipBot listening on :${port}`);
   engine.init().catch(e => console.error(`Init: ${e.message}`));
 });

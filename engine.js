@@ -6,10 +6,11 @@ const CLOB_REST = process.env.CLOB_REST || 'https://clob.polymarket.com';
 
 const WINDOW_SECONDS = 300;                     // BTC 5m windows
 
-const ENTRY_PRICE = Number(process.env.ENTRY_PRICE || 0.40);
-const TP_PRICE    = Number(process.env.TP_PRICE    || 0.60);
-const SL_PRICE    = Number(process.env.SL_PRICE    || 0.25);
-const SHARES      = Number(process.env.SHARES      || 100);
+const TRADE_PRICE   = Number(process.env.TRADE_PRICE   || 0.55); // fire when side ask ticks to this
+const SLIP_TOL      = Number(process.env.SLIP_TOL      || 0.05); // accept entry slippage up to TRADE_PRICE + this
+const BASE_PCT      = Number(process.env.BASE_PCT      || 0.01); // base = this fraction of bankroll
+const MARTINGALE_X  = Number(process.env.MARTINGALE_X  || 2);    // each flip = prev shares * this
+const START_BANKROLL= Number(process.env.START_BANKROLL|| 1000); // demo capital
 
 const CLOB_POLL_MS   = Math.max(100, Number(process.env.CLOB_POLL_MS || 300));
 const CLOB_FRESH_MS  = Math.max(CLOB_POLL_MS, Number(process.env.CLOB_FRESH_MS || 1500));
@@ -21,15 +22,15 @@ function round5(v) { return Math.round(v * 100000) / 100000; }
 function windowStartFor(ms) { return Math.floor(ms / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS; }
 function slugFor(start) { return `btc-updown-5m-${start}`; }
 
-class LimitHedgeEngine {
+class FlipBotEngine {
   constructor(options = {}) {
     this.fetchImpl = options.fetchImpl || fetch;
     this.onTick = options.onTick || (() => {});
     this.onLog = options.onLog || (() => {});
-    this.name = options.name || 'LimitHedge5m';
+    this.name = options.name || 'FlipBot5m';
     this.startedAt = Date.now();
 
-    this.bankroll = options.bankroll ?? 1000;
+    this.bankroll = options.bankroll ?? START_BANKROLL;
     this.initialBankroll = this.bankroll;
     this.realizedPnl = 0;
     this.wins = 0;
@@ -42,10 +43,13 @@ class LimitHedgeEngine {
     this.currentStart = windowStartFor(Date.now());
 
     // Per-window trading state
-    this.windowOrdersPlacedFor = null; // windowStart for which entry limits are out
-    this.entryOrders = [];             // {outcome, price, status, placedAt}
-    this.tpOrders = [];                // {outcome, price, status, placedAt}
-    this.positions = [];               // open positions (both sides possible)
+    this.windowStartFor = null;           // windowStart currently being traded
+    this.positionSeq = 0;                 // flip count within current window (1-based)
+    this.baseShares = Math.max(1, Math.round(this.bankroll * BASE_PCT / TRADE_PRICE)); // 1% of capital in shares at 0.55
+    this.nextShares = this.baseShares;    // shares for the next flip
+    this.latestSide = null;               // 'UP' or 'DOWN' of the most recent fill
+    this.firedThisWindow = 0;             // number of flips fired this window
+    this.positions = [];                  // all accumulated BUY positions (hold to resolution)
     this.results = [];
     this.trades = [];
     this.windowPaused = false;
@@ -87,7 +91,7 @@ class LimitHedgeEngine {
         signal: controller.signal,
         headers: {
           'Content-Type': 'application/json',
-          'User-Agent': 'limit-hedge-bot/1.0',
+          'User-Agent': 'flip-bot/1.0',
           ...(options.headers || {}),
         },
       });
@@ -144,6 +148,7 @@ class LimitHedgeEngine {
       tokenId: String(tokenId), slug, outcome,
       bid: null, ask: null, mid: null, spread: null,
       topAskNotional: 0, updatedAt: null, bookAsks: [], bookBids: [],
+      prevAsk: null,
     };
     this.tokens.set(token.tokenId, token);
     return token;
@@ -151,6 +156,7 @@ class LimitHedgeEngine {
 
   // ── CLOB polling ──────────────────────────────────────────
   applyBook(token, bids, asks) {
+    token.prevAsk = token.ask; // snapshot for tick-crossing detection
     const validBids = (bids || []).filter(l => Number(l.size) > 0).map(l => ({ price: Number(l.price), size: Number(l.size) }));
     validBids.sort((a, b) => b.price - a.price);
     const validAsks = (asks || []).filter(l => Number(l.size) > 0).map(l => ({ price: Number(l.price), size: Number(l.size) }));
@@ -204,23 +210,26 @@ class LimitHedgeEngine {
   }
 
   // ── Strategy ──────────────────────────────────────────────
-  ensureWindowOrders(market) {
-    const now = Date.now();
-    if (this.windowOrdersPlacedFor === market.windowStart) return;
-    this.windowOrdersPlacedFor = market.windowStart;
+  // Flip bot: whichever side's ask ticks to TRADE_PRICE (0.55) fires immediately.
+  // Alternates UP -> DOWN -> UP -> ... with unlimited flips, each 2x the previous
+  // shares. First flip of a window = base = 1% of capital. All shares are held to
+  // resolution. New window recalculates base from updated capital.
+
+  computeBaseForNextWindow() {
+    this.baseShares = Math.max(1, Math.round(this.bankroll * BASE_PCT / TRADE_PRICE));
+  }
+
+  prepareWindow(market) {
+    // Called once per new window to reset per-window flip state.
+    this.windowStartFor = market.windowStart;
+    this.positionSeq = 0;
+    this.firedThisWindow = 0;
+    this.latestSide = null;
     this.windowPaused = false;
     this.pauseReason = null;
-    this.entryOrders = [];
-    this.tpOrders = [];
-
-    if (this.entryWindow != null && market.windowStart < this.entryWindow) {
-      this.log(`⏳ Window ${market.windowStart} skipped (entryWindow ${this.entryWindow})`);
-      return;
-    }
-
-    this.entryOrders.push({ outcome: 'UP',   price: ENTRY_PRICE, status: 'RESTING', placedAt: now });
-    this.entryOrders.push({ outcome: 'DOWN', price: ENTRY_PRICE, status: 'RESTING', placedAt: now });
-    this.log(`📌 WINDOW ${market.slug.slice(-10)} — LIMIT BUY UP+DOWN @ ${ENTRY_PRICE.toFixed(2)} × ${SHARES}sh each`);
+    this.computeBaseForNextWindow();
+    this.nextShares = this.baseShares;
+    this.log(`🆕 WINDOW ${market.slug.slice(-10)} — BASE ${this.baseShares} SH ≈1% of $${this.bankroll.toFixed(2)} @ ${TRADE_PRICE.toFixed(2)} · flip ×${MARTINGALE_X}`);
     this.onTick(this.buildState());
   }
 
@@ -231,27 +240,92 @@ class LimitHedgeEngine {
     const market = this.markets.get(slugFor(cs));
 
     // Resolve any open position whose own window has ended (handles rollover).
-    // NOTE: windowStart/windowEnd are stored in SECONDS (from windowStartFor).
     this.resolveExpired(market, nowS);
 
     if (!market) return;
-    this.ensureWindowOrders(market);
-    if (this.windowOrdersPlacedFor !== market.windowStart) return; // waiting for next window
+    if (this.entryWindow != null && market.windowStart < this.entryWindow) {
+      // Started mid-window on (re)start: skip until next full window.
+      return;
+    }
 
-    // Fill resting limit buys at 0.40 (natural fills, both sides independent)
-    if (!this.windowPaused) this.fillEntryOrders(market);
+    // New window → reset flip state (only when the window rolled over).
+    if (this.windowStartFor !== market.windowStart) this.prepareWindow(market);
 
-    // TP limit sells: first-filled side gets a resting sell @ 0.60
-    if (!this.windowPaused) this.fillTpOrders(market);
-
-    // Stop-loss (market order): any open position mark <= SL → sell + pause window
-    if (this.checkStopLosses(market)) this.pauseWindow(market);
+    // Fire on the side whose ask ticks to TRADE_PRICE, alternating.
+    if (!this.windowPaused) this.fireFlips(market);
 
     this.recordEquity();
     this.onTick(this.buildState());
   }
 
+  fireFlips(market) {
+    // A side "ticks 0.55" when its ask crosses UP through TRADE_PRICE (the side
+    // is becoming favored). Fire immediately on that tick, accepting slippage up
+    // to TRADE_PRICE + SLIP_TOL. Alternating: after UP fires, only DOWN can fire,
+    // and only when DOWN itself ticks up to 0.55. Unlimited flips per window.
+    let guard = 0;
+    while (guard++ < 40) {
+      const allowUp   = this.latestSide !== 'UP';   // UP can fire unless UP just fired
+      const allowDown = this.latestSide !== 'DOWN'; // DOWN can fire unless DOWN just fired
+      const upCross = allowUp   && this.crossedUp(market.up);
+      const downCross = allowDown && this.crossedUp(market.down);
+      let side = null;
+      if (upCross && downCross) {
+        // Degenerate/stale book with both sides at the level: prefer the one
+        // closest to TRADE_PRICE (the fresher tick), tie → UP.
+        const upDist = Math.abs((market.up.ask ?? 1) - TRADE_PRICE);
+        const dnDist = Math.abs((market.down.ask ?? 1) - TRADE_PRICE);
+        side = upDist <= dnDist ? 'UP' : 'DOWN';
+      } else if (upCross) side = 'UP';
+      else if (downCross) side = 'DOWN';
+      if (!side) break;
+
+      const token = side === 'UP' ? market.up : market.down;
+      const shares = this.nextShares;
+      const cost = round2(shares * TRADE_PRICE);
+      if (cost > this.bankroll) {
+        this.log(`⚠️  SKIP ${side} FLIP #${this.positionSeq + 1} — bankroll $${this.bankroll.toFixed(2)} < cost $${cost.toFixed(2)}`);
+        break;
+      }
+      this.executeFlip(market, side, shares, token.ask);
+      if (this.bankroll < TRADE_PRICE) break; // out of funds for another flip
+    }
+  }
+
+  crossedUp(token) {
+    // True when the side's ask has just risen to the TRADE_PRICE level
+    // (observed tick: previous ask below the level, current ask at/above it).
+    const ask = token.ask;
+    if (ask == null || token.prevAsk == null) return false; // need a real tick
+    const cap = TRADE_PRICE + SLIP_TOL;
+    return token.prevAsk < TRADE_PRICE && ask >= TRADE_PRICE && ask <= cap;
+  }
+
+  executeFlip(market, outcome, shares, fillAsk) {
+    // Fire immediately at TRADE_PRICE (accept any slippage the book shows).
+    const price = TRADE_PRICE;
+    const cost = round2(shares * price);
+    this.bankroll = round2(this.bankroll - cost);
+    this.positionSeq += 1;
+    this.firedThisWindow += 1;
+    this.latestSide = outcome;
+    const position = {
+      slug: market.slug, outcome, market,
+      windowStart: market.windowStart, windowEnd: market.windowEnd,
+      shares, entryPrice: price, cost,
+      openedAt: Date.now(), exitReason: null, exitPrice: null, pnl: null,
+      flipNo: this.positionSeq,
+    };
+    this.positions.push(position);
+    this.trades.push({ timestamp: Date.now(), type: 'BUY', slug: market.slug, outcome, shares, price, cost, reason: `FLIP #${this.positionSeq} ask ${fillAsk.toFixed(2)}` });
+    this.log(`⚡ FLIP #${this.positionSeq} ${outcome} ${shares}sh @ ${price.toFixed(2)} · cost $${cost.toFixed(2)} · ask ${fillAsk.toFixed(2)} · latest ${outcome}`);
+    // Next flip = 2x previous shares.
+    this.nextShares = Math.round(shares * MARTINGALE_X);
+    this.onTick(this.buildState());
+  }
+
   sellPosition(position, price, reason, extra = {}) {
+    if (position.exitReason != null) return;
     const proceeds = round2(position.shares * price);
     const pnl = round2(proceeds - position.cost);
     if (pnl >= 0) this.wins++; else this.losses++;
@@ -265,98 +339,37 @@ class LimitHedgeEngine {
     this.results.unshift({ ...position, market: undefined, token: undefined });
     this.results = this.results.slice(0, 50);
     this.trades.push({ timestamp: Date.now(), type: 'SELL', slug: position.slug, outcome: position.outcome, shares: position.shares, price, pnl, reason, ...extra });
-    this.log(`💰 ${reason} ${position.outcome} @ ${price.toFixed(3)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · ${position.shares}sh`);
+    this.log(`💰 RESOLUTION ${position.outcome} @ ${price.toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · ${position.shares}sh · flip #${position.flipNo}`);
     this.recordEquity();
     this.onTick(this.buildState());
   }
 
-  fillEntryOrders(market) {
-    for (const order of this.entryOrders) {
-      if (order.status !== 'RESTING') continue;
-      const token = order.outcome === 'UP' ? market.up : market.down;
-      if (token.ask == null) continue;
-      if (token.ask <= ENTRY_PRICE) {
-        const cost = round2(SHARES * ENTRY_PRICE);
-        if (cost > this.bankroll) { order.status = 'SKIPPED'; this.log(`⚠️  skip ${order.outcome} — bankroll $${this.bankroll} < cost $${cost}`); continue; }
-        const isFirstFill = !this.positions.some(p => p.hasTp);
-        order.status = 'FILLED';
-        order.filledAt = Date.now();
-        this.bankroll = round2(this.bankroll - cost);
-        const position = {
-          slug: market.slug, outcome: order.outcome, market,
-          shares: SHARES, entryPrice: ENTRY_PRICE, cost,
-          openedAt: Date.now(), exitReason: null, exitPrice: null, pnl: null, hasTp: isFirstFill,
-        };
-        this.positions.push(position);
-        this.trades.push({ timestamp: Date.now(), type: 'BUY', slug: market.slug, outcome: order.outcome, shares: SHARES, price: ENTRY_PRICE, cost, reason: `LIMIT FILL ask ${token.ask.toFixed(2)} ≤ 0.40` });
-        this.log(`✅ BUY ${order.outcome} ${SHARES}sh @ ${ENTRY_PRICE.toFixed(2)} · cost $${cost.toFixed(2)} · ask was ${token.ask.toFixed(2)}`);
-
-        // First filled side → immediately place TP limit sell @ 0.60
-        if (isFirstFill) {
-          this.tpOrders.push({ outcome: order.outcome, price: TP_PRICE, status: 'RESTING', placedAt: Date.now() });
-          this.log(`🎯 TP LIMIT SELL ${order.outcome} @ ${TP_PRICE.toFixed(2)} placed (${SHARES}sh)`);
-        }
-      }
-    }
-  }
-
-  fillTpOrders(market) {
-    for (const order of this.tpOrders) {
-      if (order.status !== 'RESTING') continue;
-      const token = order.outcome === 'UP' ? market.up : market.down;
-      if (token.bid == null) continue;
-      if (token.bid >= TP_PRICE) {
-        const pos = this.positions.find(p => p.outcome === order.outcome && p.exitReason == null);
-
-        order.status = 'FILLED';
-        order.filledAt = Date.now();
-        this.log(`🎯 TP HIT ${order.outcome} — LIMIT SELL @ ${TP_PRICE.toFixed(2)} (bid ${token.bid.toFixed(2)})`);
-        this.sellPosition(pos, TP_PRICE, 'TP', {});
-      }
-    }
-  }
-
-  checkStopLosses(market) {
-    let hit = false;
-    for (const pos of this.positions) {
-      if (pos.exitReason != null) continue;
-      const token = pos.outcome === 'UP' ? market.up : market.down;
-      if (token.mid == null) continue;
-      pos.markPrice = token.mid;
-      if (token.mid <= SL_PRICE) {
-        this.log(`🛑 SL ${pos.outcome} — mid ${token.mid.toFixed(3)} ≤ ${SL_PRICE.toFixed(2)}`);
-        this.sellPosition(pos, token.mid, 'SL', {});
-        hit = true;
-        break; // one SL → pause window
-      }
-    }
-    return hit;
-  }
-
-  pauseWindow(market) {
-    this.windowPaused = true;
-    this.pauseReason = `SL ${SL_PRICE.toFixed(2)} hit — window paused`;
-    for (const o of this.entryOrders) if (o.status === 'RESTING') o.status = 'CANCELLED';
-    for (const o of this.tpOrders) if (o.status === 'RESTING') o.status = 'CANCELLED';
-    this.log('🛑 SL hit — window PAUSED · pending orders cancelled · held side stays to resolution');
-  }
-
   resolveExpired(market, nowS) {
     const open = this.positions.filter(p => p.exitReason == null);
+    const buckets = new Map(); // windowStart -> positions
     for (const pos of open) {
-      if (nowS < pos.market.windowEnd) continue;
-      const m = pos.market;
+      if (nowS < pos.windowEnd) continue;
+      const w = pos.windowEnd;
+      if (!buckets.has(w)) buckets.set(w, []);
+      buckets.get(w).push(pos);
+    }
+    for (const [windowEnd, group] of buckets) {
+      const m = group[0].market;
       const upMid = m.up.mid, downMid = m.down.mid;
       let winner = null;
       if (upMid != null && downMid != null) winner = upMid >= downMid ? 'UP' : 'DOWN';
       else if (upMid != null) winner = upMid >= 0.5 ? 'UP' : 'DOWN';
       else if (downMid != null) winner = downMid >= 0.5 ? 'DOWN' : 'UP';
       if (!winner) winner = 'UP';
-      const won = pos.outcome === winner;
-      const payout = won ? pos.shares : 0;
-      const exitPrice = won ? 1 : 0;
-      this.sellPosition(pos, exitPrice, 'RESOLUTION', { winner, won });
-      this.log(`🏁 WINDOW ${m.slug.slice(-10)} RESOLVED → ${winner} · ${pos.outcome} ${won ? 'WIN' : 'LOSS'} · payout $${payout.toFixed(2)}`);
+      let winPayout = 0, lossCost = 0;
+      for (const pos of group) {
+        const won = pos.outcome === winner;
+        const payout = won ? pos.shares : 0;
+        const exitPrice = won ? 1 : 0;
+        this.sellPosition(pos, exitPrice, 'RESOLUTION', { winner, won });
+        if (won) winPayout += payout; else lossCost += pos.cost;
+      }
+      this.log(`🏁 WINDOW ${m.slug.slice(-10)} RESOLVED → ${winner} · win payout $${winPayout.toFixed(2)} · loss cost $${lossCost.toFixed(2)}`);
     }
   }
 
@@ -398,14 +411,14 @@ class LimitHedgeEngine {
     const market = this.markets.get(slugFor(cs));
     const open = this.positions.filter(p => p.exitReason == null);
     const openUnrealized = open.reduce((s, p) => {
-      const token = p.outcome === 'UP' ? market?.up : market?.down;
+      const token = p.outcome === 'UP' ? p.market?.up : p.market?.down;
       const mark = token?.mid ?? p.entryPrice;
       return s + round2(p.shares * mark - p.cost);
     }, 0);
     return {
       version: '3.0.0',
       name: this.name,
-      strategy: `LIMIT HEDGE · BUY BOTH SIDES @ 0.40 (${SHARES}sh) · TP 0.60 LIMIT SELL · SL 0.25 MARKET · MAX 2 BETS`,
+      strategy: `FLIP BOT · FIRE @ ${TRADE_PRICE.toFixed(2)} (UP↔DOWN) · BASE=${BASE_PCT*100}% · ×${MARTINGALE_X} per flip · HOLD TO RESOLUTION`,
       serverTime: now,
       connected: this.isClobFresh(),
       lastError: this.lastError,
@@ -425,16 +438,18 @@ class LimitHedgeEngine {
       pauseReason: this.pauseReason,
       currentWindow: market ? this.publicMarket(market) : null,
       windowRemaining: market ? Math.max(0, market.windowEnd - Math.floor(now / 1000)) : null,
-      entryOrders: this.entryOrders.map(o => ({ ...o })),
-      tpOrders: this.tpOrders.map(o => ({ ...o })),
+      baseShares: this.baseShares,
+      nextShares: this.nextShares,
+      latestSide: this.latestSide,
+      flips: this.firedThisWindow,
       positions: open.map(p => {
-        const token = p.outcome === 'UP' ? market?.up : market?.down;
+        const token = p.outcome === 'UP' ? p.market?.up : p.market?.down;
         const mark = token?.mid ?? p.entryPrice;
         return {
           outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost,
           markPrice: mark, unrealized: round2(p.shares * mark - p.cost),
-          remaining: market ? Math.max(0, market.windowEnd - Math.floor(now / 1000)) : null,
-          hasTp: p.hasTp,
+          remaining: p.windowEnd ? Math.max(0, p.windowEnd - Math.floor(now / 1000)) : null,
+          flipNo: p.flipNo,
         };
       }),
       tradeCount: this.trades.length,
@@ -446,7 +461,8 @@ class LimitHedgeEngine {
       drawdown: round2(this.peakEquity - this.markValue()),
       uptime: Math.floor((now - this.startedAt) / 1000),
       config: {
-        entryPrice: ENTRY_PRICE, tpPrice: TP_PRICE, slPrice: SL_PRICE, shares: SHARES,
+        tradePrice: TRADE_PRICE, basePct: BASE_PCT, martingaleX: MARTINGALE_X, slippageCap: SLIP_TOL,
+        baseShares: this.baseShares, nextShares: this.nextShares, latestSide: this.latestSide, flips: this.firedThisWindow,
         pollMs: CLOB_POLL_MS, bankroll: this.initialBankroll,
       },
     };
@@ -474,7 +490,7 @@ class LimitHedgeEngine {
       setInterval(() => this.evaluate(), 200),
       setInterval(() => this.recordEquity(), 1000),
     ];
-    this.log(`🚀 LimitHedge started | BUY UP+DOWN @ ${ENTRY_PRICE} × ${SHARES}sh · TP ${TP_PRICE} limit · SL ${SL_PRICE} market`);
+    this.log(`🚀 FlipBot started | FIRE @ ${TRADE_PRICE} alternating UP↔DOWN · base ${BASE_PCT*100}% of capital · each flip ×${MARTINGALE_X} · hold to resolution`);
   }
 
   close() {
@@ -483,4 +499,4 @@ class LimitHedgeEngine {
   }
 }
 
-module.exports = { LimitHedgeEngine, config: { ENTRY_PRICE, TP_PRICE, SL_PRICE, SHARES, CLOB_POLL_MS } };
+module.exports = { FlipBotEngine, config: { TRADE_PRICE, BASE_PCT, MARTINGALE_X, START_BANKROLL, CLOB_POLL_MS } };
