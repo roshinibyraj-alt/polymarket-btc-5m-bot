@@ -26,18 +26,26 @@ function upPrice() {
   const d = step;
   // Oscillate: 0.50 -> 0.56 (UP ticks 0.55 -> FLIP UP)
   if (mode === 'down-first') {
-    // DOWN-first: start at 0.58 -> fall to ~0.42 so DOWN rises to 0.55 first.
-    if (d < 40)        return round2(0.58 - d * 0.002);    // 0.58->0.50
-    if (d < 80)        return round2(0.50 - (d - 40) * 0.002); // 0.50->0.42 (DOWN crosses up)
-    if (d < 120)       return round2(0.44 + (d - 80) * 0.0028); // ->0.55 (UP crosses)
-    if (d < 160)       return round2(0.56 - (d - 120) * 0.0025); // ->0.46 (DOWN crosses)
-    return round2(0.46 + (d - 160) * 0.0032); // UP wins
+    // DOWN-first: DOWN is the first side observed at >= 0.55 (UP starts low at
+    // 0.42 -> DOWN ~0.58), so the FIRST fire must be DOWN.
+    if (d < 40)        return round2(0.42 + d * 0.0016);   // 0.42->0.48 (DOWN stays high)
+    if (d < 80)        return round2(0.48 + (d - 40) * 0.0022); // ->0.57 (DOWN above 0.55 throughout)
+    if (d < 120)       return round2(0.57 - (d - 80) * 0.0025); // ->0.47 (DOWN dips below, UP crosses)
+    if (d < 160)       return round2(0.47 + (d - 120) * 0.0028); // ->0.58 (UP crosses)
+    return round2(0.58 - (d - 160) * 0.0032); // DOWN wins final
   }
   if (mode === 'jump') {
     // Sit at 0.50, then jump to 0.82 in one poll — bot must fire at the
     // observed ask (~0.825) despite the gap (slippage ceiling 0.99).
     if (d < 6)  return 0.50;
     return 0.82;
+  }
+  if (mode === 'opens-high') {
+    // The live bug: window opens with UP already >= 0.55 and never drops below.
+    // Used to be missed (prevAsk null at open); now it must fire immediately.
+    if (d < 6)  return 0.62;          // first observation already at 0.62
+    if (d < 150) return round2(0.60 + Math.sin(d * 0.05) * 0.03); // hover 0.57-0.63
+    return round2(0.60 + (d - 150) * 0.002); // ->0.90 UP wins
   }
   if (d < 40)        return round2(0.50 + d * 0.0016);   // 0.50->0.56
   if (d < 80)        return round2(0.56 - (d - 40) * 0.0025); // 0.56->0.46 (DOWN ticks up)
@@ -92,11 +100,12 @@ async function runScenario(m, label) {
     }
     await engine.pollClob();
     engine.evaluate(); // final ticks
+    // window being traded = w0 + WINDOW (the bot entered it at t = w0+WINDOW)
+    const openEnd = (w0 + WINDOW) + WINDOW;
     // resolution
     await engine.discoverWindow(engine.positions[0]?.market?.windowStart ?? w0);
     await engine.pollClob();
     // force window end pass
-    const openEnd = Math.max(...engine.positions.map(p => p.windowEnd));
     t = (openEnd + 1) * 1000;
     await engine.pollClob();
     engine.evaluate();
@@ -119,6 +128,12 @@ async function runScenario(m, label) {
     if (m === 'jump') {
       if (buys.length === 0) failures.push(`${label}: expected a flip after the jump`);
       else if (buys[0].price < 0.80) failures.push(`${label}: expected fill near 0.82, got ${buys[0].price}`);
+    }
+    // Check 1d: opens-high fires immediately and does not spam static flips
+    if (m === 'opens-high') {
+      if (buys.length < 1) failures.push(`${label}: expected an immediate fire at open`);
+      else if (buys[0].outcome !== 'UP') failures.push(`${label}: expected UP first, got ${buys[0].outcome}`);
+      if (buys.length > 2) failures.push(`${label}: static price should not re-fire (got ${buys.length} flips)`);
     }
     // Check 2: alternation UP -> DOWN -> UP...
     for (let i = 1; i < outcomes.length; i++) {
@@ -157,6 +172,7 @@ async function runScenario(m, label) {
   await runScenario('down-wins', 'Scenario DOWN wins — verify loss/win accounting');
   await runScenario('down-first', 'Scenario DOWN first — first fire is side-agnostic (whichever side ticks first)');
   await runScenario('jump', 'Scenario JUMP — 0.50 -> 0.82 in one poll, fire at actual ask (ceiling 0.99)');
+  await runScenario('opens-high', 'Scenario OPENS-HIGH — window opens with UP >= 0.55, stays high; must fire immediately');
   if (process.argv.includes('--quick')) {}
   console.log('\n=== SMOKE RESULT ===');
   if (failures.length) {

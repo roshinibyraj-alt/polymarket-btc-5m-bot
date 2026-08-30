@@ -149,6 +149,7 @@ class FlipBotEngine {
       bid: null, ask: null, mid: null, spread: null,
       topAskNotional: 0, updatedAt: null, bookAsks: [], bookBids: [],
       prevAsk: null,
+      lastFireTick: null, // last ask value we already fired/considered for this side
     };
     this.tokens.set(token.tokenId, token);
     return token;
@@ -294,14 +295,17 @@ class FlipBotEngine {
   }
 
   crossedUp(token) {
-    // True when the side's ask has just risen to the TRADE_PRICE level.
-    // We fire on ANY observed crossing (prevAsk below 0.55, ask now at/above it)
-    // even if the price jumped far in one poll — the user accepts slippage up to
-    // SLIP_CEILING (0.99). If the ask already exceeds the ceiling the tick is a
-    // missed/stale window and we don't chase it.
+    // Fire signal: the side's ask is at/above TRADE_PRICE (0.55) and within the
+    // slippage ceiling. This includes the very first observation in a window
+    // (e.g. the window opens with UP at 0.62) — no "previous tick below 0.55"
+    // requirement anymore, since that caused missed fires when the price opened
+    // or jumped straight above the level. Each side only fires once per distinct
+    // ask value: static prices don't re-trigger (lastFireTick tracks it).
     const ask = token.ask;
-    if (ask == null || token.prevAsk == null) return false; // need a real tick
-    return token.prevAsk < TRADE_PRICE && ask >= TRADE_PRICE && ask <= SLIP_CEILING;
+    if (ask == null || ask > SLIP_CEILING) return false;
+    if (ask < TRADE_PRICE) return false;
+    if (token.lastFireTick === ask) return false; // same level already fired
+    return true;
   }
 
   executeFlip(market, outcome, shares, fillPrice) {
@@ -313,6 +317,9 @@ class FlipBotEngine {
     this.positionSeq += 1;
     this.firedThisWindow += 1;
     this.latestSide = outcome;
+    // Mark this side's fired ask level so a static book doesn't re-trigger it.
+    const fireToken = outcome === 'UP' ? market.up : market.down;
+    fireToken.lastFireTick = fillPrice;
     const position = {
       slug: market.slug, outcome, market,
       windowStart: market.windowStart, windowEnd: market.windowEnd,
@@ -375,6 +382,8 @@ class FlipBotEngine {
       }
       this.log(`🏁 WINDOW ${m.slug.slice(-10)} RESOLVED → ${winner} · win payout $${winPayout.toFixed(2)} · loss cost $${lossCost.toFixed(2)}`);
     }
+    // Prune resolved positions so the array doesn't grow forever.
+    if (buckets.size) this.positions = this.positions.filter(p => p.exitReason == null);
   }
 
   // ── State / equity ────────────────────────────────────────
