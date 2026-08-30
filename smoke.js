@@ -33,6 +33,12 @@ function upPrice() {
     if (d < 160)       return round2(0.56 - (d - 120) * 0.0025); // ->0.46 (DOWN crosses)
     return round2(0.46 + (d - 160) * 0.0032); // UP wins
   }
+  if (mode === 'jump') {
+    // Sit at 0.50, then jump to 0.82 in one poll — bot must fire at the
+    // observed ask (~0.825) despite the gap (slippage ceiling 0.99).
+    if (d < 6)  return 0.50;
+    return 0.82;
+  }
   if (d < 40)        return round2(0.50 + d * 0.0016);   // 0.50->0.56
   if (d < 80)        return round2(0.56 - (d - 40) * 0.0025); // 0.56->0.46 (DOWN ticks up)
   if (d < 120)       return round2(0.46 + (d - 80) * 0.0025); // 0.46->0.56 (UP again)
@@ -109,6 +115,11 @@ async function runScenario(m, label) {
     if (buys[0].shares !== base) failures.push(`${label}: base shares ${buys[0].shares} != expected ${base}`);
     // Check 1b: down-first mode should open with DOWN
     if (m === 'down-first' && outcomes[0] !== 'DOWN') failures.push(`${label}: expected first flip DOWN got ${outcomes[0]}`);
+    // Check 1c: jump mode fires at the actual observed ask (0.82 + half-spread), not fixed 0.55
+    if (m === 'jump') {
+      if (buys.length === 0) failures.push(`${label}: expected a flip after the jump`);
+      else if (buys[0].price < 0.80) failures.push(`${label}: expected fill near 0.82, got ${buys[0].price}`);
+    }
     // Check 2: alternation UP -> DOWN -> UP...
     for (let i = 1; i < outcomes.length; i++) {
       if (outcomes[i] === outcomes[i - 1]) failures.push(`${label}: no alternation at flip ${i} (${outcomes[i-1]}->${outcomes[i]})`);
@@ -145,6 +156,7 @@ async function runScenario(m, label) {
   await runScenario('up-wins', 'Scenario UP wins — oscillation triggers 3+ flips, base/2x verified');
   await runScenario('down-wins', 'Scenario DOWN wins — verify loss/win accounting');
   await runScenario('down-first', 'Scenario DOWN first — first fire is side-agnostic (whichever side ticks first)');
+  await runScenario('jump', 'Scenario JUMP — 0.50 -> 0.82 in one poll, fire at actual ask (ceiling 0.99)');
   if (process.argv.includes('--quick')) {}
   console.log('\n=== SMOKE RESULT ===');
   if (failures.length) {

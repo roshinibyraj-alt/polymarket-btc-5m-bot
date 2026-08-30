@@ -96,7 +96,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div id="marketBody"><div class="empty">Waiting for market...</div></div>
 </div>
 <div class="box" style="margin-bottom:8px">
-<div class="section-head"><span>Flip Engine — fire @ 0.55, alternate UP↔DOWN, ×2 per flip</span></div>
+<div class="section-head"><span>Flip Engine — fire on tick to 0.55 (ceiling 0.99), alternate UP↔DOWN, ×2 per flip</span></div>
 <div id="orderBody"><div class="empty">No flips yet this window</div></div>
 </div>
 <div class="box" id="posBox" style="margin-bottom:8px;display:none">
@@ -168,7 +168,7 @@ function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div 
 +'<div class="mini"><div class="label">Base (1% cap)</div><div class="value">'+num(c.baseShares)+' sh</div></div>'
 +'<div class="mini"><div class="label">Martingale</div><div class="value">x'+c.martingaleX+' per flip</div></div>'
 +'<div class="mini"><div class="label">Next Flip</div><div class="value">'+num(c.nextShares)+' sh</div></div>'
-+'<div class="mini"><div class="label">Slippage Cap</div><div class="value">+'+(c.slippageCap? c.slippageCap.toFixed(2):'0.05')+'</div></div>'
++'<div class="mini"><div class="label">Slippage Ceiling</div><div class="value">'+(c.slippageCap!=null?c.slippageCap.toFixed(2):'0.99')+'</div></div>'
 +'<div class="mini"><div class="label">Demo Capital</div><div class="value">'+cash(c.bankroll)+'</div></div>'}
 function renderChart(c){const svg=$('equityChart');if(!c||!c.length){svg.innerHTML='';return}
 const v=c.map(p=>p.equity),lo=Math.min(...v),hi=Math.max(...v),rng=(hi-lo)||1;const W=700,H=120,P=12;

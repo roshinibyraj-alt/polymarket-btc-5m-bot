@@ -4,7 +4,7 @@ Paper/demo trading bot for the Polymarket **BTC Up/Down 5-minute** market. No wa
 
 ## Strategy (intra-window flip)
 - **Demo capital:** $1,000 (configurable via `START_BANKROLL`).
-- **Trade price:** whenever either side's ask **ticks up to 0.55**, the bot **fires immediately** (no wait, accepts slippage up to `TRADE_PRICE + SLIP_TOL`).
+- **Trade price:** whenever either side's ask **ticks up to 0.55** (observed crossing: previous ask below 0.55, current ask at/above it), the bot **fires immediately** — no wait — even if the price jumped far in one poll. **Slippage ceiling 0.99**: the fill is taken at the actual observed ask (never above 0.99).
 - **Alternation / flip:** the flip alternates unlimited times. Once UP fires, only DOWN can fire next — and DOWN only fires when **DOWN itself** ticks to 0.55. Then it waits for UP again, and so on.
 - **Sizing (martingale):** first flip of a window = **base = 1% of current capital** (in shares at 0.55). Every subsequent flip = **2× the previous flip's shares** (e.g. 18 → 36 → 72 → 144 → …).
 - **Hold to resolution:** all accumulated shares (both sides) are held until the window resolves; the winning side pays 1.0, the losing side 0.
@@ -13,15 +13,15 @@ Paper/demo trading bot for the Polymarket **BTC Up/Down 5-minute** market. No wa
 ## Config (env vars)
 | Var | Default | Meaning |
 | --- | --- | --- |
-| `TRADE_PRICE` | `0.55` | Side fires when its ask ticks to this |
-| `SLIP_TOL` | `0.05` | Max accepted entry slippage above `TRADE_PRICE` |
+| `TRADE_PRICE` | `0.55` | Side fires when its ask ticks up to this |
+| `SLIP_CEILING` | `0.99` | Max accepted fill price (slippage ceiling) |
 | `BASE_PCT` | `0.01` | Base = this fraction of capital (in shares at trade price) |
 | `MARTINGALE_X` | `2` | Each flip = previous shares × this |
 | `START_BANKROLL` | `1000` | Demo starting capital |
 | `CLOB_POLL_MS` | `300` | CLOB polling interval |
 
 ## Pricing
-Gamma is used only to resolve the slug into the UP/DOWN CLOB token IDs; all prices come from the CLOB order book (`POST /books`). Fills fire on ask tick crossing 0.55. No fees modelled.
+Gamma is used only to resolve the slug into the UP/DOWN CLOB token IDs; all prices come from the CLOB order book (`POST /books`). Fills fire on an observed ask tick crossing 0.55; the entry price recorded is the actual ask seen at fire time (slippage accepted up to 0.99). No fees modelled.
 
 ## Run
 ```bash

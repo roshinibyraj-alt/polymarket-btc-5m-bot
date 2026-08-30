@@ -7,7 +7,7 @@ const CLOB_REST = process.env.CLOB_REST || 'https://clob.polymarket.com';
 const WINDOW_SECONDS = 300;                     // BTC 5m windows
 
 const TRADE_PRICE   = Number(process.env.TRADE_PRICE   || 0.55); // fire when side ask ticks to this
-const SLIP_TOL      = Number(process.env.SLIP_TOL      || 0.05); // accept entry slippage up to TRADE_PRICE + this
+const SLIP_CEILING  = Number(process.env.SLIP_CEILING  || 0.99); // accept ANY slippage up to this ceiling (0.99)
 const BASE_PCT      = Number(process.env.BASE_PCT      || 0.01); // base = this fraction of bankroll
 const MARTINGALE_X  = Number(process.env.MARTINGALE_X  || 2);    // each flip = prev shares * this
 const START_BANKROLL= Number(process.env.START_BANKROLL|| 1000); // demo capital
@@ -261,7 +261,7 @@ class FlipBotEngine {
   fireFlips(market) {
     // A side "ticks 0.55" when its ask crosses UP through TRADE_PRICE (the side
     // is becoming favored). Fire immediately on that tick, accepting slippage up
-    // to TRADE_PRICE + SLIP_TOL. Alternating: after UP fires, only DOWN can fire,
+    // to SLIP_CEILING (0.99). Alternating: after UP fires, only DOWN can fire,
     // and only when DOWN itself ticks up to 0.55. Unlimited flips per window.
     let guard = 0;
     while (guard++ < 40) {
@@ -282,28 +282,32 @@ class FlipBotEngine {
 
       const token = side === 'UP' ? market.up : market.down;
       const shares = this.nextShares;
-      const cost = round2(shares * TRADE_PRICE);
+      const fillPrice = token.ask; // actual price we see on the book at fire time
+      const cost = round2(shares * fillPrice);
       if (cost > this.bankroll) {
         this.log(`⚠️  SKIP ${side} FLIP #${this.positionSeq + 1} — bankroll $${this.bankroll.toFixed(2)} < cost $${cost.toFixed(2)}`);
         break;
       }
-      this.executeFlip(market, side, shares, token.ask);
+      this.executeFlip(market, side, shares, fillPrice);
       if (this.bankroll < TRADE_PRICE) break; // out of funds for another flip
     }
   }
 
   crossedUp(token) {
-    // True when the side's ask has just risen to the TRADE_PRICE level
-    // (observed tick: previous ask below the level, current ask at/above it).
+    // True when the side's ask has just risen to the TRADE_PRICE level.
+    // We fire on ANY observed crossing (prevAsk below 0.55, ask now at/above it)
+    // even if the price jumped far in one poll — the user accepts slippage up to
+    // SLIP_CEILING (0.99). If the ask already exceeds the ceiling the tick is a
+    // missed/stale window and we don't chase it.
     const ask = token.ask;
     if (ask == null || token.prevAsk == null) return false; // need a real tick
-    const cap = TRADE_PRICE + SLIP_TOL;
-    return token.prevAsk < TRADE_PRICE && ask >= TRADE_PRICE && ask <= cap;
+    return token.prevAsk < TRADE_PRICE && ask >= TRADE_PRICE && ask <= SLIP_CEILING;
   }
 
-  executeFlip(market, outcome, shares, fillAsk) {
-    // Fire immediately at TRADE_PRICE (accept any slippage the book shows).
-    const price = TRADE_PRICE;
+  executeFlip(market, outcome, shares, fillPrice) {
+    // Fire immediately. Entry price = the actual ask observed at fire time
+    // (slippage accepted, ceiling 0.99). Cost is shares x actual fill price.
+    const price = fillPrice;
     const cost = round2(shares * price);
     this.bankroll = round2(this.bankroll - cost);
     this.positionSeq += 1;
@@ -317,8 +321,8 @@ class FlipBotEngine {
       flipNo: this.positionSeq,
     };
     this.positions.push(position);
-    this.trades.push({ timestamp: Date.now(), type: 'BUY', slug: market.slug, outcome, shares, price, cost, reason: `FLIP #${this.positionSeq} ask ${fillAsk.toFixed(2)}` });
-    this.log(`⚡ FLIP #${this.positionSeq} ${outcome} ${shares}sh @ ${price.toFixed(2)} · cost $${cost.toFixed(2)} · ask ${fillAsk.toFixed(2)} · latest ${outcome}`);
+    this.trades.push({ timestamp: Date.now(), type: 'BUY', slug: market.slug, outcome, shares, price, cost, reason: `FLIP #${this.positionSeq} fill ${fillPrice.toFixed(3)}` });
+    this.log(`⚡ FLIP #${this.positionSeq} ${outcome} ${shares}sh @ ${price.toFixed(3)} · cost $${cost.toFixed(2)} · fill ${fillPrice.toFixed(3)} · latest ${outcome}`);
     // Next flip = 2x previous shares.
     this.nextShares = Math.round(shares * MARTINGALE_X);
     this.onTick(this.buildState());
@@ -461,7 +465,7 @@ class FlipBotEngine {
       drawdown: round2(this.peakEquity - this.markValue()),
       uptime: Math.floor((now - this.startedAt) / 1000),
       config: {
-        tradePrice: TRADE_PRICE, basePct: BASE_PCT, martingaleX: MARTINGALE_X, slippageCap: SLIP_TOL,
+        tradePrice: TRADE_PRICE, basePct: BASE_PCT, martingaleX: MARTINGALE_X, slippageCap: SLIP_CEILING,
         baseShares: this.baseShares, nextShares: this.nextShares, latestSide: this.latestSide, flips: this.firedThisWindow,
         pollMs: CLOB_POLL_MS, bankroll: this.initialBankroll,
       },
@@ -490,7 +494,7 @@ class FlipBotEngine {
       setInterval(() => this.evaluate(), 200),
       setInterval(() => this.recordEquity(), 1000),
     ];
-    this.log(`🚀 FlipBot started | FIRE @ ${TRADE_PRICE} alternating UP↔DOWN · base ${BASE_PCT*100}% of capital · each flip ×${MARTINGALE_X} · hold to resolution`);
+    this.log(`🚀 FlipBot started | FIRE on tick to ${TRADE_PRICE} alternating UP↔DOWN · slippage ceiling ${SLIP_CEILING} · base ${BASE_PCT*100}% of capital · each flip ×${MARTINGALE_X} · hold to resolution`);
   }
 
   close() {
