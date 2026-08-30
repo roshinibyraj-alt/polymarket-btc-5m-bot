@@ -1,14 +1,16 @@
 'use strict';
 // Internal smoke test — drives the flip bot through simulated windows.
-// Strategy verification (v6):
+// Strategy verification (v5):
 //  1. Wait WAIT_SECONDS (7s) after window start — no fire before that.
 //  2. First entry: ANY side's ask ticks >= ENTRY_PRICE (0.70). Start size =
-//     base = 10% of capital in shares (1000 * 0.10 / 0.70 = 142.85 -> 143).
-//  3. Stop loss: held side mid <= SL_PRICE (0.50) -> sell immediately at 0.50.
+//     base (1% of capital) unless a carried martingale is active.
+//  3. Stop loss: held side mid <= SL_PRICE (0.50) → sell immediately at 0.50.
 //  4. Re-entry after SL: wait for ANY side's ask >= REENTRY_PRICE (0.65), fire
-//     with DOUBLE shares, capped at MAX_MARTINGALE (2) steps per window
-//     (up to 3 entries: S -> 2S -> 4S). After the 3rd SL the window stops.
-//  5. NO CARRY: every window starts fresh at base regardless of prior losses.
+//     with DOUBLE shares — capped at MAX_MARTINGALE (2) steps per window
+//     (so up to 3 entries: S -> 2S -> 4S).
+//  5. Carry-over: if the LAST (max) martingale hits SL or loses at resolution,
+//     that size carries to the next window (escalating: 14→28→56, lose ⇒
+//     56→112→224, …). A clean win resets start back to base.
 
 const { FlipBotEngine } = require('./engine');
 
@@ -17,7 +19,7 @@ const WAIT = 7;
 const ENTRY = 0.70;
 const SL = 0.50;
 const REENTRY = 0.65;
-const BASE_PCT = 0.10;
+const MAX_M = 2;
 const TOKEN_UP = 'token-up';
 const TOKEN_DOWN = 'token-down';
 
@@ -27,11 +29,13 @@ let mode = null;
 const failures = [];
 function round2(v) { return Math.round(v * 100) / 100; }
 
+// Window-relative price path (step resets to 0 each window). DOWN = 1 - UP.
 function upPrice() {
   const d = step;
   if (mode === 'win') {
+    // Single entry that holds and wins (never hits SL).
     if (d < 6) return 0.50;
-    if (d < 250) return 0.70;                  // ENTRY @ ask 0.705 (start base)
+    if (d < 250) return 0.75;                  // ENTRY @ ask 0.755 (start S)
     return 0.90;                               // hold, UP wins
   }
   if (mode === 'any-down') {
@@ -44,15 +48,16 @@ function upPrice() {
     if (d < 250) return 0.72;                  // ask 0.725 after wait
     return 0.82;                               // UP wins
   }
-  // mode === 'all-sl': base @0.70 -> SL -> 2*base @0.65 -> SL -> 4*base @0.65 -> SL
-  // (cap reached, window stops). Distinct re-entry levels avoid lastFireTick guard.
+  // mode === 'all-sl': start S @0.70 -> SL -> 2S @0.65 -> SL -> 4S @0.65 -> SL
+  // (max martingale reached, carry 4S). Distinct re-entry levels avoid the
+  // lastFireTick re-fire guard.
   if (d < 6) return 0.50;
-  if (d < 49) return 0.72;              // ENTRY#1 (base) @ 0.725
+  if (d < 49) return 0.72;              // ENTRY#1 (start S) @ 0.725
   if (d < 99) return 0.45;              // SL#1 @ 0.50
-  if (d < 149) return 0.66;             // ENTRY#2 (2x) @ 0.665
+  if (d < 149) return 0.66;             // ENTRY#2 (2S) @ 0.665
   if (d < 199) return 0.45;             // SL#2
-  if (d < 249) return 0.67;             // ENTRY#3 (4x) @ 0.675
-  return 0.45;                          // SL#3 -> cap, stop
+  if (d < 249) return 0.67;             // ENTRY#3 (4S) @ 0.675
+  return 0.45;                          // SL#3 -> cap, carry 4S
 }
 
 function askOf(price) { return round2(price + 0.005); }
@@ -76,27 +81,31 @@ const fakeFetch = async (url) => {
 
 function advance(sec) { for (let i = 0; i < sec; i++) { t += 1000; step += 1; } }
 
+// Run a single 300s window from `startMs` with the given price mode. Returns
+// { trades, buys, sells, res, bankroll, windowStartShares, carryShares,
+//   startSharesPerWindow } snapshot captured BEFORE the window is overwritten.
 async function runWindow(engine, startMs, m) {
   mode = m;
   t = startMs * 1000;
   const w0 = startMs;
   step = 0;
-  engine.windowStartFor = null;
+  engine.windowStartFor = null;          // force prepareWindow on next evaluate
   await engine.discoverWindow(w0);
   await engine.discoverWindow(w0 + WINDOW);
   let elapsedPreWait = 0;
   let startShares = null;
+  let startCarry = null;
   for (let s = 0; s < 300; s += 2) {
     advance(2);
     await engine.pollClob();
     engine.evaluate();
     const elapsed = Math.floor(t / 1000 - w0);
-    if (startShares === null) startShares = engine.baseShares;
+    if (startShares === null) { startShares = engine.windowStartShares ?? engine.nextShares; startCarry = engine.carryShares || 0; }
     if (elapsed === 6) elapsedPreWait = engine.trades.filter(x => x.type === 'BUY').length;
   }
   await engine.pollClob();
   engine.evaluate();
-  return { w0, elapsedPreWait, startShares };
+  return { w0, elapsedPreWait, startShares, startCarry };
 }
 
 async function resolve(engine, openEnd) {
@@ -117,19 +126,25 @@ async function fullScenario(name, windows) {
     const firstW = Math.floor(t / 1000 / WINDOW) * WINDOW;
     await engine.discoverWindow(firstW);
     await engine.discoverWindow(firstW + WINDOW);
-    let wStart = firstW + WINDOW;
-    const starts = [];
+    let wStart = firstW + WINDOW;         // first tradeable window
+    const carried = [];
     for (const w of windows) {
       const rw = await runWindow(engine, wStart, w.mode);
+      // resolve window (wStart)
       await engine.discoverWindow(wStart);
       await resolve(engine, wStart + WINDOW);
-      starts.push(rw.startShares);
-      if (w.expectStart != null && rw.startShares !== w.expectStart) failures.push(`${name} W${w.i}: base ${rw.startShares} != expected ${w.expectStart}`);
+      carried.push({ start: rw.startShares, carry: engine.carryShares });
+      if (w.expectCarry != null && engine.carryShares !== w.expectCarry) failures.push(`${name} W${w.i}: carry ${engine.carryShares} != expected ${w.expectCarry}`);
+      if (w.expectStart != null && rw.startShares !== w.expectStart) failures.push(`${name} W${w.i}: start ${rw.startShares} != expected ${w.expectStart}`);
       if (w.preWait != null && rw.elapsedPreWait !== w.preWait) failures.push(`${name} W${w.i}: pre-wait buys ${rw.elapsedPreWait} != expected ${w.preWait}`);
+      if (w.expectNoLostRes != null) {
+        const lostRes = engine.results.filter(r => r.exitReason === 'RESOLUTION' && !r.won);
+        if (w.expectNoLostRes && lostRes.length) failures.push(`${name} W${w.i}: expected no lost resolution, got ${lostRes.length}`);
+      }
       wStart += WINDOW;
     }
     console.log(`\n── ${name} ──`);
-    starts.forEach((s, i) => console.log(`  W${i + 1}: base ${s}sh`));
+    carried.forEach((c, i) => console.log(`  W${i + 1}: start ${c.start}sh · carry ${c.carry}sh`));
     console.log('  bank:', engine.bankroll.toFixed(2), '| wins:', engine.wins, '| losses:', engine.losses);
     return engine;
   } finally {
@@ -138,55 +153,57 @@ async function fullScenario(name, windows) {
 }
 
 (async () => {
-  const base10 = Math.max(1, Math.round(1000 * BASE_PCT / ENTRY)); // 143
-
-  // SCENARIO 1: all SL in one window -> cap reached, no carry. Next window still base.
+  // SCENARIO 1: all three entries SL -> cap -> carry 56 to next window; then
+  // next window escalates 56->112->224 and SLs -> carry 224.
   {
-    const e = await fullScenario('NO-CARRY (all SL, cap reached)', [
-      { i: 1, mode: 'all-sl', expectStart: base10 },
-      { i: 2, mode: 'all-sl', expectStart: null }, // fresh base from reduced bankroll, asserted below
+    const e = await fullScenario('CAP-CARRY (all SL), escalation', [
+      { i: 1, mode: 'all-sl', expectStart: 14, expectCarry: 56 },
+      { i: 2, mode: 'all-sl', expectStart: 56, expectCarry: 224 },
     ]);
-    const buys = e.trades.filter(x => x.type === 'BUY');
-    // W1: base -> 2x -> 4x (from initial bankroll 1000 -> base 143)
-    const w1 = buys.slice(0, 3).map(b => b.shares);
-    const exp1 = [base10, base10 * 2, base10 * 4];
-    if (JSON.stringify(w1) !== JSON.stringify(exp1)) failures.push(`NO-CARRY: W1 shares ${w1} != ${exp1}`);
-    // W2: NO carry — starts FRESH at base recomputed from the (reduced) bankroll,
-    // NOT escalated to 143->286->572. So W2 = [w2base, 2x, 4x] where w2base < base10.
-    const w2 = buys.slice(3, 6).map(b => b.shares);
-    const w2base = w2[0];
-    if (w2base >= base10) failures.push(`NO-CARRY: W2 base ${w2base} >= W1 base ${base10} — carry/escalation must NOT happen`);
-    if (JSON.stringify(w2) !== JSON.stringify([w2base, w2base * 2, w2base * 4])) failures.push(`NO-CARRY: W2 shares ${w2} not 2x-martingale from fresh base`);
-    if (e.trades.filter(x => x.type === 'SELL' && x.reason === 'STOP_LOSS').length !== 6) failures.push(`NO-CARRY: expected 6 SLs, got ${e.trades.filter(x => x.type === 'SELL' && x.reason === 'STOP_LOSS').length}`);
-    if (buys.length !== 6) failures.push(`NO-CARRY: expected exactly 6 buys (3 per window), got ${buys.length}`);
+    const w1 = e.trades.filter(x => x.type === 'BUY' && x.timestamp < (e.trades[0]?.timestamp + 999999));
+    // shares in window1: 14->28->56, window2: 56->112->224
+    const w1Shares = [];
+    const w2Shares = [];
+    // Partition buys by entryNo reset — simpler: check overall pattern.
+    const allShares = e.trades.filter(x => x.type === 'BUY').map(b => b.shares);
+    const half = allShares.length / 2;
+    for (let i = 0; i < half; i++) w1Shares.push(allShares[i]);
+    for (let i = half; i < allShares.length; i++) w2Shares.push(allShares[i]);
+    const expW1 = [14, 28, 56], expW2 = [56, 112, 224];
+    if (JSON.stringify(w1Shares) !== JSON.stringify(expW1)) failures.push(`CAP-CARRY: window1 shares ${w1Shares} != ${expW1}`);
+    if (JSON.stringify(w2Shares) !== JSON.stringify(expW2)) failures.push(`CAP-CARRY: window2 shares ${w2Shares} != ${expW2}`);
+    if (e.trades.filter(x => x.type === 'SELL' && x.reason === 'STOP_LOSS').length !== 6) failures.push(`CAP-CARRY: expected 6 SLs, got ${e.trades.filter(x => x.type === 'SELL' && x.reason === 'STOP_LOSS').length}`);
   }
 
-  // SCENARIO 2: after a winning window, next window still starts fresh at base
-  // (no carry, no escalation). Base recomputes from the updated bankroll.
+  // SCENARIO 2: after a carried win, reset to base.
   {
-    const e = await fullScenario('NO-CARRY WIN, fresh base next', [
-      { i: 1, mode: 'win', expectStart: base10 },
-      { i: 2, mode: 'win', expectStart: null }, // recomputed; assert it's ~10% of new bankroll below
+    const e = await fullScenario('CARRY-RESET (carried win)', [
+      { i: 1, mode: 'all-sl', expectStart: 14, expectCarry: 56 },
+      { i: 2, mode: 'win', expectStart: 56, expectCarry: 0 },
+      { i: 3, mode: 'win', expectStart: null, expectCarry: 0 },
     ]);
-    const w2Base = e.baseShares;
-    const expW2 = Math.max(1, Math.round(e.bankroll * BASE_PCT / ENTRY));
-    if (w2Base !== expW2) failures.push(`NO-CARRY WIN: W2 base ${w2Base} != expected ${expW2} (fresh, ~10% of bankroll)`);
+    // W3 should start at BASE (~14 from current bankroll), not 56.
+    const buys = e.trades.filter(x => x.type === 'BUY');
+    if (buys[buys.length - 1].shares !== e.baseShares) failures.push(`CARRY-RESET: window3 start ${buys[buys.length-1].shares} != base ${e.baseShares} — carry not reset`);
   }
 
-  // SCENARIO 3: wait gate + side-agnostic
+  // SCENARIO 3: wait gate + side-agnostic single windows routed through the
+  // full harness so nothing regresses.
   {
-    const e = await fullScenario('WAIT-GATE', [
-      { i: 1, mode: 'wait-gate', expectStart: base10, preWait: 0 },
+    const e = await fullScenario('WAIT-GATE & ANY-SIDE', [
+      { i: 1, mode: 'wait-gate', expectStart: 14, expectCarry: 0, preWait: 0 },
     ]);
     const buys = e.trades.filter(x => x.type === 'BUY');
-    if (buys.length < 1 || buys[0].outcome !== 'UP') failures.push('WAIT-GATE: expected UP first entry');
+    if (buys.length < 1) failures.push('WAIT-GATE: no entry');
+    else if (buys[0].outcome !== 'UP') failures.push(`WAIT-GATE: expected UP, got ${buys[0].outcome}`);
   }
   {
     const e = await fullScenario('ANY-SIDE DOWN', [
-      { i: 1, mode: 'any-down', expectStart: base10 },
+      { i: 1, mode: 'any-down', expectStart: 14, expectCarry: 0 },
     ]);
     const buys = e.trades.filter(x => x.type === 'BUY');
-    if (buys.length < 1 || buys[0].outcome !== 'DOWN') failures.push('ANY-SIDE: expected DOWN first entry');
+    if (buys.length < 1) failures.push('ANY-SIDE: no entry');
+    else if (buys[0].outcome !== 'DOWN') failures.push(`ANY-SIDE: expected DOWN, got ${buys[0].outcome}`);
   }
 
   console.log('\n=== SMOKE RESULT ===');
@@ -196,4 +213,3 @@ async function fullScenario(name, windows) {
   }
   console.log('✔ All checks passed');
 })().catch(e => { console.error(e); process.exit(1); });
-
