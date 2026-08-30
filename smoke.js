@@ -49,6 +49,15 @@ function upPrice() {
     if (d < 250) return 0.695;                 // ask 0.700 at/below after wait
     return 0.82;                               // UP wins
   }
+  if (mode === 'win-at-3') {
+    if (d < 46) return 0.50;
+    if (d < 96) return 0.695;             // ENTRY#1 (start S) @ ask 0.700
+    if (d < 146) return 0.45;             // SL#1
+    if (d < 196) return 0.66;             // ENTRY#2 (2S) @ 0.665
+    if (d < 246) return 0.45;             // SL#2
+    if (d < 296) return 0.67;             // ENTRY#3 (4S) @ 0.675
+    return 0.90;                          // UP wins at resolution -> deepest before win = M2
+  }
   // mode === 'all-sl': start S @0.70 -> SL -> 2S @0.65 -> SL -> 4S @0.65 -> SL
   // (max martingale reached, carry 4S). Distinct re-entry levels avoid the
   // lastFireTick re-fire guard.
@@ -188,7 +197,16 @@ async function fullScenario(name, windows) {
     if (buys[buys.length - 1].shares !== e.baseShares) failures.push(`CARRY-RESET: window3 start ${buys[buys.length-1].shares} != base ${e.baseShares} — carry not reset`);
   }
 
-  // SCENARIO 3: wait gate + side-agnostic single windows routed through the
+  // SCENARIO 3: win at the deepest martingale (entry #3) -> record M2 / 2 loses before win
+  {
+    const e = await fullScenario('WIN-AT-3 (deepest martingale before win)', [
+      { i: 1, mode: 'win-at-3', expectStart: 14, expectCarry: 0 },
+    ]);
+    if (e.maxDeepestBeforeWin !== 2) failures.push(`WIN-AT-3: maxDeepestBeforeWin ${e.maxDeepestBeforeWin} != 2`);
+    if (e.maxConsecLosesBeforeWin !== 2) failures.push(`WIN-AT-3: maxConsecLosesBeforeWin ${e.maxConsecLosesBeforeWin} != 2`);
+  }
+
+  // SCENARIO 4: wait gate + side-agnostic single windows routed through the
   // full harness so nothing regresses.
   {
     const e = await fullScenario('WAIT-GATE & ANY-SIDE', [
