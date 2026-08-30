@@ -1,7 +1,7 @@
 {
   "name": "polymarket-flip-bot",
-  "version": "4.0.0",
-  "description": "BTC 5m intra-window flip bot (paper): fire whichever side ticks 0.55, alternate UP<->DOWN, 2x martingale each flip, base = 1% of capital, hold to resolution",
+  "version": "5.0.0",
+  "description": "BTC 5m flip bot (paper): wait 7s, fire any side @ 0.70, SL @ 0.50, re-enter any side @ 0.65 with 2x shares, hold to resolution",
   "main": "index.js",
   "engines": {
     "node": ">=18.0.0"

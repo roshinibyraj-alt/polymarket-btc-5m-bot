@@ -6,10 +6,13 @@ const CLOB_REST = process.env.CLOB_REST || 'https://clob.polymarket.com';
 
 const WINDOW_SECONDS = 300;                     // BTC 5m windows
 
-const TRADE_PRICE   = Number(process.env.TRADE_PRICE   || 0.55); // fire when side ask ticks to this
+const ENTRY_PRICE   = Number(process.env.ENTRY_PRICE   || 0.70); // first entry fire level
+const SL_PRICE      = Number(process.env.SL_PRICE      || 0.50); // stop-loss sell level
+const REENTRY_PRICE = Number(process.env.REENTRY_PRICE || 0.65); // re-entry fire level after SL
+const WAIT_SECONDS  = Number(process.env.WAIT_SECONDS  || 7);    // wait after window open
 const SLIP_CEILING  = Number(process.env.SLIP_CEILING  || 0.99); // accept ANY slippage up to this ceiling (0.99)
 const BASE_PCT      = Number(process.env.BASE_PCT      || 0.01); // base = this fraction of bankroll
-const MARTINGALE_X  = Number(process.env.MARTINGALE_X  || 2);    // each flip = prev shares * this
+const MARTINGALE_X  = Number(process.env.MARTINGALE_X  || 2);    // double shares each re-entry
 const START_BANKROLL= Number(process.env.START_BANKROLL|| 1000); // demo capital
 
 const CLOB_POLL_MS   = Math.max(100, Number(process.env.CLOB_POLL_MS || 300));
@@ -44,12 +47,14 @@ class FlipBotEngine {
 
     // Per-window trading state
     this.windowStartFor = null;           // windowStart currently being traded
-    this.positionSeq = 0;                 // flip count within current window (1-based)
-    this.baseShares = Math.max(1, Math.round(this.bankroll * BASE_PCT / TRADE_PRICE)); // 1% of capital in shares at 0.55
-    this.nextShares = this.baseShares;    // shares for the next flip
-    this.latestSide = null;               // 'UP' or 'DOWN' of the most recent fill
-    this.firedThisWindow = 0;             // number of flips fired this window
-    this.positions = [];                  // all accumulated BUY positions (hold to resolution)
+    this.positionSeq = 0;                 // entry count within current window (1-based)
+    this.reentryCount = 0;                // how many re-entries (after SL) in this window
+    this.baseShares = Math.max(1, Math.round(this.bankroll * BASE_PCT / ENTRY_PRICE)); // 1% of capital in shares at 0.70
+    this.nextShares = this.baseShares;    // shares for the next entry
+    this.entryTarget = ENTRY_PRICE;       // current fire level (0.70 first, 0.65 after SL)
+    this.awaitingReentry = false;         // true after an SL, wait for any side at 0.65
+    this.openEntry = null;                // side of the current open position
+    this.positions = [];                  // BUY positions (open + resolved this window)
     this.results = [];
     this.trades = [];
     this.windowPaused = false;
@@ -211,26 +216,33 @@ class FlipBotEngine {
   }
 
   // ── Strategy ──────────────────────────────────────────────
-  // Flip bot: whichever side's ask ticks to TRADE_PRICE (0.55) fires immediately.
-  // Alternates UP -> DOWN -> UP -> ... with unlimited flips, each 2x the previous
-  // shares. First flip of a window = base = 1% of capital. All shares are held to
-  // resolution. New window recalculates base from updated capital.
+  // Flow per window:
+  //   1. Wait WAIT_SECONDS (7s) after the window opens.
+  //   2. Fire when ANY side's ask ticks to ENTRY_PRICE (0.70) — first entry,
+  //      base = 1% of capital in shares. Hold it.
+  //   3. If held price drops to SL_PRICE (0.50) → sell immediately at 0.50.
+  //   4. After SL, wait for ANY side's ask to reach REENTRY_PRICE (0.65) and fire
+  //      with DOUBLE the shares. Repeat 3-4, doubling each SL (unlimited).
+  //   5. If held and never hits SL → hold to resolution (winner 1.0, loser 0).
 
   computeBaseForNextWindow() {
-    this.baseShares = Math.max(1, Math.round(this.bankroll * BASE_PCT / TRADE_PRICE));
+    this.baseShares = Math.max(1, Math.round(this.bankroll * BASE_PCT / ENTRY_PRICE));
   }
 
   prepareWindow(market) {
-    // Called once per new window to reset per-window flip state.
+    // Called once per new window to reset per-window state.
     this.windowStartFor = market.windowStart;
     this.positionSeq = 0;
-    this.firedThisWindow = 0;
-    this.latestSide = null;
+    this.reentryCount = 0;
+    this.awaitingReentry = false;
+    this.openEntry = null;
     this.windowPaused = false;
     this.pauseReason = null;
     this.computeBaseForNextWindow();
     this.nextShares = this.baseShares;
-    this.log(`🆕 WINDOW ${market.slug.slice(-10)} — BASE ${this.baseShares} SH ≈1% of $${this.bankroll.toFixed(2)} @ ${TRADE_PRICE.toFixed(2)} · flip ×${MARTINGALE_X}`);
+    this.entryTarget = ENTRY_PRICE;
+    this.windowOpenedAt = Date.now();
+    this.log(`🆕 WINDOW ${market.slug.slice(-10)} — BASE ${this.baseShares} SH ≈1% of $${this.bankroll.toFixed(2)} @ ${ENTRY_PRICE.toFixed(2)} · wait ${WAIT_SECONDS}s · SL ${SL_PRICE.toFixed(2)} · re-enter @ ${REENTRY_PRICE.toFixed(2)}`);
     this.onTick(this.buildState());
   }
 
@@ -249,90 +261,92 @@ class FlipBotEngine {
       return;
     }
 
-    // New window → reset flip state (only when the window rolled over).
+    // New window → reset state.
     if (this.windowStartFor !== market.windowStart) this.prepareWindow(market);
 
-    // Fire on the side whose ask ticks to TRADE_PRICE, alternating.
-    if (!this.windowPaused) this.fireFlips(market);
+    const elapsed = Math.floor(nowS - market.windowStart);
+
+    if (!this.windowPaused) {
+      if (this.openEntry) {
+        // Holding a position → check stop loss first.
+        this.checkStopLoss(market);
+      } else if (elapsed >= WAIT_SECONDS) {
+        // Not holding and past wait → fire at the current entry target.
+        this.tryEntry(market);
+      }
+    }
 
     this.recordEquity();
     this.onTick(this.buildState());
   }
 
-  fireFlips(market) {
-    // A side "ticks 0.55" when its ask crosses UP through TRADE_PRICE (the side
-    // is becoming favored). Fire immediately on that tick, accepting slippage up
-    // to SLIP_CEILING (0.99). Alternating: after UP fires, only DOWN can fire,
-    // and only when DOWN itself ticks up to 0.55. Unlimited flips per window.
-    let guard = 0;
-    while (guard++ < 40) {
-      const allowUp   = this.latestSide !== 'UP';   // UP can fire unless UP just fired
-      const allowDown = this.latestSide !== 'DOWN'; // DOWN can fire unless DOWN just fired
-      const upCross = allowUp   && this.crossedUp(market.up);
-      const downCross = allowDown && this.crossedUp(market.down);
-      let side = null;
-      if (upCross && downCross) {
-        // Degenerate/stale book with both sides at the level: prefer the one
-        // closest to TRADE_PRICE (the fresher tick), tie → UP.
-        const upDist = Math.abs((market.up.ask ?? 1) - TRADE_PRICE);
-        const dnDist = Math.abs((market.down.ask ?? 1) - TRADE_PRICE);
-        side = upDist <= dnDist ? 'UP' : 'DOWN';
-      } else if (upCross) side = 'UP';
-      else if (downCross) side = 'DOWN';
-      if (!side) break;
-
-      const token = side === 'UP' ? market.up : market.down;
-      const shares = this.nextShares;
-      const fillPrice = token.ask; // actual price we see on the book at fire time
-      const cost = round2(shares * fillPrice);
-      if (cost > this.bankroll) {
-        this.log(`⚠️  SKIP ${side} FLIP #${this.positionSeq + 1} — bankroll $${this.bankroll.toFixed(2)} < cost $${cost.toFixed(2)}`);
-        break;
-      }
-      this.executeFlip(market, side, shares, fillPrice);
-      if (this.bankroll < TRADE_PRICE) break; // out of funds for another flip
-    }
+  tryEntry(market) {
+    // Fire when ANY side's ask ticks to the current target (<= SLIP_CEILING).
+    const target = this.entryTarget;
+    const upRd = this.tryBuildEntry('UP', market, target);
+    const dnRd = this.tryBuildEntry('DOWN', market, target);
+    let entry = null;
+    if (upRd && dnRd) {
+      // Both crossed: pick the side closer to the target (fresher), tie -> UP.
+      const upDist = Math.abs((market.up.ask ?? 1) - target);
+      const dnDist = Math.abs((market.down.ask ?? 1) - target);
+      entry = upDist <= dnDist ? upRd : dnRd;
+    } else entry = upRd || dnRd;
+    if (!entry) return;
+    this.executeEntry(market, entry.outcome, entry.shares, entry.fillPrice, target);
   }
 
-  crossedUp(token) {
-    // Fire signal: the side's ask is at/above TRADE_PRICE (0.55) and within the
-    // slippage ceiling. This includes the very first observation in a window
-    // (e.g. the window opens with UP at 0.62) — no "previous tick below 0.55"
-    // requirement anymore, since that caused missed fires when the price opened
-    // or jumped straight above the level. Each side only fires once per distinct
-    // ask value: static prices don't re-trigger (lastFireTick tracks it).
+  tryBuildEntry(outcome, market, target) {
+    const token = outcome === 'UP' ? market.up : market.down;
     const ask = token.ask;
-    if (ask == null || ask > SLIP_CEILING) return false;
-    if (ask < TRADE_PRICE) return false;
-    if (token.lastFireTick === ask) return false; // same level already fired
-    return true;
+    if (ask == null || ask > SLIP_CEILING) return null;
+    if (ask < target) return null;
+    // Don't re-fire the same static level.
+    if (token.lastFireTick === ask) return null;
+    const shares = this.nextShares;
+    const cost = round2(shares * ask);
+    if (cost > this.bankroll) { this.log(`⚠️  SKIP ${outcome} @ ${ask.toFixed(3)} — bankroll $${this.bankroll.toFixed(2)} < cost $${cost.toFixed(2)}`); return null; }
+    return { outcome, shares, fillPrice: ask };
   }
 
-  executeFlip(market, outcome, shares, fillPrice) {
-    // Fire immediately. Entry price = the actual ask observed at fire time
-    // (slippage accepted, ceiling 0.99). Cost is shares x actual fill price.
+  executeEntry(market, outcome, shares, fillPrice, target) {
     const price = fillPrice;
     const cost = round2(shares * price);
     this.bankroll = round2(this.bankroll - cost);
     this.positionSeq += 1;
-    this.firedThisWindow += 1;
-    this.latestSide = outcome;
-    // Mark this side's fired ask level so a static book doesn't re-trigger it.
+    this.openEntry = outcome;
+    // Mark this side's fired level so a static price doesn't re-trigger.
     const fireToken = outcome === 'UP' ? market.up : market.down;
-    fireToken.lastFireTick = fillPrice;
+    fireToken.lastFireTick = price;
     const position = {
       slug: market.slug, outcome, market,
       windowStart: market.windowStart, windowEnd: market.windowEnd,
       shares, entryPrice: price, cost,
       openedAt: Date.now(), exitReason: null, exitPrice: null, pnl: null,
-      flipNo: this.positionSeq,
+      entryNo: this.positionSeq, isReentry: this.reentryCount > 0,
     };
     this.positions.push(position);
-    this.trades.push({ timestamp: Date.now(), type: 'BUY', slug: market.slug, outcome, shares, price, cost, reason: `FLIP #${this.positionSeq} fill ${fillPrice.toFixed(3)}` });
-    this.log(`⚡ FLIP #${this.positionSeq} ${outcome} ${shares}sh @ ${price.toFixed(3)} · cost $${cost.toFixed(2)} · fill ${fillPrice.toFixed(3)} · latest ${outcome}`);
-    // Next flip = 2x previous shares.
-    this.nextShares = Math.round(shares * MARTINGALE_X);
+    this.trades.push({ timestamp: Date.now(), type: 'BUY', slug: market.slug, outcome, shares, price, cost, reason: `ENTRY#${this.positionSeq} ${this.reentryCount > 0 ? `RE@${REENTRY_PRICE}` : `@${ENTRY_PRICE}`} fill ${fillPrice.toFixed(3)}` });
+    this.log(`⚡ ENTRY#${this.positionSeq} ${outcome} ${shares}sh @ ${price.toFixed(3)} · cost $${cost.toFixed(2)} · fill ${fillPrice.toFixed(3)}` + (this.reentryCount > 0 ? ` · RE-ENTRY after SL` : ` · first entry`));
     this.onTick(this.buildState());
+  }
+
+  checkStopLoss(market) {
+    const pos = this.positions.find(p => p.exitReason == null);
+    if (!pos) { this.openEntry = null; return; }
+    const token = pos.outcome === 'UP' ? market.up : market.down;
+    const px = token.mid ?? token.bid ?? token.ask;
+    if (px == null) return;
+    if (px <= SL_PRICE) {
+      this.sellPosition(pos, SL_PRICE, 'STOP_LOSS');
+      this.openEntry = null;
+      // Double the shares and wait for the re-entry level (0.65).
+      this.reentryCount += 1;
+      this.nextShares = Math.round(pos.shares * MARTINGALE_X);
+      this.entryTarget = REENTRY_PRICE;
+      this.awaitingReentry = true;
+      this.log(`🔁 SL at ${SL_PRICE.toFixed(2)} — next re-entry @ ${REENTRY_PRICE.toFixed(2)} with ${this.nextShares}sh`);
+    }
   }
 
   sellPosition(position, price, reason, extra = {}) {
@@ -350,7 +364,7 @@ class FlipBotEngine {
     this.results.unshift({ ...position, market: undefined, token: undefined });
     this.results = this.results.slice(0, 50);
     this.trades.push({ timestamp: Date.now(), type: 'SELL', slug: position.slug, outcome: position.outcome, shares: position.shares, price, pnl, reason, ...extra });
-    this.log(`💰 RESOLUTION ${position.outcome} @ ${price.toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · ${position.shares}sh · flip #${position.flipNo}`);
+    this.log(`💰 ${reason === 'RESOLUTION' ? 'RESOLUTION' : 'STOP-LOSS'} ${position.outcome} @ ${price.toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · ${position.shares}sh · entry #${position.entryNo}`);
     this.recordEquity();
     this.onTick(this.buildState());
   }
@@ -431,7 +445,7 @@ class FlipBotEngine {
     return {
       version: '3.0.0',
       name: this.name,
-      strategy: `FLIP BOT · FIRE @ ${TRADE_PRICE.toFixed(2)} (UP↔DOWN) · BASE=${BASE_PCT*100}% · ×${MARTINGALE_X} per flip · HOLD TO RESOLUTION`,
+      strategy: `FLIP BOT · FIRE @ ${ENTRY_PRICE.toFixed(2)} after ${WAIT_SECONDS}s wait · SL @ ${SL_PRICE.toFixed(2)} · RE-ENTER @ ${REENTRY_PRICE.toFixed(2)} ×${MARTINGALE_X}`,
       serverTime: now,
       connected: this.isClobFresh(),
       lastError: this.lastError,
@@ -453,8 +467,11 @@ class FlipBotEngine {
       windowRemaining: market ? Math.max(0, market.windowEnd - Math.floor(now / 1000)) : null,
       baseShares: this.baseShares,
       nextShares: this.nextShares,
-      latestSide: this.latestSide,
-      flips: this.firedThisWindow,
+      entryTarget: this.entryTarget,
+      openEntry: this.openEntry,
+      awaitingReentry: this.awaitingReentry,
+      reentryCount: this.reentryCount,
+      windowElapsed: market ? Math.max(0, Math.floor(now / 1000 - market.windowStart)) : 0,
       positions: open.map(p => {
         const token = p.outcome === 'UP' ? p.market?.up : p.market?.down;
         const mark = token?.mid ?? p.entryPrice;
@@ -462,7 +479,7 @@ class FlipBotEngine {
           outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost,
           markPrice: mark, unrealized: round2(p.shares * mark - p.cost),
           remaining: p.windowEnd ? Math.max(0, p.windowEnd - Math.floor(now / 1000)) : null,
-          flipNo: p.flipNo,
+          entryNo: p.entryNo, isReentry: p.isReentry,
         };
       }),
       tradeCount: this.trades.length,
@@ -474,8 +491,10 @@ class FlipBotEngine {
       drawdown: round2(this.peakEquity - this.markValue()),
       uptime: Math.floor((now - this.startedAt) / 1000),
       config: {
-        tradePrice: TRADE_PRICE, basePct: BASE_PCT, martingaleX: MARTINGALE_X, slippageCap: SLIP_CEILING,
-        baseShares: this.baseShares, nextShares: this.nextShares, latestSide: this.latestSide, flips: this.firedThisWindow,
+        entryPrice: ENTRY_PRICE, slPrice: SL_PRICE, reentryPrice: REENTRY_PRICE, waitSeconds: WAIT_SECONDS,
+        basePct: BASE_PCT, martingaleX: MARTINGALE_X, slippageCap: SLIP_CEILING,
+        baseShares: this.baseShares, nextShares: this.nextShares, entryTarget: this.entryTarget,
+        openEntry: this.openEntry, reentryCount: this.reentryCount,
         pollMs: CLOB_POLL_MS, bankroll: this.initialBankroll,
       },
     };
@@ -503,7 +522,7 @@ class FlipBotEngine {
       setInterval(() => this.evaluate(), 200),
       setInterval(() => this.recordEquity(), 1000),
     ];
-    this.log(`🚀 FlipBot started | FIRE on tick to ${TRADE_PRICE} alternating UP↔DOWN · slippage ceiling ${SLIP_CEILING} · base ${BASE_PCT*100}% of capital · each flip ×${MARTINGALE_X} · hold to resolution`);
+    this.log(`🚀 FlipBot started | wait ${WAIT_SECONDS}s → fire @ ${ENTRY_PRICE} any side · SL @ ${SL_PRICE} · re-enter @ ${REENTRY_PRICE} ×${MARTINGALE_X} · ceiling ${SLIP_CEILING}`);
   }
 
   close() {
@@ -512,4 +531,4 @@ class FlipBotEngine {
   }
 }
 
-module.exports = { FlipBotEngine, config: { TRADE_PRICE, BASE_PCT, MARTINGALE_X, START_BANKROLL, CLOB_POLL_MS } };
+module.exports = { FlipBotEngine, config: { ENTRY_PRICE, SL_PRICE, REENTRY_PRICE, WAIT_SECONDS, BASE_PCT, MARTINGALE_X, START_BANKROLL, CLOB_POLL_MS } };
