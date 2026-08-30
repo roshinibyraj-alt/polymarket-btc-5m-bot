@@ -11,7 +11,7 @@ const SL_PRICE      = Number(process.env.SL_PRICE      || 0.50); // stop-loss se
 const REENTRY_PRICE = Number(process.env.REENTRY_PRICE || 0.65); // re-entry fire level after SL
 const WAIT_SECONDS  = Number(process.env.WAIT_SECONDS  || 7);    // wait after window open
 const SLIP_CEILING  = Number(process.env.SLIP_CEILING  || 0.99); // accept ANY slippage up to this ceiling (0.99)
-const BASE_PCT      = Number(process.env.BASE_PCT      || 0.01); // base = this fraction of bankroll
+const BASE_PCT      = Number(process.env.BASE_PCT      || 0.10); // base = this fraction of bankroll (10%)
 const MARTINGALE_X  = Number(process.env.MARTINGALE_X  || 2);    // double shares each re-entry
 const MAX_MARTINGALE = Number(process.env.MAX_MARTINGALE || 2);   // max martingale steps per window (base + 2 = 3 entries max)
 const START_BANKROLL= Number(process.env.START_BANKROLL|| 1000); // demo capital
@@ -51,14 +51,12 @@ class FlipBotEngine {
     this.positionSeq = 0;                 // entry count within current window (1-based)
     this.reentryCount = 0;                // how many re-entries (after SL) in this window
     this.maxMartingale = MAX_MARTINGALE;  // max martingale steps per window
-    this.baseShares = Math.max(1, Math.round(this.bankroll * BASE_PCT / ENTRY_PRICE)); // 1% of capital in shares at 0.70
+    this.baseShares = Math.max(1, Math.round(this.bankroll * BASE_PCT / ENTRY_PRICE)); // 10% of capital in shares at 0.70
     this.nextShares = this.baseShares;    // shares for the next entry
     this.entryTarget = ENTRY_PRICE;       // current fire level (0.70 first, 0.65 after SL)
     this.awaitingReentry = false;         // true after an SL, wait for any side at 0.65
     this.openEntry = null;                // side of the current open position
     this.noMoreEntries = false;           // martingale cap reached -> no more entries this window
-    this.carryShares = 0;                 // carried martingale size for the next window (0 = none)
-    this.windowStartShares = 0;           // actual start size this window (carry or base)
     this.positions = [];                  // BUY positions (open + resolved this window)
     this.results = [];
     this.trades = [];
@@ -229,10 +227,9 @@ class FlipBotEngine {
   //   4. After SL, wait for ANY side's ask to reach REENTRY_PRICE (0.65) and fire
   //      with DOUBLE the shares — capped at MAX_MARTINGALE (2) steps per window.
   //   5. If held and never hits SL → hold to resolution (winner 1.0, loser 0).
-  //   6. Carry-over: if the LAST (max) martingale hits SL or loses at resolution,
-  //      that size carries to the next window as the start size (escalating
-  //      14→28→56, lose ⇒ 56→112→224, lose ⇒ 224→448→896 …). A clean win resets
-  //      the start size back to base.
+  //   6. No carry-over: each window always starts fresh at base (10% of capital).
+  //      When the martingale cap (2 steps) is reached and the 3rd bet SLs, the
+  //      window simply ends — nothing carries to the next window.
 
   computeBaseForNextWindow() {
     this.baseShares = Math.max(1, Math.round(this.bankroll * BASE_PCT / ENTRY_PRICE));
@@ -249,11 +246,10 @@ class FlipBotEngine {
     this.pauseReason = null;
     this.noMoreEntries = false;
     this.computeBaseForNextWindow();
-    this.windowStartShares = this.carryShares > 0 ? this.carryShares : this.baseShares;
-    this.nextShares = this.windowStartShares;
+    this.nextShares = this.baseShares;
     this.entryTarget = ENTRY_PRICE;
     this.windowOpenedAt = Date.now();
-    this.log(`🆕 WINDOW ${market.slug.slice(-10)} — START ${this.windowStartShares} SH` + (this.carryShares > 0 ? ` (CARRY ${this.carryShares} SH from last loss)` : ` = BASE ≈1% of $${this.bankroll.toFixed(2)} @ ${ENTRY_PRICE.toFixed(2)}`) + ` · wait ${WAIT_SECONDS}s · SL ${SL_PRICE.toFixed(2)} · re-enter @ ${REENTRY_PRICE.toFixed(2)} · max ${MAX_MARTINGALE} martingale`);
+    this.log(`🆕 WINDOW ${market.slug.slice(-10)} — BASE ${this.baseShares} SH = 10% of $${this.bankroll.toFixed(2)} @ ${ENTRY_PRICE.toFixed(2)} · wait ${WAIT_SECONDS}s · SL ${SL_PRICE.toFixed(2)} · re-enter @ ${REENTRY_PRICE.toFixed(2)} · max ${MAX_MARTINGALE} martingale (no carry)`);
     this.onTick(this.buildState());
   }
 
@@ -354,12 +350,10 @@ class FlipBotEngine {
       this.sellPosition(pos, SL_PRICE, 'STOP_LOSS');
       this.openEntry = null;
       if (this.reentryCount >= this.maxMartingale) {
-        // Last martingale stopped out → no more entries this window; carry its
-        // size to the next window.
+        // Last martingale stopped out → no more entries this window (cap reached).
         this.noMoreEntries = true;
         this.awaitingReentry = false;
-        this.carryShares = pos.shares;
-        this.log(`🔁 SL at ${SL_PRICE.toFixed(2)} — martingale cap (${this.maxMartingale}) reached → carry ${this.carryShares}sh to next window`);
+        this.log(`🔁 SL at ${SL_PRICE.toFixed(2)} — martingale cap (${this.maxMartingale}) reached · stop trading this window`);
       } else {
         // Double the shares and wait for the re-entry level (0.65).
         this.nextShares = Math.round(pos.shares * MARTINGALE_X);
@@ -416,17 +410,7 @@ class FlipBotEngine {
         if (won) winPayout += payout; else lossCost += pos.cost;
       }
       this.log(`🏁 WINDOW ${m.slug.slice(-10)} RESOLVED → ${winner} · win payout $${winPayout.toFixed(2)} · loss cost $${lossCost.toFixed(2)}`);
-      // Carry-over decision: last position of the window decides.
-      const lastPos = group[group.length - 1];
-      if (lastPos.won) {
-        if (this.carryShares > 0) this.log(`✅ WIN — carry reset → start BASE (${this.baseShares}sh) next window`);
-        this.carryShares = 0;
-      } else if (lastPos.isReentry) {
-        this.carryShares = lastPos.shares;
-        this.log(`🔁 LOSS on last martingale (${lastPos.shares}sh) → carry ${this.carryShares}sh to next window`);
-      } else {
-        this.carryShares = 0;
-      }
+      // No carry-over: next window always starts fresh at base.
     }
     // Prune resolved positions so the array doesn't grow forever.
     if (buckets.size) this.positions = this.positions.filter(p => p.exitReason == null);
@@ -477,7 +461,7 @@ class FlipBotEngine {
     return {
       version: '3.0.0',
       name: this.name,
-      strategy: `FLIP BOT · wait ${WAIT_SECONDS}s → fire @ ${ENTRY_PRICE.toFixed(2)} · SL ${SL_PRICE.toFixed(2)} · re-enter @ ${REENTRY_PRICE.toFixed(2)} ×${MARTINGALE_X} (max ${MAX_MARTINGALE} martingale) · carry on loss`,
+      strategy: `FLIP BOT · wait ${WAIT_SECONDS}s → fire @ ${ENTRY_PRICE.toFixed(2)} · SL ${SL_PRICE.toFixed(2)} · re-enter @ ${REENTRY_PRICE.toFixed(2)} ×${MARTINGALE_X} (max ${MAX_MARTINGALE} martingale) · base 10% · NO carry`,
       serverTime: now,
       connected: this.isClobFresh(),
       lastError: this.lastError,
@@ -498,8 +482,6 @@ class FlipBotEngine {
       currentWindow: market ? this.publicMarket(market) : null,
       windowRemaining: market ? Math.max(0, market.windowEnd - Math.floor(now / 1000)) : null,
       baseShares: this.baseShares,
-      windowStartShares: this.windowStartShares,
-      carryShares: this.carryShares,
       noMoreEntries: this.noMoreEntries,
       nextShares: this.nextShares,
       entryTarget: this.entryTarget,
@@ -528,7 +510,7 @@ class FlipBotEngine {
       config: {
         entryPrice: ENTRY_PRICE, slPrice: SL_PRICE, reentryPrice: REENTRY_PRICE, waitSeconds: WAIT_SECONDS,
         basePct: BASE_PCT, martingaleX: MARTINGALE_X, slippageCap: SLIP_CEILING,
-        baseShares: this.baseShares, windowStartShares: this.windowStartShares, carryShares: this.carryShares, maxMartingale: this.maxMartingale, noMoreEntries: this.noMoreEntries, nextShares: this.nextShares, entryTarget: this.entryTarget,
+        baseShares: this.baseShares, maxMartingale: this.maxMartingale, noMoreEntries: this.noMoreEntries, nextShares: this.nextShares, entryTarget: this.entryTarget,
         openEntry: this.openEntry, reentryCount: this.reentryCount,
         pollMs: CLOB_POLL_MS, bankroll: this.initialBankroll,
       },
