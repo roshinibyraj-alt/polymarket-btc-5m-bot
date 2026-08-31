@@ -1,238 +1,155 @@
 'use strict';
-// Internal smoke test — drives the flip bot through simulated windows.
-// Strategy verification (v8 — any-side entry, no frozen skip):
-//  1. Wait WAIT_SECONDS (45s) after window start — no fire before that.
-//  2. First entry: fire when ANY side's ask <= ENTRY_PRICE (0.70). E.g. UP 0.35 /
-//     DOWN 0.65 → ENTRY UP (first side <= 0.70). Start size = base =
-//     5% of capital in shares (300 * 0.05 / 0.70 = 21.43 -> 21).
-//  3. Stop loss: held side mid <= SL_PRICE (0.50) -> sell immediately at 0.50.
-//  4. Re-entry after SL: wait for ANY side's ask >= REENTRY_PRICE (0.65), fire
-//     with DOUBLE shares; ceiling 0.99 is slippage-only there. Capped at
-//     MAX_MARTINGALE (2) steps per window (up to 3 entries: S -> 2S -> 4S).
-//     After the 3rd SL the window stops.
-//  5. NO CARRY: every window starts fresh at base regardless of prior losses.
-
-const { FlipBotEngine } = require('./engine');
+const { CheapHunterEngine } = require('./engine');
 
 const WINDOW = 300;
-const WAIT = 30;
-const ENTRY = 0.70;
-const SL = 0.50;
-const REENTRY = 0.65;
-const BASE_PCT = 0.05;
-const TOKEN_UP = 'token-up';
-const TOKEN_DOWN = 'token-down';
+const CHEAP = 0.20;
+const START = 300;
 
-let t = 1600000000000;
-let step = 0;
-let mode = null;
-const failures = [];
-function round2(v) { return Math.round(v * 100) / 100; }
+const FIRST_WINDOW = Math.floor(Date.now() / 1000 / WINDOW) * WINDOW;
 
+let step = 0, mode = null, nowMs = 0;
+
+function askOf(p) { return Math.round((p + 0.005) * 100) / 100; }
+
+// At entry time (step ≥ 29): bot sees DOWN ≤ 0.20, buys DOWN.
+// cheap-win: DOWN WINS at resolution (DN price → high)
+// cheap-lose: DOWN LOSES at resolution (DN price → low)
 function upPrice() {
   const d = step;
-  if (mode === 'win') {
-    // Cheap side (UP=0.35) wins at resolution.
-    if (d < 29) return 0.50;
-    if (d < 250) return 0.35;                  // UP ask 0.355 is CHEAP (< DOWN 0.655) -> ENTRY UP
-    return 0.90;                               // UP wins
-  }
-  if (mode === 'any-down') {
-    // Cheap side is DOWN (UP=0.70, DOWN=0.30) -> ENTRY DOWN.
-    if (d < 29) return 0.50;
-    if (d < 250) return 0.70;                  // DOWN ask 0.305 is CHEAP -> ENTRY DOWN
-    return 0.10;                               // DOWN wins at resolution
-  }
-  if (mode === 'cheap-buy') {
-    // Ultra-cheap UP at 0.125 -> ENTRY UP, wins.
-    if (d < 29) return 0.50;
-    if (d < 250) return 0.125;                 // UP ask 0.13 is CHEAP -> ENTRY UP
-    return 0.90;                               // UP wins at resolution
-  }
-  if (mode === 'wait-gate') {
-    // Both sides at 0.50 -> tie -> UP by default, then UP wins.
-    if (d < 29) return 0.50;
-    if (d < 250) return 0.50;                  // UP=DOWN=0.50, tie -> UP by default
-    return 0.82;                               // UP wins
-  }
-  if (mode === 'win-at-3') {
-    // Cheap UP at 0.38 SLs when price drops, then re-entries at 0.66/0.67, wins at 3rd (M2).
-    // Key: after each SL, DOWN ask stays < 0.65 so re-entry waits for UP pullback.
-    if (d < 29) return 0.50;
-    if (d < 80) return 0.38;                   // ENTRY#1 UP (cheap) @ 0.385
-    if (d < 120) return 0.45;                  // SL#1 @ 0.50 (DOWN=0.55, ask 0.555 < 0.65)
-    if (d < 160) return 0.66;                  // ENTRY#2 UP (re-entry) @ 0.665 (DOWN=0.34, ask 0.345 < 0.65)
-    if (d < 180) return 0.45;                  // SL#2 (DOWN=0.55, ask 0.555 < 0.65)
-    if (d < 220) return 0.67;                  // ENTRY#3 UP (re-entry) @ 0.675
-    return 0.90;                               // UP wins -> deepest before win = M2
-  }
-  // mode === 'all-sl': cheap UP -> SL -> 2x re-entry -> SL -> 4x re-entry -> SL -> cap, stop.
-  // After each SL, DOWN ask < 0.65 so re-entry waits for UP pullback.
-  if (d < 29) return 0.50;
-  if (d < 80) return 0.38;                     // ENTRY#1 UP (cheap) @ 0.385
-  if (d < 120) return 0.45;                    // SL#1 @ 0.50
-  if (d < 160) return 0.66;                    // ENTRY#2 UP (re-entry) @ 0.665
-  if (d < 180) return 0.45;                    // SL#2
-  if (d < 220) return 0.67;                    // ENTRY#3 UP (re-entry) @ 0.675
-  return 0.45;                                 // SL#3 -> cap, stop
+  if (mode === 'no-cheap')   return d < 29 ? 0.50 : 0.55;
+  if (mode === 'cheap-tp')   return d < 29 ? 0.50 : (d < 80 ? 0.85 : 0.45);
+  // cheap-win or cheap-lose: UP starts at 0.80, then at resolution...
+  const during = 0.80;
+  const resUp = (mode === 'cheap-win') ? 0.10 : 0.90; // cheap-win → UP loses; cheap-lose → UP wins
+  return d < 29 ? 0.50 : (d < 250 ? during : resUp);
+}
+function dnPrice() {
+  const d = step;
+  if (mode === 'no-cheap')   return d < 29 ? 0.50 : 0.48;
+  if (mode === 'cheap-tp')   return d < 29 ? 0.50 : (d < 80 ? 0.15 : 0.55);
+  // cheap-win or cheap-lose: DOWN starts at 0.15 (cheap), then at resolution...
+  const during = 0.15;
+  const resDn = (mode === 'cheap-win') ? 0.90 : 0.10; // cheap-win → DN wins; cheap-lose → DN loses
+  return d < 29 ? 0.50 : (d < 250 ? during : resDn);
 }
 
-function askOf(price) { return round2(price + 0.005); }
+const windowTokens = {};
 
-const fakeFetch = async (url) => {
-  const u = String(url);
-  if (u.includes('gamma-api') && u.includes('/markets?slug=')) {
-    const slug = decodeURIComponent(u.split('slug=')[1]).split('&')[0];
-    return { ok: true, json: async () => [{ conditionId: 'c-' + slug, question: 'BTC test', outcomes: JSON.stringify(['Up', 'Down']), clobTokenIds: JSON.stringify([TOKEN_UP, TOKEN_DOWN]), closed: false }] };
+function fakeFetch(url) {
+  if (url.includes('gamma-api')) {
+    const slug = url.match(/slug=(btc-updown-5m-\d+)/)?.[1] || 'test';
+    const wStart = parseInt(slug.split('-').pop()) || 0;
+    const tokUp = `tok_up_${wStart}`;
+    const tokDn = `tok_dn_${wStart}`;
+    windowTokens[wStart] = { up: tokUp, dn: tokDn };
+    return Promise.resolve({ ok: true, json: () => Promise.resolve([{
+      id: `evt_${wStart}`, markets: [{
+        id: `mkt_${wStart}`, question: `BTC ${wStart}`,
+        tokens: [{ token_id: tokUp, outcome: 'Yes' }, { token_id: tokDn, outcome: 'No' }],
+        clobTokenIds: [tokUp, tokDn]
+      }]
+    }]) });
   }
-  if (u.includes('/books')) {
-    const up = upPrice();
-    const down = round2(1 - up);
-    return { ok: true, json: async () => ([
-      { asset_id: TOKEN_UP, bids: [{ price: round2(up - 0.005), size: 5000 }], asks: [{ price: askOf(up), size: 5000 }] },
-      { asset_id: TOKEN_DOWN, bids: [{ price: round2(down - 0.005), size: 5000 }], asks: [{ price: askOf(down), size: 5000 }] },
-    ]) };
+  const up = upPrice(), dn = dnPrice();
+  const books = {};
+  for (const wStart of Object.keys(windowTokens)) {
+    const wt = windowTokens[wStart];
+    books[wt.up] = { asks: [{ price: askOf(up) }], bids: [{ price: Math.max(0.01, askOf(up) - 0.01).toFixed(2) }] };
+    books[wt.dn] = { asks: [{ price: askOf(dn) }], bids: [{ price: Math.max(0.01, askOf(dn) - 0.01).toFixed(2) }] };
   }
-  throw new Error('unexpected url ' + u);
-};
+  return Promise.resolve({ ok: true, json: () => Promise.resolve(books) });
+}
 
-function advance(sec) { for (let i = 0; i < sec; i++) { t += 1000; step += 1; } }
-
-async function runWindow(engine, startMs, m) {
+async function runWindow(engine, wStart, m) {
   mode = m;
-  t = startMs * 1000;
-  const w0 = startMs;
   step = 0;
-  engine.windowStartFor = null;
-  await engine.discoverWindow(w0);
-  await engine.discoverWindow(w0 + WINDOW);
-  let elapsedPreWait = 0;
-  let startShares = null;
-  for (let s = 0; s < 300; s += 2) {
-    advance(2);
+  nowMs = wStart * 1000;
+  Date.now = () => nowMs;
+  await engine.discoverWindow(wStart);
+  await engine.discoverWindow(wStart + WINDOW);
+  for (let s = 0; s < WINDOW + 5; s++) {
     await engine.pollClob();
     engine.evaluate();
-    const elapsed = Math.floor(t / 1000 - w0);
-    if (startShares === null) startShares = engine.baseShares;
-    if (elapsed === 6) elapsedPreWait = engine.trades.filter(x => x.type === 'BUY').length;
-  }
-  await engine.pollClob();
-  engine.evaluate();
-  return { w0, elapsedPreWait, startShares };
-}
-
-async function resolve(engine, openEnd) {
-  await engine.pollClob();
-  t = (openEnd + 1) * 1000;
-  await engine.pollClob();
-  engine.evaluate();
-}
-
-async function fullScenario(name, windows) {
-  const engine = new FlipBotEngine({ fetchImpl: fakeFetch, bankroll: 300, onTick: () => {}, onLog: () => {} });
-  const origNow = Date.now;
-  t = 1600000000000;
-  mode = null;
-  Date.now = () => t;
-  try {
-    engine.entryWindow = 0;
-    const firstW = Math.floor(t / 1000 / WINDOW) * WINDOW;
-    await engine.discoverWindow(firstW);
-    await engine.discoverWindow(firstW + WINDOW);
-    let wStart = firstW + WINDOW;
-    const starts = [];
-    for (const w of windows) {
-      const rw = await runWindow(engine, wStart, w.mode);
-      await engine.discoverWindow(wStart);
-      await resolve(engine, wStart + WINDOW);
-      starts.push(rw.startShares);
-      if (w.expectStart != null && rw.startShares !== w.expectStart) failures.push(`${name} W${w.i}: base ${rw.startShares} != expected ${w.expectStart}`);
-      if (w.preWait != null && rw.elapsedPreWait !== w.preWait) failures.push(`${name} W${w.i}: pre-wait buys ${rw.elapsedPreWait} != expected ${w.preWait}`);
-      wStart += WINDOW;
-    }
-    console.log(`\n── ${name} ──`);
-    starts.forEach((s, i) => console.log(`  W${i + 1}: base ${s}sh`));
-    console.log('  bank:', engine.bankroll.toFixed(2), '| wins:', engine.wins, '| losses:', engine.losses);
-    return engine;
-  } finally {
-    Date.now = origNow;
+    nowMs += 1000;
+    step += 1;
   }
 }
 
+const failures = [];
 (async () => {
-  const base10 = Math.max(1, Math.round(300 * BASE_PCT / ENTRY)); // 21
-
-  // SCENARIO 1: all SL in one window -> cap reached, no carry. Next window still base.
+  // Test 1: cheap side available, wins at resolution
   {
-    const e = await fullScenario('NO-CARRY (all SL, cap reached)', [
-      { i: 1, mode: 'all-sl', expectStart: base10 },
-      { i: 2, mode: 'all-sl', expectStart: null }, // fresh base from reduced bankroll, asserted below
-    ]);
-    const buys = e.trades.filter(x => x.type === 'BUY');
-    // W1: base -> 2x -> 4x (from initial bankroll 1000 -> base 143)
-    const w1 = buys.slice(0, 3).map(b => b.shares);
-    const exp1 = [base10, base10 * 2, base10 * 4]; // same share count regardless of buy price // same share count regardless of buy price
-    if (JSON.stringify(w1) !== JSON.stringify(exp1)) failures.push(`NO-CARRY: W1 shares ${w1} != ${exp1}`);
-    // W2: NO carry — starts FRESH at base recomputed from the (reduced) bankroll,
-    // NOT escalated to 143->286->572. So W2 = [w2base, 2x, 4x] where w2base < base10.
-    const w2 = buys.slice(3, 6).map(b => b.shares);
-    const w2base = w2[0];
-    if (w2base >= base10) failures.push(`NO-CARRY: W2 base ${w2base} >= W1 base ${base10} — carry/escalation must NOT happen`);
-    if (JSON.stringify(w2) !== JSON.stringify([w2base, w2base * 2, w2base * 4])) failures.push(`NO-CARRY: W2 shares ${w2} not 2x-martingale from fresh base`);
-    if (e.trades.filter(x => x.type === 'SELL' && (x.reason === 'STOP_LOSS' || x.reason === 'TP')).length !== 6) failures.push(`NO-CARRY: expected 6 SL/TP exits, got ${e.trades.filter(x => x.type === 'SELL' && x.reason === 'STOP_LOSS').length}`);
-    if (buys.length !== 6) failures.push(`NO-CARRY: expected exactly 6 buys (3 per window), got ${buys.length}`);
+    const engine = new CheapHunterEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
+    engine.entryWindow = 0;
+    await runWindow(engine, FIRST_WINDOW, 'cheap-win');
+    const buys = (engine.trades || []).filter(t => t.type === 'BUY');
+    console.log('\n── CHEAP-WIN ──');
+    console.log('  bank:', engine.bankroll.toFixed(2), '| W:', engine.wins, 'L:', engine.losses, '| buys:', buys.length);
+    if (buys.length !== 1) failures.push('CHEAP-WIN: expected 1 buy, got ' + buys.length);
+    if (buys[0] && buys[0].price > CHEAP) failures.push('CHEAP-WIN: entry price > 0.20');
+    if (engine.wins !== 1) failures.push('CHEAP-WIN: should be 1 win');
+    if (engine.bankroll <= START) failures.push('CHEAP-WIN: should profit after win');
   }
 
-  // SCENARIO 2: after a winning window, next window still starts fresh at base
-  // (no carry, no escalation). Base recomputes from the updated bankroll.
+  // Test 2: cheap side available, loses at resolution
   {
-    const e = await fullScenario('NO-CARRY WIN, fresh base next', [
-      { i: 1, mode: 'win', expectStart: base10 },
-      { i: 2, mode: 'win', expectStart: null }, // recomputed; assert it's ~10% of new bankroll below
-    ]);
-    const w2Base = e.baseShares;
-    const expW2 = Math.max(1, Math.round(e.bankroll * BASE_PCT / ENTRY));
-    if (w2Base !== expW2) failures.push(`NO-CARRY WIN: W2 base ${w2Base} != expected ${expW2} (fresh, ~5% of bankroll)`);
+    const engine = new CheapHunterEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
+    engine.entryWindow = 0;
+    await runWindow(engine, FIRST_WINDOW + WINDOW, 'cheap-lose');
+    const buys = (engine.trades || []).filter(t => t.type === 'BUY');
+    const sells = (engine.trades || []).filter(t => t.type === 'SELL');
+    console.log('\n── CHEAP-LOSE ──');
+    console.log('  bank:', engine.bankroll.toFixed(2), '| W:', engine.wins, 'L:', engine.losses, '| buys:', buys.length, 'sells:', sells.length);
+    if (buys.length !== 1) failures.push('CHEAP-LOSE: expected 1 buy');
+    if (sells.length !== 1) failures.push('CHEAP-LOSE: expected 1 sell at resolution');
+    if (engine.losses !== 1) failures.push('CHEAP-LOSE: should be 1 loss');
   }
 
-  // SCENARIO 3: win at the deepest martingale (entry #3) -> record M2 / 2 loses before win
+  // Test 3: no cheap side → skip
   {
-    const e = await fullScenario('WIN-AT-3 (deepest martingale before win)', [
-      { i: 1, mode: 'win-at-3', expectStart: base10 },
-    ]);
-    if (e.maxDeepestBeforeWin !== 2) failures.push(`WIN-AT-3: maxDeepestBeforeWin ${e.maxDeepestBeforeWin} != 2`);
-    if (e.maxConsecLosesBeforeWin !== 2) failures.push(`WIN-AT-3: maxConsecLosesBeforeWin ${e.maxConsecLosesBeforeWin} != 2`);
+    const engine = new CheapHunterEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
+    engine.entryWindow = 0;
+    await runWindow(engine, FIRST_WINDOW + WINDOW * 2, 'no-cheap');
+    const buys = (engine.trades || []).filter(t => t.type === 'BUY');
+    console.log('\n── NO-CHEAP (skip) ──');
+    console.log('  bank:', engine.bankroll.toFixed(2), '| trades:', buys.length);
+    if (buys.length !== 0) failures.push('NO-CHEAP: should have 0 trades');
+    if (engine.bankroll !== START) failures.push('NO-CHEAP: bankroll should be unchanged');
   }
 
-  // SCENARIO 4: wait gate + any-side entry (may buy cheap side)
+  // Test 4: multi-window compounding — win, win, skip
   {
-    const e = await fullScenario('WAIT-GATE', [
-      { i: 1, mode: 'wait-gate', expectStart: base10, preWait: 0 },
-    ]);
-    const buys = e.trades.filter(x => x.type === 'BUY');
-    if (buys.length < 1 || buys[0].outcome !== 'UP') failures.push('WAIT-GATE: expected UP (tie at 0.50)');
+    const engine = new CheapHunterEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
+    engine.entryWindow = 0;
+    await runWindow(engine, FIRST_WINDOW + WINDOW * 3, 'cheap-win');
+    const bank1 = engine.bankroll;
+    await runWindow(engine, FIRST_WINDOW + WINDOW * 4, 'cheap-win');
+    const bank2 = engine.bankroll;
+    await runWindow(engine, FIRST_WINDOW + WINDOW * 5, 'no-cheap');
+    const buys = (engine.trades || []).filter(t => t.type === 'BUY');
+    console.log('\n── COMPOUND (2 wins + 1 skip) ──');
+    console.log('  bank:', engine.bankroll.toFixed(2), '| W:', engine.wins, 'L:', engine.losses);
+    console.log('  after win1: $' + bank1.toFixed(2) + ' | after win2: $' + bank2.toFixed(2) + ' | final: $' + engine.bankroll.toFixed(2));
+    if (buys.length !== 2) failures.push('COMPOUND: expected 2 buys, got ' + buys.length);
+    if (engine.wins !== 2) failures.push('COMPOUND: expected 2 wins, got ' + engine.wins);
+    if (engine.bankroll <= START) failures.push('COMPOUND: should be profitable');
+    if (bank2 <= bank1) failures.push('COMPOUND: second win should grow capital');
   }
-  {
-    const e = await fullScenario('ANY-SIDE DOWN', [
-      { i: 1, mode: 'any-down', expectStart: base10 },
-    ]);
-    const buys = e.trades.filter(x => x.type === 'BUY');
-    if (buys.length < 1 || buys[0].outcome !== 'DOWN') failures.push('ANY-SIDE: expected DOWN (ask 0.305 <= 0.70)');
-  }
-  {
-    const e = await fullScenario('CHEAP-BUY (old cheap-leg entry)', [
-      { i: 1, mode: 'cheap-buy', expectStart: base10 },
-    ]);
-    const buys = e.trades.filter(x => x.type === 'BUY');
-    if (buys.length < 1 || buys[0].outcome !== 'UP' || buys[0].entryPrice > 0.15) failures.push('CHEAP-BUY: expected UP cheap entry ~0.13, got ' + (buys[0] && buys[0].outcome));
 
+  // Test 5: win+loss combo — verify P&L math
+  {
+    const engine = new CheapHunterEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
+    engine.entryWindow = 0;
+    await runWindow(engine, FIRST_WINDOW + WINDOW * 6, 'cheap-win');
+    const bankAfterWin = engine.bankroll;
+    await runWindow(engine, FIRST_WINDOW + WINDOW * 7, 'cheap-lose');
+    console.log('\n── WIN + LOSS ──');
+    console.log('  after win: $' + bankAfterWin.toFixed(2) + ' | after loss: $' + engine.bankroll.toFixed(2) + ' | W:', engine.wins, 'L:', engine.losses);
+    if (engine.wins !== 1 || engine.losses !== 1) failures.push('WIN+LOSS: should be 1W 1L');
   }
 
   console.log('\n=== SMOKE RESULT ===');
-  if (failures.length) {
-    failures.forEach(f => console.log('  ✗', f));
-    process.exit(1);
-  }
-  console.log('✔ All checks passed');
-})().catch(e => { console.error(e); process.exit(1); });
-
+  if (failures.length === 0) console.log('✔ All checks passed');
+  else failures.forEach(f => console.log('  ✗ ' + f));
+  process.exit(failures.length > 0 ? 1 : 0);
+})();

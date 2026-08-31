@@ -1,7 +1,9 @@
 # Version History
 
-## v080-30s-waiter  ← current
-- Replaced old MartingaleBot with 30 Seconds Waiter strategy.
-- Same as Invented (45s waiter) but with **30-second wait** instead of 45s.
-- **Config**: $300 demo capital · 5% base (21 shares) · fire any side ≤ 0.70 · SL 0.50 · martingale 2× max 2 · compounding · fees · no carry · no frozen skip.
+## v100-cheap-hunter ← current
+- Complete rewrite: **CheapHunter** strategy.
+- **Entry**: wait 30s → market buy underdog if ask ≤ 0.20 (GTC 0.99 ceiling).
+- **Exit**: immediately place limit sell at 0.50 (resting TP). If unfilled at resolution → resolve.
+- **No stop loss, no martingale, no re-entries.** One trade per window.
+- **Config**: $300 demo · 10% base · compounding · fees.
 - Dashboard: "30 Seconds Waiter"
