@@ -2,8 +2,8 @@
 // Internal smoke test — drives the flip bot through simulated windows.
 // Strategy verification (v5):
 //  1. Wait WAIT_SECONDS (45s) after window start — no fire before that.
-//  2. First entry: ANY side's ask in the [0.65, 0.70] band — waits for the
-//     favorite side to pull back to 0.70 and never buys the cheap leg. Start size = base
+//  2. First entry: fire when ANY side.s ask ticks down to AT/BELOW 0.70 (old
+//     analyzed profitable logs — may buy the cheap/losing side too). Start size = base
 //     (1% of capital) unless a carried martingale is active.
 //  3. Stop loss: held side mid <= SL_PRICE (0.50) → sell immediately at 0.50.
 //  4. Re-entry after SL: wait for ANY side's ask >= REENTRY_PRICE (0.65), fire
@@ -44,6 +44,12 @@ function upPrice() {
     if (d < 250) return 0.35;                  // UP ask 0.355 < 0.65 ineligible; DOWN ask 0.655 in [0.65,0.70] -> ENTRY DOWN
     return 0.26;                               // DOWN holds, DOWN wins
   }
+  if (mode === 'cheap-buy') {
+    if (d < 46) return 0.50;
+    if (d < 250) return 0.125;                 // UP ask 0.13 cheap side -> ENTRY UP (old behavior, buys cheap leg)
+    return 0.90;                               // UP wins at resolution
+  }
+
   if (mode === 'wait-gate') {
     if (d < 46) return 0.50;
     if (d < 250) return 0.695;                 // ask 0.700 at/below after wait
@@ -223,6 +229,15 @@ async function fullScenario(name, windows) {
     const buys = e.trades.filter(x => x.type === 'BUY');
     if (buys.length < 1) failures.push('ANY-SIDE: no entry');
     else if (buys[0].outcome !== 'DOWN') failures.push(`ANY-SIDE: expected DOWN, got ${buys[0].outcome}`);
+  }
+  {
+    const e = await fullScenario('CHEAP-BUY (old cheap-leg entry)', [
+      { i: 1, mode: 'cheap-buy', expectStart: 14, expectCarry: 0 },
+    ]);
+    const buys = e.trades.filter(x => x.type === 'BUY');
+    if (buys.length < 1) failures.push('CHEAP-BUY: no entry');
+    else if (buys[0].outcome !== 'UP' || buys[0].entryPrice > 0.15) failures.push(`CHEAP-BUY: expected UP cheap ~0.13, got ` + buys[0].outcome + " @ " + buys[0].entryPrice);
+
   }
 
   console.log('\n=== SMOKE RESULT ===');
