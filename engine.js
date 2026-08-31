@@ -288,6 +288,17 @@ class FlipBotEngine {
 
     const elapsed = Math.floor(nowS - market.windowStart);
 
+    // Frozen-market detection: if both sides are pinned at ~0.50 for 60+ seconds
+    // after the wait period, the market is suspended — skip this window.
+    if (!this.windowFrozen && elapsed >= WAIT_SECONDS + 60 && !this.openEntry) {
+      const upMid = market.up.mid, dnMid = market.down.mid;
+      if (upMid != null && dnMid != null && Math.abs(upMid - 0.50) <= 0.02 && Math.abs(dnMid - 0.50) <= 0.02) {
+        this.windowFrozen = true;
+        this.noMoreEntries = true;
+        this.log(`⏸️ Frozen market detected — both sides at ~0.50 after ${elapsed}s · skipping window`);
+      }
+    }
+
     if (!this.windowPaused) {
       if (this.openEntry) {
         // Holding a position → check stop loss first.
@@ -390,8 +401,13 @@ class FlipBotEngine {
     const px = token.mid ?? token.bid ?? token.ask;
     if (px == null) return;
     if (px <= SL_PRICE) {
-      this.sellPosition(pos, SL_PRICE, 'STOP_LOSS');
+      const isTP = pos.entryPrice < SL_PRICE;
+      const exitReason = isTP ? 'TP' : 'STOP_LOSS';
+      this.sellPosition(pos, SL_PRICE, exitReason);
       this.openEntry = null;
+      if (isTP) {
+        this.log(`✅ TP at ${SL_PRICE.toFixed(2)} — entry ${pos.entryPrice.toFixed(3)} < ${SL_PRICE.toFixed(2)} · profitable exit`);
+      }
       if (this.reentryCount >= this.maxMartingale) {
         // Last martingale stopped out → no more entries this window; carry its
         // size to the next window.
@@ -404,7 +420,7 @@ class FlipBotEngine {
         this.nextShares = Math.round(pos.shares * MARTINGALE_X);
         this.entryTarget = REENTRY_PRICE;
         this.awaitingReentry = true;
-        this.log(`🔁 SL at ${SL_PRICE.toFixed(2)} — next re-entry @ ${REENTRY_PRICE.toFixed(2)} with ${this.nextShares}sh (M${this.reentryCount + 1}/${this.maxMartingale})`);
+        this.log(`🔁 ${exitReason} at ${SL_PRICE.toFixed(2)} — next re-entry @ ${REENTRY_PRICE.toFixed(2)} with ${this.nextShares}sh (M${this.reentryCount + 1}/${this.maxMartingale})`);
       }
     }
   }

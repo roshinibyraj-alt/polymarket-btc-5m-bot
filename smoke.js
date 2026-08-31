@@ -190,7 +190,7 @@ async function fullScenario(name, windows) {
     const expW1 = [14, 28, 56], expW2 = [56, 112, 224];
     if (JSON.stringify(w1Shares) !== JSON.stringify(expW1)) failures.push(`CAP-CARRY: window1 shares ${w1Shares} != ${expW1}`);
     if (JSON.stringify(w2Shares) !== JSON.stringify(expW2)) failures.push(`CAP-CARRY: window2 shares ${w2Shares} != ${expW2}`);
-    if (e.trades.filter(x => x.type === 'SELL' && x.reason === 'STOP_LOSS').length !== 6) failures.push(`CAP-CARRY: expected 6 SLs, got ${e.trades.filter(x => x.type === 'SELL' && x.reason === 'STOP_LOSS').length}`);
+    if (e.trades.filter(x => x.type === 'SELL' && x.reason === 'STOP_LOSS' || x.reason === 'TP').length !== 6) failures.push(`CAP-CARRY: expected 6 SL/TP exits, got ${e.trades.filter(x => x.type === 'SELL' && x.reason === 'STOP_LOSS').length}`);
   }
 
   // SCENARIO 2: after a carried win, reset to base.
