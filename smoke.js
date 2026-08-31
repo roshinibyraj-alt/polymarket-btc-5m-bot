@@ -1,6 +1,6 @@
 'use strict';
 // Internal smoke test — drives the flip bot through simulated windows.
-// Strategy verification (v6 — cheap-side initial entry):
+// Strategy verification (v8 — any-side entry, no frozen skip):
 //  1. Wait WAIT_SECONDS (45s) after window start — no fire before that.
 //  2. First entry: fire when ANY side.s ask ticks down to AT/BELOW 0.70 (old
 //     analyzed profitable logs — may buy the cheap/losing side too). Start size = base
