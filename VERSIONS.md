@@ -1,9 +1,10 @@
 # Version History
 
-## v100-cheap-hunter ← current
-- Complete rewrite: **CheapHunter** strategy.
-- **Entry**: wait 30s → market buy underdog if ask ≤ 0.20 (GTC 0.99 ceiling).
-- **Exit**: immediately place limit sell at 0.50 (resting TP). If unfilled at resolution → resolve.
-- **No stop loss, no martingale, no re-entries.** One trade per window.
-- **Config**: $300 demo · 10% base · compounding · fees.
-- Dashboard: "30 Seconds Waiter"
+## v101-cheap-hunter-strategy (current)
+- Strategy changed to CheapHunter (on original FlipBot discovery/polling engine).
+- Entry: wait 30s -> buy cheapest side (underdog) if ask <= 0.20.
+- Exit: check mid >= 0.50 each tick -> TP limit at 0.50. If not filled -> hold to resolution.
+- No stop loss, no martingale, no re-entries. One trade per window.
+- Config: $300 demo, 5% base, compounding, taker fees.
+
+## v100-cheap-hunter-rewrite (abandoned - broken discovery, reverted)

@@ -1,7 +1,7 @@
 {
   "name": "polymarket-flip-bot",
   "version": "5.0.0",
-  "description": "BTC 5m flip bot (paper): wait 45s, first entry ONLY in 0.65\u20130.70 band (no cheap low-side buys), SL 0.50, re-enter any side \u22650.65 with 2x shares, carry on loss, hold to resolution",
+  "description": "BTC 5m CheapHunter (paper): wait 30s, buy underdog <= 0.20, TP @ 0.50, one trade per window, no SL, no martingale",
   "main": "index.js",
   "engines": {
     "node": ">=18.0.0"

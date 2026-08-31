@@ -1,5 +1,5 @@
 'use strict';
-const { CheapHunterEngine } = require('./engine');
+const { FlipBotEngine } = require('./engine');
 
 const WINDOW = 300;
 const CHEAP = 0.20;
@@ -43,19 +43,19 @@ function fakeFetch(url) {
     const tokDn = `tok_dn_${wStart}`;
     windowTokens[wStart] = { up: tokUp, dn: tokDn };
     return Promise.resolve({ ok: true, json: () => Promise.resolve([{
-      id: `evt_${wStart}`, markets: [{
-        id: `mkt_${wStart}`, question: `BTC ${wStart}`,
-        tokens: [{ token_id: tokUp, outcome: 'Yes' }, { token_id: tokDn, outcome: 'No' }],
-        clobTokenIds: [tokUp, tokDn]
-      }]
+      conditionId: '0x' + wStart, question: `BTC ${wStart}`,
+      outcomes: JSON.stringify(['Up', 'Down']),
+      clobTokenIds: JSON.stringify([tokUp, tokDn]),
+      closed: false
     }]) });
   }
+  // POST /books returns an array of { asset_id, asks[], bids[] }
   const up = upPrice(), dn = dnPrice();
-  const books = {};
+  const books = [];
   for (const wStart of Object.keys(windowTokens)) {
     const wt = windowTokens[wStart];
-    books[wt.up] = { asks: [{ price: askOf(up) }], bids: [{ price: Math.max(0.01, askOf(up) - 0.01).toFixed(2) }] };
-    books[wt.dn] = { asks: [{ price: askOf(dn) }], bids: [{ price: Math.max(0.01, askOf(dn) - 0.01).toFixed(2) }] };
+    books.push({ asset_id: wt.up, asks: [{ price: askOf(up), size: 100 }], bids: [{ price: Math.max(0.01, askOf(up) - 0.01).toFixed(2), size: 100 }] });
+    books.push({ asset_id: wt.dn, asks: [{ price: askOf(dn), size: 100 }], bids: [{ price: Math.max(0.01, askOf(dn) - 0.01).toFixed(2), size: 100 }] });
   }
   return Promise.resolve({ ok: true, json: () => Promise.resolve(books) });
 }
@@ -79,7 +79,7 @@ const failures = [];
 (async () => {
   // Test 1: cheap side available, wins at resolution
   {
-    const engine = new CheapHunterEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
+    const engine = new FlipBotEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
     engine.entryWindow = 0;
     await runWindow(engine, FIRST_WINDOW, 'cheap-win');
     const buys = (engine.trades || []).filter(t => t.type === 'BUY');
@@ -93,7 +93,7 @@ const failures = [];
 
   // Test 2: cheap side available, loses at resolution
   {
-    const engine = new CheapHunterEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
+    const engine = new FlipBotEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
     engine.entryWindow = 0;
     await runWindow(engine, FIRST_WINDOW + WINDOW, 'cheap-lose');
     const buys = (engine.trades || []).filter(t => t.type === 'BUY');
@@ -107,7 +107,7 @@ const failures = [];
 
   // Test 3: no cheap side → skip
   {
-    const engine = new CheapHunterEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
+    const engine = new FlipBotEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
     engine.entryWindow = 0;
     await runWindow(engine, FIRST_WINDOW + WINDOW * 2, 'no-cheap');
     const buys = (engine.trades || []).filter(t => t.type === 'BUY');
@@ -119,7 +119,7 @@ const failures = [];
 
   // Test 4: multi-window compounding — win, win, skip
   {
-    const engine = new CheapHunterEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
+    const engine = new FlipBotEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
     engine.entryWindow = 0;
     await runWindow(engine, FIRST_WINDOW + WINDOW * 3, 'cheap-win');
     const bank1 = engine.bankroll;
@@ -138,7 +138,7 @@ const failures = [];
 
   // Test 5: win+loss combo — verify P&L math
   {
-    const engine = new CheapHunterEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
+    const engine = new FlipBotEngine({ fetchImpl: fakeFetch, bankroll: START, onTick: () => {}, onLog: () => {} });
     engine.entryWindow = 0;
     await runWindow(engine, FIRST_WINDOW + WINDOW * 6, 'cheap-win');
     const bankAfterWin = engine.bankroll;
