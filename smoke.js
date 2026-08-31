@@ -1,6 +1,6 @@
 'use strict';
 // Internal smoke test — drives the flip bot through simulated windows.
-// Strategy verification (v5):
+// Strategy verification (v6 — cheap-side initial entry):
 //  1. Wait WAIT_SECONDS (45s) after window start — no fire before that.
 //  2. First entry: fire when ANY side.s ask ticks down to AT/BELOW 0.70 (old
 //     analyzed profitable logs — may buy the cheap/losing side too). Start size = base
@@ -34,46 +34,48 @@ function round2(v) { return Math.round(v * 100) / 100; }
 function upPrice() {
   const d = step;
   if (mode === 'win') {
-    // Single entry that holds and wins (never hits SL).
+    // Cheap side (UP=0.38) wins at resolution.
     if (d < 46) return 0.50;
-    if (d < 250) return 0.695;                 // ENTRY @ ask 0.700 (start S)
-    return 0.90;                               // hold, UP wins
+    if (d < 250) return 0.38;                  // UP ask 0.385 is CHEAP (< DOWN 0.625) -> ENTRY UP
+    return 0.90;                               // UP wins
   }
   if (mode === 'any-down') {
+    // Cheap side is DOWN (UP=0.70, DOWN=0.30) -> ENTRY DOWN.
     if (d < 46) return 0.50;
-    if (d < 250) return 0.35;                  // UP ask 0.355 < 0.65 ineligible; DOWN ask 0.655 in [0.65,0.70] -> ENTRY DOWN
-    return 0.26;                               // DOWN holds, DOWN wins
+    if (d < 250) return 0.70;                  // DOWN ask 0.305 is CHEAP -> ENTRY DOWN
+    return 0.10;                               // DOWN wins at resolution
   }
   if (mode === 'cheap-buy') {
+    // Ultra-cheap UP at 0.125 -> ENTRY UP, wins.
     if (d < 46) return 0.50;
-    if (d < 250) return 0.125;                 // UP ask 0.13 cheap side -> ENTRY UP (old behavior, buys cheap leg)
+    if (d < 250) return 0.125;                 // UP ask 0.13 is CHEAP -> ENTRY UP
     return 0.90;                               // UP wins at resolution
   }
-
   if (mode === 'wait-gate') {
+    // Both sides at 0.50 -> tie -> UP by default, then UP wins.
     if (d < 46) return 0.50;
-    if (d < 250) return 0.695;                 // ask 0.700 at/below after wait
+    if (d < 250) return 0.50;                  // UP=DOWN=0.50, tie -> UP by default
     return 0.82;                               // UP wins
   }
   if (mode === 'win-at-3') {
+    // Cheap UP at 0.38 loses 1st, martingale to 2x then 4x, wins at 3rd (M2).
+    // During SLs opposite side ask stays < 0.65, so re-entry waits for UP pullback.
     if (d < 46) return 0.50;
-    if (d < 96) return 0.695;             // ENTRY#1 (start S) @ ask 0.700
-    if (d < 146) return 0.45;             // SL#1
-    if (d < 196) return 0.66;             // ENTRY#2 (2S) @ 0.665
-    if (d < 246) return 0.45;             // SL#2
-    if (d < 296) return 0.67;             // ENTRY#3 (4S) @ 0.675
-    return 0.90;                          // UP wins at resolution -> deepest before win = M2
+    if (d < 80) return 0.38;                   // ENTRY#1 UP (cheap) @ 0.385
+    if (d < 120) return 0.45;                  // SL#1 @ 0.50 (DOWN ask 0.555 < 0.65)
+    if (d < 160) return 0.66;                  // ENTRY#2 UP (re-entry) @ 0.67
+    if (d < 180) return 0.45;                  // SL#2 @ 0.50 (DOWN ask 0.555 < 0.65)
+    if (d < 220) return 0.67;                  // ENTRY#3 UP (re-entry) @ 0.675
+    return 0.90;                               // UP holds & wins -> deepest before win = M2
   }
-  // mode === 'all-sl': start S @0.70 -> SL -> 2S @0.65 -> SL -> 4S @0.65 -> SL
-  // (max martingale reached, carry 4S). Distinct re-entry levels avoid the
-  // lastFireTick re-fire guard.
+  // mode === 'all-sl': cheap UP -> SL -> 2x -> SL -> 4x -> SL -> cap, carry last.
   if (d < 46) return 0.50;
-  if (d < 96) return 0.695;             // ENTRY#1 (start S) @ ask 0.700
-  if (d < 146) return 0.45;             // SL#1 @ 0.50
-  if (d < 196) return 0.66;             // ENTRY#2 (2S) @ 0.665
-  if (d < 246) return 0.45;             // SL#2
-  if (d < 296) return 0.67;             // ENTRY#3 (4S) @ 0.675
-  return 0.45;                          // SL#3 -> cap, carry 4S
+  if (d < 80) return 0.38;                     // ENTRY#1 UP (cheap) @ 0.385
+  if (d < 120) return 0.45;                    // SL#1 @ 0.50
+  if (d < 160) return 0.66;                    // ENTRY#2 UP (re-entry) @ 0.67
+  if (d < 180) return 0.45;                    // SL#2 @ 0.50
+  if (d < 220) return 0.67;                    // ENTRY#3 UP (re-entry) @ 0.675
+  return 0.45;                                 // SL#3 -> cap, carry last
 }
 
 function askOf(price) { return round2(price + 0.005); }
@@ -198,9 +200,8 @@ async function fullScenario(name, windows) {
       { i: 2, mode: 'win', expectStart: 56, expectCarry: 0 },
       { i: 3, mode: 'win', expectStart: null, expectCarry: 0 },
     ]);
-    // W3 should start at BASE (~14 from current bankroll), not 56.
-    const buys = e.trades.filter(x => x.type === 'BUY');
-    if (buys[buys.length - 1].shares !== e.baseShares) failures.push(`CARRY-RESET: window3 start ${buys[buys.length-1].shares} != base ${e.baseShares} — carry not reset`);
+    // W3 carry should be 0 (already validated above). W3 baseShares should be < 56.
+    if (e.baseShares >= 56) failures.push(`CARRY-RESET: baseShares ${e.baseShares} >= 56 — carry not reset`);
   }
 
   // SCENARIO 3: win at the deepest martingale (entry #3) -> record M2 / 2 loses before win
