@@ -50,10 +50,6 @@ class FlipBotEngine {
     this.losses = 0;
     this.peakEquity = this.bankroll;
     this.maxDrawdown = 0;        // biggest drop from peak equity (lifetime)
-    this.maxReentryEver = 0;   // highest martingale steps ever used in one window
-    this.maxSharesEver = 0;    // largest single entry ever placed (lifetime)
-    this.maxDeepestBeforeWin = 0;   // deepest martingale escalation reached before a win (all-time)
-    this.maxConsecLosesBeforeWin = 0; // most consecutive losing steps before a win (all-time)
 
     this.markets = new Map();          // slug -> market record
     this.tokens = new Map();           // tokenId -> token
@@ -252,7 +248,6 @@ class FlipBotEngine {
     // Called once per new window to reset per-window state.
     this.windowStartFor = market.windowStart;
     this.positionSeq = 0;
-    this.reentryCount = 0;
     this.awaitingReentry = false;
     this.openEntry = null;
     this.windowTraded = false;
@@ -323,10 +318,7 @@ class FlipBotEngine {
     this.bankroll = round2(this.bankroll - cost - fee);
     this.totalFeesPaid = round2(this.totalFeesPaid + fee);
     this.positionSeq += 1;
-    const isReentry = this.positionSeq > 1;
-    if (isReentry) this.reentryCount += 1;
     this.openEntry = outcome;
-    // Mark this side's fired level so a static price doesn't re-trigger.
     const fireToken = outcome === 'UP' ? market.up : market.down;
     fireToken.lastFireTick = price;
     const position = {
@@ -338,8 +330,6 @@ class FlipBotEngine {
     };
     this.windowTraded = true;
     this.positions.push(position);
-    if (shares > this.maxSharesEver) this.maxSharesEver = shares;
-    if (this.reentryCount > this.maxReentryEver) this.maxReentryEver = this.reentryCount;
     this.trades.push({ timestamp: Date.now(), type: 'BUY', slug: market.slug, outcome, shares, price, cost, fee, reason: `BUY ${outcome} ${shares}sh @ ${price.toFixed(3)} ≤ ${CHEAP_THRESHOLD.toFixed(2)}` });
     this.log(`⚡ BUY ${outcome} ${shares}sh @ ${price.toFixed(3)} · cost $${cost.toFixed(2)} · fee $${fee.toFixed(4)} · UNDERDOG ≤ ${CHEAP_THRESHOLD.toFixed(2)}`);
     this.onTick(this.buildState());
@@ -406,13 +396,6 @@ class FlipBotEngine {
         this.sellPosition(pos, exitPrice, 'RESOLUTION', { winner, won });
         if (won) winPayout += payout; else lossCost += pos.cost;
       }
-      // Track the deepest martingale escalation & consecutive losing steps before the winning leg.
-      const winPos = group.find(p => p.outcome === winner && p.exitReason != null && p.won);
-      if (winPos) {
-        const stepsBeforeWin = Math.max(0, (winPos.entryNo || 1) - 1);
-        if (stepsBeforeWin > this.maxDeepestBeforeWin) this.maxDeepestBeforeWin = stepsBeforeWin;
-        if (stepsBeforeWin > this.maxConsecLosesBeforeWin) this.maxConsecLosesBeforeWin = stepsBeforeWin;
-      }
       this.log(`🏁 WINDOW ${m.slug.slice(-10)} RESOLVED → ${winner} · win payout $${winPayout.toFixed(2)} · loss cost $${lossCost.toFixed(2)}`);
       // No carry-over: next window always starts fresh at base.
     }
@@ -467,7 +450,7 @@ class FlipBotEngine {
       name: this.name,
       strategy: `CHEAP HUNTER · wait ${WAIT_SECONDS}s → buy underdog ≤ ${CHEAP_THRESHOLD.toFixed(2)} · TP @ ${TP_PRICE.toFixed(2)} · base 10% · no SL · no martingale`,
       serverTime: now,
-      connected: this.isClobFresh(),
+      connected: this.pollCount > 0 || this.tickCount > 0,
       lastError: this.lastError,
       pollCount: this.pollCount,
       tickCount: this.tickCount,
@@ -497,7 +480,7 @@ class FlipBotEngine {
           outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost,
           markPrice: mark, unrealized: round2(p.shares * mark - p.cost),
           remaining: p.windowEnd ? Math.max(0, p.windowEnd - Math.floor(now / 1000)) : null,
-          entryNo: p.entryNo, isReentry: p.isReentry,
+          entryNo: p.entryNo,
         };
       }),
       tradeCount: this.trades.length,
@@ -508,10 +491,7 @@ class FlipBotEngine {
       peakEquity: this.peakEquity,
       drawdown: round2(this.peakEquity - this.markValue()),
       maxDrawdown: this.maxDrawdown,
-      maxReentryEver: this.maxReentryEver,
-      maxSharesEver: this.maxSharesEver,
-      maxDeepestBeforeWin: this.maxDeepestBeforeWin,
-      maxConsecLosesBeforeWin: this.maxConsecLosesBeforeWin,
+
       uptime: Math.floor((now - this.startedAt) / 1000),
       config: {
         cheapThreshold: CHEAP_THRESHOLD, tpPrice: TP_PRICE, waitSeconds: WAIT_SECONDS, entryCutoff: ENTRY_CUTOFF,

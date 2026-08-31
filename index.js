@@ -91,10 +91,10 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div class="box"><div class="label">Total Fees</div><div class="value neg" id="totalFees">$0.00</div></div>
 <div class="box"><div class="label">Window</div><div class="value" id="windowTime">—</div><div class="small" id="entryHint"></div></div>
 <div class="box"><div class="label">Wins / Losses</div><div class="value" id="winLoss">0 / 0</div><div class="small" id="winRate"></div></div>
-<div class="box"><div class="label">Entry # / Status</div><div class="value" id="flipInfo">0 / —</div><div class="small" id="baseInfo">BASE 0 SH</div></div>
+
 <div class="box"><div class="label">Max Drawdown</div><div class="value neg" id="maxDrawdown">$0.00</div></div>
 <div class="box"><div class="label">Peak Capital</div><div class="value pos" id="peakCapital">$1,000</div></div>
-<div class="box"><div class="label">Highest Martingale</div><div class="value amb" id="maxMartingaleEver">M0</div><div class="small" id="maxSharesEver">0 SH</div><div class="small">Deepest before win: <span id="deepestBeforeWin">M0</span> · Loses before win: <span id="consecLosesBeforeWin">0</span></div></div>
+
 </div>
 <div class="two-col">
 <div>
@@ -152,12 +152,12 @@ b.innerHTML='<div class="clock">'+r+'s<small> T+'+e+'s · entry @ window start</
 +(m.down.spread!=null?'<div class="spread">SPR '+prc(m.down.spread)+'</div>':'')+'</div></div>'}
 function renderOrders(list){const b=$('orderBody');if(!list||!list.length){b.innerHTML='<div class="empty">No entries yet — waiting for a side to reach the entry level</div>';return}
 b.innerHTML='<div class="orders">'+list.map((f,i)=>{const cls=f.outcome==='UP'?'up':'down';
-return '<div class="order fill"><div>'+(f.isReentry?'RE-ENTRY #'+(f.entryNo||0):'ENTRY #'+(f.entryNo||0))+' '+num(f.shares)+' SH @ '+prc(f.entryPrice)+'</div>'
+return '<div class="order fill"><div>ENTRY '+num(f.shares)+' SH @ '+prc(f.entryPrice)+'</div>'
 +'<div class="dim">COST '+cash(f.cost)+' · '+(f.outcome==='UP'?'▲ UP':'▼ DOWN')+'</div></div>'}).join('')+'</div>'}
 function renderPositions(list){const box=$('posBox'),b=$('posBody');if(!list||!list.length){box.style.display='none';return}box.style.display='block';
 b.innerHTML=list.map(p=>{const cls=p.outcome==='UP'?'pos-up':'pos-down';const mark=p.markPrice!=null?p.markPrice:p.entryPrice;
 return '<div class="box" style="margin-bottom:6px"><div class="section-head"><span>'+(p.outcome==='UP'?'▲ UP':'▼ DOWN')+' '+num(p.shares)+' SH</span><span class="'+tone(p.unrealized)+'">'+money(p.unrealized)+'</span></div>'
-+'<div class="dim">ENTRY #'+(p.entryNo||0)+(p.isReentry?' · RE-ENTRY':'')+' · ENTRY '+prc(p.entryPrice)+' · MARK '+prc(mark)+' · COST '+cash(p.cost)+' · TP @ 0.50 · HOLD TO RESOLUTION</div>'
++'<div class="dim">ENTRY '+prc(p.entryPrice)+' · MARK '+prc(mark)+' · COST '+cash(p.cost)+' · TP @ 0.50 · HOLD TO RESOLUTION</div>'
 +'<div class="dim">'+num(p.shares)+' × '+prc(mark)+' = '+cash(p.shares*mark)+' · '+p.remaining+'s left</div></div>'}).join('')}
 function renderResults(a){const b=$('resBody'),ct=$('resCount');ct.textContent=a.length;
 b.innerHTML=!a.length?'<div class="empty">NO RESOLVED POSITIONS YET</div>':a.map(r=>{const side=r.outcome==='UP'?'▲ UP':'▼ DOWN';const cls=r.pnl>=0?'buy':'sell';const lbl=r.exitReason||'';return '<div class="result"><div><span class="'+cls+'">'+side+' '+lbl+'</span><div class="dim">'+new Date(r.closedAt).toLocaleTimeString()+' · '+num(r.shares)+'sh @ '+prc(r.entryPrice)+' · '+(r.win?'WIN':'')+(r.won!=null?(r.won?'WIN':'LOSS'):'')+'</div></div><div class="'+cls+'">'+money(r.pnl)+'</div></div>'}).join('')}
@@ -168,16 +168,13 @@ return '<div class="trade-item"><div><span class="'+cls+'">'+ESC(tr.type)+' '+si
 +'<div style="text-align:right">'+cash(tr.cost)+(tr.pnl!=null?'<div class="'+cls+'">'+money(tr.pnl)+'</div>':'')+'</div></div>'}).join('')}
 function renderLogs(a){const b=$('logBody'),ct=$('logCount');ct.textContent=a.length+' LINES';b.innerHTML=a.slice(-50).map(l=>{let c='';if(l.includes('WIN'))c='log-win';else if(l.includes('LOSS'))c='log-loss';else if(l.includes('TP'))c='log-tp';else if(l.includes('🎯')||l.includes('🛑')||l.includes('🏁'))c='log-info';return '<div class="'+c+'">'+ESC(l)+'</div>'}).join('')}
 function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div class="mini"><div class="label">Wait</div><div class="value">'+c.waitSeconds+'s</div></div>'
-+'<div class="mini"><div class="label">Entry</div><div class="value">'+c.entryPrice.toFixed(2)+'</div></div>'
-+'<div class="mini"><div class="label">Stop Loss</div><div class="value">'+c.slPrice.toFixed(2)+'</div></div>'
-+'<div class="mini"><div class="label">Re-entry</div><div class="value">'+c.reentryPrice.toFixed(2)+'</div></div>'
-+'<div class="mini"><div class="label">Base (1% cap)</div><div class="value">'+num(c.baseShares)+' sh</div></div>'
-+'<div class="mini"><div class="label">Base (10% cap)</div><div class="value">'+num(c.baseShares)+' sh</div></div>'
-+'<div class="mini"><div class="label">M'+(c.maxMartingale||0)+' Steps Used</div><div class="value">'+num(c.reentryCount||0)+' / '+(c.maxMartingale||0)+'</div></div>'
-+'<div class="mini"><div class="label">Next Shares</div><div class="value">'+num(c.nextShares)+' sh</div></div>'
-+'<div class="mini"><div class="label">Slippage Ceiling</div><div class="value">'+(c.slippageCap!=null?c.slippageCap.toFixed(2):'0.99')+'</div></div>'
-+'<div class="mini"><div class="label">Taker Fee</div><div class="value">'+(c.takerFeeRate!=null?(c.takerFeeRate*100).toFixed(2)+'%':'7.00%')+'</div></div>'
-+'<div class="mini"><div class="label">Demo Capital</div><div class="value">'+cash(c.bankroll)+'</div></div>'}
++'<div class="mini"><div class="label">Cheap Level</div><div class="value"><= '+c.cheapThreshold.toFixed(2)+'</div></div>'
++'<div class="mini"><div class="label">TP Level</div><div class="value">'+c.tpPrice.toFixed(2)+'</div></div>'
++'<div class="mini"><div class="label">Entry Cutoff</div><div class="value">'+c.entryCutoff+'s</div></div>'
++'<div class="mini"><div class="label">Base Cost</div><div class="value">'+cash(c.baseCost)+'</div></div>'
++'<div class="mini"><div class="label">Base %</div><div class="value">'+(c.basePct*100)+'%</div></div>'
++'<div class="mini"><div class="label">Capital</div><div class="value">'+cash(c.bankroll)+'</div></div>'
++'<div class="mini"><div class="label">Taker Fee</div><div class="value">'+(c.takerFeeRate!=null?(c.takerFeeRate*100).toFixed(2)+'%':'7.00%')+'</div></div>'}
 function renderChart(c){const svg=$('equityChart');const epl=$('equityPeakLabel');if(epl)epl.textContent='VALUE '+cash(S.markValue||0)+' · PEAK '+cash(S.peakEquity||0);if(!c||!c.length){svg.innerHTML='';return}
 const v=c.map(p=>p.equity),lo=Math.min(...v),hi=Math.max(...v),rng=(hi-lo)||1;const W=700,H=120,P=12;
 const pts=c.map((p,i)=>[i/Math.max(1,c.length-1)*W,H-P-(p.equity-lo)/rng*(H-P*2)]);
@@ -192,15 +189,10 @@ const tf=$('totalFees');if(tf)tf.textContent=cash(d.totalFeesPaid||0);
 $('winLoss').textContent=(d.wins||0)+' / '+(d.losses||0);$('winRate').textContent=d.winRate!=null?'Win '+d.winRate+'%':'';
 $('maxDrawdown').textContent=cash(d.maxDrawdown||0);
 const pk=$('peakCapital');if(pk)pk.textContent=cash(d.peakEquity||0);
-const mm=$('maxMartingaleEver');if(mm)mm.textContent='M'+(d.maxReentryEver||0);
-const ms=$('maxSharesEver');if(ms)ms.textContent=num(d.maxSharesEver||0)+' SH';
-const dbw=$('deepestBeforeWin');if(dbw)dbw.textContent='M'+(d.maxDeepestBeforeWin||0);
-const clbw=$('consecLosesBeforeWin');if(clbw)clbw.textContent=(d.maxConsecLosesBeforeWin||0);
 $('windowTime').textContent=d.windowRemaining!=null?d.windowRemaining+'s':'—';
 const eh=$('entryHint');const waitSec=(d.config&&d.config.waitSeconds)||30;const cutoff=(d.config&&d.config.entryCutoff)||35;const elapsed=d.windowElapsed||0;if(d.windowPaused){eh.textContent=String.fromCharCode(0x26D4)+' '+ESC(d.pauseReason||'PAUSED')}else if(d.waitingForWindow){eh.textContent='WAITING FOR NEXT WINDOW'}else if(elapsed<waitSec){eh.textContent='WAIT '+(waitSec-elapsed)+'s \u2192 scan underdog \u2264 0.20 ('+cutoff+'s cutoff)'}else if(elapsed>cutoff&&d.windowTraded===false&&!d.openEntry){eh.textContent='WINDOW SKIPPED \u2014 no cheap side \u2264 0.20 found'}else if(d.openEntry){eh.textContent='HOLDING '+(d.openEntry==='UP'?'\u25B2 UP':'\u25BC DOWN')+' \u00B7 TP @ 0.50 \u00B7 HOLD TO RESOLUTION'}else if(d.windowTraded){eh.textContent='ALREADY ENTERED THIS WINDOW'}else{eh.textContent='SCANNING FOR UNDERDOG \u2264 0.20'};
 eh.style.color=(d.windowPaused||d.noMoreEntries)?'#ff4a68':'';
-const fi=$('flipInfo');if(fi){const oe=d.openEntry||'—';fi.textContent=(d.reentryCount||0)+' / '+(d.config&&d.config.maxMartingale?d.config.maxMartingale:2)+' RE · '+num(d.nextShares||0)+' NEXT';fi.className='value '+(oe==='UP'?'pos':oe==='DOWN'?'neg':'');}
-const bi=$('baseInfo');if(bi){bi.textContent='BASE '+num(d.baseShares||0)+' SH (10%) · NEXT '+num(d.nextShares||0)+' SH';}
+
 const wp=$('waitPill');if(wp){if(d.windowPaused){wp.textContent='PAUSED';wp.className='pill bad'}else if(d.waitingForWindow){const ww=Math.max(0,Math.ceil((d.entryWindow-Math.floor(Date.now()/1000))));wp.textContent='WAIT '+ww+'s';wp.className='pill warn'}else{wp.textContent='TRADING';wp.className='pill live'}};$('tickPill').textContent='TICKS '+(d.tickCount||0);
 $('uptimePill').textContent=uptimeFmt(d.uptime||0);
 const sp=$('statusPill');if(d.connected){sp.textContent='● LIVE';sp.className='pill live'}else{sp.textContent='● OFFLINE';sp.className='pill bad'}
