@@ -10,6 +10,7 @@ const ENTRY_PRICE   = Number(process.env.ENTRY_PRICE   || 0.70); // first entry 
 const SL_PRICE      = Number(process.env.SL_PRICE      || 0.50); // stop-loss sell level
 const REENTRY_PRICE = Number(process.env.REENTRY_PRICE || 0.65); // re-entry fire level after SL
 const WAIT_SECONDS  = Number(process.env.WAIT_SECONDS  || 30);   // wait after window open
+const ENTRY_CUTOFF  = Number(process.env.ENTRY_CUTOFF  || 35);   // skip window after this many seconds
 const SLIP_CEILING  = Number(process.env.SLIP_CEILING  || 0.99); // accept ANY slippage up to this ceiling (0.99)
 const BASE_PCT      = Number(process.env.BASE_PCT      || 0.05); // base = this fraction of bankroll (5%)
 const MARTINGALE_X  = Number(process.env.MARTINGALE_X  || 2);    // double shares each re-entry
@@ -64,8 +65,7 @@ class FlipBotEngine {
     this.positionSeq = 0;                 // entry count within current window (1-based)
     this.reentryCount = 0;                // how many re-entries (after SL) in this window
     this.maxMartingale = MAX_MARTINGALE;  // max martingale steps per window
-    this.baseShares = Math.max(1, Math.round(this.bankroll * BASE_PCT / ENTRY_PRICE)); // 5% of capital in shares at 0.70
-    this.nextShares = this.baseShares;    // shares for the next entry
+    this.baseCost = Math.max(1, Math.round(this.bankroll * BASE_PCT * 100) / 100); // 5% of capital in dollars    // shares for the next entry
     this.entryTarget = ENTRY_PRICE;       // current fire level (0.70 first, 0.65 after SL)
     this.awaitingReentry = false;         // true after an SL, wait for any side at 0.65
     this.openEntry = null;                // side of the current open position
@@ -245,7 +245,7 @@ class FlipBotEngine {
   //      window simply ends — nothing carries to the next window.
 
   computeBaseForNextWindow() {
-    this.baseShares = Math.max(1, Math.round(this.bankroll * BASE_PCT / ENTRY_PRICE));
+    this.baseCost = Math.max(1, Math.round(this.bankroll * BASE_PCT * 100) / 100); // 5% of capital in dollars
   }
 
   prepareWindow(market) {
@@ -259,9 +259,8 @@ class FlipBotEngine {
     this.windowPaused = false;
     this.pauseReason = null;
     this.computeBaseForNextWindow();
-    this.nextShares = this.baseShares;
     this.windowOpenedAt = Date.now();
-    this.log(`🆕 WINDOW ${market.slug.slice(-10)} — BASE ${this.baseShares} SH = 10% of $${this.bankroll.toFixed(2)} · wait ${WAIT_SECONDS}s · buy underdog ≤ ${CHEAP_THRESHOLD.toFixed(2)} · TP @ ${TP_PRICE.toFixed(2)} · no SL · no martingale`);
+    this.log(`🆕 WINDOW ${market.slug.slice(-10)} — BASE $${this.baseCost.toFixed(2)} = ${BASE_PCT*100}% of $${this.bankroll.toFixed(2)} · wait ${WAIT_SECONDS}s · buy underdog ≤ ${CHEAP_THRESHOLD.toFixed(2)} · TP @ ${TP_PRICE.toFixed(2)} · no SL · no martingale`);
     this.onTick(this.buildState());
   }
 
@@ -290,8 +289,8 @@ class FlipBotEngine {
       if (this.openEntry) {
         // Holding a position → check TP target.
         this.checkTp(market);
-      } else if (elapsed >= WAIT_SECONDS && !this.windowTraded) {
-        // One trade per window: only if no entry yet.
+      } else if (elapsed >= WAIT_SECONDS && elapsed <= ENTRY_CUTOFF && !this.windowTraded) {
+        // Only check for underdog entry between 30–35s. After cutoff → skip.
         this.tryEntry(market);
       }
     }
@@ -302,15 +301,15 @@ class FlipBotEngine {
 
   tryEntry(market) {
     // Buy the CHEAPEST side (underdog) if its ask <= CHEAP_THRESHOLD.
+    // Uses dollar-based sizing: baseCost / fillPrice = shares.
     const upAsk = market.up.ask, dnAsk = market.down.ask;
     if (upAsk == null || dnAsk == null) return;
     let side = null, ask = null;
-    // Pick the cheaper side that meets threshold
     if (upAsk <= CHEAP_THRESHOLD && dnAsk <= CHEAP_THRESHOLD) { ask = upAsk; side = 'UP'; if (dnAsk < upAsk) { ask = dnAsk; side = 'DOWN'; } }
     else if (upAsk <= CHEAP_THRESHOLD) { side = 'UP'; ask = upAsk; }
     else if (dnAsk <= CHEAP_THRESHOLD) { side = 'DOWN'; ask = dnAsk; }
-    if (!side) return;  // neither side cheap enough
-    const shares = this.nextShares;
+    if (!side) return;
+    const shares = Math.max(1, Math.floor(this.baseCost / ask));
     const cost = round2(shares * ask);
     const fee = takerFee(shares, ask);
     if (cost + fee > this.bankroll) { this.log(`⚠️ SKIP ${side} @ ${ask.toFixed(3)} — bankroll $${this.bankroll.toFixed(2)} < cost+fee $${(cost+fee).toFixed(2)}`); return; }
@@ -487,14 +486,9 @@ class FlipBotEngine {
       pauseReason: this.pauseReason,
       currentWindow: market ? this.publicMarket(market) : null,
       windowRemaining: market ? Math.max(0, market.windowEnd - Math.floor(now / 1000)) : null,
-      baseShares: this.baseShares,
-      noMoreEntries: this.noMoreEntries,
+      baseCost: this.baseCost,
       windowTraded: this.windowTraded,
-      nextShares: this.nextShares,
-      entryTarget: this.entryTarget,
       openEntry: this.openEntry,
-      awaitingReentry: this.awaitingReentry,
-      reentryCount: this.reentryCount,
       windowElapsed: market ? Math.max(0, Math.floor(now / 1000 - market.windowStart)) : 0,
       positions: open.map(p => {
         const token = p.outcome === 'UP' ? p.market?.up : p.market?.down;
@@ -520,11 +514,9 @@ class FlipBotEngine {
       maxConsecLosesBeforeWin: this.maxConsecLosesBeforeWin,
       uptime: Math.floor((now - this.startedAt) / 1000),
       config: {
-        entryPrice: ENTRY_PRICE, slPrice: SL_PRICE, reentryPrice: REENTRY_PRICE, waitSeconds: WAIT_SECONDS,
-        basePct: BASE_PCT, martingaleX: MARTINGALE_X, slippageCap: SLIP_CEILING,
-        baseShares: this.baseShares, maxMartingale: this.maxMartingale, noMoreEntries: this.noMoreEntries, nextShares: this.nextShares, entryTarget: this.entryTarget, takerFeeRate: TAKER_FEE_RATE,
-        openEntry: this.openEntry, reentryCount: this.reentryCount,
-        pollMs: CLOB_POLL_MS, bankroll: this.initialBankroll,
+        cheapThreshold: CHEAP_THRESHOLD, tpPrice: TP_PRICE, waitSeconds: WAIT_SECONDS, entryCutoff: ENTRY_CUTOFF,
+        basePct: BASE_PCT, baseCost: this.baseCost, bankroll: this.initialBankroll,
+        pollMs: CLOB_POLL_MS, takerFeeRate: TAKER_FEE_RATE,
       },
     };
   }
@@ -573,4 +565,4 @@ class FlipBotEngine {
   }
 }
 
-module.exports = { FlipBotEngine, config: { CHEAP_THRESHOLD, TP_PRICE, WAIT_SECONDS, BASE_PCT, START_BANKROLL, CLOB_POLL_MS, TAKER_FEE_RATE } };
+module.exports = { FlipBotEngine, config: { CHEAP_THRESHOLD, TP_PRICE, WAIT_SECONDS, ENTRY_CUTOFF, BASE_PCT, START_BANKROLL, CLOB_POLL_MS, TAKER_FEE_RATE } };
