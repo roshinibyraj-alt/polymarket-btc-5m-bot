@@ -14,7 +14,7 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 
 const engine = new FlipBotEngine({
-  name: 'MartingaleBot',
+  name: 'Invented',
   onLog: line => console.log(`[FLIP] ${line}`),
 });
 
@@ -27,7 +27,7 @@ const dashboard = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MartingaleBot — BTC 5m</title>
+<title>30 Seconds Waiter — BTC 5m</title>
 <style>
 *{box-sizing:border-box}
 :root{--bg:#000;--panel:#070707;--line:#222;--muted:#9d9d9d;--up:#00ff85;--down:#ff4a68;--amber:#ffc400;--blue:#38d6ff}
@@ -75,7 +75,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 </head>
 <body><div class="wrap">
 <header class="topbar">
-<div class="brand"><div class="btc">₿</div><div><h1>MartingaleBot</h1><div class="sub" id="strategy">LOADING…</div></div></div>
+<div class="brand"><div class="btc">₿</div><div><h1>30 Seconds Waiter</h1><div class="sub" id="strategy">LOADING…</div></div></div>
 <div class="status"><span id="waitPill" class="pill warn">WAIT —</span><span id="statusPill" class="pill bad">OFFLINE</span><span id="tickPill" class="pill">TICKS 0</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
 <div class="box equity" style="margin-bottom:8px">
@@ -172,7 +172,7 @@ function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div 
 +'<div class="mini"><div class="label">Stop Loss</div><div class="value">'+c.slPrice.toFixed(2)+'</div></div>'
 +'<div class="mini"><div class="label">Re-entry</div><div class="value">'+c.reentryPrice.toFixed(2)+'</div></div>'
 +'<div class="mini"><div class="label">Base (1% cap)</div><div class="value">'+num(c.baseShares)+' sh</div></div>'
-+'<div class="mini"><div class="label">Start / Carry</div><div class="value">'+(c.carryShares>0?'CARRY '+num(c.carryShares):'BASE '+num(c.windowStartShares||c.baseShares))+' sh</div></div>'
++'<div class="mini"><div class="label">Base (10% cap)</div><div class="value">'+num(c.baseShares)+' sh</div></div>'
 +'<div class="mini"><div class="label">M'+(c.maxMartingale||0)+' Steps Used</div><div class="value">'+num(c.reentryCount||0)+' / '+(c.maxMartingale||0)+'</div></div>'
 +'<div class="mini"><div class="label">Next Shares</div><div class="value">'+num(c.nextShares)+' sh</div></div>'
 +'<div class="mini"><div class="label">Slippage Ceiling</div><div class="value">'+(c.slippageCap!=null?c.slippageCap.toFixed(2):'0.99')+'</div></div>'
@@ -197,10 +197,10 @@ const ms=$('maxSharesEver');if(ms)ms.textContent=num(d.maxSharesEver||0)+' SH';
 const dbw=$('deepestBeforeWin');if(dbw)dbw.textContent='M'+(d.maxDeepestBeforeWin||0);
 const clbw=$('consecLosesBeforeWin');if(clbw)clbw.textContent=(d.maxConsecLosesBeforeWin||0);
 $('windowTime').textContent=d.windowRemaining!=null?d.windowRemaining+'s':'—';
-const eh=$('entryHint');const waitSec=(d.config&&d.config.waitSeconds)||7;if(d.windowPaused){eh.textContent='⛔ '+ESC(d.pauseReason||'PAUSED')}else if(d.waitingForWindow){eh.textContent='WAITING FOR NEXT WINDOW'}else if(d.noMoreEntries){eh.textContent='⛔ MARTINGALE CAP REACHED · CARRY '+num(d.carryShares||0)+' SH TO NEXT WINDOW'}else if(d.windowElapsed!=null&&d.windowElapsed<waitSec){eh.textContent='WAIT '+(waitSec-d.windowElapsed)+'s → first entry in 0.65–0.70'}else if(d.openEntry){eh.textContent='HOLDING '+(d.openEntry==='UP'?'▲ UP':'▼ DOWN')+' · SL @ 0.50'}else if(d.awaitingReentry){eh.textContent='WAITING RE-ENTRY @ 0.65 · NEXT '+num(d.nextShares)+' SH'}else{eh.textContent='READY · WAIT SIDE IN 0.65–0.70';}
+const eh=$('entryHint');const waitSec=(d.config&&d.config.waitSeconds)||7;if(d.windowPaused){eh.textContent='⛔ '+ESC(d.pauseReason||'PAUSED')}else if(d.waitingForWindow){eh.textContent='WAITING FOR NEXT WINDOW'}else if(d.noMoreEntries){eh.textContent='⛔ MARTINGALE CAP REACHED · NO MORE ENTRIES THIS WINDOW'}else if(d.windowElapsed!=null&&d.windowElapsed<waitSec){eh.textContent='WAIT '+(waitSec-d.windowElapsed)+'s → first entry in 0.65–0.70'}else if(d.openEntry){eh.textContent='HOLDING '+(d.openEntry==='UP'?'▲ UP':'▼ DOWN')+' · SL @ 0.50'}else if(d.awaitingReentry){eh.textContent='WAITING RE-ENTRY @ 0.65 · NEXT '+num(d.nextShares)+' SH'}else{eh.textContent='READY · WAIT SIDE IN 0.65–0.70';}
 eh.style.color=(d.windowPaused||d.noMoreEntries)?'#ff4a68':'';
 const fi=$('flipInfo');if(fi){const oe=d.openEntry||'—';fi.textContent=(d.reentryCount||0)+' / '+(d.config&&d.config.maxMartingale?d.config.maxMartingale:2)+' RE · '+num(d.nextShares||0)+' NEXT';fi.className='value '+(oe==='UP'?'pos':oe==='DOWN'?'neg':'');}
-const bi=$('baseInfo');if(bi){bi.textContent=(d.carryShares>0?'CARRY '+num(d.carryShares)+' SH':'BASE '+num(d.baseShares||0)+' SH')+' · NEXT '+num(d.nextShares||0)+' SH';}
+const bi=$('baseInfo');if(bi){bi.textContent='BASE '+num(d.baseShares||0)+' SH (10%) · NEXT '+num(d.nextShares||0)+' SH';}
 const wp=$('waitPill');if(wp){if(d.windowPaused){wp.textContent='PAUSED';wp.className='pill bad'}else if(d.waitingForWindow){const ww=Math.max(0,Math.ceil((d.entryWindow-Math.floor(Date.now()/1000))));wp.textContent='WAIT '+ww+'s';wp.className='pill warn'}else{wp.textContent='TRADING';wp.className='pill live'}};$('tickPill').textContent='TICKS '+(d.tickCount||0);
 $('uptimePill').textContent=uptimeFmt(d.uptime||0);
 const sp=$('statusPill');if(d.connected){sp.textContent='● LIVE';sp.className='pill live'}else{sp.textContent='● OFFLINE';sp.className='pill bad'}
