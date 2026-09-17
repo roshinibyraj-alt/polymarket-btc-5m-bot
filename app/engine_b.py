@@ -1,14 +1,14 @@
 """
 Engine B -- interval ladder strategy.
 
-Phase 1 (t=0 to t=120s): every 15s, buy the CHEAPER side for 100
+Phase 1 (t=0 to t=120s): every 15s, buy the MORE EXPENSIVE side for 100
   shares, only if its price is between 0.20 and 0.40 (inclusive of
   0.20, exclusive of 0.40). The side can differ from check to check --
-  whichever is cheaper at that moment.
+  whichever is more expensive at that moment.
 
 Gap (t=120 to t=135s): idle.
 
-Phase 2 (t=135 to t=255s): every 15s, buy the CHEAPER side for 50
+Phase 2 (t=135 to t=255s): every 15s, buy the MORE EXPENSIVE side for 50
   shares, only if its price is between 0.20 and 0.40 (same entry logic
   as phase 1, different timing window and share size).
 
@@ -73,9 +73,9 @@ class EngineB:
         )
         self.broker.log_event(
             self.name, window.slug, "WINDOW_OPEN",
-            note=(f"Phase 1: cheaper side in [{config.PHASE1_MIN_PRICE},{config.PHASE1_MAX_PRICE}), {config.PHASE1_SHARES} shares, "
+            note=(f"Phase 1: more expensive side in [{config.PHASE1_MIN_PRICE},{config.PHASE1_MAX_PRICE}), {config.PHASE1_SHARES} shares, "
                   f"every {config.PHASE1_INTERVAL_SECONDS}s to {config.PHASE1_END_OFFSET}s. "
-                  f"Phase 2: cheaper side in [{config.PHASE2_MIN_PRICE},{config.PHASE2_MAX_PRICE}), {config.PHASE2_SHARES} shares, "
+                  f"Phase 2: more expensive side in [{config.PHASE2_MIN_PRICE},{config.PHASE2_MAX_PRICE}), {config.PHASE2_SHARES} shares, "
                   f"every {config.PHASE2_INTERVAL_SECONDS}s from {config.PHASE2_START_OFFSET}s "
                   f"to {config.PHASE2_END_OFFSET}s."),
         )
@@ -88,12 +88,12 @@ class EngineB:
         prices = {Side.UP: up_price, Side.DOWN: down_price}
 
         self._run_due_checks(self.phase1_checks, "_phase1_idx", now, prices,
-                              side_selector=self._cheaper_side,
+                              side_selector=self._more_expensive_side,
                               price_condition=lambda p: config.PHASE1_MIN_PRICE <= p < config.PHASE1_MAX_PRICE,
                               shares=config.PHASE1_SHARES, tag="phase1")
 
         self._run_due_checks(self.phase2_checks, "_phase2_idx", now, prices,
-                              side_selector=self._cheaper_side,
+                              side_selector=self._more_expensive_side,
                               price_condition=lambda p: config.PHASE2_MIN_PRICE <= p < config.PHASE2_MAX_PRICE,
                               shares=config.PHASE2_SHARES, tag="phase2")
 
@@ -102,11 +102,11 @@ class EngineB:
             self._log_resolution_signal(prices)
 
     @staticmethod
-    def _cheaper_side(prices: dict) -> Optional[Side]:
+    def _more_expensive_side(prices: dict) -> Optional[Side]:
         up_p, down_p = prices.get(Side.UP), prices.get(Side.DOWN)
         if up_p is None or down_p is None:
             return None
-        return Side.UP if up_p <= down_p else Side.DOWN
+        return Side.UP if up_p > down_p else Side.DOWN
 
     def _run_due_checks(self, schedule: List[dict], idx_attr: str, now: float,
                           prices: dict, side_selector, price_condition,

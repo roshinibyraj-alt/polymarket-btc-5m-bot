@@ -7,14 +7,14 @@ $5,000 balance, no real orders) with a live dashboard.
 ## Strategy — Engine B (interval ladder)
 
 **Phase 1 (t=0s to t=120s):** every 15 seconds (9 checks: 0, 15, 30, ...,
-120), buy the **cheaper** side for **100 shares**, only if its price is
+120), buy the **more expensive** side for **100 shares**, only if its price is
 between **0.20 and 0.40** (inclusive of 0.20, exclusive of 0.40). The
 side can differ from check to check.
 
 **Gap (t=120s to t=135s):** idle, no checks.
 
 **Phase 2 (t=135s to t=255s):** every 15 seconds (9 checks: 135, 150,
-..., 255), buy the **cheaper** side for **50 shares**, only if its
+..., 255), buy the **more expensive** side for **50 shares**, only if its
 price is between **0.20 and 0.40** — same entry rule as phase 1, different size
 (50 vs phase 1's 100), same timing window.
 

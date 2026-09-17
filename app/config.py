@@ -30,7 +30,7 @@ RESOLUTION_RETRY_SECONDS = 6
 
 # ---- Engine B: interval ladder strategy --------------------------------
 #
-# Phase 1: buy the CHEAPER side every 15s from t=0 to t=120, 20 shares,
+# Phase 1: buy the MORE EXPENSIVE side every 15s from t=0 to t=120, 100 shares,
 #          only if that side is priced below 0.40.
 PHASE1_START_OFFSET = 0
 PHASE1_END_OFFSET = 120
@@ -41,7 +41,7 @@ PHASE1_MAX_PRICE = 0.40
 
 # Gap: t=120 to t=135, no checks.
 
-# Phase 2: buy the CHEAPER side every 15s from t=135 to t=255,
+# Phase 2: buy the MORE EXPENSIVE side every 15s from t=135 to t=255,
 #          50 shares, only if that side is priced between 0.20 and 0.40
 #          (same entry logic as phase 1, different timing window).
 PHASE2_START_OFFSET = 135
