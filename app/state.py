@@ -1,6 +1,6 @@
 """
 Runtime orchestration: owns the poll loop, rolls windows, reads each window's winner from the
-CLOB in its last second, and feeds ticks to the Engine. No Binance / no external price feed --
+    CLOB in its last two seconds, and feeds ticks to the Engine. No Binance / no external price feed --
 everything here comes from Polymarket's own CLOB.
 """
 import asyncio
@@ -26,7 +26,7 @@ class BotState:
         self.error: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
 
-        # Last-second CLOB read of the window that is about to close (see _watch_close).
+        # CLOB read of the window that is about to close.
         self._settle_done_slug: Optional[str] = None
 
     async def start(self):
@@ -85,8 +85,8 @@ class BotState:
                             up_bid_levels=up_bid_lv, up_ask_levels=up_ask_lv,
                             down_bid_levels=down_bid_lv, down_ask_levels=down_ask_lv)
 
-        # Last-second winner read, once per window, while it's still the live window.
-        if (window.close_ts - now <= 1.0 and now < window.close_ts
+        # Winner read during the final two seconds, once per window, while it's still live.
+        if (window.close_ts - now <= config.CLOSE_PHASE_SECONDS and now < window.close_ts
                 and self._settle_done_slug != window.slug
                 and up_bid is not None and down_bid is not None):
             self._settle_done_slug = window.slug
@@ -110,22 +110,28 @@ class BotState:
             self.engine._no_signal("bot started mid-window -- watching this one to read its result")
 
     def _read_result(self, window: WindowMarket) -> dict:
-        """The window that just closed: who won, from the last-second CLOB read captured in
-        _tick(). WIN_PRICE (0.95) or higher on a side's bid = that side won. Neither side there,
-        or no read was captured at all (e.g. an empty book right at the close) = undecided."""
-        up = down = None
-        age = None
-        snap = getattr(self, "_last_second_prices", None)
-        if snap is not None:
-            up_bid, up_ask, down_bid, down_ask, ts = snap
-            up, down = up_bid, down_bid
-            age = round(window.close_ts - ts, 2)
+        """Read the winner from the CLOB snapshot captured in the final two seconds.
+
+        The bot intentionally does not use Gamma settlement results here. A side at or above
+        WIN_PRICE wins; if neither side reaches it, the window remains undecided.
+        """
+        up, down, age = self._last_second_snapshot(window)
         winner = None
         if up is not None and up >= config.WIN_PRICE:
             winner = Side.UP
         elif down is not None and down >= config.WIN_PRICE:
             winner = Side.DOWN
-        return {"winner": winner, "up": up, "down": down, "age": age}
+        return {"winner": winner, "up": up, "down": down, "age": age, "source": "clob"}
+
+    def _last_second_snapshot(self, window: WindowMarket):
+        up = down = None
+        age = None
+        snap = getattr(self, "_last_second_prices", None)
+        if snap is not None:
+            up_bid, _up_ask, down_bid, _down_ask, ts = snap
+            up, down = up_bid, down_bid
+            age = round(window.close_ts - ts, 2)
+        return up, down, age
 
     # ---- dashboard payload -------------------------------------------------
 

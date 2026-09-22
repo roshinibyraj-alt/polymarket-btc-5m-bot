@@ -9,7 +9,7 @@ T0 = 1_800_000_000.0    # aligned to a 300s boundary
 
 class FakeClient:
     """Two consecutive 5-minute windows (w1: T0..T0+300, w2: T0+300..T0+600), each with a
-    controllable order book. w1 resolves UP (up bid hits 0.95+ in its last second)."""
+    controllable order book. w1 resolves UP (up bid hits 0.95+ in its last two seconds)."""
     def __init__(self):
         self.books = {
             "u1": {"bid": 0.50, "ask": 0.52, "bids": [(0.50, 1000)], "asks": [(0.52, 1000)]},
@@ -59,14 +59,14 @@ async def main():
     assert bs.engine.s.plan == "no_signal" and bs.engine.s.position is None
     print("1 ok: first window observed -> no signal, no trade")
 
-    # ---- last second of window 1: UP bid crosses 0.95 -> captured as the winner read --------
+    # ---- last two seconds of window 1: UP bid crosses 0.95 -> captured as the winner read ----
     bs.client.books["u1"]["bid"] = 0.97
     bs.client.books["u1"]["bids"] = [(0.97, 1000)]
     await run_to(T0 + 300 - 0.5)
     assert bs._settle_done_slug == "btc-updown-5m-1800000000"
     up_bid, *_ = bs._last_second_prices
     assert up_bid == 0.97
-    print("2 ok: last-second CLOB read captured UP at 0.97")
+    print("2 ok: last-two-second CLOB read captured UP at 0.97")
 
     # ---- roll into window 2: follows UP (window 1's winner), fires at +5s, any price --------
     await run_to(T0 + 300 + 6)

@@ -10,7 +10,7 @@ Whichever side **won the previous window** is bought in the next one:
 
 - previous window UP → buy UP; previous window DOWN → buy DOWN.
 
-**Winner rule:** in the last second of a window, read both sides' CLOB
+**Winner rule:** during the last two seconds of a window, read both sides' CLOB
 prices. A side is the winner once its price is **0.95+** (`WIN_PRICE`).
 If neither side gets there, the window is undecided and the next window
 has no signal. The very first window after startup is watched only —
@@ -69,7 +69,7 @@ curve and event log.
 
 - `app/engine.py` — the strategy: signal handling, the +5s taker entry,
   settlement, the size ladder
-- `app/state.py` — runtime loop, window rolling, the last-second CLOB
+- `app/state.py` — runtime loop, window rolling, the last-two-second CLOB
   winner read, faster polling right at the close
 - `app/polymarket_client.py`, `app/paper_broker.py`, `app/models.py` —
   Polymarket CLOB access, fee/log helper, shared types
@@ -93,9 +93,9 @@ for a tighter winner read).
 - "Buys regardless of price" means the bot pays whatever the ask is,
   including 0.95+ — right before the window is likely to resolve that
   side's way.
-- The winner read is a single last-second snapshot, not an average —
-  matching the "0.95+ in the final second" rule as literally as possible
-  given 1s (0.25s near the close) polling.
+- The winner read is a single snapshot during the final two seconds, not an
+  average — matching the "0.95+ in the final two seconds" rule with 0.25s
+  polling near the close.
 - Taker fee uses `TAKER_FEE_RATE`/`TAKER_FEE_EXPONENT` in `config.py`;
   verify against Polymarket's fee-rate endpoint before real money.
 - This is a fixed rule, not a fitted model: nothing here has been

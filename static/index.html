@@ -291,8 +291,8 @@ function renderPrev(prev){
   tag.textContent = prev.slug;
   const w = prev.winner;
   const cls = w || 'none';
-  const headline = w ? `${w} won this window's read (${w==='UP'?fmtP(prev.up):fmtP(prev.down)} ≥ 0.95) → buying ${w} in the next window.`
-                     : `Neither side reached 0.95 at the close — undecided, no signal for the next window.`;
+  const headline = w ? `${w} won this window's last-two-second CLOB read (${prev[w==='UP'?'up':'down']!=null ? fmtP(prev[w==='UP'?'up':'down']) : '—'} ≥ 0.95) → buying ${w} in the next window.`
+                     : `Neither side reached 0.95 during the last two seconds — undecided, no signal for the next window.`;
   box.innerHTML = `<div class="prev-banner ${cls}">${headline}
     <div class="prev-grid">
       <div class="prev-side UP ${w==='UP'?'winner':''}"><div class="k">UP</div><div class="v">${fmtP(prev.up)}</div></div>

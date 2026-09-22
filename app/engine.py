@@ -1,8 +1,8 @@
 """
 ALPHASTRIKE trading engine -- "follow the last window".
 
-Signal : the side that won the PREVIOUS window (winner = the side priced 0.95+ in the last
-         second of that window, read from the CLOB -- see state.py) is traded in the next one.
+    Signal : the side that won the PREVIOUS window (winner = the side priced 0.95+ during the
+             last two seconds of that window, read from the CLOB -- see state.py) is traded next.
 
 Entry  : on the traded side, size = current base. ONE order type, a taker market buy: at least
          ENTRY_DELAY_SECONDS (5s) after the window opens, buy the current base size at market,
@@ -162,8 +162,8 @@ class Engine:
         if window.open_ts - prev["open_ts"] != config.WINDOW_SECONDS:
             return self._no_signal("missed a window (no consecutive previous result) -- no signal")
         if prev["winner"] is None:
-            return self._no_signal("previous window undecided (no side at "
-                                   f"{config.WIN_PRICE:.2f}+ in its last second) -- no signal")
+            return self._no_signal("previous window undecided (neither side reached "
+                                   f"{config.WIN_PRICE:.2f}+ in its last two seconds) -- no signal")
 
         side: Side = prev["winner"]
         self.s.side = side
@@ -270,7 +270,8 @@ class Engine:
         window = self.s.window
         winner: Optional[Side] = result.get("winner")
         self.prev = {"slug": window.slug, "open_ts": window.open_ts, "winner": winner,
-                     "up": result.get("up"), "down": result.get("down"), "age": result.get("age")}
+                     "up": result.get("up"), "down": result.get("down"), "age": result.get("age"),
+                     "source": result.get("source", "clob")}
         if winner is None:
             self.total_undecided += 1
 
@@ -403,7 +404,8 @@ class Engine:
         prev_payload = None
         if prev is not None:
             prev_payload = {"slug": prev["slug"], "winner": prev["winner"].value if prev["winner"] else None,
-                            "up": prev["up"], "down": prev["down"], "age": prev["age"]}
+                            "up": prev["up"], "down": prev["down"], "age": prev["age"],
+                            "source": prev.get("source", "clob")}
 
         win_rate = round(100 * self.wins / (self.wins + self.losses), 1) if (self.wins + self.losses) else None
         judged = self.follow_right + self.follow_wrong

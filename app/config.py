@@ -2,8 +2,8 @@
 Central configuration for ALPHASTRIKE -- BTC 5-minute up/down, "follow the last window".
 
   SIGNAL: whichever side won the PREVIOUS window is the side to trade in the next one.
-  WINNER: read from Polymarket's own CLOB prices in the last second of the window --
-          the side whose price is 0.95+ won. Neither at 0.95+ -> undecided -> no signal.
+  WINNER: read from the CLOB during the last two seconds of the window --
+          whichever side reaches 0.95+ is the winner.
 
   ENTRY (next window, traded side, size = current base): ONE order type, a taker market buy.
     At least ENTRY_DELAY_SECONDS (5) after the window opens, buy the current base size at
@@ -34,10 +34,10 @@ WINDOW_SECONDS = 300
 
 # ---- Polling cadence -----------------------------------------------------
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
-# Faster polling in the last seconds of a window, so the 0.95 winner read is as close to the
-# final second as possible.
+# Faster polling in the last seconds of a window, so the CLOB winner read is as close to
+# the close as possible.
 CLOSE_PHASE_POLL_SECONDS = float(os.getenv("CLOSE_PHASE_POLL_SECONDS", "0.25"))
-CLOSE_PHASE_SECONDS = 3.0
+CLOSE_PHASE_SECONDS = 2.0
 
 # ---- Entry: one taker buy, fired shortly after the window opens ---------
 ENTRY_DELAY_SECONDS = float(os.getenv("ENTRY_DELAY_SECONDS", "5"))   # fire this long after the window opens
@@ -47,7 +47,7 @@ BASE_SHARES = int(os.getenv("BASE_SHARES", "500"))
 SHARES_STEP = int(os.getenv("SHARES_STEP", "100"))
 
 # ---- Winner rule --------------------------------------------------------------
-WIN_PRICE = float(os.getenv("WIN_PRICE", "0.95"))                 # side priced at/above this at the close won
+WIN_PRICE = float(os.getenv("WIN_PRICE", "0.95"))                 # side priced at/above this won
 SETTLE_MAX_STALENESS_SECONDS = float(os.getenv("SETTLE_MAX_STALENESS_SECONDS", "3"))  # older reads don't count
 
 STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))

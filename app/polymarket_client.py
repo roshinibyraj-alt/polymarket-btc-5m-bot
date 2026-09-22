@@ -160,20 +160,13 @@ class PolymarketClient:
         ), None
 
     # ---- resolution (real settlement, not a price guess) ---------------------
-    #
-    # NOT CALLED anywhere right now -- state.py settles every window off
-    # the last observed CLOB price instead (see BotState._infer_winner),
-    # per explicit request to keep outcomes deterministic and simple
-    # rather than waiting on/confirming Polymarket's real resolution.
-    # Left in place in case you want real-resolution settlement back;
-    # wiring it in is a one-line change in state.py's _roll_window.
 
     async def fetch_resolution(self, slug: str):
-        """Returns the real winning Side once Polymarket has settled this
-        market, or None if it isn't resolved yet. Uses `closed` + a
-        decisive outcomePrices split (winner priced >=0.99) rather than
-        just reading the live CLOB price, since the live price can be
-        noisy/stale right at the boundary."""
+        """Return the real winning Side once Polymarket has settled this market.
+
+        This helper is intentionally not used by the strategy. The bot's winner rule is the
+        last-two-second CLOB threshold in state.py.
+        """
         from .models import Side  # local import avoids a circular import
         market_json, _reason = await self.fetch_market_by_slug(slug)
         if not market_json:
