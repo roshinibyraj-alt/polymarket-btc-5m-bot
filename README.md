@@ -1,124 +1,103 @@
-# Polymarket BTC 5m Up/Down Bot — paper trading
+# ⚡ ALPHASTRIKE — BTC 5m up/down bot
 
-Engine B runs an interval-based accumulation ("ladder") strategy against
-Polymarket's `btc-updown-5m-*` markets, in **paper mode** (simulated
-$5,000 balance, no real orders) with a live dashboard.
+Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. Strategy:
+**follow the last window.** Everything is priced and settled off
+Polymarket's own CLOB — no external price feed.
 
-## Strategy — Engine B (interval ladder)
+## The signal
 
-**Phase 1 (t=0s to t=120s):** every 15 seconds (9 checks: 0, 15, 30, ...,
-120), buy the **more expensive** side for **100 shares**, only if its price is
-between **0.20 and 0.40** (inclusive of 0.20, exclusive of 0.40). The
-side can differ from check to check.
+Whichever side **won the previous window** is bought in the next one:
 
-**Gap (t=120s to t=135s):** idle, no checks.
+- previous window UP → buy UP; previous window DOWN → buy DOWN.
 
-**Phase 2 (t=135s to t=255s):** every 15 seconds (9 checks: 135, 150,
-..., 255), buy the **more expensive** side for **50 shares**, only if its
-price is between **0.20 and 0.40** — same entry rule as phase 1, different size
-(50 vs phase 1's 100), same timing window.
+**Winner rule:** in the last second of a window, read both sides' CLOB
+prices. A side is the winner once its price is **0.95+** (`WIN_PRICE`).
+If neither side gets there, the window is undecided and the next window
+has no signal. The very first window after startup is watched only —
+there's no previous result yet to follow.
 
-**t=255s to close (300s):** idle, hold everything to expiry.
+## The trade
 
-No stop loss, no take profit — every individual fill across both phases
-is tracked separately and settled against Polymarket's **real**
-outcome at window close (via `fetch_resolution`, retried for ~6s with a
-last-price fallback): $1/share if that fill's side won, $0/share if it
-lost.
+One order type: a **taker market buy**, on the followed side, sized to
+the current base (see below).
 
-A side printing 0.90+ in the last 2 seconds before close is logged for
-visibility but never triggers an action.
+1. At least **5 seconds** (`ENTRY_DELAY_SECONDS`) after the window opens,
+   buy the base size at market — **whatever the price**, no cap. The fill
+   is priced by walking real ask depth and pays the taker fee. If there's
+   no ask / no depth at 5s, it keeps checking every tick until the window
+   closes; never filling means no trade that window (the base doesn't move).
+2. **No exit.** The position is held to the window's close and settled by
+   the same 0.95 rule: winner pays **$1/share**, loser **$0**. If the
+   window turns out undecided, any open position is closed at the last
+   bid instead (real proceeds, not $1/$0) — and this doesn't move the
+   ladder, since it isn't a real win or loss.
+3. One entry per window.
 
-## Fees
+## Size ladder
 
-Modeled on Polymarket's published taker-fee formula:
-
-```
-fee = shares * TAKER_FEE_RATE * price * (1 - price)
-```
-
-`TAKER_FEE_RATE = 0.07` (current Crypto-category rate). Peaks at a 0.50
-price and shrinks symmetrically toward the extremes — e.g. 100 shares
-at 0.30 costs ~$1.47 in fees, at 0.05 costs ~$0.33. Charged on every
-buy (every fill in this bot is a taker fill). Redemption at expiry is
-not a matched CLOB trade and isn't fee'd. Verify the current rate at
-docs.polymarket.com/trading/fees before relying on this for real
-capital — Polymarket has changed its fee structure more than once in
-2026.
-
-## Dashboard
-
-- Live Up/Down prices + sparkline.
-- **Window timeline**: a segmented bar showing phase 1 / gap / phase 2 /
-  hold, with all 18 check points marked — filled green/red if bought
-  (colored by side), hollow gray if skipped, dark gray if still
-  upcoming. A moving amber playhead tracks elapsed time.
-- **Exposure cards** for Up and Down: total shares, average entry
-  price, cost basis, live mark-to-market value, and unrealized P&L.
-- Balance / total P&L strip and full trade log.
-
-## Project layout
+One shared base for both sides, starting at **500** shares
+(`BASE_SHARES`):
 
 ```
-app/
-  config.py             strategy + runtime parameters
-  models.py              shared dataclasses/enums
-  polymarket_client.py   Gamma (market discovery) + CLOB (pricing) + resolution API client
-  paper_broker.py         simulated wallet / fills / PnL
-  engine_b.py              the ladder strategy
-  state.py                 background polling loop + orchestration
-  main.py                  FastAPI app (serves API + dashboard)
-static/index.html          dashboard UI
+500 → 400 → 300 → 200 → 100 → 0   (−100 per win, floor 0)
 ```
+
+- Every **win** (the followed side matched the window's winner) takes
+  100 off the base.
+- **Any loss resets the base to 500** — wherever it was on the ladder.
+- At **0**, the bot **skips** signals on the side that ran the base down
+  (it still watches and records the result, just doesn't trade). The
+  **first signal on the opposite side** trades 500 and restarts the base.
+- An undecided window, a no-signal window, or a signal that never got
+  filled all leave the base exactly where it was.
 
 ## Run locally
 
-```bash
-python -m venv .venv && source .venv/bin/activate
+```
 pip install -r requirements.txt
-cp .env.example .env
+cp .env.example .env   # all vars optional
 uvicorn app.main:app --reload
 ```
 
-Open http://localhost:8000
+Dashboard at http://localhost:8000: the countdown, the previous window's
+result (both final prices, which side won), live UP/DOWN books, the
+armed entry / open position, the size ladder, a history of recent
+windows (followed side, winner, result, P&L, base after), stats, equity
+curve and event log.
 
-## Deploy: GitHub → Railway
+## Layout
 
-1. Push this folder to a new GitHub repo:
-   ```bash
-   git init
-   git add .
-   git commit -m "Interval ladder strategy"
-   git branch -M main
-   git remote add origin <your-repo-url>
-   git push -u origin main
-   ```
-2. In Railway: **New Project → Deploy from GitHub repo**, pick the repo.
-   Railway auto-detects Python via Nixpacks and uses the `Procfile` /
-   `railway.json` start command — no manual build config needed.
-3. Under **Variables**, set any of the values from `.env.example` you
-   want to override (defaults work out of the box for paper mode).
-4. Deploy. Railway assigns a public URL — that's your dashboard.
+- `app/engine.py` — the strategy: signal handling, the +5s taker entry,
+  settlement, the size ladder
+- `app/state.py` — runtime loop, window rolling, the last-second CLOB
+  winner read, faster polling right at the close
+- `app/polymarket_client.py`, `app/paper_broker.py`, `app/models.py` —
+  Polymarket CLOB access, fee/log helper, shared types
+- `tests/` — `python tests/run_all.py` (no network needed): the ladder
+  (including the floor-skip / restart edge cases), the entry timing and
+  any-price fill, empty-book retries, settlement (win/loss/undecided),
+  and the orchestration with a fake CLOB across several windows
 
-## Verify the Polymarket API responses once live
+## Config (`app/config.py`, env-overridable)
 
-`app/polymarket_client.py` isolates all HTTP calls to Polymarket's
-public Gamma (metadata) and CLOB (pricing) APIs. After your first
-deploy, confirm:
+`ENTRY_DELAY_SECONDS` (5), `BASE_SHARES` (500), `SHARES_STEP` (100),
+`WIN_PRICE` (0.95), `STARTING_CAPITAL` ($2000), `POLL_INTERVAL_SECONDS`
+(1.0), `CLOSE_PHASE_POLL_SECONDS` (0.25, used in the last 3s of a window
+for a tighter winner read).
 
-- The dashboard header shows a real slug instead of "waiting for
-  market...".
-- Up/Down prices populate and the sparkline moves.
-- Fills settle correctly at window close (check the trade log for
-  `RESOLVE_WIN` / `RESOLVE_LOSS` rows, or `RESOLUTION_FALLBACK` if the
-  real outcome wasn't confirmed in time).
+## Notes / assumptions
 
-If any of these are off, the fix is contained to `polymarket_client.py`.
-
-## Going live (real orders)
-
-This build intentionally stops at paper trading. To route real orders,
-add `py-clob-client`, a funded Polygon wallet, and Polymarket API
-credentials, then replace the `buy`/`sell` calls in `paper_broker.py`
-with real order calls and add slippage/fee handling and a kill switch
-before risking capital.
+- The entry can only fire on a poll tick, so it lands between 5.0s and
+  ~6s after open at the default 1s poll interval; lower
+  `POLL_INTERVAL_SECONDS` to tighten it.
+- "Buys regardless of price" means the bot pays whatever the ask is,
+  including 0.95+ — right before the window is likely to resolve that
+  side's way.
+- The winner read is a single last-second snapshot, not an average —
+  matching the "0.95+ in the final second" rule as literally as possible
+  given 1s (0.25s near the close) polling.
+- Taker fee uses `TAKER_FEE_RATE`/`TAKER_FEE_EXPONENT` in `config.py`;
+  verify against Polymarket's fee-rate endpoint before real money.
+- This is a fixed rule, not a fitted model: nothing here has been
+  backtested. The dashboard's follow-accuracy and win-rate tallies are
+  there to measure it as it runs.

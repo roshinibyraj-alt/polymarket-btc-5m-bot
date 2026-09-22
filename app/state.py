@@ -1,28 +1,33 @@
-"""Shared runtime state + the background loop that drives Engine B."""
+"""
+Runtime orchestration: owns the poll loop, rolls windows, reads each window's winner from the
+CLOB in its last second, and feeds ticks to the Engine. No Binance / no external price feed --
+everything here comes from Polymarket's own CLOB.
+"""
 import asyncio
 import time
-from collections import deque
 from typing import Optional
 
 from . import config
-from .engine_b import EngineB
-from .models import PricePoint, Side, WindowMarket
+from .engine import Engine
+from .models import Side, WindowMarket
 from .paper_broker import PaperBroker
 from .polymarket_client import PolymarketClient
 
 
 class BotState:
     def __init__(self):
-        self.broker = PaperBroker(config.STARTING_BALANCE_USDC)
-        self.engine_b = EngineB(self.broker)
         self.client = PolymarketClient()
+        self.broker = PaperBroker()
+        self.engine = Engine(self.broker)
+
         self.current_window: Optional[WindowMarket] = None
-        self.price_history: deque = deque(maxlen=300)  # ~5 min at 1s ticks
-        self.last_up_price: Optional[float] = None
-        self.last_down_price: Optional[float] = None
+        self.market_error: Optional[str] = None
         self.status = "starting"
         self.error: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
+
+        # Last-second CLOB read of the window that is about to close (see _watch_close).
+        self._settle_done_slug: Optional[str] = None
 
     async def start(self):
         self._task = asyncio.create_task(self._run_loop())
@@ -34,99 +39,123 @@ class BotState:
 
     async def _run_loop(self):
         self.status = "running"
+        loop = asyncio.get_running_loop()
         while True:
+            started = loop.time()
             try:
                 await self._tick()
             except Exception as e:  # keep the loop alive no matter what
                 self.error = str(e)
-            await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
+            interval = self._poll_interval()
+            # sleep only what is left of the interval, so slow ticks don't stretch the cadence
+            await asyncio.sleep(max(0.0, interval - (loop.time() - started)))
+
+    def _poll_interval(self) -> float:
+        w = self.current_window
+        if w is not None and w.close_ts - time.time() <= config.CLOSE_PHASE_SECONDS:
+            return config.CLOSE_PHASE_POLL_SECONDS       # poll fast right at the close, for the 0.95 read
+        return config.POLL_INTERVAL_SECONDS
 
     async def _tick(self):
         now = time.time()
-        window = await self.client.get_active_window(now)
+        window, reason = await self.client.get_active_window(now)
         if window is None:
-            self.error = "No market found for current window slug"
+            self.market_error = reason
             return
-        self.error = None
+        self.market_error = None
 
         if self.current_window is None or window.slug != self.current_window.slug:
-            await self._roll_window(window)
+            await self._roll_window(window, now)
 
-        up_price = await self.client.get_price(self.current_window.token_up)
-        down_price = await self.client.get_price(self.current_window.token_down)
-        self.last_up_price, self.last_down_price = up_price, down_price
-        self.price_history.append(PricePoint(ts=now, up=up_price, down=down_price))
+        up_bid, up_ask, up_bid_lv, up_ask_lv = None, None, None, None
+        down_bid, down_ask, down_bid_lv, down_ask_lv = None, None, None, None
+        if window.token_up and window.token_down:
+            up_book, down_book = await asyncio.gather(
+                self.client.get_book_full(window.token_up),
+                self.client.get_book_full(window.token_down),
+            )
+            if up_book:
+                up_bid, up_ask = up_book["best_bid"], up_book["best_ask"]
+                up_bid_lv, up_ask_lv = up_book["bids"], up_book["asks"]
+            if down_book:
+                down_bid, down_ask = down_book["best_bid"], down_book["best_ask"]
+                down_bid_lv, down_ask_lv = down_book["bids"], down_book["asks"]
 
-        seconds_to_close = self.current_window.close_ts - now
-        self.engine_b.on_tick(up_price, down_price, seconds_to_close, now=now)
+        self.engine.on_tick(up_bid, up_ask, down_bid, down_ask, now=now,
+                            up_bid_levels=up_bid_lv, up_ask_levels=up_ask_lv,
+                            down_bid_levels=down_bid_lv, down_ask_levels=down_ask_lv)
 
-    async def _roll_window(self, new_window: WindowMarket):
-        # Finalize the previous window before starting the new one.
-        if self.current_window is not None:
-            winning_side = await self._resolve_previous_window(self.current_window)
-            self.engine_b.finalize_window(winning_side)
+        # Last-second winner read, once per window, while it's still the live window.
+        if (window.close_ts - now <= 1.0 and now < window.close_ts
+                and self._settle_done_slug != window.slug
+                and up_bid is not None and down_bid is not None):
+            self._settle_done_slug = window.slug
+            self._last_second_prices = (up_bid, up_ask, down_bid, down_ask, now)
 
-        self.current_window = new_window
-        self.price_history.clear()
-        self.engine_b.reset_for_window(new_window)
+    async def _roll_window(self, window: WindowMarket, now: float):
+        prev = self.current_window
+        # A window we only see well after it opened (bot just started) is watched, but not
+        # traded: the previous window's result is the signal, and there is none yet.
+        late = prev is None and (now - window.open_ts) > (config.WINDOW_SECONDS / 2)
 
-    async def _resolve_previous_window(self, window: WindowMarket) -> Optional[Side]:
-        """Use Polymarket's actual settled outcome, not a price guess.
-        These 5-minute crypto markets typically settle within a couple of
-        seconds of close, so we retry briefly before giving up."""
-        for _ in range(config.RESOLUTION_RETRY_SECONDS):
-            winner = await self.client.fetch_resolution(window.slug)
-            if winner is not None:
-                return winner
-            await asyncio.sleep(1.0)
-        fallback = self._infer_winner()
-        self.broker.log_event(
-            "SYS", window.slug, "RESOLUTION_FALLBACK",
-            side=fallback.value if fallback else None,
-            note="Polymarket outcome not confirmed within retry window; settled by last observed price instead",
-        )
-        return fallback
+        if prev is not None:
+            result = self._read_result(prev)
+            self.engine.finalize_window(result)
 
-    def _infer_winner(self) -> Optional[Side]:
-        """Fallback only -- used when Polymarket's real settlement isn't
-        confirmed within the retry window. Approximates the winner as
-        whichever side's last observed price was higher."""
-        if self.last_up_price is None or self.last_down_price is None:
-            return None
-        return Side.UP if self.last_up_price >= self.last_down_price else Side.DOWN
+        self.current_window = window
+        self._settle_done_slug = None
+        self._last_second_prices = None
+        self.engine.reset_for_window(window, now=now)
+        if late:
+            self.engine._no_signal("bot started mid-window -- watching this one to read its result")
+
+    def _read_result(self, window: WindowMarket) -> dict:
+        """The window that just closed: who won, from the last-second CLOB read captured in
+        _tick(). WIN_PRICE (0.95) or higher on a side's bid = that side won. Neither side there,
+        or no read was captured at all (e.g. an empty book right at the close) = undecided."""
+        up = down = None
+        age = None
+        snap = getattr(self, "_last_second_prices", None)
+        if snap is not None:
+            up_bid, up_ask, down_bid, down_ask, ts = snap
+            up, down = up_bid, down_bid
+            age = round(window.close_ts - ts, 2)
+        winner = None
+        if up is not None and up >= config.WIN_PRICE:
+            winner = Side.UP
+        elif down is not None and down >= config.WIN_PRICE:
+            winner = Side.DOWN
+        return {"winner": winner, "up": up, "down": down, "age": age}
 
     # ---- dashboard payload -------------------------------------------------
 
     def snapshot(self) -> dict:
+        now = time.time()
+        w = self.current_window
+        window_payload = None
+        seconds_left = None
+        if w is not None:
+            seconds_left = max(0.0, w.close_ts - now)
+            window_payload = {"slug": w.slug, "open_ts": w.open_ts, "close_ts": w.close_ts,
+                              "seconds_left": round(seconds_left, 1)}
+
+        s = self.engine.s
+        book = {
+            "up_bid": s.up_bid, "up_ask": s.up_ask, "down_bid": s.down_bid, "down_ask": s.down_ask,
+        }
+
         return {
+            "server_time": now,
             "status": self.status,
             "error": self.error,
-            "server_time": time.time(),
-            "window": None if not self.current_window else {
-                "slug": self.current_window.slug,
-                "open_ts": self.current_window.open_ts,
-                "close_ts": self.current_window.close_ts,
-            },
-            "prices": {
-                "up": self.last_up_price,
-                "down": self.last_down_price,
-            },
-            "price_history": [
-                {"ts": p.ts, "up": p.up, "down": p.down}
-                for p in list(self.price_history)[-120:]
-            ],
-            "balance": round(self.broker.balance, 2),
-            "starting_balance": self.broker.starting_balance,
-            "pnl_total": round(self.broker.balance - self.broker.starting_balance, 2),
-            "total_fees_paid": round(self.broker.total_fees_paid, 4),
-            "engine_b": self.engine_b.snapshot(up_price=self.last_up_price, down_price=self.last_down_price),
+            "market_error": self.market_error,
+            "window": window_payload,
+            "book": book,
+            "engine": self.engine.snapshot(),
             "log": [
-                {
-                    "ts": e.ts, "engine": e.engine, "window": e.window_slug,
-                    "event": e.event, "side": e.side, "price": e.price,
-                    "shares": e.shares, "pnl": e.pnl, "fee": e.fee,
-                    "balance_after": e.balance_after, "note": e.note,
-                }
+                {"ts": e.ts, "engine": e.engine, "window": e.window_slug, "event": e.event,
+                 "side": e.side, "price": e.price, "shares": e.shares, "fee": e.fee, "pnl": e.pnl,
+                 "balance_after": e.balance_after, "note": e.note}
                 for e in reversed(self.broker.log[-100:])
             ],
         }
