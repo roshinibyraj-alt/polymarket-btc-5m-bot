@@ -26,8 +26,10 @@ class BotState:
         self.error: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
 
-        # CLOB read of the window that is about to close.
+        # CLOB reads of the window that is about to close.
         self._settle_done_slug: Optional[str] = None
+        self._last_second_prices = None
+        self._close_phase_winner: Optional[Side] = None
 
     async def start(self):
         self._task = asyncio.create_task(self._run_loop())
@@ -85,12 +87,17 @@ class BotState:
                             up_bid_levels=up_bid_lv, up_ask_levels=up_ask_lv,
                             down_bid_levels=down_bid_lv, down_ask_levels=down_ask_lv)
 
-        # Winner read during the final two seconds, once per window, while it's still live.
-        if (window.close_ts - now <= config.CLOSE_PHASE_SECONDS and now < window.close_ts
-                and self._settle_done_slug != window.slug
-                and up_bid is not None and down_bid is not None):
-            self._settle_done_slug = window.slug
+        # Keep sampling throughout the final two seconds. A single early snapshot can miss a
+        # side crossing 0.95 later in the close phase, which would incorrectly suppress the
+        # signal for the next window.
+        if window.close_ts - now <= config.CLOSE_PHASE_SECONDS and now < window.close_ts:
             self._last_second_prices = (up_bid, up_ask, down_bid, down_ask, now)
+            self._settle_done_slug = window.slug
+            if self._close_phase_winner is None:
+                if up_bid is not None and up_bid >= config.WIN_PRICE:
+                    self._close_phase_winner = Side.UP
+                elif down_bid is not None and down_bid >= config.WIN_PRICE:
+                    self._close_phase_winner = Side.DOWN
 
     async def _roll_window(self, window: WindowMarket, now: float):
         prev = self.current_window
@@ -105,6 +112,7 @@ class BotState:
         self.current_window = window
         self._settle_done_slug = None
         self._last_second_prices = None
+        self._close_phase_winner = None
         self.engine.reset_for_window(window, now=now)
         if late:
             self.engine._no_signal("bot started mid-window -- watching this one to read its result")
@@ -116,11 +124,13 @@ class BotState:
         WIN_PRICE wins; if neither side reaches it, the window remains undecided.
         """
         up, down, age = self._last_second_snapshot(window)
-        winner = None
-        if up is not None and up >= config.WIN_PRICE:
-            winner = Side.UP
-        elif down is not None and down >= config.WIN_PRICE:
-            winner = Side.DOWN
+        winner = self._close_phase_winner
+        if winner is None:
+            # Defensive fallback for manually supplied snapshots and older state instances.
+            if up is not None and up >= config.WIN_PRICE:
+                winner = Side.UP
+            elif down is not None and down >= config.WIN_PRICE:
+                winner = Side.DOWN
         return {"winner": winner, "up": up, "down": down, "age": age, "source": "clob"}
 
     def _last_second_snapshot(self, window: WindowMarket):

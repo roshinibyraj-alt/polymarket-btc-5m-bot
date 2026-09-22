@@ -59,14 +59,18 @@ async def main():
     assert bs.engine.s.plan == "no_signal" and bs.engine.s.position is None
     print("1 ok: first window observed -> no signal, no trade")
 
-    # ---- last two seconds of window 1: UP bid crosses 0.95 -> captured as the winner read ----
+    # ---- first close-phase poll is below threshold; a later poll crosses 0.95 ---------------
+    # This is the smoke case that catches a one-snapshot implementation.
+    await run_to(T0 + 300 - 1.75)
+    assert bs._close_phase_winner is None
     bs.client.books["u1"]["bid"] = 0.97
     bs.client.books["u1"]["bids"] = [(0.97, 1000)]
     await run_to(T0 + 300 - 0.5)
     assert bs._settle_done_slug == "btc-updown-5m-1800000000"
     up_bid, *_ = bs._last_second_prices
     assert up_bid == 0.97
-    print("2 ok: last-two-second CLOB read captured UP at 0.97")
+    assert bs._close_phase_winner == Side.UP
+    print("2 ok: later last-two-second CLOB crossing captured UP at 0.97")
 
     # ---- roll into window 2: follows UP (window 1's winner), fires at +5s, any price --------
     await run_to(T0 + 300 + 6)
