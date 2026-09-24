@@ -35,7 +35,7 @@ class PolymarketClient:
 
     # ---- market discovery -------------------------------------------------
     #
-    # Polymarket's btc-updown-15m-<ts> slug keys off the window's OPEN time,
+    # Polymarket's btc-updown-5m-<ts> slug keys off the window's OPEN time,
     # not its close time (confirmed against a live window). Using ceil()
     # here -- i.e. treating <ts> as a close time -- silently resolves to
     # the *next* window's open timestamp instead, which is exactly the bug
@@ -44,13 +44,12 @@ class PolymarketClient:
     # case Polymarket changes convention or a market is momentarily
     # missing from Gamma right at the boundary.
     #
-    # IMPORTANT: for the short-window crypto series, Gamma's `/markets?slug=...`
+    # IMPORTANT: for the 5-minute crypto series, Gamma's `/markets?slug=...`
     # returns an empty list -- these markets are only addressable by slug
     # through the `/events?slug=...` endpoint (each event wraps exactly one
     # market for this series, in event["markets"][0]). Confirmed against a
-    # live event (5m series): `/markets?slug=btc-updown-5m-<ts>` -> [], while
-    # `/events?slug=btc-updown-5m-<ts>` -> [{ ..., "markets": [{...}] }]. The
-    # 15m series uses the same event slug pattern (btc-updown-15m-<open ts>).
+    # live event: `/markets?slug=btc-updown-5m-<ts>` -> [], while
+    # `/events?slug=btc-updown-5m-<ts>` -> [{ ..., "markets": [{...}] }].
 
     def _slug_for_ts(self, ts: int) -> str:
         return f"{config.SLUG_PREFIX}{ts}"
@@ -59,18 +58,14 @@ class PolymarketClient:
         now = now or time.time()
         return int(math.floor(now / config.WINDOW_SECONDS) * config.WINDOW_SECONDS)
 
-    async def fetch_market_by_slug(self, slug: str) -> "tuple[Optional[dict], Optional[str]]":
-        """Returns (market_json, error_reason). error_reason is None on
-        success, otherwise a short diagnostic string explaining exactly
-        which step failed -- this is what should show up in the
-        dashboard's error banner instead of a generic 'not found'."""
+    async def fetch_market_by_slug(self, slug: str) -> Optional[dict]:
         url = f"{config.GAMMA_API_BASE}/events"
         try:
             resp = await self._client.get(url, params={"slug": slug})
             resp.raise_for_status()
             data = resp.json()
-        except Exception as e:
-            return None, f"Gamma /events request failed for slug={slug}: {e}"
+        except Exception:
+            return None
 
         event = None
         if isinstance(data, list) and data:
@@ -83,17 +78,17 @@ class PolymarketClient:
             event = data
 
         if not isinstance(event, dict):
-            return None, f"Gamma /events returned no event for slug={slug} (response shape: {type(data).__name__}, empty or unrecognized)"
+            return None
 
         markets = event.get("markets")
         if isinstance(markets, list) and markets:
-            return markets[0], None
+            return markets[0]
         # extremely defensive fallback: if Gamma ever returns the market
         # fields flattened directly on the event (no nested "markets"),
         # treat the event itself as the market record.
         if event.get("clobTokenIds") is not None:
-            return event, None
-        return None, f"Gamma event found for slug={slug} but it has no 'markets' array and no clobTokenIds on the event itself -- response shape may have changed"
+            return event
+        return None
 
     def _extract_token_ids(self, market_json: dict):
         """Gamma returns clobTokenIds as a JSON-encoded string list, in the
@@ -120,7 +115,7 @@ class PolymarketClient:
             token_up, token_down = raw_tokens[0], raw_tokens[1]
         return token_up, token_down
 
-    async def get_active_window(self, now: Optional[float] = None) -> "tuple[Optional[WindowMarket], Optional[str]]":
+    async def get_active_window(self, now: Optional[float] = None) -> Optional[WindowMarket]:
         """Resolve the market for the window covering `now`.
 
         Primary candidate is the current window's open_ts (confirmed slug
@@ -128,28 +123,14 @@ class PolymarketClient:
         early right at the boundary), we retry on the next tick rather
         than falling through to the *next* window's slug -- doing that
         was the original bug, so we deliberately don't guess forward here.
-
-        Returns (WindowMarket, None) on full success. Returns (None,
-        reason) if EITHER the market lookup fails OR the market was
-        found but its CLOB token ids couldn't be extracted -- a window
-        with unusable token ids is treated as a failure here, not a
-        half-valid result, since silently returning token_up=None would
-        make every subsequent price fetch fail forever with no visible
-        error (this was a real bug: the dashboard showed 'live' with no
-        error while prices stayed blank)."""
+        """
         now = now or time.time()
         open_ts = self.current_window_open_ts(now)
         slug = self._slug_for_ts(open_ts)
-        market_json, reason = await self.fetch_market_by_slug(slug)
+        market_json = await self.fetch_market_by_slug(slug)
         if not market_json:
-            return None, reason
+            return None
         token_up, token_down = self._extract_token_ids(market_json)
-        if not token_up or not token_down:
-            return None, (
-                f"Gamma market found for slug={slug} but token ids couldn't be extracted "
-                f"(clobTokenIds={market_json.get('clobTokenIds')!r}, outcomes={market_json.get('outcomes')!r}) "
-                f"-- check _extract_token_ids for a field-name mismatch"
-            )
         return WindowMarket(
             slug=slug,
             condition_id=market_json.get("conditionId"),
@@ -157,18 +138,25 @@ class PolymarketClient:
             token_down=token_down,
             open_ts=open_ts,
             close_ts=open_ts + config.WINDOW_SECONDS,
-        ), None
+        )
 
     # ---- resolution (real settlement, not a price guess) ---------------------
+    #
+    # NOT CALLED anywhere right now -- state.py settles every window off
+    # the last observed CLOB price instead (see BotState._infer_winner),
+    # per explicit request to keep outcomes deterministic and simple
+    # rather than waiting on/confirming Polymarket's real resolution.
+    # Left in place in case you want real-resolution settlement back;
+    # wiring it in is a one-line change in state.py's _roll_window.
 
     async def fetch_resolution(self, slug: str):
-        """Return the real winning Side once Polymarket has settled this market.
-
-        This helper is intentionally not used by the strategy. The bot's winner rule is the
-        last-two-second CLOB threshold in state.py.
-        """
+        """Returns the real winning Side once Polymarket has settled this
+        market, or None if it isn't resolved yet. Uses `closed` + a
+        decisive outcomePrices split (winner priced >=0.99) rather than
+        just reading the live CLOB price, since the live price can be
+        noisy/stale right at the boundary."""
         from .models import Side  # local import avoids a circular import
-        market_json, _reason = await self.fetch_market_by_slug(slug)
+        market_json = await self.fetch_market_by_slug(slug)
         if not market_json:
             return None
         if not market_json.get("closed"):
@@ -233,79 +221,40 @@ class PolymarketClient:
         return None
 
     async def get_book(self, token_id: str) -> "tuple[Optional[float], Optional[float]]":
-        """Best bid and best ask for a token -- thin wrapper around
-        get_book_full() kept for any caller that only wants the top of
-        book. Either can be None if that side of the book is empty or
-        the request fails."""
-        full = await self.get_book_full(token_id)
-        if full is None:
-            return None, None
-        return full["best_bid"], full["best_ask"]
-
-    async def get_book_full(self, token_id: str) -> "Optional[dict]":
-        """Full order book for a token, not just the top price -- this is
-        what lets a caller price a real fill by walking through available
-        size instead of assuming unlimited depth at the best quote (which
-        badly overstates achievable fill quality once a side goes
-        illiquid, e.g. late in a window once one side is clearly losing).
-
-        Returns None if the request fails outright (unknown book state --
-        caller should treat this tick as "no data" and fall back to
-        whatever it had). Returns {"best_bid", "best_ask", "bids", "asks"}
-        on success, where "bids"/"asks" are lists of (price, size) tuples,
-        best price first, size in shares -- an empty list is a real
-        signal that the book has NO resting orders on that side right
-        now (as opposed to None, which means the fetch itself failed).
+        """Best bid and best ask for a token, from the real order book
+        (not a synthesized spread around the midpoint). Returns
+        (best_bid, best_ask); either can be None if that side of the
+        book is empty or the request fails.
 
         Convention: ask is always >= bid (ask = lowest price a seller
         will accept, bid = highest price a buyer will pay). The /book
-        response's bids/asks arrays aren't guaranteed sorted here, so we
-        sort bids descending (best/highest first) and asks ascending
-        (best/lowest first)."""
+        response's bids/asks arrays aren't guaranteed sorted here, so
+        best bid = max price in bids[], best ask = min price in asks[]."""
         if not token_id:
-            return None
+            return None, None
         try:
             resp = await self._client.get(
                 f"{config.CLOB_API_BASE}/book", params={"token_id": token_id}
             )
             if resp.status_code != 200:
-                return None
+                return None, None
             data = resp.json()
         except Exception:
-            return None
+            return None, None
         if not isinstance(data, dict):
-            return None
+            return None, None
 
-        def parse_levels(levels):
-            out = []
-            for lvl in levels or []:
-                try:
-                    price = float(lvl.get("price"))
-                except Exception:
-                    continue
-                try:
-                    size = float(lvl.get("size"))
-                except Exception:
-                    size = 0.0
-                out.append((price, size))
-            return out
+        def best(levels, pick_max: bool):
+            if not levels:
+                return None
+            try:
+                prices = [float(lvl.get("price")) for lvl in levels if lvl.get("price") is not None]
+            except Exception:
+                return None
+            if not prices:
+                return None
+            return max(prices) if pick_max else min(prices)
 
-        bids = parse_levels(data.get("bids"))
-        asks = parse_levels(data.get("asks"))
-        # If the API didn't actually give us usable size data on any
-        # level, we can't walk the book for a realistic fill -- treat
-        # depth as unknown (None) rather than pretending every level is
-        # zero-size, which would make nothing ever fillable.
-        bids_have_size = any(size > 0 for _, size in bids)
-        asks_have_size = any(size > 0 for _, size in asks)
-
-        bids.sort(key=lambda ps: -ps[0])
-        asks.sort(key=lambda ps: ps[0])
-        best_bid = bids[0][0] if bids else None
-        best_ask = asks[0][0] if asks else None
-
-        return {
-            "best_bid": best_bid, "best_ask": best_ask,
-            "bids": bids if bids_have_size else (None if bids else []),
-            "asks": asks if asks_have_size else (None if asks else []),
-        }
+        best_bid = best(data.get("bids"), pick_max=True)
+        best_ask = best(data.get("asks"), pick_max=False)
+        return best_bid, best_ask

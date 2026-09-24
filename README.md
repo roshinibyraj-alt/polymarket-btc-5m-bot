@@ -1,103 +1,55 @@
-# ⚡ ALPHASTRIKE — BTC 5m up/down bot
+# Breakout @ 0.70 — BTC 5m bot
 
-Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. Strategy:
-**follow the last window.** Everything is priced and settled off
-Polymarket's own CLOB — no external price feed.
+Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. Runs a single
+breakout strategy with anti-martingale sizing.
 
-## The signal
+## Strategy
 
-Whichever side **won the previous window** is bought in the next one:
+### Breakout taker entry @ 0.70
+1. **Enter**: watches both sides' mid-price every tick. Whichever side's
+   mid-price reaches 0.70 first triggers a one-time taker market BUY of
+   that side for $30 notional (crosses the spread, pays the taker fee).
+   Fires at most once per window.
+2. **Take profit**: resting maker TP sell at 0.99.
+3. **Stop loss (time-tightened)**: starts at 0.29 and steps up the
+   longer the position stays open:
+   - 0:00–2:00 since entry → 0.29 (base)
+   - 2:00–3:00 since entry → 0.40
+   - 3:00–4:00 since entry → 0.45
+   - 4:00+ since entry → 0.50 (final minute of the window)
 
-- previous window UP → buy UP; previous window DOWN → buy DOWN.
-
-**Winner rule:** during the last two seconds of a window, read both sides' CLOB
-prices. A side is the winner once its price is **0.95+** (`WIN_PRICE`).
-If neither side gets there, the window is undecided and the next window
-has no signal. The very first window after startup is watched only —
-there's no previous result yet to follow.
-
-## The trade
-
-One order type: a **taker market buy**, on the followed side, sized to
-the current base (see below).
-
-1. At least **5 seconds** (`ENTRY_DELAY_SECONDS`) after the window opens,
-   buy the base size at market — **whatever the price**, no cap. The fill
-   is priced by walking real ask depth and pays the taker fee. If there's
-   no ask / no depth at 5s, it keeps checking every tick until the window
-   closes; never filling means no trade that window (the base doesn't move).
-2. **No exit.** The position is held to the window's close and settled by
-   the same 0.95 rule: winner pays **$1/share**, loser **$0**. If the
-   window turns out undecided, any open position is closed at the last
-   bid instead (real proceeds, not $1/$0) — and this doesn't move the
-   ladder, since it isn't a real win or loss.
-3. One entry per window.
-
-## Size ladder
-
-One shared base for both sides, starting at **500** shares
-(`BASE_SHARES`):
-
-```
-500 → 400 → 300 → 200 → 100 → 0   (−100 per win, floor 0)
-```
-
-- Every **win** (the followed side matched the window's winner) takes
-  100 off the base.
-- **Any loss resets the base to 500** — wherever it was on the ladder.
-- At **0**, the bot **skips** signals on the side that ran the base down
-  (it still watches and records the result, just doesn't trade). The
-  **first signal on the opposite side** trades 500 and restarts the base.
-- An undecided window, a no-signal window, or a signal that never got
-  filled all leave the base exactly where it was.
+   The moment the bid drops to/through whichever level is currently
+   active, immediately taker-sell (market order, pays taker fee) to
+   guarantee the exit.
+4. **Forced close**: if the window closes with the position still open
+   (no TP, no SL hit), force a taker close (market sell) right at window
+   end.
+5. **Anti-martingale**: base size $30. A win doubles the size for the
+   next window (2x → $60, 4x → $120, 8x → $240 — up to 3 doublings),
+   pressing size only with prior winnings. A loss (SL hit, or a forced
+   close that lost money), or completing the 3rd press level, resets
+   size back to base. This bounds the *percentage* lost on any single
+   trade (the stop-loss distance) but not the dollar amount, which
+   scales with whatever level the streak had pressed to.
 
 ## Run locally
 
 ```
 pip install -r requirements.txt
-cp .env.example .env   # all vars optional
+cp .env.example .env   # edit if needed
 uvicorn app.main:app --reload
 ```
 
-Dashboard at http://localhost:8000: the countdown, the previous window's
-result (both final prices, which side won), live UP/DOWN books, the
-armed entry / open position, the size ladder, a history of recent
-windows (followed side, winner, result, P&L, base after), stats, equity
-curve and event log.
+Dashboard at http://localhost:8000
 
-## Layout
+## Config knobs (`app/config.py`)
 
-- `app/engine.py` — the strategy: signal handling, the +5s taker entry,
-  settlement, the size ladder
-- `app/state.py` — runtime loop, window rolling, the last-two-second CLOB
-  winner read, faster polling right at the close
-- `app/polymarket_client.py`, `app/paper_broker.py`, `app/models.py` —
-  Polymarket CLOB access, fee/log helper, shared types
-- `tests/` — `python tests/run_all.py` (no network needed): the ladder
-  (including the floor-skip / restart edge cases), the entry timing and
-  any-price fill, empty-book retries, settlement (win/loss/undecided),
-  and the orchestration with a fake CLOB across several windows
-
-## Config (`app/config.py`, env-overridable)
-
-`ENTRY_DELAY_SECONDS` (5), `BASE_SHARES` (500), `SHARES_STEP` (100),
-`WIN_PRICE` (0.95), `STARTING_CAPITAL` ($2000), `POLL_INTERVAL_SECONDS`
-(1.0), `CLOSE_PHASE_POLL_SECONDS` (0.25, used in the last 3s of a window
-for a tighter winner read).
+- `ENGINE2_TRIGGER_PRICE`, `ENGINE2_TP_PRICE`, `ENGINE2_SL_SCHEDULE`, `ENGINE2_BASE_USD`, `ENGINE2_MAX_MARTINGALE_LEVEL`
+- `STARTING_CAPITAL`, fee/rebate constants
 
 ## Notes / assumptions
 
-- The entry can only fire on a poll tick, so it lands between 5.0s and
-  ~6s after open at the default 1s poll interval; lower
-  `POLL_INTERVAL_SECONDS` to tighten it.
-- "Buys regardless of price" means the bot pays whatever the ask is,
-  including 0.95+ — right before the window is likely to resolve that
-  side's way.
-- The winner read is a single snapshot during the final two seconds, not an
-  average — matching the "0.95+ in the final two seconds" rule with 0.25s
-  polling near the close.
-- Taker fee uses `TAKER_FEE_RATE`/`TAKER_FEE_EXPONENT` in `config.py`;
-  verify against Polymarket's fee-rate endpoint before real money.
-- This is a fixed rule, not a fitted model: nothing here has been
-  backtested. The dashboard's follow-accuracy and win-rate tallies are
-  there to measure it as it runs.
+- The breakout trigger reads CLOB best bid/ask **mid-price**, checked every tick.
+- Entry, the stop loss, and any forced window-end close are all taker orders and pay the taker fee for real; TP is still a resting maker order.
+- A forced close at window end counts as a win for anti-martingale purposes if its realized P&L is ≥ $0, and a loss otherwise — there's no explicit TP/SL trigger to key off of in that case.
+- This reuses `polymarket_client.py`, `models.py`, `paper_broker.py`, and the `main.py`/`state.py` orchestration loop unchanged in behavior.
