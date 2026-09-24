@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Candle Engines — BTC 5m bot</title>
+<title>Candle Contrarian — BTC 5m bot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -151,7 +151,6 @@
   .log-row .ev.HALTED{color:var(--coral);}
   .log-row .ev.ENGINE_SLEEP{color:var(--muted);}
   .log-row .ev.ENGINE_RESUMED{color:var(--amber);}
-  .log-row .ev.ENGINE1_LOCKED{color:var(--amber);}
   .log-row .ev.CANDLE{color:var(--faint);}
   .log-row .note{color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .log-row .pnl{font-weight:600;}
@@ -162,8 +161,8 @@
 <div class="wrap">
   <header>
     <div>
-      <h1>Candle Engines</h1>
-      <div class="sub">BTC 5m up/down — E1 3-in-a-row continuation + E2 single-candle contrarian, running in parallel, TP 0.99, $500 target then sleep 3 windows</div>
+      <h1>Candle Contrarian</h1>
+      <div class="sub">BTC 5m up/down — single-candle contrarian (Binance BTCUSDT), 500sh on window open, TP 0.99, $500 target then sleep 3 windows</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -193,8 +192,11 @@
   </div>
 
   <div class="two-col">
-    <div class="card" id="engineCard1"></div>
-    <div class="card" id="engineCard2"></div>
+    <div class="card" id="engineCard"></div>
+    <div class="card">
+      <h2>Risk</h2>
+      <div class="stats-grid" id="drawdownGrid"></div>
+    </div>
   </div>
 
   <div class="two-col">
@@ -273,8 +275,8 @@ async function poll(){
     renderGauge('downTrack','downMid','downBidAsk','DOWN', book.down_bid, book.down_ask);
 
     renderCandleStrip(e.candle_history || []);
-    renderEngineCard('engineCard1', e.engine1);
-    renderEngineCard('engineCard2', e.engine2);
+    renderEngineCard('engineCard', e);
+    renderDrawdown(e);
     renderStats(e);
     renderEquityHero(e);
     renderEquityCurve(e.equity_curve || []);
@@ -294,16 +296,12 @@ function renderCandleStrip(history){
 function renderEngineCard(elId, e){
   const el = $(elId);
   if(!e){ el.innerHTML = '<div class="empty">no data</div>'; return; }
-  const statusLabels = {
-    waiting_for_streak:'watching for streak', armed:'armed \u2014 buys on next tick',
-    open:'position open', sleeping:'sleeping', halted:'halted', waiting:'waiting',
-  };
 
   const defRowsHtml = [
-    ['Mode', e.sticky ? '3-in-a-row, locks side' : 'single-candle, recomputes'],
+    ['Signal', 'single-candle contrarian, recomputes every window'],
     ['Shares / trade', `${fmtSh(e.shares)}sh`],
     ['Take profit', '0.99 (booked @ $1.00/sh)'],
-    ['Locked / signalled side', e.locked_side || e.entry_side_this_window || '\u2014'],
+    ['Signalled side', e.entry_side_this_window || '\u2014'],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
   const progressPct = Math.max(0, Math.min(100, e.progress_pct || 0));
@@ -315,7 +313,7 @@ function renderEngineCard(elId, e){
         <span class="size" style="color:${progressNeg?'var(--coral)':'var(--amber)'}">${e.session_pnl>=0?'+':''}${fmt$(e.session_pnl)}</span>
       </div>
       <div class="progress-track" style="margin-top:9px;"><div class="progress-fill ${progressNeg?'neg':''}" style="width:${progressPct}%"></div></div>
-      <div class="press-meta" style="margin-top:7px;"><span>lifetime P&amp;L: ${fmt$(e.total_pnl)}</span><span class="max">win rate: ${e.win_rate!=null?e.win_rate+'%':'\u2014'}</span></div>
+      <div class="press-meta" style="margin-top:7px;"><span>lifetime P&amp;L: ${fmt$(e.realized_pnl)}</span><span class="max">win rate: ${e.win_rate!=null?e.win_rate+'%':'\u2014'}</span></div>
     </div>`;
 
   const pos = e.position;
@@ -363,14 +361,25 @@ function renderEngineCard(elId, e){
   `;
 }
 
-function renderStats(e){
-  const e1 = e.engine1 || {}, e2 = e.engine2 || {};
-  const sum = (k) => (e1[k]||0) + (e2[k]||0);
-  const wins = sum('wins'), losses = sum('losses');
+function renderDrawdown(e){
+  const el = $('drawdownGrid');
+  if(!el) return;
   const tiles = [
-    [sum('fills'), 'entries'], [sum('tp_fills'), 'tp fills'],
-    [sum('settled_wins'), 'won settle'], [sum('settled_losses'), 'lost settle'],
-    [sum('no_signal_windows'), 'no-signal'],
+    [fmt$(e.peak_equity), 'peak equity'],
+    [fmt$(e.max_drawdown), 'max drawdown $'],
+    [(e.max_drawdown_pct!=null ? e.max_drawdown_pct.toFixed(2) : '0.00') + '%', 'max drawdown %'],
+    [fmt$(e.equity), 'live equity'],
+  ];
+  el.innerHTML = tiles.map(([v,label]) =>
+    `<div class="stat-tile ${label==='max drawdown $' && e.max_drawdown>0 ? 'loss':''}"><div class="n">${v}</div><div class="l">${label}</div></div>`).join('');
+}
+
+function renderStats(e){
+  const wins = e.wins||0, losses = e.losses||0;
+  const tiles = [
+    [e.fills||0, 'entries'], [e.tp_fills||0, 'tp fills'],
+    [e.settled_wins||0, 'won settle'], [e.settled_losses||0, 'lost settle'],
+    [e.no_signal_windows||0, 'no-signal'],
     [(wins+losses) ? (100*wins/(wins+losses)).toFixed(1) : '\u2014', 'win rate %'],
   ];
   $('statsGrid').innerHTML = tiles.map(([v,label]) =>
@@ -378,27 +387,26 @@ function renderStats(e){
 }
 
 function renderEquityHero(e){
-  const e1 = e.engine1 || {}, e2 = e.engine2 || {};
-  const balance = (e1.balance||0) + (e2.balance||0);
-  const startingCapital = (e1.starting_capital||0) + (e2.starting_capital||0);
+  const balance = e.balance||0;
+  const startingCapital = e.starting_capital||0;
   const above = balance >= startingCapital;
   const delta = balance - startingCapital;
   const deltaPct = startingCapital ? (delta/startingCapital*100) : 0;
   $('equityHero').innerHTML = `
     <div class="item">
-      <div class="k">Combined balance</div>
+      <div class="k">Balance</div>
       <div class="v ${above?'pos':'neg'}">${fmt$(balance)}</div>
       <div class="sub">${delta>=0?'+':''}${fmt$(delta)} (${delta>=0?'+':''}${deltaPct.toFixed(1)}%) since start</div>
     </div>
     <div class="item">
       <div class="k">Realized P&amp;L</div>
       <div class="v ${pnlClass(e.realized_pnl)}">${e.realized_pnl>=0?'+':''}${fmt$(e.realized_pnl)}</div>
-      <div class="sub">lifetime, both engines</div>
+      <div class="sub">lifetime, closed trades</div>
     </div>
     <div class="item">
       <div class="k">Unrealized P&amp;L</div>
       <div class="v ${pnlClass(e.unrealized_pnl)}">${e.unrealized_pnl>=0?'+':''}${fmt$(e.unrealized_pnl)}</div>
-      <div class="sub">floating, both engines combined</div>
+      <div class="sub">floating, open position</div>
     </div>
   `;
 }
