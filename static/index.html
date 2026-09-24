@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Candle Handoff — BTC 5m bot</title>
+<title>Candle Engines — BTC 5m bot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -70,7 +70,7 @@
   .candle-chip.green{background:var(--mint);} .candle-chip.red{background:var(--coral);}
   .candle-chip.doji{background:var(--faint);}
 
-  .status-badge.paused{background:#1a2029; color:#6a7688;}
+  .status-badge.sleeping{background:#1a2029; color:#6a7688;}
   .status-badge.waiting_for_streak{background:var(--amber-dim); color:var(--amber);}
   .status-badge.armed{background:var(--violet-dim); color:var(--violet);}
 
@@ -149,8 +149,8 @@
   .log-row .ev.SETTLE_LOSS{color:var(--coral);}
   .log-row .ev.SETTLE_UNKNOWN{color:var(--muted);}
   .log-row .ev.HALTED{color:var(--coral);}
-  .log-row .ev.ENGINE_ACTIVATED{color:var(--amber);}
-  .log-row .ev.ENGINE_PAUSED{color:var(--muted);}
+  .log-row .ev.ENGINE_SLEEP{color:var(--muted);}
+  .log-row .ev.ENGINE_RESUMED{color:var(--amber);}
   .log-row .ev.ENGINE1_LOCKED{color:var(--amber);}
   .log-row .ev.CANDLE{color:var(--faint);}
   .log-row .note{color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
@@ -162,8 +162,8 @@
 <div class="wrap">
   <header>
     <div>
-      <h1>Candle Handoff</h1>
-      <div class="sub">BTC 5m up/down — E1 3-in-a-row continuation \u2194 E2 single-candle contrarian, TP 0.99, target $500/session</div>
+      <h1>Candle Engines</h1>
+      <div class="sub">BTC 5m up/down — E1 3-in-a-row continuation + E2 single-candle contrarian, running in parallel, TP 0.99, $500 target then sleep 3 windows</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -277,7 +277,7 @@ async function poll(){
     renderEngineCard('engineCard2', e.engine2);
     renderStats(e);
     renderEquityHero(e);
-    renderEquityCurve((e.engine1 && e.engine1.active ? e.engine1.equity_curve : (e.engine2 && e.engine2.equity_curve)) || []);
+    renderEquityCurve(e.equity_curve || []);
     renderLog(s.log || []);
   }catch(err){
     $('statusDot').className = 'dot err';
@@ -296,7 +296,7 @@ function renderEngineCard(elId, e){
   if(!e){ el.innerHTML = '<div class="empty">no data</div>'; return; }
   const statusLabels = {
     waiting_for_streak:'watching for streak', armed:'armed \u2014 buys on next tick',
-    open:'position open', paused:'paused (handed off)', halted:'halted', waiting:'waiting',
+    open:'position open', sleeping:'sleeping', halted:'halted', waiting:'waiting',
   };
 
   const defRowsHtml = [
@@ -348,7 +348,7 @@ function renderEngineCard(elId, e){
   el.innerHTML = `
     <h2>
       ${e.label}
-      <span class="status-badge ${e.active ? '' : 'paused'}">${e.active ? 'ACTIVE' : 'paused'}</span>
+      <span class="status-badge ${e.active ? '' : 'sleeping'}">${e.active ? 'ACTIVE' : `sleeping (${e.sleep_windows_remaining} windows left)`}</span>
     </h2>
     <div class="def-grid">${defRowsHtml}</div>
     ${progressHtml}
@@ -379,7 +379,6 @@ function renderStats(e){
 
 function renderEquityHero(e){
   const e1 = e.engine1 || {}, e2 = e.engine2 || {};
-  const active = e1.active ? e1 : e2;
   const balance = (e1.balance||0) + (e2.balance||0);
   const startingCapital = (e1.starting_capital||0) + (e2.starting_capital||0);
   const above = balance >= startingCapital;
@@ -399,7 +398,7 @@ function renderEquityHero(e){
     <div class="item">
       <div class="k">Unrealized P&amp;L</div>
       <div class="v ${pnlClass(e.unrealized_pnl)}">${e.unrealized_pnl>=0?'+':''}${fmt$(e.unrealized_pnl)}</div>
-      <div class="sub">floating, ${active.label || 'active engine'}</div>
+      <div class="sub">floating, both engines combined</div>
     </div>
   `;
 }

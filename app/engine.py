@@ -1,7 +1,7 @@
 """
-Trading engines -- two candle-signal engines that hand control back and
-forth (only one places new trades at a time). See app/config.py for the
-full strategy write-up.
+Trading engines -- two independent candle-signal engines that trade in
+parallel (neither stops the other). See app/config.py for the full
+strategy write-up.
 """
 import time
 from collections import deque
@@ -58,14 +58,15 @@ class CandleEngineState:
     down_bid: Optional[float] = None
     down_ask: Optional[float] = None
 
-    active: bool = False           # is this engine the one currently allowed to enter new trades?
+    active: bool = True            # False while sleeping off a hit profit target
+    sleep_windows_remaining: int = 0  # counts down to 0 across window rollovers, then resumes
     locked_side: Optional[Side] = None   # engine 1 only: side locked in after a 3-in-a-row
     entry_side_this_window: Optional[Side] = None  # signalled side for the window that just opened
     entered_this_window: bool = False
     position: Optional[Position] = None
 
-    session_pnl: float = 0.0       # resets to 0 every time this engine (re)activates
-    total_pnl: float = 0.0         # lifetime, across all activations
+    session_pnl: float = 0.0       # resets to 0 every time this engine wakes up from sleep
+    total_pnl: float = 0.0         # lifetime, across all sessions
     fills: int = 0
     tp_fills: int = 0
     settled_wins: int = 0
@@ -90,19 +91,20 @@ class CandleEngine:
         self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event,
                                balance_after=self.capital.balance, **kw)
 
-    def activate(self):
-        if self.s.active:
-            return
+    def _wake_up(self):
         self.s.active = True
+        self.s.sleep_windows_remaining = 0
         self.s.locked_side = None
         self.s.session_pnl = 0.0
-        self._log("ENGINE_ACTIVATED", note=f"{self.label} activated -- session P&L reset, target +${config.ENGINE_PROFIT_TARGET_USD:.0f}")
+        self._log("ENGINE_RESUMED", note=f"{self.label} resumed after sleep -- session P&L reset, target +${config.ENGINE_PROFIT_TARGET_USD:.0f}")
 
-    def pause(self):
-        if not self.s.active:
-            return
-        self.s.active = False
-        self._log("ENGINE_PAUSED", note=f"{self.label} paused -- session P&L +${self.s.session_pnl:.2f} reached target")
+    def _check_sleep(self):
+        if self.s.active and self.s.session_pnl >= config.ENGINE_PROFIT_TARGET_USD:
+            self.s.active = False
+            self.s.sleep_windows_remaining = config.ENGINE_SLEEP_WINDOWS
+            self._log("ENGINE_SLEEP",
+                       note=(f"{self.label} session P&L +${self.s.session_pnl:.2f} reached target -- "
+                             f"sleeping {config.ENGINE_SLEEP_WINDOWS} windows (does not affect the other engine)"))
 
     # ---- signal: decide (if anything) to buy at the open of the new window -
 
@@ -111,8 +113,14 @@ class CandleEngine:
         self.s.entry_side_this_window = None
         self.s.entered_this_window = False
 
-        if self.capital.halted or not self.s.active:
+        if self.capital.halted:
             return
+
+        if not self.s.active:
+            if self.s.sleep_windows_remaining > 0:
+                self.s.sleep_windows_remaining -= 1
+                return  # this window is one of the 3 skipped -- no signal, no trade
+            self._wake_up()  # remaining already hit 0 -- trade this window as usual below
 
         if self.sticky:
             if self.s.locked_side is None and len(candle_history) >= config.ENGINE1_STREAK_LEN:
@@ -224,9 +232,7 @@ class CandleEngine:
             self.s.losses += 1
         self._log(reason, side=pos.side.value, price=pos.entry_price, shares=pos.shares, pnl=pnl, fee=fee, note=note)
         self.capital.check_halt()
-
-    def target_reached(self) -> bool:
-        return self.s.active and self.s.session_pnl >= config.ENGINE_PROFIT_TARGET_USD
+        self._check_sleep()
 
     def record_equity_point(self, window_slug: Optional[str]):
         self.capital.record_equity_point(window_slug)
@@ -254,7 +260,7 @@ class CandleEngine:
         if self.capital.halted:
             status = "halted"
         elif not self.s.active:
-            status = "paused"
+            status = "sleeping"
         elif pos is not None:
             status = "open"
         elif self.sticky and self.s.locked_side is None:
@@ -266,6 +272,7 @@ class CandleEngine:
 
         return {
             "engine": self.name, "label": self.label, "active": self.s.active,
+            "sleep_windows_remaining": self.s.sleep_windows_remaining,
             "sticky": self.sticky, "shares": self.shares,
 
             "balance": round(self.capital.balance, 2),
@@ -295,8 +302,8 @@ class CandleEngine:
 
 
 # ---------------------------------------------------------------------------
-# Manager -- coordinates the two engines' hand-off, keeps the same external
-# surface app/state.py already drives (Engine(broker), on_tick,
+# Manager -- runs both engines independently in parallel, keeps the same
+# external surface app/state.py already drives (Engine(broker), on_tick,
 # reset_for_window, finalize_window, snapshot).
 # ---------------------------------------------------------------------------
 
@@ -310,7 +317,8 @@ class Engine:
                                      shares=config.ENGINE1_SHARES, sticky=True)
         self.engine2 = CandleEngine("E2", "Engine 2 (single-candle contrarian)", broker,
                                      shares=config.ENGINE2_SHARES, sticky=False)
-        self.engine1.activate()  # engine 1 starts active; engine 2 waits
+        # both start active and trade in parallel from the first window --
+        # neither one's state depends on the other.
 
     def _log(self, engine_name, window_slug, event, **kw):
         self.broker.log_event(engine_name, window_slug, event, **kw)
@@ -331,22 +339,12 @@ class Engine:
         now = now if now is not None else time.time()
         self.engine1.on_tick(up_bid, up_ask, down_bid, down_ask, now)
         self.engine2.on_tick(up_bid, up_ask, down_bid, down_ask, now)
-        self._check_handoff()
-
-    def _check_handoff(self):
-        if self.engine1.target_reached():
-            self.engine1.pause()
-            self.engine2.activate()
-        elif self.engine2.target_reached():
-            self.engine2.pause()
-            self.engine1.activate()
 
     def finalize_window(self, winning_side: Optional[Side]):
         window_slug = self.engine1.s.window.slug if self.engine1.s.window else (
             self.engine2.s.window.slug if self.engine2.s.window else None)
         self.engine1.settle_at_window_close(winning_side)
         self.engine2.settle_at_window_close(winning_side)
-        self._check_handoff()
         self.engine1.record_equity_point(window_slug)
         self.engine2.record_equity_point(window_slug)
         self.engine1.s.window = None
@@ -357,13 +355,21 @@ class Engine:
     def snapshot(self) -> dict:
         e1 = self.engine1.snapshot()
         e2 = self.engine2.snapshot()
-        active = e1 if e1["active"] else e2
+
+        # both engines record an equity point every window (in lockstep),
+        # so index-pairing them gives a true combined balance curve.
+        combined_curve = []
+        for i in range(min(len(e1["equity_curve"]), len(e2["equity_curve"]))):
+            p1, p2 = e1["equity_curve"][i], e2["equity_curve"][i]
+            combined_curve.append({
+                "window": p1["window"] or p2["window"], "ts": max(p1["ts"], p2["ts"]),
+                "balance": round(p1["balance"] + p2["balance"], 2),
+            })
+
         return {
-            # top-level mirrors of the currently-active engine, for anything
-            # in state.py/dashboard that expects a single "the engine" view
-            "balance": active["balance"], "starting_capital": config.STARTING_CAPITAL,
+            "balance": round(e1["balance"] + e2["balance"], 2), "starting_capital": 2 * config.STARTING_CAPITAL,
             "halted": e1["halted"] and e2["halted"],
-            "equity_curve": active["equity_curve"],
+            "equity_curve": combined_curve,
             "realized_pnl": round(e1["total_pnl"] + e2["total_pnl"], 4),
             "unrealized_pnl": round(e1["unrealized_pnl"] + e2["unrealized_pnl"], 4),
 
