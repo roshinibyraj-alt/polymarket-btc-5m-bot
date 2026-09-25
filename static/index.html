@@ -149,6 +149,7 @@
   .log-row .ev.HALTED{color:var(--coral);}
   .log-row .ev.IMBALANCE_SIGNAL{color:var(--violet);}
   .log-row .ev.IMBALANCE_UNLOCK{color:var(--amber);}
+  .log-row .ev.SIZE_ADJUST{color:var(--faint);}
   .log-row .ev.HISTORY_SEEDED{color:var(--faint);}
   .log-row .ev.CANDLE{color:var(--faint);}
   .log-row .note{color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
@@ -298,7 +299,7 @@ function renderEngineCard(elId, e){
 
   const defRowsHtml = [
     ['Signal', `imbalance over last ${e.imbalance_window} candles, gap \u2265 ${e.imbalance_threshold}`],
-    ['Shares / trade', `${fmtSh(e.shares)}sh`],
+    ['Shares / trade', e.locked_side ? `${fmtSh(e.current_shares)}sh (base ${fmtSh(e.base_shares)}, locked gap ${e.gap_at_lock})` : `${fmtSh(e.base_shares)}sh base`],
     ['Take profit', '0.99 (booked @ $1.00/sh)'],
     ['Locked side', e.locked_side ? `${e.locked_side} (unlocks on next ${e.required_color} candle)` : '\u2014 (gap within 1)'],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');

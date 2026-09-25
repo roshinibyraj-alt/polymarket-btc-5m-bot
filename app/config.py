@@ -21,7 +21,14 @@ Central configuration for the BTC 5-min up/down bot.
     window with no real reversal -- until a candle of the lacking color
     actually closes. That unlocks it, and the signal is re-evaluated
     from scratch (may immediately re-lock, flip sides, or go flat).
-    ENGINE2_SHARES (500) shares, taker, on window open.
+  - Sizing while locked: the gap (in the locked side's favor) is tracked
+    against its value at the moment of lock. Each +1 move in that gap
+    since lock adds ENGINE2_SIZE_STEP (100) shares to the base
+    (ENGINE2_SHARES, 500); each -1 move removes 100. Capped at
+    ENGINE2_MAX_ADDITIONS (5) additions above base (1000sh max) and
+    floored at ENGINE2_MIN_SHARES (100sh), however far the gap shrinks.
+    A fresh lock always starts back at the 500 base. Taker, on window
+    open.
   - Runs continuously -- no profit-target pause/sleep of any kind.
 
   Exit mechanics:
@@ -68,7 +75,10 @@ ENGINE_TP_PRICE = 0.99          # resting maker sell
 ENGINE_TP_COUNTS_AS = 1.00      # TP fill is booked at this price for realized P&L, not 0.99
 
 # ---- Engine sizing -------------------------------------------------------
-ENGINE2_SHARES = 500.0
+ENGINE2_SHARES = 500.0           # base size, used at the moment a side locks in
+ENGINE2_SIZE_STEP = 100.0        # shares added/removed per +1/-1 move in the gap since lock
+ENGINE2_MAX_ADDITIONS = 5        # cap on step-ups above base (base + 5*step = 1000sh max)
+ENGINE2_MIN_SHARES = 100.0       # absolute floor, regardless of how far the gap shrinks
 
 MAKER_REBATE_FRACTION = 0.20  # rebate earned on every resting-order fill (maker side)
 
