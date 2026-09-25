@@ -12,13 +12,16 @@ Central configuration for the BTC 5-min up/down bot.
     reds vs greens across the most recent IMBALANCE_WINDOW (16) candles
     (recalculated fresh each time -- oldest drops off, newest comes in).
   - If reds - greens >= IMBALANCE_THRESHOLD (2): green is "lacking" ->
-    buy UP. If greens - reds >= IMBALANCE_THRESHOLD: red is "lacking" ->
-    buy DOWN. Otherwise (gap is 0 or 1 either way): no signal, no trade
-    that window.
-  - Because the count is recomputed fresh every window from the current
-    16-candle window, the signal naturally turns itself off the moment
-    the gap closes back to within 1 -- no separate stop condition
-    needed. ENGINE2_SHARES (500) shares, taker, on window open.
+    lock onto UP. If greens - reds >= IMBALANCE_THRESHOLD: red is
+    "lacking" -> lock onto DOWN. Otherwise (gap is 0 or 1 either way):
+    no signal, no trade that window.
+  - Once locked onto a side, it keeps trading that side every window --
+    ignoring what the rolling-16 recompute says in the meantime, since
+    that number can shrink just from an old candle aging out of the
+    window with no real reversal -- until a candle of the lacking color
+    actually closes. That unlocks it, and the signal is re-evaluated
+    from scratch (may immediately re-lock, flip sides, or go flat).
+    ENGINE2_SHARES (500) shares, taker, on window open.
   - Runs continuously -- no profit-target pause/sleep of any kind.
 
   Exit mechanics:

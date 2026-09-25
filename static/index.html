@@ -148,6 +148,7 @@
   .log-row .ev.SETTLE_UNKNOWN{color:var(--muted);}
   .log-row .ev.HALTED{color:var(--coral);}
   .log-row .ev.IMBALANCE_SIGNAL{color:var(--violet);}
+  .log-row .ev.IMBALANCE_UNLOCK{color:var(--amber);}
   .log-row .ev.HISTORY_SEEDED{color:var(--faint);}
   .log-row .ev.CANDLE{color:var(--faint);}
   .log-row .note{color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
@@ -299,7 +300,7 @@ function renderEngineCard(elId, e){
     ['Signal', `imbalance over last ${e.imbalance_window} candles, gap \u2265 ${e.imbalance_threshold}`],
     ['Shares / trade', `${fmtSh(e.shares)}sh`],
     ['Take profit', '0.99 (booked @ $1.00/sh)'],
-    ['Signalled side', e.entry_side_this_window || '\u2014 (gap within 1)'],
+    ['Locked side', e.locked_side ? `${e.locked_side} (unlocks on next ${e.required_color} candle)` : '\u2014 (gap within 1)'],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
   const reds = e.reds_this_signal||0, greens = e.greens_this_signal||0;

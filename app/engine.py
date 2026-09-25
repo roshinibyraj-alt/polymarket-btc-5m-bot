@@ -80,6 +80,9 @@ class EngineState:
     entered_this_window: bool = False
     position: Optional[Position] = None
 
+    locked_side: Optional[Side] = None       # side currently being traded every window
+    required_color: Optional[str] = None     # the lacking color we're waiting to see, to unlock
+
     total_pnl: float = 0.0
     fills: int = 0
     tp_fills: int = 0
@@ -92,9 +95,12 @@ class EngineState:
 
 class Engine:
     """16-candle imbalance mean-reversion engine: recomputes reds vs
-    greens across the most recent 16 closed Binance candles every window;
-    a gap of >=2 buys the lacking color's side (500 shares, taker, at the
-    window's open). Resting TP at 0.99 (booked as $1/share); otherwise
+    greens across the most recent 16 closed Binance candles; a gap of
+    >=2 locks onto the lacking color's side (500 shares, taker, every
+    window's open) and keeps trading that side -- ignoring the
+    recomputed gap in the meantime -- until a candle of the lacking
+    color actually closes, at which point it unlocks and re-evaluates
+    from scratch. Resting TP at 0.99 (booked as $1/share); otherwise
     rides to the window's real $0/$1 settlement. Runs continuously --
     no profit-target pause."""
 
@@ -150,18 +156,42 @@ class Engine:
         self.s.reds_this_signal = reds
         self.s.greens_this_signal = greens
 
+        if self.s.locked_side is not None:
+            # Once locked onto a side, keep trading it every window
+            # regardless of what the recomputed rolling-16 gap says (that
+            # gap can shrink just because an old candle ages out, with no
+            # real reversal) -- only unlock once the candle that just
+            # closed is actually the color we're waiting to see.
+            just_closed = self.candle_history[-1] if self.candle_history else None
+            if just_closed == self.s.required_color:
+                self._log("IMBALANCE_UNLOCK",
+                           note=(f"a {self.s.required_color} candle finally closed -- unlocking "
+                                 f"{self.s.locked_side.value}, re-evaluating from scratch"))
+                self.s.locked_side = None
+                self.s.required_color = None
+                # fall through to a fresh evaluation below, same window
+            else:
+                self.s.entry_side_this_window = self.s.locked_side
+                return
+
         if len(last_n) < config.IMBALANCE_WINDOW:
             self.s.no_signal_windows += 1
             return  # only possible right at startup if Binance backfill came up short
 
         if reds - greens >= config.IMBALANCE_THRESHOLD:
+            self.s.locked_side = Side.UP
+            self.s.required_color = "green"
             self.s.entry_side_this_window = Side.UP
             self._log("IMBALANCE_SIGNAL", side="UP",
-                       note=f"last {config.IMBALANCE_WINDOW} candles: {reds} red / {greens} green -- green lacking, buying UP")
+                       note=(f"last {config.IMBALANCE_WINDOW} candles: {reds} red / {greens} green -- green lacking, "
+                             f"locking onto UP until a green candle closes"))
         elif greens - reds >= config.IMBALANCE_THRESHOLD:
+            self.s.locked_side = Side.DOWN
+            self.s.required_color = "red"
             self.s.entry_side_this_window = Side.DOWN
             self._log("IMBALANCE_SIGNAL", side="DOWN",
-                       note=f"last {config.IMBALANCE_WINDOW} candles: {reds} red / {greens} green -- red lacking, buying DOWN")
+                       note=(f"last {config.IMBALANCE_WINDOW} candles: {reds} red / {greens} green -- red lacking, "
+                             f"locking onto DOWN until a red candle closes"))
         else:
             self.s.no_signal_windows += 1
 
@@ -311,6 +341,8 @@ class Engine:
             "unrealized_pnl": round(unrealized_pnl, 4),
 
             "entry_side_this_window": self.s.entry_side_this_window.value if self.s.entry_side_this_window else None,
+            "locked_side": self.s.locked_side.value if self.s.locked_side else None,
+            "required_color": self.s.required_color,
             "reds_this_signal": self.s.reds_this_signal, "greens_this_signal": self.s.greens_this_signal,
             "imbalance_window": config.IMBALANCE_WINDOW, "imbalance_threshold": config.IMBALANCE_THRESHOLD,
             "position": position_payload,
