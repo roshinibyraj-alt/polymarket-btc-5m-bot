@@ -1,18 +1,25 @@
 """
 Central configuration for the BTC 5-min up/down bot.
 
-Single-candle contrarian engine:
+16-candle imbalance mean-reversion engine:
   - Candle = the real BTC/USDT 5-min spot candle (Binance klines) for
     the window that just closed, colored green (close > open) or red
     (close < open). Independent of Polymarket's own resolution.
-  - Every window, looks at just the single most-recently-closed candle:
-    green -> buy DOWN next window, red -> buy UP next window (a doji
-    candle is skipped -- no signal that window). ENGINE2_SHARES (500)
-    shares, taker, on window open.
-  - Fires every window until session realized P&L reaches
-    +ENGINE_PROFIT_TARGET_USD ($500), then sleeps for the next
-    ENGINE_SLEEP_WINDOWS (3) window opens (no signal check, no entry),
-    then wakes up with session P&L reset to zero.
+  - At startup, immediately backfills the last IMBALANCE_WINDOW (16)
+    closed Binance candles -- no waiting around for 16 windows to pass
+    organically before the bot can trade.
+  - Every time a new candle closes (i.e. every window rollover), counts
+    reds vs greens across the most recent IMBALANCE_WINDOW (16) candles
+    (recalculated fresh each time -- oldest drops off, newest comes in).
+  - If reds - greens >= IMBALANCE_THRESHOLD (2): green is "lacking" ->
+    buy UP. If greens - reds >= IMBALANCE_THRESHOLD: red is "lacking" ->
+    buy DOWN. Otherwise (gap is 0 or 1 either way): no signal, no trade
+    that window.
+  - Because the count is recomputed fresh every window from the current
+    16-candle window, the signal naturally turns itself off the moment
+    the gap closes back to within 1 -- no separate stop condition
+    needed. ENGINE2_SHARES (500) shares, taker, on window open.
+  - Runs continuously -- no profit-target pause/sleep of any kind.
 
   Exit mechanics:
     - A resting take-profit sell at ENGINE_TP_PRICE (0.99) (maker). If
@@ -49,21 +56,22 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "BTCUSDT")
 CANDLE_HISTORY_MAXLEN = 20  # rolling window of recent candle colors kept in memory
 
-# ---- Candle-signal engines: shared exit mechanics ----------------------
+# ---- Imbalance signal ---------------------------------------------------
+IMBALANCE_WINDOW = 16      # how many recent candles to count reds/greens over
+IMBALANCE_THRESHOLD = 2    # minimum gap (reds - greens or greens - reds) to trigger a buy
+
+# ---- Take profit (shared exit mechanic) --------------------------------
 ENGINE_TP_PRICE = 0.99          # resting maker sell
 ENGINE_TP_COUNTS_AS = 1.00      # TP fill is booked at this price for realized P&L, not 0.99
-ENGINE_PROFIT_TARGET_USD = 500.0  # engine sleeps after +$500 this session
-ENGINE_SLEEP_WINDOWS = 3          # windows the engine sits out after hitting its target
 
-# ---- Engine: single-candle contrarian -----------------------------------
+# ---- Engine sizing -------------------------------------------------------
 ENGINE2_SHARES = 500.0
 
 MAKER_REBATE_FRACTION = 0.20  # rebate earned on every resting-order fill (maker side)
 
-# Demo capital: each engine gets its own pool, debited on entry fill,
-# credited on TP/settlement. An engine halts permanently if its own
-# balance ever drops below $0.
-STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
+# Demo capital: debited on entry fill, credited on TP/settlement. The
+# engine halts permanently if balance ever drops below $0.
+STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "10000"))
 
 # ---- Trading fees -----------------------------------------------------
 # Entries are taker orders and pay the fee for real; TP is a resting

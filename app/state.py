@@ -29,7 +29,16 @@ class BotState:
         self._task: Optional[asyncio.Task] = None
 
     async def start(self):
+        await self._seed_candle_history()
         self._task = asyncio.create_task(self._run_loop())
+
+    async def _seed_candle_history(self):
+        try:
+            candles = await self.binance.get_closed_candles(limit=config.IMBALANCE_WINDOW)
+        except Exception as e:
+            self.broker.log_event("SYS", "", "HISTORY_SEED_FAILED", note=f"could not backfill candle history: {e}")
+            return
+        self.engine.seed_history(candles[-config.IMBALANCE_WINDOW:])
 
     async def stop(self):
         if self._task:

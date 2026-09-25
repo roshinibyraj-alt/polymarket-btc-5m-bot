@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Candle Contrarian — BTC 5m bot</title>
+<title>Candle Imbalance — BTC 5m bot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -70,8 +70,6 @@
   .candle-chip.green{background:var(--mint);} .candle-chip.red{background:var(--coral);}
   .candle-chip.doji{background:var(--faint);}
 
-  .status-badge.sleeping{background:#1a2029; color:#6a7688;}
-  .status-badge.waiting_for_streak{background:var(--amber-dim); color:var(--amber);}
   .status-badge.armed{background:var(--violet-dim); color:var(--violet);}
 
   .progress-track{position:relative; height:10px; background:var(--panel-3); border-radius:6px; overflow:hidden; border:1px solid var(--line);}
@@ -82,7 +80,7 @@
   .card h2{margin:0 0 13px; font-size:12.5px; color:var(--muted); font-weight:600; display:flex; align-items:center; justify-content:space-between; gap:8px;}
   .card h2 .tag{font-size:10px; padding:2px 8px; border-radius:6px; background:var(--panel-3); color:var(--faint); font-family:var(--mono); font-weight:500;}
 
-  .status-badge{font-size:10.5px; font-weight:600; padding:4px 10px; border-radius:6px;}
+  .status-badge{font-size:10.5px; font-weight:600; padding:4px 10px; border-radius:6px; background:var(--mint-dim); color:var(--mint);}
   .status-badge.waiting{background:#1a2029; color:#6a7688;}
   .status-badge.open{background:var(--violet-dim); color:var(--violet);}
   .status-badge.triggered{background:var(--amber-dim); color:var(--amber);}
@@ -149,8 +147,8 @@
   .log-row .ev.SETTLE_LOSS{color:var(--coral);}
   .log-row .ev.SETTLE_UNKNOWN{color:var(--muted);}
   .log-row .ev.HALTED{color:var(--coral);}
-  .log-row .ev.ENGINE_SLEEP{color:var(--muted);}
-  .log-row .ev.ENGINE_RESUMED{color:var(--amber);}
+  .log-row .ev.IMBALANCE_SIGNAL{color:var(--violet);}
+  .log-row .ev.HISTORY_SEEDED{color:var(--faint);}
   .log-row .ev.CANDLE{color:var(--faint);}
   .log-row .note{color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .log-row .pnl{font-weight:600;}
@@ -161,8 +159,8 @@
 <div class="wrap">
   <header>
     <div>
-      <h1>Candle Contrarian</h1>
-      <div class="sub">BTC 5m up/down — single-candle contrarian (Binance BTCUSDT), 500sh on window open, TP 0.99, $500 target then sleep 3 windows</div>
+      <h1>Candle Imbalance</h1>
+      <div class="sub">BTC 5m up/down — 16-candle red/green imbalance mean-reversion (Binance BTCUSDT), 500sh on window open, TP 0.99, runs continuously</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -205,7 +203,7 @@
       <div class="stats-grid" id="statsGrid"></div>
     </div>
     <div class="card">
-      <h2>Balance <span class="tag">active engine</span></h2>
+      <h2>Balance <span class="tag">engine</span></h2>
       <div class="equity-hero" id="equityHero"></div>
     </div>
   </div>
@@ -298,21 +296,24 @@ function renderEngineCard(elId, e){
   if(!e){ el.innerHTML = '<div class="empty">no data</div>'; return; }
 
   const defRowsHtml = [
-    ['Signal', 'single-candle contrarian, recomputes every window'],
+    ['Signal', `imbalance over last ${e.imbalance_window} candles, gap \u2265 ${e.imbalance_threshold}`],
     ['Shares / trade', `${fmtSh(e.shares)}sh`],
     ['Take profit', '0.99 (booked @ $1.00/sh)'],
-    ['Signalled side', e.entry_side_this_window || '\u2014'],
+    ['Signalled side', e.entry_side_this_window || '\u2014 (gap within 1)'],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
-  const progressPct = Math.max(0, Math.min(100, e.progress_pct || 0));
-  const progressNeg = (e.session_pnl || 0) < 0;
+  const reds = e.reds_this_signal||0, greens = e.greens_this_signal||0;
+  const total = Math.max(1, reds+greens);
+  const redPct = Math.round(100*reds/total);
   const progressHtml = `
     <div class="press-box">
       <div class="press-top">
-        <span class="lbl">Session P&amp;L \u2192 target ${fmt$(e.profit_target)}</span>
-        <span class="size" style="color:${progressNeg?'var(--coral)':'var(--amber)'}">${e.session_pnl>=0?'+':''}${fmt$(e.session_pnl)}</span>
+        <span class="lbl">Last ${e.imbalance_window} candles</span>
+        <span class="size" style="color:var(--amber)">${reds} red / ${greens} green</span>
       </div>
-      <div class="progress-track" style="margin-top:9px;"><div class="progress-fill ${progressNeg?'neg':''}" style="width:${progressPct}%"></div></div>
+      <div class="progress-track" style="margin-top:9px;">
+        <div class="progress-fill" style="width:${redPct}%; background:linear-gradient(90deg,var(--coral-dim),var(--coral));"></div>
+      </div>
       <div class="press-meta" style="margin-top:7px;"><span>lifetime P&amp;L: ${fmt$(e.realized_pnl)}</span><span class="max">win rate: ${e.win_rate!=null?e.win_rate+'%':'\u2014'}</span></div>
     </div>`;
 
@@ -343,10 +344,15 @@ function renderEngineCard(elId, e){
     posHtml = `<div class="position-box empty">no open position \u2014 flat</div>`;
   }
 
+  const statusLabels = {
+    waiting:'watching for imbalance', armed:'armed \u2014 buys on next tick',
+    open:'position open', halted:'halted',
+  };
+
   el.innerHTML = `
     <h2>
       ${e.label}
-      <span class="status-badge ${e.active ? '' : 'sleeping'}">${e.active ? 'ACTIVE' : `sleeping (${e.sleep_windows_remaining} windows left)`}</span>
+      <span class="status-badge ${e.status}">${statusLabels[e.status] || e.status}</span>
     </h2>
     <div class="def-grid">${defRowsHtml}</div>
     ${progressHtml}

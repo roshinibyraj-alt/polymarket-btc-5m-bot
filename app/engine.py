@@ -1,6 +1,6 @@
 """
-Trading engine -- single-candle contrarian entries off real BTC/USDT spot
-candles. See app/config.py for the full strategy write-up.
+Trading engine -- 16-candle imbalance mean-reversion. See app/config.py
+for the full strategy write-up.
 """
 import time
 from collections import deque
@@ -74,14 +74,13 @@ class EngineState:
     down_bid: Optional[float] = None
     down_ask: Optional[float] = None
 
-    active: bool = True            # False while sleeping off a hit profit target
-    sleep_windows_remaining: int = 0  # counts down to 0 across window rollovers, then resumes
     entry_side_this_window: Optional[Side] = None  # signalled side for the window that just opened
+    reds_this_signal: int = 0
+    greens_this_signal: int = 0
     entered_this_window: bool = False
     position: Optional[Position] = None
 
-    session_pnl: float = 0.0       # resets to 0 every time the engine wakes up from sleep
-    total_pnl: float = 0.0         # lifetime, across all sessions
+    total_pnl: float = 0.0
     fills: int = 0
     tp_fills: int = 0
     settled_wins: int = 0
@@ -92,14 +91,15 @@ class EngineState:
 
 
 class Engine:
-    """Single-candle contrarian engine: green candle -> buy DOWN next
-    window, red candle -> buy UP next window (500 shares, taker, at the
+    """16-candle imbalance mean-reversion engine: recomputes reds vs
+    greens across the most recent 16 closed Binance candles every window;
+    a gap of >=2 buys the lacking color's side (500 shares, taker, at the
     window's open). Resting TP at 0.99 (booked as $1/share); otherwise
-    rides to the window's real $0/$1 settlement. Sleeps 3 windows after
-    +$500 session P&L, then resumes with a clean session."""
+    rides to the window's real $0/$1 settlement. Runs continuously --
+    no profit-target pause."""
 
     name = "E2"
-    label = "Single-candle contrarian"
+    label = "16-candle imbalance"
 
     def __init__(self, broker: PaperBroker):
         self.broker = broker
@@ -114,21 +114,20 @@ class Engine:
         self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event,
                                balance_after=self.capital.balance, **kw)
 
-    def _wake_up(self):
-        self.s.active = True
-        self.s.sleep_windows_remaining = 0
-        self.s.session_pnl = 0.0
-        self._log("ENGINE_RESUMED", note=f"resumed after sleep -- session P&L reset, target +${config.ENGINE_PROFIT_TARGET_USD:.0f}")
+    # ---- candle bookkeeping --------------------------------------------------
 
-    def _check_sleep(self):
-        if self.s.active and self.s.session_pnl >= config.ENGINE_PROFIT_TARGET_USD:
-            self.s.active = False
-            self.s.sleep_windows_remaining = config.ENGINE_SLEEP_WINDOWS
-            self._log("ENGINE_SLEEP",
-                       note=(f"session P&L +${self.s.session_pnl:.2f} reached target -- "
-                             f"sleeping {config.ENGINE_SLEEP_WINDOWS} windows"))
-
-    # ---- candle bookkeeping, fed by state.py at every window rollover -------
+    def seed_history(self, candles: List[dict]):
+        """Called once at startup with the last IMBALANCE_WINDOW closed
+        Binance candles, so the bot can trade immediately instead of
+        waiting 16 windows to accumulate history organically."""
+        for c in candles:
+            self.candle_history.append(c["color"])
+        if candles:
+            self.last_candle = candles[-1]
+        reds = list(self.candle_history).count("red")
+        greens = list(self.candle_history).count("green")
+        self._log("HISTORY_SEEDED",
+                   note=f"backfilled {len(candles)} closed candles ({reds} red, {greens} green) -- ready to trade immediately")
 
     def record_candle(self, candle: Optional[dict]):
         self.last_candle = candle
@@ -145,21 +144,25 @@ class Engine:
         if self.capital.halted:
             return
 
-        if not self.s.active:
-            if self.s.sleep_windows_remaining > 0:
-                self.s.sleep_windows_remaining -= 1
-                return  # this window is one of the 3 skipped -- no signal, no trade
-            self._wake_up()  # remaining already hit 0 -- trade this window as usual below
+        last_n = list(self.candle_history)[-config.IMBALANCE_WINDOW:]
+        reds = last_n.count("red")
+        greens = last_n.count("green")
+        self.s.reds_this_signal = reds
+        self.s.greens_this_signal = greens
 
-        if self.candle_history:
-            last_color = self.candle_history[-1]
-            if last_color == "red":
-                self.s.entry_side_this_window = Side.UP
-            elif last_color == "green":
-                self.s.entry_side_this_window = Side.DOWN
-            # "doji" (or unknown) -- no signal this window
+        if len(last_n) < config.IMBALANCE_WINDOW:
+            self.s.no_signal_windows += 1
+            return  # only possible right at startup if Binance backfill came up short
 
-        if self.s.entry_side_this_window is None:
+        if reds - greens >= config.IMBALANCE_THRESHOLD:
+            self.s.entry_side_this_window = Side.UP
+            self._log("IMBALANCE_SIGNAL", side="UP",
+                       note=f"last {config.IMBALANCE_WINDOW} candles: {reds} red / {greens} green -- green lacking, buying UP")
+        elif greens - reds >= config.IMBALANCE_THRESHOLD:
+            self.s.entry_side_this_window = Side.DOWN
+            self._log("IMBALANCE_SIGNAL", side="DOWN",
+                       note=f"last {config.IMBALANCE_WINDOW} candles: {reds} red / {greens} green -- red lacking, buying DOWN")
+        else:
             self.s.no_signal_windows += 1
 
     # ---- tick: fire the entry (once, on the first tick with a live ask),
@@ -172,7 +175,7 @@ class Engine:
         if self.capital.halted or self.s.window is None:
             return
 
-        if (self.s.active and self.s.entry_side_this_window is not None
+        if (self.s.entry_side_this_window is not None
                 and not self.s.entered_this_window and self.s.position is None):
             ask = up_ask if self.s.entry_side_this_window == Side.UP else down_ask
             if ask is not None:
@@ -222,8 +225,7 @@ class Engine:
 
     def finalize_window(self, winning_side: Optional[Side]):
         """Called once per window close -- an open position must still
-        resolve even if the engine is (or just became) asleep. If TP
-        already closed it, there's nothing left to do."""
+        resolve. If TP already closed it, there's nothing left to do."""
         window_slug = self.s.window.slug if self.s.window else None
         pos = self.s.position
         if pos is not None:
@@ -253,7 +255,6 @@ class Engine:
     def _settle(self, pos: Position, proceeds: float, pnl: float, reason: str, fee: float, note: str):
         self.capital.balance += proceeds
         self.s.total_pnl += pnl
-        self.s.session_pnl += pnl
         if pnl >= 0:
             self.s.wins += 1
         else:
@@ -261,7 +262,6 @@ class Engine:
         self._log(reason, side=pos.side.value, price=pos.entry_price, shares=pos.shares, pnl=pnl, fee=fee, note=note)
         self.capital.check_halt()
         self.capital.update_drawdown(self._live_equity())
-        self._check_sleep()
 
     # ---- dashboard payload --------------------------------------------------
 
@@ -285,8 +285,6 @@ class Engine:
 
         if self.capital.halted:
             status = "halted"
-        elif not self.s.active:
-            status = "sleeping"
         elif pos is not None:
             status = "open"
         elif self.s.entry_side_this_window is not None and not self.s.entered_this_window:
@@ -297,9 +295,7 @@ class Engine:
         equity = round(self.capital.balance + open_market_value, 4)
 
         return {
-            "engine": self.name, "label": self.label, "active": self.s.active,
-            "sleep_windows_remaining": self.s.sleep_windows_remaining,
-            "shares": self.shares,
+            "engine": self.name, "label": self.label, "shares": self.shares,
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
@@ -312,15 +308,14 @@ class Engine:
             "max_drawdown_pct": round(self.capital.max_drawdown_pct, 2),
 
             "realized_pnl": round(self.s.total_pnl, 4),
-            "session_pnl": round(self.s.session_pnl, 4),
             "unrealized_pnl": round(unrealized_pnl, 4),
-            "profit_target": config.ENGINE_PROFIT_TARGET_USD,
-            "progress_pct": round(100 * max(0.0, self.s.session_pnl) / config.ENGINE_PROFIT_TARGET_USD, 1),
 
             "entry_side_this_window": self.s.entry_side_this_window.value if self.s.entry_side_this_window else None,
+            "reds_this_signal": self.s.reds_this_signal, "greens_this_signal": self.s.greens_this_signal,
+            "imbalance_window": config.IMBALANCE_WINDOW, "imbalance_threshold": config.IMBALANCE_THRESHOLD,
             "position": position_payload,
 
-            "candle_history": list(self.candle_history)[-10:],
+            "candle_history": list(self.candle_history)[-config.IMBALANCE_WINDOW:],
             "last_candle": self.last_candle,
 
             "fills": self.s.fills, "tp_fills": self.s.tp_fills,
