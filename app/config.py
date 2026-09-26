@@ -21,14 +21,11 @@ Central configuration for the BTC 5-min up/down bot.
     window with no real reversal -- until a candle of the lacking color
     actually closes. That unlocks it, and the signal is re-evaluated
     from scratch (may immediately re-lock, flip sides, or go flat).
-  - Sizing while locked: the gap (in the locked side's favor) is tracked
-    against its value at the moment of lock. Each +1 move in that gap
-    since lock adds ENGINE2_SIZE_STEP (100) shares to the base
-    (ENGINE2_SHARES, 500); each -1 move removes 100. Capped at
-    ENGINE2_MAX_ADDITIONS (5) additions above base (1000sh max) and
-    floored at ENGINE2_MIN_SHARES (100sh), however far the gap shrinks.
-    A fresh lock always starts back at the 500 base. Taker, on window
-    open.
+  - Sizing: each settled win reduces the next trade by ENGINE2_SIZE_STEP
+    (100) shares, but never below ENGINE2_MIN_SHARES (500). Each settled
+    loss adds 100 shares, up to ENGINE2_MAX_ADDITIONS (7) additions above
+    the 500-share base, for a maximum of 1,200 shares. Unfilled and
+    unresolved windows do not change the size. Taker, on window open.
   - Runs continuously -- no profit-target pause/sleep of any kind.
 
   Exit mechanics:
@@ -67,7 +64,7 @@ BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "BTCUSDT")
 CANDLE_HISTORY_MAXLEN = 20  # rolling window of recent candle colors kept in memory
 
 # ---- Imbalance signal ---------------------------------------------------
-IMBALANCE_WINDOW = 16      # how many recent candles to count reds/greens over
+IMBALANCE_WINDOW = 10      # how many recent candles to count reds/greens over
 IMBALANCE_THRESHOLD = 2    # minimum gap (reds - greens or greens - reds) to trigger a buy
 
 # ---- Take profit (shared exit mechanic) --------------------------------
@@ -77,8 +74,8 @@ ENGINE_TP_COUNTS_AS = 1.00      # TP fill is booked at this price for realized P
 # ---- Engine sizing -------------------------------------------------------
 ENGINE2_SHARES = 500.0           # base size, used at the moment a side locks in
 ENGINE2_SIZE_STEP = 100.0        # shares added/removed per +1/-1 move in the gap since lock
-ENGINE2_MAX_ADDITIONS = 5        # cap on step-ups above base (base + 5*step = 1000sh max)
-ENGINE2_MIN_SHARES = 100.0       # absolute floor, regardless of how far the gap shrinks
+ENGINE2_MAX_ADDITIONS = 7        # seven loss additions (base + 7*step = 1200sh max)
+ENGINE2_MIN_SHARES = 500.0       # wins reduce only to the 500-share base floor
 
 MAKER_REBATE_FRACTION = 0.20  # rebate earned on every resting-order fill (maker side)
 

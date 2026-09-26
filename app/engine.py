@@ -82,8 +82,7 @@ class EngineState:
 
     locked_side: Optional[Side] = None       # side currently being traded every window
     required_color: Optional[str] = None     # the lacking color we're waiting to see, to unlock
-    gap_at_lock: Optional[int] = None        # the (favorable) gap value at the moment of lock
-    current_shares: float = config.ENGINE2_SHARES  # size for this lock's entries, adjusted by gap movement
+    current_shares: float = config.ENGINE2_SHARES  # next trade size, adjusted after wins/losses
 
     total_pnl: float = 0.0
     fills: int = 0
@@ -97,20 +96,19 @@ class EngineState:
 
 class Engine:
     """16-candle imbalance mean-reversion engine: recomputes reds vs
-    greens across the most recent 16 closed Binance candles; a gap of
+    greens across the most recent 10 closed Binance candles; a gap of
     >=2 locks onto the lacking color's side (taker, every window's
     open) and keeps trading that side -- ignoring the recomputed gap
     for lock/unlock purposes in the meantime -- until a candle of the
     lacking color actually closes, at which point it unlocks and
-    re-evaluates from scratch. While locked, position size adjusts with
-    the gap: +100sh per +1 gap move since lock (capped at 5 additions,
-    1000sh max), -100sh per -1 move (floored at 100sh); a fresh lock
-    always restarts at the 500sh base. Resting TP at 0.99 (booked as
+    re-evaluates from scratch. Position size changes only after a
+    settled trade: wins subtract 100sh down to 500sh, losses add 100sh
+    up to 1200sh (seven additions). Resting TP at 0.99 (booked as
     $1/share); otherwise rides to the window's real $0/$1 settlement.
     Runs continuously -- no profit-target pause."""
 
     name = "E2"
-    label = "16-candle imbalance"
+    label = "10-candle imbalance"
 
     def __init__(self, broker: PaperBroker):
         self.broker = broker
@@ -130,7 +128,7 @@ class Engine:
     def seed_history(self, candles: List[dict]):
         """Called once at startup with the last IMBALANCE_WINDOW closed
         Binance candles, so the bot can trade immediately instead of
-        waiting 16 windows to accumulate history organically."""
+        waiting 10 windows to accumulate history organically."""
         for c in candles:
             self.candle_history.append(c["color"])
         if candles:
@@ -174,12 +172,9 @@ class Engine:
                                  f"{self.s.locked_side.value}, re-evaluating from scratch"))
                 self.s.locked_side = None
                 self.s.required_color = None
-                self.s.gap_at_lock = None
-                self.s.current_shares = config.ENGINE2_SHARES
                 # fall through to a fresh evaluation below, same window
             else:
                 self.s.entry_side_this_window = self.s.locked_side
-                self._update_sizing(reds, greens)
                 return
 
         if len(last_n) < config.IMBALANCE_WINDOW:
@@ -189,43 +184,19 @@ class Engine:
         if reds - greens >= config.IMBALANCE_THRESHOLD:
             self.s.locked_side = Side.UP
             self.s.required_color = "green"
-            self.s.gap_at_lock = reds - greens
             self.s.entry_side_this_window = Side.UP
-            self._update_sizing(reds, greens)
             self._log("IMBALANCE_SIGNAL", side="UP",
                        note=(f"last {config.IMBALANCE_WINDOW} candles: {reds} red / {greens} green -- green lacking, "
                              f"locking onto UP until a green candle closes ({self.s.current_shares:.0f}sh)"))
         elif greens - reds >= config.IMBALANCE_THRESHOLD:
             self.s.locked_side = Side.DOWN
             self.s.required_color = "red"
-            self.s.gap_at_lock = greens - reds
             self.s.entry_side_this_window = Side.DOWN
-            self._update_sizing(reds, greens)
             self._log("IMBALANCE_SIGNAL", side="DOWN",
                        note=(f"last {config.IMBALANCE_WINDOW} candles: {reds} red / {greens} green -- red lacking, "
                              f"locking onto DOWN until a red candle closes ({self.s.current_shares:.0f}sh)"))
         else:
             self.s.no_signal_windows += 1
-
-    def _update_sizing(self, reds: int, greens: int):
-        """While locked, adjust this window's trade size by how far the
-        gap (in the locked side's favor) has moved since the lock
-        started: +1 gap => +ENGINE2_SIZE_STEP shares, -1 gap =>
-        -ENGINE2_SIZE_STEP, capped at ENGINE2_MAX_ADDITIONS above base
-        and floored at ENGINE2_MIN_SHARES."""
-        if self.s.gap_at_lock is None:
-            self.s.current_shares = config.ENGINE2_SHARES
-            return
-        current_gap = (reds - greens) if self.s.locked_side == Side.UP else (greens - reds)
-        gap_delta = current_gap - self.s.gap_at_lock
-        additions = min(config.ENGINE2_MAX_ADDITIONS, gap_delta)  # no cap on the negative side here --
-        shares = config.ENGINE2_SHARES + config.ENGINE2_SIZE_STEP * additions  # the floor below handles that
-        shares = max(config.ENGINE2_MIN_SHARES, shares)
-        if shares != self.s.current_shares:
-            self._log("SIZE_ADJUST", side=self.s.locked_side.value,
-                       note=(f"gap moved to {current_gap} (from {self.s.gap_at_lock} at lock) -- "
-                             f"size now {shares:.0f}sh (was {self.s.current_shares:.0f}sh)"))
-        self.s.current_shares = shares
 
     # ---- tick: fire the entry (once, on the first tick with a live ask),
     # watch for TP, and track live equity for max-drawdown -------------------
@@ -325,6 +296,36 @@ class Engine:
         self.capital.check_halt()
         self.capital.update_drawdown(self._live_equity())
 
+        if reason in ("SETTLE_WIN", "TP_FILL"):
+            self._adjust_size(is_win=True)
+        elif reason == "SETTLE_LOSS":
+            self._adjust_size(is_win=False)
+
+    def _adjust_size(self, is_win: bool):
+        """Move the next trade size one 100-share step after settlement."""
+        old_size = self.s.current_shares
+        if is_win:
+            self.s.current_shares = max(
+                config.ENGINE2_MIN_SHARES,
+                self.s.current_shares - config.ENGINE2_SIZE_STEP,
+            )
+        else:
+            max_size = config.ENGINE2_SHARES + (
+                config.ENGINE2_MAX_ADDITIONS * config.ENGINE2_SIZE_STEP
+            )
+            self.s.current_shares = min(
+                max_size,
+                self.s.current_shares + config.ENGINE2_SIZE_STEP,
+            )
+        if self.s.current_shares != old_size:
+            self._log(
+                "SIZE_ADJUST",
+                side=self.s.entry_side_this_window.value if self.s.entry_side_this_window else None,
+                shares=self.s.current_shares,
+                note=(f"{'win' if is_win else 'loss'}: next size "
+                      f"{old_size:.0f}sh -> {self.s.current_shares:.0f}sh"),
+            )
+
     # ---- dashboard payload --------------------------------------------------
 
     def snapshot(self) -> dict:
@@ -358,9 +359,12 @@ class Engine:
 
         return {
             "engine": self.name, "label": self.label, "base_shares": self.shares,
-            "current_shares": self.s.current_shares, "gap_at_lock": self.s.gap_at_lock,
+            "current_shares": self.s.current_shares,
+            "next_size_if_win": max(config.ENGINE2_MIN_SHARES, self.s.current_shares - config.ENGINE2_SIZE_STEP),
+            "next_size_if_loss": min(config.ENGINE2_SHARES + config.ENGINE2_MAX_ADDITIONS * config.ENGINE2_SIZE_STEP, self.s.current_shares + config.ENGINE2_SIZE_STEP),
             "size_step": config.ENGINE2_SIZE_STEP, "max_additions": config.ENGINE2_MAX_ADDITIONS,
             "min_shares": config.ENGINE2_MIN_SHARES,
+            "max_shares": config.ENGINE2_SHARES + config.ENGINE2_MAX_ADDITIONS * config.ENGINE2_SIZE_STEP,
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
