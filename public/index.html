@@ -222,7 +222,7 @@ function render(s){
   const bb=s.bb,cf=s.cfg;
   $('bbState').className='chip '+(bb.side==='UP'?'up':bb.side==='DOWN'?'dn':'vi');$('bbState').textContent=bb.label;
   $('bbU').textContent=bb.upper==null?'–':bb.upper.toFixed(2);$('bbM').textContent=bb.middle==null?'–':bb.middle.toFixed(2);$('bbL').textContent=bb.lower==null?'–':bb.lower.toFixed(2);$('bbR').textContent=bb.rsi==null?'–':bb.rsi.toFixed(1);
-  $('bbRule').innerHTML='<b style="color:var(--tx)">Rule:</b> a wick that reaches a band but closes back inside fades toward the middle band (200 shares, dropping to 100 past the middle). A candle that <i>closes</i> beyond a band means the bot follows that side instead, 100 shares/window, until price closes back inside. Before the first touch, RSI picks the side ('+cf.neutralShares+' shares). <b style="color:var(--tx)">Filters:</b> the bot fires every window — entry waits for Polymarket\'s own live price on our side to reach '+cf.confirmPrice+' (the market agreeing with us), but fires anyway by '+(cf.confirmDeadlineMs/1000)+'s regardless.';
+  $('bbRule').innerHTML='<b style="color:var(--tx)">Rule:</b> a wick that reaches a band but closes back inside fades toward the middle band (200 shares, dropping to 100 past the middle). A candle that <i>closes</i> beyond a band means the bot follows that side instead, 100 shares/window, until price closes back inside. Before the first touch, RSI picks the side ('+cf.neutralShares+' shares). <b style="color:var(--tx)">Entry:</b> first position opens '+(cf.entryDelayMs/1000)+'s after the 5-minute window opens, without waiting for price confirmation. Positions reverse on an opposite closed 1-minute signal.';
   $('how').innerHTML=`<b style="color:var(--tx)">How a winner is decided:</b> in the last ${cf.endWatchMs/1000}s of a window, the side priced above ${cf.winPrice*100}¢ has won and each winning share pays $1; the other side has lost and pays $0. If no side gets there, that window stays unknown and the bot skips any bet that needs it.`;
   $('bbSub').textContent=`BTC · 5m candles · ${cf.bbPeriod}-period, ${cf.bbStddev}σ`;
   // window strip
@@ -233,7 +233,7 @@ function render(s){
   $('cUp').textContent='UP '+s.counts.UP;$('cDn').textContent='DOWN '+s.counts.DOWN;
   const sg=s.lastSignal;
   $('sig').innerHTML=sg?`<span class="chip am">Bet ${sg.side}</span><span class="dim">${sg.shares} shares this window</span>${sg.state==='NEUTRAL'?`<span class="dim">(RSI ${sg.rsi==null?'n/a':sg.rsi} tie-break)</span>`:''}`:'<span class="dim">Waiting for the Bollinger state…</span>';
-  $('rule').innerHTML=bb.bandsReady?`Current state: <b style="color:var(--tx)">${bb.state}</b>. Entry fires ${cf.entryDelayMs/1000}s after the window opens, at any price, held to resolution.`:'Loading BTC candle history…';
+  $('rule').innerHTML=bb.bandsReady?`Current state: <b style="color:var(--tx)">${bb.state}</b>. First entry fires ${cf.entryDelayMs/1000}s after the window opens at any price. Reverse on an opposite closed 1m signal; otherwise hold to resolution.`:'Loading BTC candle history…';
   stats(s);tables(s);logs(s);
 }
 function stats(s){

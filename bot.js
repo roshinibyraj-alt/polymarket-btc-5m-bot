@@ -245,15 +245,7 @@ class Bot {
     }
 
     if (elapsed >= cfg.ENTRY_DELAY_MS) {
-      const px = this.prices && this.prices.slug === w.slug ? this.prices : null;
-      const ourPrice = px ? (w.signal.side === 'UP' ? px.up.mid : px.down.mid) : null;
-      const confirmed = ourPrice != null && ourPrice >= cfg.CONFIRM_PRICE;
-      const deadlinePassed = elapsed >= cfg.ENTRY_CONFIRM_DEADLINE_MS;
-      if (confirmed || deadlinePassed) {
-        if (!confirmed) this._push({ event: 'FIRING', slug: w.slug, side: w.signal.side, shares: w.signal.shares,
-          note: 'market never confirmed (last read ' + (ourPrice == null ? 'n/a' : round(ourPrice, 3)) + ') -- firing at the ' + (cfg.ENTRY_CONFIRM_DEADLINE_MS / 1000) + 's deadline' });
-        await this._fire(w, w.signal.side, w.signal.shares, w.signal.side === 'UP' ? w.window.tokenUp : w.window.tokenDown, false);
-      }
+      await this._fire(w, w.signal.side, w.signal.shares, w.signal.side === 'UP' ? w.window.tokenUp : w.window.tokenDown, false);
     }
   }
 
@@ -528,7 +520,7 @@ class Bot {
       equity: this.equity,
       stats: this.stats,
       cfg: { bbPeriod: cfg.BB_PERIOD, bbStddev: cfg.BB_STDDEV, bbNearTouchSigma: cfg.BB_NEAR_TOUCH_SIGMA, bbInterval: cfg.BB_INTERVAL, exitPriceFloor: cfg.EXIT_PRICE_FLOOR, reversalRetryMs: cfg.REVERSAL_RETRY_MS, stage1: cfg.SHARES_STAGE1, stage2: cfg.SHARES_STAGE2, breakShares: cfg.SHARES_BREAK,
-        neutralShares: cfg.SHARES_NEUTRAL, rsiPeriod: cfg.RSI_PERIOD, confirmPrice: cfg.CONFIRM_PRICE, confirmDeadlineMs: cfg.ENTRY_CONFIRM_DEADLINE_MS,
+        neutralShares: cfg.SHARES_NEUTRAL, rsiPeriod: cfg.RSI_PERIOD,
         winPrice: cfg.WIN_PRICE, endWatchMs: cfg.END_WATCH_MS, entryDelayMs: cfg.ENTRY_DELAY_MS, windowSec: WINDOW_SECONDS },
       log: this.log.slice(-100).reverse(),
     };
