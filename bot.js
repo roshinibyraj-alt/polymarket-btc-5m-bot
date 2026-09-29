@@ -72,7 +72,7 @@ class Bot {
       }
       // poll faster during the last seconds of a window, when winners are decided
       const inWindowMs = Date.now() % WINDOW_MS;
-      await sleep(inWindowMs >= WINDOW_MS - cfg.END_WATCH_MS ? 400 : POLL_MS);
+      await sleep(inWindowMs >= WINDOW_MS - cfg.END_WATCH_MS ? 250 : POLL_MS);
     }
   }
 
@@ -135,6 +135,7 @@ class Bot {
     const openTs = currentWindowOpenTs(now);
     const slug = slugForTs(openTs);
     if (!this.w || this.w.slug !== slug) {
+      if (this.w) this._closeOut(this.w);   // window just rolled over -- guarantee it has a winner
       this.w = { slug, openTs, status: 'starting', window: null, signal: null, outcomeDone: false };
     }
     const w = this.w;
@@ -171,12 +172,30 @@ class Bot {
     this.outcomes.set(openTs, { winner, source, price: price == null ? null : round(price, 3), loser: loser == null ? null : round(loser, 3) });
     this.counts[winner] += 1;
     if (this.outcomes.size > 60) this.outcomes.delete(this.outcomes.keys().next().value);
-    this._push({ event: 'OUTCOME', slug: slugForTs(openTs), side: winner,
-      note: `${winner} won: price ${round(price, 3)} > ${cfg.WIN_PRICE} in last ${cfg.END_WATCH_MS / 1000}s, ${winner === 'UP' ? 'DOWN' : 'UP'} lost at ${loser == null ? '~0' : round(loser, 3)}` });
+    const opp = winner === 'UP' ? 'DOWN' : 'UP';
+    const note = source === 'price'
+      ? `${winner} won ($1/sh): price ${round(price, 3)} > ${cfg.WIN_PRICE} in last ${cfg.END_WATCH_MS / 1000}s, ${opp} lost ($0/sh) at ${loser == null ? '~0' : round(loser, 3)}`
+      : `${winner} won ($1/sh): never crossed ${cfg.WIN_PRICE} in the watch window -- decided at window close, ${winner} ${round(price, 3)} vs ${opp} ${loser == null ? '?' : round(loser, 3)}`;
+    this._push({ event: 'OUTCOME', slug: slugForTs(openTs), side: winner, note });
   }
 
-  /** Winner of the window that opened at openTs, from our own last-seconds price reading only (no fallback). */
+  /** Winner of the window that opened at openTs, from our own price reading only (no Polymarket API). */
   async _outcomeFor(openTs) { return this.outcomes.get(openTs) || null; }
+
+  /** Called the instant a window rolls over. If the >WIN_PRICE watch never fired (thin book, no clean
+   * cross), this guarantees a winner anyway by comparing the last known UP vs DOWN price -- whichever
+   * is higher wins -- so no pending bet is ever left stuck and every window always settles. */
+  _closeOut(w) {
+    if (!w.window || w.outcomeDone || this.outcomes.has(w.openTs)) return;
+    const px = this.prices && this.prices.slug === w.slug ? this.prices : null;
+    if (!px || px.up.mid == null || px.down.mid == null) {
+      this._push({ event: 'NO_TRADE', slug: w.slug, note: 'window closed with no readable price for either side -- winner unknown, any pending bet on it waits for the settlement timeout' });
+      return;
+    }
+    const upWins = px.up.mid >= px.down.mid;
+    this._setWindowOutcome(w.openTs, upWins ? 'UP' : 'DOWN', 'close', upWins ? px.up.mid : px.down.mid, upWins ? px.down.mid : px.up.mid);
+    w.outcomeDone = true;
+  }
 
   async _entryStep(w, elapsed) {
     if (DONE.has(w.status) || w.status === 'firing') return;
