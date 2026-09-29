@@ -61,7 +61,7 @@ async function fetchClosedCandles(limit) {
   const raw = await httpGetJson(url);
   if (!Array.isArray(raw) || raw.length < 2) throw new Error('Binance returned no candle history');
   const closed = raw.slice(0, -1);
-  return closed.map((k) => ({ openTs: Math.floor(Number(k[0]) / 1000), high: Number(k[2]), low: Number(k[3]), close: Number(k[4]) }));
+  return closed.map((k) => ({ openTs: Math.floor(Number(k[0]) / 1000), open: Number(k[1]), high: Number(k[2]), low: Number(k[3]), close: Number(k[4]) }));
 }
 
 /**
@@ -93,7 +93,7 @@ function startClosedCandleFeed(limit, onCandles, onError = () => {}) {
     let changed = false;
     const byOpen = new Map(candles.map((c) => [c.openTs, c]));
     for (const candle of batch) {
-      if (!Number.isFinite(candle.openTs) || !Number.isFinite(candle.high)
+      if (!Number.isFinite(candle.openTs) || !Number.isFinite(candle.open) || !Number.isFinite(candle.high)
         || !Number.isFinite(candle.low) || !Number.isFinite(candle.close)) continue;
       const previous = byOpen.get(candle.openTs);
       if (!previous || previous.high !== candle.high || previous.low !== candle.low || previous.close !== candle.close) {
@@ -146,7 +146,7 @@ function startClosedCandleFeed(limit, onCandles, onError = () => {}) {
         const message = JSON.parse(raw.toString());
         const k = message && message.k;
         if (!k || !k.x) return;
-        merge([{ openTs: Math.floor(Number(k.t) / 1000), high: Number(k.h), low: Number(k.l), close: Number(k.c) }]);
+        merge([{ openTs: Math.floor(Number(k.t) / 1000), open: Number(k.o), high: Number(k.h), low: Number(k.l), close: Number(k.c) }]);
       } catch (error) {
         report(new Error('Binance WebSocket message error: ' + error.message));
       }
@@ -190,7 +190,7 @@ function computeBands(candles) {
   const closes = window.map((c) => c.close);
   const m = mean(closes), sd = stddev(closes, m);
   const candle = candles[candles.length - 1];
-  return { openTs: candle.openTs, candle, middle: m, upper: m + cfg.BB_STDDEV * sd, lower: m - cfg.BB_STDDEV * sd };
+  return { openTs: candle.openTs, candle, middle: m, stddev: sd, upper: m + cfg.BB_STDDEV * sd, lower: m - cfg.BB_STDDEV * sd };
 }
 
 /** Advance the state machine by one newly-closed candle. */
@@ -198,8 +198,11 @@ function nextState(prevState, bands) {
   const { candle, upper, middle, lower } = bands;
   const brokeUpper = candle.close > upper;
   const brokeLower = candle.close < lower;
-  const touchedUpper = !brokeUpper && candle.high >= upper;
-  const touchedLower = !brokeLower && candle.low <= lower;
+  const nearTouchDistance = cfg.BB_NEAR_TOUCH_SIGMA * (Number.isFinite(bands.stddev) ? bands.stddev : 0);
+  const nearUpper = candle.close < candle.open && candle.high < upper && upper - candle.high <= nearTouchDistance;
+  const nearLower = candle.close > candle.open && candle.low > lower && candle.low - lower <= nearTouchDistance;
+  const touchedUpper = !brokeUpper && (candle.high >= upper || nearUpper);
+  const touchedLower = !brokeLower && (candle.low <= lower || nearLower);
 
   if (brokeUpper) return 'BREAK_UP_100';
   if (brokeLower) return 'BREAK_DOWN_100';

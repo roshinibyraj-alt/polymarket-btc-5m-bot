@@ -384,7 +384,7 @@ class Bot {
       trades: this.trades.slice(-60).reverse(),
       equity: this.equity,
       stats: this.stats,
-      cfg: { bbPeriod: cfg.BB_PERIOD, bbStddev: cfg.BB_STDDEV, stage1: cfg.SHARES_STAGE1, stage2: cfg.SHARES_STAGE2, breakShares: cfg.SHARES_BREAK,
+      cfg: { bbPeriod: cfg.BB_PERIOD, bbStddev: cfg.BB_STDDEV, bbNearTouchSigma: cfg.BB_NEAR_TOUCH_SIGMA, stage1: cfg.SHARES_STAGE1, stage2: cfg.SHARES_STAGE2, breakShares: cfg.SHARES_BREAK,
         neutralShares: cfg.SHARES_NEUTRAL, rsiPeriod: cfg.RSI_PERIOD, confirmPrice: cfg.CONFIRM_PRICE, confirmDeadlineMs: cfg.ENTRY_CONFIRM_DEADLINE_MS,
         winPrice: cfg.WIN_PRICE, endWatchMs: cfg.END_WATCH_MS, entryDelayMs: cfg.ENTRY_DELAY_MS, windowSec: WINDOW_SECONDS },
       log: this.log.slice(-100).reverse(),

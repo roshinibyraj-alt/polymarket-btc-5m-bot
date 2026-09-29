@@ -10,6 +10,7 @@ module.exports = {
   BB_INTERVAL: '5m',
   BB_PERIOD: 20,                // candles in the moving average
   BB_STDDEV: 2,                 // band width, in standard deviations
+  BB_NEAR_TOUCH_SIGMA: 0.1,      // directional near-miss tolerance in standard deviations
 
   // Position size by strategy state (see bollinger.js for the full state machine).
   SHARES_STAGE1: 200,           // just touched a band, heading back to the middle
