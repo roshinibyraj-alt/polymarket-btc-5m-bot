@@ -35,8 +35,9 @@ class Bot {
     this.prices = null;                            // live UP/DOWN quotes for the current window
     this.priceSeries = []; this._seriesSlug = null;
     this.counts = { UP: 0, DOWN: 0 };              // how many windows each side has won this session
-    this.bb = { state: 'NEUTRAL', upper: null, middle: null, lower: null, candle: null,
+    this.bb = { state: 'NEUTRAL', upper: null, middle: null, lower: null, candle: null, rsi: null,
                 side: null, shares: 0, bandsReady: false, candles: [] };  // Bollinger strategy state
+    this._lastNeutralSide = null;
     this._running = false;
     this._warned = new Set();
   }
@@ -106,15 +107,19 @@ class Bot {
           const isNew = !this.bb.candle || bands.openTs !== this.bb.candle.openTs;
           if (isNew) {
             const state = bollinger.nextState(this.bb.state, bands);
+            const rsi = bollinger.computeRSI(candles, cfg.RSI_PERIOD);
+            const side = state === 'NEUTRAL' ? bollinger.sideForNeutral(rsi) : bollinger.SIDE[state];
+            const shares = state === 'NEUTRAL' ? cfg.SHARES_NEUTRAL : bollinger.SHARES[state];
             this.bb = {
               state, upper: round(bands.upper, 2), middle: round(bands.middle, 2), lower: round(bands.lower, 2),
-              candle: bands.candle, side: bollinger.SIDE[state], shares: bollinger.SHARES[state],
+              candle: bands.candle, rsi: rsi == null ? null : round(rsi, 1), side, shares,
               bandsReady: true, candles: candles.slice(-40),
             };
-            if (state !== 'NEUTRAL' || this.bb.state !== state) {
-              this._push({ event: 'BB_UPDATE', side: bollinger.SIDE[state], shares: bollinger.SHARES[state],
+            if (state !== 'NEUTRAL' || side !== this._lastNeutralSide) {
+              this._lastNeutralSide = state === 'NEUTRAL' ? side : this._lastNeutralSide;
+              this._push({ event: 'BB_UPDATE', side, shares,
                 note: `${bollinger.LABEL[state]} (close ${bands.candle.close}, upper ${round(bands.upper, 2)}, `
-                  + `mid ${round(bands.middle, 2)}, lower ${round(bands.lower, 2)})` });
+                  + `mid ${round(bands.middle, 2)}, lower ${round(bands.lower, 2)}, rsi ${rsi == null ? 'n/a' : round(rsi, 1)}) -> ${side} ${shares}sh` });
             }
           } else {
             this.bb.upper = round(bands.upper, 2); this.bb.middle = round(bands.middle, 2); this.bb.lower = round(bands.lower, 2);
@@ -202,25 +207,29 @@ class Bot {
 
     if (!w.signal) {
       if (elapsed > cfg.SIGNAL_DEADLINE_MS) return this._voidNoData(w, `Bollinger signal not ready within `
-        + `${cfg.SIGNAL_DEADLINE_MS / 1000}s (${w.window ? 'bands not ready' : 'market not found'}) -- skipping window`);
+        + `${cfg.SIGNAL_DEADLINE_MS / 1000}s (${w.window ? 'bands not ready -- still collecting BTC candle history' : 'market not found'}) -- skipping window`);
       if (!w.window || !this.bb.bandsReady) return;
       const { state, side, shares } = this.bb;
       w.signal = { state, side, shares };
-      this.lastSignal = { state, side, shares, upper: this.bb.upper, middle: this.bb.middle, lower: this.bb.lower, slug: w.slug };
-      if (!side) {
-        w.status = 'no_signal';
-        this.stats.noSignal += 1;
-        this._push({ event: 'NO_TRADE', slug: w.slug, note: bollinger.LABEL[state] });
-        return;
-      }
+      this.lastSignal = { state, side, shares, rsi: this.bb.rsi, upper: this.bb.upper, middle: this.bb.middle, lower: this.bb.lower, slug: w.slug };
       w.status = 'armed';
       this._push({ event: 'SIGNAL', slug: w.slug, side, shares,
-        note: `${bollinger.LABEL[state]} -> buy ${side} ${shares}sh at ${cfg.ENTRY_DELAY_MS / 1000}s, any price` });
+        note: `${bollinger.LABEL[state]} -> buy ${side} ${shares}sh, entering ${cfg.ENTRY_DELAY_MS / 1000}s in `
+          + `once the market agrees (>=${cfg.CONFIRM_PRICE}) or by ${cfg.ENTRY_CONFIRM_DEADLINE_MS / 1000}s regardless` });
     }
 
     if (w.status === 'armed' && elapsed >= cfg.ENTRY_DELAY_MS) {
       const { side, shares } = w.signal;
-      await this._fire(w, side, shares, side === 'UP' ? w.window.tokenUp : w.window.tokenDown);
+      const px = this.prices && this.prices.slug === w.slug ? this.prices : null;
+      const ourPrice = px ? (side === 'UP' ? px.up.mid : px.down.mid) : null;
+      const confirmed = ourPrice != null && ourPrice >= cfg.CONFIRM_PRICE;
+      const deadlinePassed = elapsed >= cfg.ENTRY_CONFIRM_DEADLINE_MS;
+      if (confirmed || deadlinePassed) {
+        if (!confirmed) this._push({ event: 'FIRING', slug: w.slug, side, shares,
+          note: `market never confirmed (last read ${ourPrice == null ? 'n/a' : round(ourPrice, 3)}) -- firing anyway at the ${cfg.ENTRY_CONFIRM_DEADLINE_MS / 1000}s deadline` });
+        await this._fire(w, side, shares, side === 'UP' ? w.window.tokenUp : w.window.tokenDown);
+      }
+      // else: keep waiting -- re-checked every tick, guaranteed to fire by the deadline above
     }
   }
 
@@ -360,7 +369,7 @@ class Bot {
       prices: px && w && px.slug === w.slug ? px : null,
       priceSeries: this.priceSeries,
       bb: { state: this.bb.state, label: bollinger.LABEL[this.bb.state], upper: this.bb.upper, middle: this.bb.middle,
-        lower: this.bb.lower, side: this.bb.side, shares: this.bb.shares, bandsReady: this.bb.bandsReady, candles: this.bb.candles },
+        lower: this.bb.lower, rsi: this.bb.rsi, side: this.bb.side, shares: this.bb.shares, bandsReady: this.bb.bandsReady, candles: this.bb.candles },
       counts: this.counts,
       recentOutcomes: [...this.outcomes.entries()].slice(-24).map(([t, o]) => {
         const tr = tradeBy.get(t), pd = pendBy.get(t);
@@ -373,6 +382,7 @@ class Bot {
       equity: this.equity,
       stats: this.stats,
       cfg: { bbPeriod: cfg.BB_PERIOD, bbStddev: cfg.BB_STDDEV, stage1: cfg.SHARES_STAGE1, stage2: cfg.SHARES_STAGE2, breakShares: cfg.SHARES_BREAK,
+        neutralShares: cfg.SHARES_NEUTRAL, rsiPeriod: cfg.RSI_PERIOD, confirmPrice: cfg.CONFIRM_PRICE, confirmDeadlineMs: cfg.ENTRY_CONFIRM_DEADLINE_MS,
         winPrice: cfg.WIN_PRICE, endWatchMs: cfg.END_WATCH_MS, entryDelayMs: cfg.ENTRY_DELAY_MS, windowSec: WINDOW_SECONDS },
       log: this.log.slice(-100).reverse(),
     };

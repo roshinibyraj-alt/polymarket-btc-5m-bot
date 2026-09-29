@@ -46,6 +46,20 @@ async function fetchClosedCandles(limit) {
 const mean = (a) => a.reduce((s, x) => s + x, 0) / a.length;
 const stddev = (a, m) => Math.sqrt(mean(a.map((x) => (x - m) ** 2)));
 
+/** RSI(period) for the most recently closed candle (classic average-gain/average-loss version). */
+function computeRSI(candles, period) {
+  if (candles.length < period + 1) return null;
+  const closes = candles.slice(-(period + 1)).map((c) => c.close);
+  let gains = 0, losses = 0;
+  for (let i = 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d >= 0) gains += d; else losses += -d;
+  }
+  const avgGain = gains / period, avgLoss = losses / period;
+  if (avgLoss === 0) return 100;
+  return 100 - 100 / (1 + avgGain / avgLoss);
+}
+
 /** Bollinger Bands for the most recently closed candle, from the BB_PERIOD candles ending there. */
 function computeBands(candles) {
   const period = cfg.BB_PERIOD;
@@ -77,16 +91,18 @@ function nextState(prevState, bands) {
 }
 
 const SIDE = {
-  NEUTRAL: null, UP_200: 'UP', UP_100: 'UP', BREAK_UP_100: 'UP',
+  NEUTRAL: null,  // resolved per-window by the RSI filter in bot.js -- see sideForNeutral()
+  UP_200: 'UP', UP_100: 'UP', BREAK_UP_100: 'UP',
   DOWN_200: 'DOWN', DOWN_100: 'DOWN', BREAK_DOWN_100: 'DOWN',
 };
 const SHARES = {
-  NEUTRAL: 0, UP_200: cfg.SHARES_STAGE1, DOWN_200: cfg.SHARES_STAGE1,
+  NEUTRAL: 0,     // real size comes from cfg.SHARES_NEUTRAL once a side is picked -- see bot.js
+  UP_200: cfg.SHARES_STAGE1, DOWN_200: cfg.SHARES_STAGE1,
   UP_100: cfg.SHARES_STAGE2, DOWN_100: cfg.SHARES_STAGE2,
   BREAK_UP_100: cfg.SHARES_BREAK, BREAK_DOWN_100: cfg.SHARES_BREAK,
 };
 const LABEL = {
-  NEUTRAL: 'Neutral — waiting for the first band touch',
+  NEUTRAL: 'Neutral — no band touched yet; trading the RSI-favored side at reduced size until one is',
   UP_200: 'Lower band touched — buying UP every window until the middle band',
   UP_100: 'Middle band reached from below — buying UP (reduced size) until the upper band',
   DOWN_200: 'Upper band touched — buying DOWN every window until the middle band',
@@ -95,4 +111,8 @@ const LABEL = {
   BREAK_DOWN_100: 'Lower band broken — trading DOWN only until price closes back inside',
 };
 
-module.exports = { fetchClosedCandles, computeBands, nextState, SIDE, SHARES, LABEL };
+/** NEUTRAL tie-break: RSI < 50 (softer recent momentum) leans toward a reversion-up call,
+ * RSI >= 50 leans down. Always returns a side -- the bot fires every window, never sits out. */
+function sideForNeutral(rsi) { return rsi == null || rsi < 50 ? 'UP' : 'DOWN'; }
+
+module.exports = { fetchClosedCandles, computeBands, computeRSI, nextState, sideForNeutral, SIDE, SHARES, LABEL };

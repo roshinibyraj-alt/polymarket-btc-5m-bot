@@ -15,6 +15,13 @@ module.exports = {
   SHARES_STAGE1: 200,           // just touched a band, heading back to the middle
   SHARES_STAGE2: 100,           // passed the middle band, heading to the far band
   SHARES_BREAK: 100,            // a band broke (candle closed beyond it) -- trade that side only
+  SHARES_NEUTRAL: 100,          // before the first band touch -- side picked by the RSI filter below
+
+  // Win-rate filters. Neither one ever skips a window -- the bot always fires -- they only pick a
+  // better side (RSI) and a better moment to enter (confirmation), within a hard deadline.
+  RSI_PERIOD: 14,                // RSI on the same BTC 5m candles, used only to break the NEUTRAL state
+  CONFIRM_PRICE: 0.52,           // fire early once Polymarket's own live price for our side reaches this
+  ENTRY_CONFIRM_DEADLINE_MS: 45000, // ...but fire anyway by this point even with no confirmation
 
   // Who won a window: in the last END_WATCH_MS before it closes, a side priced above WIN_PRICE wins,
   // and the other side is the loser (~0), counted as $1/share won, $0/share lost. If no side crosses
