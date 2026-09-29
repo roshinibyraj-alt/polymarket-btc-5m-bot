@@ -96,41 +96,44 @@ class Bot {
     }
   }
 
-  /** Poll Binance for the latest closed BTC 5m candle and advance the Bollinger state machine
-   * on every new candle close. Independent of the window loop -- runs on its own slower clock. */
-  async _bbLoop() {
-    while (this._running) {
-      try {
-        const candles = await bollinger.fetchClosedCandles(cfg.BB_PERIOD + 10);
-        const bands = bollinger.computeBands(candles);
-        if (bands) {
-          const isNew = !this.bb.candle || bands.openTs !== this.bb.candle.openTs;
-          if (isNew) {
-            const state = bollinger.nextState(this.bb.state, bands);
-            const rsi = bollinger.computeRSI(candles, cfg.RSI_PERIOD);
-            const side = state === 'NEUTRAL' ? bollinger.sideForNeutral(rsi) : bollinger.SIDE[state];
-            const shares = state === 'NEUTRAL' ? cfg.SHARES_NEUTRAL : bollinger.SHARES[state];
-            this.bb = {
-              state, upper: round(bands.upper, 2), middle: round(bands.middle, 2), lower: round(bands.lower, 2),
-              candle: bands.candle, rsi: rsi == null ? null : round(rsi, 1), side, shares,
-              bandsReady: true, candles: candles.slice(-40),
-            };
-            if (state !== 'NEUTRAL' || side !== this._lastNeutralSide) {
-              this._lastNeutralSide = state === 'NEUTRAL' ? side : this._lastNeutralSide;
-              this._push({ event: 'BB_UPDATE', side, shares,
-                note: `${bollinger.LABEL[state]} (close ${bands.candle.close}, upper ${round(bands.upper, 2)}, `
-                  + `mid ${round(bands.middle, 2)}, lower ${round(bands.lower, 2)}, rsi ${rsi == null ? 'n/a' : round(rsi, 1)}) -> ${side} ${shares}sh` });
-            }
-          } else {
-            this.bb.upper = round(bands.upper, 2); this.bb.middle = round(bands.middle, 2); this.bb.lower = round(bands.lower, 2);
-            this.bb.bandsReady = true; this.bb.candles = candles.slice(-40);
-          }
-        }
-      } catch (e) {
-        this.error = `Bollinger feed error: ${e.message}`;
+  /** Start the event-driven Binance candle feed; REST is used only to seed history. */
+  _bbLoop() {
+    this._stopBbFeed = bollinger.startClosedCandleFeed(
+      cfg.BB_PERIOD + 10,
+      (candles) => this._processBollingerCandles(candles),
+      (e) => {
+        this.error = 'Bollinger feed error: ' + e.message;
         this._push({ event: 'ERROR', note: this.error });
       }
-      await sleep(20_000);
+    );
+  }
+
+  _processBollingerCandles(candles) {
+    if (!candles || !candles.length) return;
+    if (typeof this.error === 'string' && this.error.startsWith('Bollinger feed error:')) this.error = null;
+    const bands = bollinger.computeBands(candles);
+    if (!bands) return;
+    const isNew = !this.bb.candle || bands.openTs !== this.bb.candle.openTs;
+    if (isNew) {
+      const state = bollinger.nextState(this.bb.state, bands);
+      const rsi = bollinger.computeRSI(candles, cfg.RSI_PERIOD);
+      const side = state === 'NEUTRAL' ? bollinger.sideForNeutral(rsi) : bollinger.SIDE[state];
+      const shares = state === 'NEUTRAL' ? cfg.SHARES_NEUTRAL : bollinger.SHARES[state];
+      this.bb = {
+        state, upper: round(bands.upper, 2), middle: round(bands.middle, 2), lower: round(bands.lower, 2),
+        candle: bands.candle, rsi: rsi == null ? null : round(rsi, 1), side, shares,
+        bandsReady: true, candles: candles.slice(-40),
+      };
+      if (state !== 'NEUTRAL' || side !== this._lastNeutralSide) {
+        this._lastNeutralSide = state === 'NEUTRAL' ? side : this._lastNeutralSide;
+        this._push({ event: 'BB_UPDATE', side, shares,
+          note: bollinger.LABEL[state] + ' (close ' + bands.candle.close + ', upper ' + round(bands.upper, 2)
+            + ', mid ' + round(bands.middle, 2) + ', lower ' + round(bands.lower, 2) + ', rsi '
+            + (rsi == null ? 'n/a' : round(rsi, 1)) + ') -> ' + side + ' ' + shares + 'sh' });
+      }
+    } else {
+      this.bb.upper = round(bands.upper, 2); this.bb.middle = round(bands.middle, 2); this.bb.lower = round(bands.lower, 2);
+      this.bb.bandsReady = true; this.bb.candles = candles.slice(-40);
     }
   }
 
