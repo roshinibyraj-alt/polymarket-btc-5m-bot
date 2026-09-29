@@ -7,7 +7,7 @@ module.exports = {
   // Bollinger Bands, computed on BTC's own 5-minute candles (Binance public klines --
   // Polymarket's windows resolve BTC up/down but don't carry a BTC price history of their own).
   BB_SYMBOL: 'BTCUSDT',
-  BB_INTERVAL: '5m',
+  BB_INTERVAL: '1m',
   BB_PERIOD: 20,                // candles in the moving average
   BB_STDDEV: 2,                 // band width, in standard deviations
   BB_NEAR_TOUCH_SIGMA: 0.1,      // directional near-miss tolerance in standard deviations
@@ -35,7 +35,9 @@ module.exports = {
   // Entry: no price filter. One order, ENTRY_DELAY_MS after the window opens, filled at any price.
   ENTRY_DELAY_MS: 3000,
   SIGNAL_DEADLINE_MS: 30000,   // if the Bollinger signal isn't ready within 30s of open, skip the window
-  PRICE_CAP: 0.99,             // order limit = highest tick, so a fired order fills at any price
+  PRICE_CAP: 0.99,             // buy ceiling for FOK orders
+  EXIT_PRICE_FLOOR: 0.01,       // sell floor when closing a position on a reversal
+  REVERSAL_RETRY_MS: 3000,      // retry an unfilled reversal after 3 seconds
 
   TAKER_FEE_RATE: 0.07,        // fee = shares * rate * p * (1-p), used for P&L estimate only
 };

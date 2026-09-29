@@ -22,23 +22,28 @@ class DemoTrader {
 
   async placeFokLimitOrder(tokenId, side, price, size) {
     const book = await this.getOrderBook(tokenId);
-    const asks = ((book && book.asks) || [])
-      .map((a) => ({ p: parseFloat(a.price), s: parseFloat(a.size) }))
-      .filter((a) => a.p > 0 && a.s > 0 && a.p <= price)
-      .sort((a, b) => a.p - b.p);
-    let need = size, cost = 0;
-    for (const a of asks) {
-      const take = Math.min(need, a.s);
-      cost += take * a.p;
+    const selling = String(side).toUpperCase() === 'SELL';
+    const levels = (selling ? ((book && book.bids) || []) : ((book && book.asks) || []))
+      .map((level) => ({ p: parseFloat(level.price), s: parseFloat(level.size) }))
+      .filter((level) => level.p > 0 && level.s > 0 && (selling ? level.p >= price : level.p <= price))
+      .sort(selling ? (a, b) => b.p - a.p : (a, b) => a.p - b.p);
+    let need = size, amount = 0;
+    for (const level of levels) {
+      const take = Math.min(need, level.s);
+      amount += take * level.p;
       need -= take;
       if (need <= 1e-9) break;
     }
-    if (need > 1e-9) throw new Error(`demo: only ${(size - need).toFixed(0)} of ${size} shares available up to ${price}`);
+    if (need > 1e-9) {
+      const bound = selling ? 'above ' : 'up to ';
+      throw new Error('demo: only ' + (size - need).toFixed(0) + ' of ' + size + ' shares available ' + bound + price);
+    }
     this._n += 1;
-    return {
-      id: `demo-${this._n}`, status: 'matched', isFilled: true, avgPrice: cost / size,
-      raw: { status: 'matched', makingAmount: String(cost), takingAmount: String(size) },
-    };
+    const avgPrice = amount / size;
+    const raw = selling
+      ? { status: 'matched', makingAmount: String(size), takingAmount: String(amount) }
+      : { status: 'matched', makingAmount: String(amount), takingAmount: String(size) };
+    return { id: 'demo-' + this._n, status: 'matched', isFilled: true, avgPrice, raw };
   }
 
   async getOrder() { return { status: 'matched' }; }
