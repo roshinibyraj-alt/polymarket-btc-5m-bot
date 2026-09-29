@@ -216,24 +216,15 @@ class Bot {
 
     const signal = { state: this.bb.state, side: this.bb.side, shares: this.bb.shares };
     if (w.position) {
-      if (signal.side && signal.side !== w.position.side && elapsed < WINDOW_MS - cfg.END_WATCH_MS
+      if (!w.outcomeDone && signal.side && signal.side !== w.position.side && elapsed < WINDOW_MS - cfg.END_WATCH_MS
         && Date.now() - (w.lastReversalAttemptAt || 0) >= cfg.REVERSAL_RETRY_MS) {
         await this._reverse(w, signal);
       }
       return;
     }
 
-    if (elapsed >= WINDOW_MS - cfg.END_WATCH_MS) return;
-    if (w.everEntered) {
-      if (!signal.side || !signal.shares || Date.now() - (w.lastOpenAttemptAt || 0) < cfg.REVERSAL_RETRY_MS) return;
-      w.signal = signal;
-      this.lastSignal = { ...signal, rsi: this.bb.rsi, upper: this.bb.upper, middle: this.bb.middle, lower: this.bb.lower, slug: w.slug };
-      w.lastOpenAttemptAt = Date.now();
-      await this._fire(w, signal.side, signal.shares, signal.side === 'UP' ? w.window.tokenUp : w.window.tokenDown, true);
-      return;
-    }
-
-    if (!signal.side || !signal.shares) return;
+    // Keep waiting for a valid price until the market closes; do not enter after its winner is locked.
+    if (w.outcomeDone || elapsed >= WINDOW_MS || !signal.side || !signal.shares) return;
     const changed = !w.signal || w.signal.side !== signal.side || w.signal.shares !== signal.shares || w.signal.state !== signal.state;
     if (changed) {
       const event = w.signal ? 'SIGNAL_UPDATE' : 'SIGNAL';
@@ -241,12 +232,15 @@ class Bot {
       this.lastSignal = { ...signal, rsi: this.bb.rsi, upper: this.bb.upper, middle: this.bb.middle, lower: this.bb.lower, slug: w.slug };
       w.status = 'armed';
       this._push({ event, slug: w.slug, side: signal.side, shares: signal.shares,
-        note: bollinger.LABEL[signal.state] + ' -> buy ' + signal.side + ' ' + signal.shares + 'sh; initial entry after ' + (cfg.ENTRY_DELAY_MS / 1000) + 's' });
+        note: bollinger.LABEL[signal.state] + ' -> watch ' + signal.side + ' best ask; first buy eligible after ' + (cfg.ENTRY_DELAY_MS / 1000) + 's at $' + cfg.PRICE_CAP + ' or lower' });
     }
 
-    if (elapsed >= cfg.ENTRY_DELAY_MS) {
-      await this._fire(w, w.signal.side, w.signal.shares, w.signal.side === 'UP' ? w.window.tokenUp : w.window.tokenDown, false);
-    }
+    if (elapsed < cfg.ENTRY_DELAY_MS || Date.now() - (w.lastOpenAttemptAt || 0) < cfg.REVERSAL_RETRY_MS) return;
+    const px = this.prices && this.prices.slug === w.slug ? this.prices : null;
+    const sideAsk = px ? (w.signal.side === 'UP' ? px.up.ask : px.down.ask) : null;
+    if (sideAsk == null || sideAsk > cfg.PRICE_CAP) return;
+    w.lastOpenAttemptAt = Date.now();
+    await this._fire(w, w.signal.side, w.signal.shares, w.signal.side === 'UP' ? w.window.tokenUp : w.window.tokenDown, w.everEntered);
   }
 
   _voidNoData(w, why) {
@@ -272,52 +266,35 @@ class Bot {
   async _fire(w, side, shares, token, reversal = false) {
     w.status = 'firing';
     this._push({ event: 'FIRING', slug: w.slug, side, shares,
-      note: (reversal ? 'reversing into ' : 'buying ') + shares + 'sh ' + side + ' (limit ' + cfg.PRICE_CAP + ')' });
+      note: (reversal ? 'reversing into ' : 'buying ') + shares + 'sh ' + side + ' (FOK limit $' + cfg.PRICE_CAP + ')' });
 
+    const waitForFill = (why) => {
+      w.status = reversal ? 'reversal_pending' : 'armed';
+      this._push({ event: reversal ? 'REVERSAL_ENTRY_FAILED' : 'ENTRY_WAITING', slug: w.slug, side, shares,
+        note: why + (reversal ? '' : '; continuing to watch for a fill at or below $' + cfg.PRICE_CAP) });
+      return false;
+    };
     let result;
     try {
       result = await this.trader.placeFokLimitOrder(token, 'BUY', cfg.PRICE_CAP, shares);
     } catch (e) {
-      if (reversal) {
-        w.status = 'reversal_pending';
-        this._push({ event: 'REVERSAL_ENTRY_FAILED', slug: w.slug, side, shares, note: 'opposite-side buy failed: ' + e.message });
-      } else this._void(w, side, shares, 'order rejected/unfilled: ' + e.message);
-      return false;
+      return waitForFill('FOK buy failed: ' + e.message);
     }
 
     const { filled, status } = await this._orderFilled(result, shares);
-    if (!filled) {
-      const why = 'FOK not filled (status: ' + (status || 'none') + ')';
-      if (reversal) {
-        w.status = 'reversal_pending';
-        this._push({ event: 'REVERSAL_ENTRY_FAILED', slug: w.slug, side, shares, note: why });
-      } else this._void(w, side, shares, why);
-      return false;
-    }
+    if (!filled) return waitForFill('FOK not filled (status: ' + (status || 'none') + ')');
 
     const raw = result.raw || {};
     let price = Number(result.avgPrice);
     const paid = parseFloat(raw.makingAmount), got = parseFloat(raw.takingAmount);
     if (paid > 0 && got > 0) price = paid / got;
-    if (!Number.isFinite(price) || price <= 0) {
-      const why = 'filled buy returned an invalid average price';
-      if (reversal) {
-        w.status = 'reversal_pending';
-        this._push({ event: 'REVERSAL_ENTRY_FAILED', slug: w.slug, side, shares, note: why });
-      } else this._void(w, side, shares, why);
-      return false;
+    if (!Number.isFinite(price) || price <= 0 || price > cfg.PRICE_CAP + 1e-9) {
+      return waitForFill('buy fill returned an invalid or over-limit average price');
     }
 
     const fee = shares * cfg.TAKER_FEE_RATE * price * (1 - price);
     const cost = shares * price + fee;
-    if (!this.live && cost > this.cash) {
-      const why = 'demo balance too low ($' + this.cash.toFixed(2) + ' < $' + cost.toFixed(2) + ')';
-      if (reversal) {
-        w.status = 'reversal_pending';
-        this._push({ event: 'REVERSAL_ENTRY_FAILED', slug: w.slug, side, shares, note: why });
-      } else this._void(w, side, shares, why);
-      return false;
-    }
+    if (!this.live && cost > this.cash) return waitForFill('demo balance too low ($' + this.cash.toFixed(2) + ' < $' + cost.toFixed(2) + ')');
     if (!this.live) this.cash -= cost;
 
     const position = { slug: w.slug, openTs: w.openTs, closeTs: w.window.closeTs, side, shares, price, fee, cost, firedAt: Date.now() };
@@ -327,7 +304,7 @@ class Bot {
     w.signal = { state: this.bb.state, side, shares };
     w.status = 'fired';
     this._push({ event: 'ENTRY_FILLED', slug: w.slug, side, shares, price: round(price, 4),
-      note: 'filled ' + shares + 'sh ' + side + ' @ ' + round(price, 4) + (reversal ? ' after intrawindow reversal' : '; holding until resolution or an opposite 1m signal') });
+      note: 'filled ' + shares + 'sh ' + side + ' @ ' + round(price, 4) + (reversal ? ' after reversal' : '; holding until resolution or an opposite 5m signal') });
     return true;
   }
 
@@ -367,7 +344,7 @@ class Bot {
     w.status = 'reversing';
     w.lastReversalAttemptAt = Date.now();
     this._push({ event: 'REVERSAL_START', slug: w.slug, side: position.side, shares: position.shares,
-      note: 'opposite 1m signal ' + signal.side + ' -- selling ' + position.shares + 'sh before reversing' });
+      note: 'opposite 5m signal ' + signal.side + ' -- selling ' + position.shares + 'sh before reversing' });
 
     let result;
     try {
@@ -411,9 +388,10 @@ class Bot {
     w.position = null;
     w.signal = signal;
     w.status = 'reversal_pending';
-    w.lastOpenAttemptAt = Date.now();
+    w.lastOpenAttemptAt = 0;
     this.lastSignal = { ...signal, rsi: this.bb.rsi, upper: this.bb.upper, middle: this.bb.middle, lower: this.bb.lower, slug: w.slug };
-    await this._fire(w, signal.side, signal.shares, signal.side === 'UP' ? w.window.tokenUp : w.window.tokenDown, true);
+    this._push({ event: 'REVERSAL_WAITING', slug: w.slug, side: signal.side, shares: signal.shares,
+      note: 'old side closed; waiting for ' + signal.side + ' best ask at or below $' + cfg.PRICE_CAP + ' before buying' });
     return true;
   }
 
@@ -519,7 +497,7 @@ class Bot {
       trades: this.trades.slice(-60).reverse(),
       equity: this.equity,
       stats: this.stats,
-      cfg: { bbPeriod: cfg.BB_PERIOD, bbStddev: cfg.BB_STDDEV, bbNearTouchSigma: cfg.BB_NEAR_TOUCH_SIGMA, bbInterval: cfg.BB_INTERVAL, exitPriceFloor: cfg.EXIT_PRICE_FLOOR, reversalRetryMs: cfg.REVERSAL_RETRY_MS, stage1: cfg.SHARES_STAGE1, stage2: cfg.SHARES_STAGE2, breakShares: cfg.SHARES_BREAK,
+      cfg: { bbPeriod: cfg.BB_PERIOD, bbStddev: cfg.BB_STDDEV, bbNearTouchSigma: cfg.BB_NEAR_TOUCH_SIGMA, bbInterval: cfg.BB_INTERVAL, exitPriceFloor: cfg.EXIT_PRICE_FLOOR, reversalRetryMs: cfg.REVERSAL_RETRY_MS, entryPriceMax: cfg.PRICE_CAP, stage1: cfg.SHARES_STAGE1, stage2: cfg.SHARES_STAGE2, breakShares: cfg.SHARES_BREAK,
         neutralShares: cfg.SHARES_NEUTRAL, rsiPeriod: cfg.RSI_PERIOD,
         winPrice: cfg.WIN_PRICE, endWatchMs: cfg.END_WATCH_MS, entryDelayMs: cfg.ENTRY_DELAY_MS, windowSec: WINDOW_SECONDS },
       log: this.log.slice(-100).reverse(),

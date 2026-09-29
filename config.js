@@ -7,7 +7,7 @@ module.exports = {
   // Bollinger Bands, computed on BTC's own 5-minute candles (Binance public klines --
   // Polymarket's windows resolve BTC up/down but don't carry a BTC price history of their own).
   BB_SYMBOL: 'BTCUSDT',
-  BB_INTERVAL: '1m',
+  BB_INTERVAL: '5m',
   BB_PERIOD: 20,                // candles in the moving average
   BB_STDDEV: 2,                 // band width, in standard deviations
   BB_NEAR_TOUCH_SIGMA: 0.1,      // directional near-miss tolerance in standard deviations
@@ -19,7 +19,7 @@ module.exports = {
   SHARES_NEUTRAL: 100,          // before the first band touch -- side picked by the RSI filter below
 
   // RSI is only used to break a NEUTRAL Bollinger state; first entry has no price-confirmation filter.
-  RSI_PERIOD: 14,                // RSI on the same BTC 1m candles, used only to break the NEUTRAL state
+  RSI_PERIOD: 14,                // RSI on the same BTC 5m candles, used only to break the NEUTRAL state
 
   // Who won a window: in the last END_WATCH_MS before it closes, a side priced above WIN_PRICE wins,
   // and the other side is the loser (~0), counted as $1/share won, $0/share lost. If no side crosses
@@ -29,10 +29,10 @@ module.exports = {
   END_WATCH_MS: 3000,
   WIN_PRICE: 0.95,          // checked from 297s onward (WINDOW_SECONDS - END_WATCH_MS)
 
-  // Entry: no price filter. One order, ENTRY_DELAY_MS after the window opens, filled at any price.
+  // Entry: wait at least 3s, then keep watching the whole window for a signalled-side ask at or below $0.40.
   ENTRY_DELAY_MS: 3000,
-  SIGNAL_DEADLINE_MS: 30000,   // if the Bollinger signal isn't ready within 30s of open, skip the window
-  PRICE_CAP: 0.99,             // buy ceiling for FOK orders
+  SIGNAL_DEADLINE_MS: 30000,   // skip only if the Bollinger signal is not ready within 30s of open
+  PRICE_CAP: 0.40,             // maximum BUY limit; the FOK order cannot pay more than $0.40
   EXIT_PRICE_FLOOR: 0.01,       // sell floor when closing a position on a reversal
   REVERSAL_RETRY_MS: 3000,      // retry an unfilled reversal after 3 seconds
 
