@@ -98,7 +98,7 @@ svg text{fill:var(--dim);font-size:10px}
 </div>
 
 <div class="card" style="margin-bottom:14px">
-  <h2>Best asks this window <span class="dim" style="font-weight:400">green = UP · red = DOWN · lines = $0.20 dip / $0.50 entry</span></h2>
+  <h2>Best asks this window <span class="dim" style="font-weight:400">green = UP · red = DOWN · dashed lines = configured dip / entry thresholds</span></h2>
   <div class="split"><i id="splitUp" style="width:50%"></i></div>
   <div class="row" style="font-size:12px;color:var(--dim);margin-bottom:6px"><span id="splUp">UP –</span><span id="splDn">DOWN –</span></div>
   <svg id="pxChart" viewBox="0 0 700 220" width="100%"></svg>
@@ -166,7 +166,7 @@ function pxChart(s){
   for(const m of [0,60,120,180,240,300])g+=`<text x="${X(m)-8}" y="${H-6}">${m}s</text>`;
   const eligibleAt=cf.windowSec-cf.minSecondsRemaining;
   g+=`<rect x="${X(eligibleAt)}" y="${t}" width="${X(cf.windowSec)-X(eligibleAt)}" height="${H-t-b}" fill="#ff5c7c18"/>`;
-  for(const [price,label,color] of [[cf.dipPrice,'dip <20¢','#ffc857'],[cf.entryPrice,'entry 50¢','#8b7bff']]){
+  for(const [price,label,color] of [[cf.dipPrice,'dip <'+Math.round(cf.dipPrice*100)+'¢','#ffc857'],[cf.entryPrice,'entry '+Math.round(cf.entryPrice*100)+'¢','#8b7bff']]){
     g+=`<line x1="${l}" x2="${W-r}" y1="${Y(price)}" y2="${Y(price)}" stroke="${color}" stroke-dasharray="3 4"/><text x="${W-r-74}" y="${Y(price)-4}" style="fill:${color}">${label}</text>`;
   }
   g+=`<line x1="${X(eligibleAt)}" x2="${X(eligibleAt)}" y1="${t}" y2="${H-b}" stroke="#ff5c7c" stroke-dasharray="3 3"/><text x="${X(eligibleAt)+4}" y="${t+10}" style="fill:#ff9aaa">last entry time</text>`;
