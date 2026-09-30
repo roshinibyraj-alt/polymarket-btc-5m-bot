@@ -1,46 +1,87 @@
 'use strict';
 
-function previousCandleSignal(candles, windowOpenTs, windowSeconds = 300) {
-  const expectedOpenTs = windowOpenTs - windowSeconds;
-  const candle = (candles || []).find((item) => item.openTs === expectedOpenTs);
-  if (!candle) return { ready: false, candle: null, color: null, side: null };
-  const color = candle.close > candle.open ? 'GREEN' : candle.close < candle.open ? 'RED' : 'DOJI';
-  const side = color === 'GREEN' ? 'UP' : color === 'RED' ? 'DOWN' : null;
-  return { ready: true, candle, color, side };
+function observeEntry(windowState, asks, elapsedSeconds, config) {
+  const events = [];
+  if (!windowState || windowState.tradeTaken) return { events, shouldBuy: false, side: null };
+  if (!Number.isFinite(elapsedSeconds) || elapsedSeconds < config.ENTRY_START_SECONDS) {
+    return { events, shouldBuy: false, side: windowState.armedSide || null };
+  }
+
+  if (!windowState.armedSide) {
+    const candidates = ['UP', 'DOWN']
+      .map((side) => ({ side, ask: Number(asks && asks[side]) }))
+      .filter((item) => Number.isFinite(item.ask) && item.ask > config.ENTRY_ARM_PRICE && item.ask < 1)
+      .sort((a, b) => b.ask - a.ask);
+    if (candidates.length) {
+      windowState.armedSide = candidates[0].side;
+      windowState.entryReadyLogged = false;
+      events.push('SIDE_ARMED');
+    }
+  }
+
+  const side = windowState.armedSide || null;
+  const ask = side ? Number(asks && asks[side]) : NaN;
+  const shouldBuy = !!side && Number.isFinite(ask) && ask > 0 && ask <= config.ENTRY_TRIGGER_PRICE;
+  if (shouldBuy && !windowState.entryReadyLogged) {
+    windowState.entryReadyLogged = true;
+    events.push('ENTRY_READY');
+  }
+  return { events, shouldBuy, side };
 }
 
-/** Track a strict below-floor dip followed by a recovery to the entry level. */
-function observeEntryPrice(windowState, ask, secondsRemaining, config) {
-  const price = Number(ask);
-  const events = [];
-  if (!Number.isFinite(price) || price <= 0 || price >= 1 || windowState.tradeTaken) {
-    return { events, shouldBuy: false };
+function estimateMarketBuyBudget(book, targetShares) {
+  const asks = ((book && book.asks) || [])
+    .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
+    .filter((level) => Number.isFinite(level.price) && level.price > 0 && level.price < 1
+      && Number.isFinite(level.size) && level.size > 0)
+    .sort((a, b) => a.price - b.price);
+  let remaining = Math.max(0, Number(targetShares) || 0);
+  let shares = 0;
+  let amount = 0;
+  for (const level of asks) {
+    const take = Math.min(remaining, level.size);
+    amount += take * level.price;
+    shares += take;
+    remaining -= take;
+    if (remaining <= 1e-9) break;
   }
-  if (price < config.DIP_PRICE && !windowState.dipSeen) {
-    windowState.dipSeen = true;
-    events.push('DIP_SEEN');
+  return { amount, shares, averagePrice: shares > 0 ? amount / shares : 0, remaining };
+}
+
+function normalizeMarketFill(result, side) {
+  const raw = (result && result.raw) || {};
+  const making = Number(raw.makingAmount);
+  const taking = Number(raw.takingAmount);
+  let shares = String(side).toUpperCase() === 'BUY' ? taking : making;
+  let notional = String(side).toUpperCase() === 'BUY' ? making : taking;
+  if (!(shares > 0) || !(notional > 0)) {
+    const fallbackShares = Number(raw.size_matched || raw.filled_size || (result && result.filledSize));
+    const fallbackPrice = Number((result && result.avgPrice) || raw.avg_fill_price || raw.price);
+    if (fallbackShares > 0 && fallbackPrice > 0) {
+      shares = fallbackShares;
+      notional = fallbackShares * fallbackPrice;
+    }
   }
-  if (windowState.dipSeen && price >= config.ENTRY_PRICE && !windowState.reboundSeen) {
-    windowState.reboundSeen = true;
-    events.push('REBOUND_SEEN');
-  }
-  const shouldBuy = windowState.dipSeen && windowState.reboundSeen
-    && price <= config.ENTRY_PRICE
-    && secondsRemaining >= config.MIN_SECONDS_REMAINING;
-  return { events, shouldBuy };
+  return {
+    shares: Number.isFinite(shares) && shares > 0 ? shares : 0,
+    notional: Number.isFinite(notional) && notional > 0 ? notional : 0,
+    averagePrice: shares > 0 && notional > 0 ? notional / shares : 0,
+  };
 }
 
 function adjustBaseShares(currentBase, outcome, config) {
   const floor = config.BASE_SHARES;
   const step = config.SHARE_STEP;
   const ceiling = floor + step * config.MAX_SHARE_ADDITIONS;
-  if (outcome === 'LOSS') return Math.min(ceiling, Math.max(floor, currentBase) + step);
-  if (outcome === 'WIN') return Math.max(floor, Math.min(ceiling, currentBase) - step);
-  return Math.min(ceiling, Math.max(floor, currentBase));
+  const current = Math.max(floor, Math.min(ceiling, Number(currentBase) || floor));
+  if (outcome === 'STOP_LOSS' || outcome === 'STOP') return Math.min(ceiling, current + step);
+  if (outcome === 'WIN' || outcome === 'TAKE_PROFIT') return Math.max(floor, current - step);
+  return current;
 }
 
 function additionCount(baseShares, config) {
-  return Math.max(0, Math.min(config.MAX_SHARE_ADDITIONS, Math.round((baseShares - config.BASE_SHARES) / config.SHARE_STEP)));
+  const count = Math.round(((Number(baseShares) || config.BASE_SHARES) - config.BASE_SHARES) / config.SHARE_STEP);
+  return Math.max(0, Math.min(config.MAX_SHARE_ADDITIONS, count));
 }
 
-module.exports = { previousCandleSignal, observeEntryPrice, adjustBaseShares, additionCount };
+module.exports = { observeEntry, estimateMarketBuyBudget, normalizeMarketFill, adjustBaseShares, additionCount };

@@ -2,10 +2,11 @@
   "name": "polymarket-btc-5m-rebound-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "BTC 5-minute rebound bot: previous-candle direction, below-20c dip, recovery-to-50c entry, adjustable share base. Demo mode by default.",
+  "description": "BTC 5-minute Polymarket strategy with delayed taker entries, maker take-profit, stop loss, and adaptive share sizing.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=18"
