@@ -116,10 +116,10 @@ svg text{fill:var(--dim);font-size:10px}
 
 <div class="grid g3">
   <div class="card">
-    <h2>Officially settled trade windows <span class="dim" style="font-weight:400">oldest → newest</span></h2>
+    <h2>Resolved BTC windows <span class="dim" style="font-weight:400">oldest → newest</span></h2>
     <div class="cs" id="cs"></div>
     <div class="row" style="margin-top:12px;align-items:center">
-      <div><span class="chip up" id="cUp">UP 0</span> <span class="chip dn" id="cDn">DOWN 0</span> <span class="dim" style="font-size:12px">official results</span></div></div>
+      <div><span class="chip up" id="cUp">UP 0</span> <span class="chip dn" id="cDn">DOWN 0</span> <span class="dim" style="font-size:12px">CLOB cutoff or official result</span></div></div>
   </div>
   <div class="card">
     <h2>This window's trigger</h2>
@@ -213,10 +213,10 @@ function render(s){
   $('candleSignal').textContent=st.color?(st.color+' candle → '+(st.side?'BUY '+st.side:'NO TRADE')):'Waiting for previous closed candle';
   $('candleMeta').textContent=c?'O '+c.open.toFixed(2)+' · H '+c.high.toFixed(2)+' · L '+c.low.toFixed(2)+' · C '+c.close.toFixed(2):'–';
   $('candleRule').innerHTML='<b style="color:var(--tx)">Entry:</b> green previous BTC candle → UP; red → DOWN; doji → skip. The selected side’s best ask must dip strictly below $'+cf.dipPrice.toFixed(2)+' and then recover to $'+cf.entryPrice.toFixed(2)+'. Buy with a $'+cf.entryPrice.toFixed(2)+' FOK limit only when at least '+cf.minSecondsRemaining+' seconds remain. One filled trade per window.';
-  $('how').innerHTML='<b style="color:var(--tx)">Settlement:</b> the bot waits for Polymarket’s official market result. A win adds $1 per share; a loss pays $0. The next base size moves by '+cf.shareStep+' shares per result, with a '+cf.baseShares+'-share floor and '+cf.maxAdditions+' additions maximum.';
+  $('how').innerHTML='<b style="color:var(--tx)">Settlement:</b> at '+cf.clobSettlementSecond+'s, exactly one side must have a CLOB best bid strictly above $'+cf.clobWinThreshold.toFixed(2)+'; that side wins at $1/share and the other pays $0. Otherwise, wait for the official result. Base size moves by '+cf.shareStep+' shares per result, with a '+cf.baseShares+'-share floor and '+cf.maxAdditions+' additions maximum.';
   // window strip
   const ro=s.recentOutcomes;let h='';
-  ro.forEach(o=>{const w=o.winner==='UP'?'U':'D';h+=`<div class="c ${w}" title="${hhmm(o.openTs)} · ${o.winner} won at ${cents(o.price)}, ${o.winner==='UP'?'DOWN':'UP'} lost at ${cents(o.loser)}${o.traded?' · bet '+o.traded:''}"><b>${w==='U'?'▲':'▼'}</b><em class="${o.result==='WIN'?'W':o.result==='LOSS'?'L':''}">${o.result==='WIN'?'✓ win':o.result==='LOSS'?'✗ loss':o.traded?'…':''}</em>${hhmm(o.openTs)}<br>${cents(o.price)}</div>`});
+  ro.forEach(o=>{const w=o.winner==='UP'?'U':'D';h+=`<div class="c ${w}" title="${hhmm(o.openTs)} · ${o.winner} won at ${cents(o.price)}, ${o.winner==='UP'?'DOWN':'UP'} lost at ${cents(o.loser)} · ${o.source==='clob_297s'?'CLOB at 297s':'official'}${o.traded?' · bet '+o.traded:''}"><b>${w==='U'?'▲':'▼'}</b><em class="${o.result==='WIN'?'W':o.result==='LOSS'?'L':''}">${o.result==='WIN'?'✓ win':o.result==='LOSS'?'✗ loss':o.traded?'…':''}</em>${hhmm(o.openTs)}<br>${cents(o.price)}</div>`});
   $('cs').innerHTML=(h||'<div class="empty">Reading previous windows…</div>')+'<div class="c now"><b>?</b><em></em>now</div>';
   $('cs').scrollLeft=9999;
   $('cUp').textContent='UP '+s.counts.UP;$('cDn').textContent='DOWN '+s.counts.DOWN;
@@ -249,8 +249,8 @@ function tables(s){
   $('open').innerHTML=s.pending.length?`<table><thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Entry</th><th>Cost</th><th>Now</th><th>Unrealized</th><th>Closes</th></tr></thead><tbody>${s.pending.map(p=>`<tr><td>${hhmm(p.openTs)}</td><td>${side(p.side)}</td><td>${p.shares}</td><td>${cents(p.price)}</td><td>${usd(p.cost)}</td><td>${cents(p.mark)}</td><td class="${p.unrealized>=0?'pos':'neg'}">${p.unrealized==null?'–':usd(p.unrealized,1)}</td><td>${hhmm(p.closeTs)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No open positions; entries wait for the dip-and-rebound trigger.</div>';
   $('trades').innerHTML=s.trades.length?`<table><thead><tr><th>Window</th><th>Bet</th><th>Winner</th><th>Shares</th><th>Entry</th><th>Cost</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>${s.trades.map(t=>`<tr><td>${hhmm(t.openTs)}</td><td>${side(t.side)}</td><td>${side(t.winner)}</td><td>${t.shares}</td><td>${cents(t.price)}</td><td>${usd(t.cost)}</td><td><span class="chip ${t.outcome==='WIN'?'up':'dn'}">${t.outcome}</span></td><td class="${t.pnl>=0?'pos':'neg'}"><b>${usd(t.pnl,1)}</b></td></tr>`).join('')}</tbody></table>`:'<div class="empty">No settled trades yet.</div>';
 }
-const grp={trade:['SIGNAL','NO_SIGNAL','DIP_SEEN','REBOUND_SEEN','FIRING','ENTRY_WAITING','ENTRY_FILLED','SETTLED_WIN','SETTLED_LOSS'],out:['OUTCOME'],err:['ERROR','SETTLEMENT_TIMEOUT']};
-const col={ENTRY_FILLED:'am',ENTRY_WAITING:'gr',SIGNAL:'am',NO_SIGNAL:'gr',DIP_SEEN:'vi',REBOUND_SEEN:'am',FIRING:'am',SETTLED_WIN:'up',SETTLED_LOSS:'dn',ERROR:'dn',SETTLEMENT_TIMEOUT:'dn',OUTCOME:'vi'};
+const grp={trade:['SIGNAL','NO_SIGNAL','DIP_SEEN','REBOUND_SEEN','FIRING','ENTRY_WAITING','ENTRY_FILLED','SETTLED_WIN','SETTLED_LOSS'],out:['OUTCOME','CLOB_OUTCOME_UNCLEAR'],err:['ERROR','SETTLEMENT_TIMEOUT']};
+const col={ENTRY_FILLED:'am',ENTRY_WAITING:'gr',SIGNAL:'am',NO_SIGNAL:'gr',DIP_SEEN:'vi',REBOUND_SEEN:'am',FIRING:'am',SETTLED_WIN:'up',SETTLED_LOSS:'dn',ERROR:'dn',SETTLEMENT_TIMEOUT:'dn',OUTCOME:'vi',CLOB_OUTCOME_UNCLEAR:'vi'};
 function logs(s){
   const L=s.log.filter(e=>filter==='all'||grp[filter].includes(e.event));
   $('log').innerHTML=L.map(e=>`<tr><td>${new Date(e.ts).toLocaleTimeString()}</td><td><span class="chip ${col[e.event]||'gr'}">${e.event}</span></td><td>${e.slug?hhmm(+e.slug.split('-').pop()):'–'}</td><td>${e.side?side(e.side):'–'}</td><td>${e.shares??'–'}</td><td class="${e.pnl>=0?'pos':'neg'}">${e.pnl!=null?usd(e.pnl,1):'–'}</td><td class="note">${esc(e.note)}</td></tr>`).join('')||'<tr><td colspan="7" class="empty">Nothing here yet.</td></tr>';

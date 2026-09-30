@@ -15,9 +15,9 @@ class Bot {
     this.trader = trader;
     this.live = !!opts.live;
     this.w = null;                                 // current window state
-    this.pending = [];                             // filled bets awaiting real resolution
+    this.pending = [];                             // filled bets awaiting outcome settlement
     this.stats = { wins: 0, losses: 0, noSignal: 0, voidNoFill: 0, voidNoData: 0, realizedPnl: 0 };
-    this.outcomes = new Map();                     // official resolved outcomes by market-window open time
+    this.outcomes = new Map();                     // CLOB cutoff or official outcomes by market-window open time
     this._resolveTried = new Map();                // openTs -> last official-resolution lookup time
     this.lastSignal = null;                        // previous-candle direction and planned entry
     this.walletBalance = null;
@@ -31,7 +31,7 @@ class Bot {
     this.peak = this.capital; this.maxDD = 0;
     this.prices = null;                            // live UP/DOWN quotes for the current window
     this.priceSeries = []; this._seriesSlug = null;
-    this.counts = { UP: 0, DOWN: 0 };              // officially resolved traded windows this session
+    this.counts = { UP: 0, DOWN: 0 };              // windows resolved this session
     this.candles = [];
     this.baseShares = cfg.BASE_SHARES;
     this.shareAdditions = 0;
@@ -82,6 +82,7 @@ class Bot {
           const [bu, bd] = await Promise.all([this.trader.getOrderBook(w.window.tokenUp), this.trader.getOrderBook(w.window.tokenDown)]);
           const up = quote(bu), down = quote(bd);
           this.prices = { slug: w.slug, ts: Date.now(), up, down };
+          this._captureClobOutcome(w, { up, down }, this.prices.ts);
           if (this._seriesSlug !== w.slug) { this._seriesSlug = w.slug; this.priceSeries = []; }
           if (up.ask != null && down.ask != null) {
             this.priceSeries.push({ t: Math.round((Date.now() - w.openTs * 1000) / 1000), up: round(up.ask, 3), down: round(down.ask, 3) });
@@ -146,7 +147,7 @@ class Bot {
       this.w = {
         slug, openTs, status: 'starting', window: null, previousCandle: null, previousCandleOpenTs: null,
         candleColor: null, side: null, dipSeen: false, reboundSeen: false,
-        tradeTaken: false, entryInFlight: false, position: null, lastOpenAttemptAt: 0,
+        tradeTaken: false, entryInFlight: false, position: null, lastOpenAttemptAt: 0, clobOutcomeChecked: false,
       };
       this.lastSignal = null;
     }
@@ -251,18 +252,41 @@ class Bot {
     w.status = 'fired';
     this.lastSignal = { color: w.candleColor, side, shares, candle: w.previousCandle, slug: w.slug };
     this._push({ event: 'ENTRY_FILLED', slug: w.slug, side, shares, price: round(price, 4),
-      note: 'filled ' + shares + 'sh ' + side + ' @ ' + round(price, 4) + '; one trade this window, holding for official resolution' });
+      note: 'filled ' + shares + 'sh ' + side + ' @ ' + round(price, 4) + '; one trade this window, holding for settlement' });
     return true;
   }
 
-  _setWindowOutcome(openTs, winner) {
+  _captureClobOutcome(w, quotes, sampledAt) {
+    if (!w || w.clobOutcomeChecked) return;
+    const elapsed = (sampledAt - w.openTs * 1000) / 1000;
+    if (elapsed < cfg.CLOB_SETTLEMENT_SECOND || elapsed >= WINDOW_SECONDS) return;
+    w.clobOutcomeChecked = true;
+
+    const upBid = quotes.up && Number.isFinite(quotes.up.bid) ? quotes.up.bid : null;
+    const downBid = quotes.down && Number.isFinite(quotes.down.bid) ? quotes.down.bid : null;
+    const upWins = upBid != null && upBid > cfg.CLOB_WIN_THRESHOLD;
+    const downWins = downBid != null && downBid > cfg.CLOB_WIN_THRESHOLD;
+    if (upWins === downWins) {
+      const show = (price) => price == null ? 'unavailable' : '$' + price.toFixed(3);
+      this._push({ event: 'CLOB_OUTCOME_UNCLEAR', slug: w.slug,
+        note: '297s CLOB check had no unique side with best bid strictly above $' + cfg.CLOB_WIN_THRESHOLD.toFixed(2) + ' (UP ' + show(upBid) + ', DOWN ' + show(downBid) + '); waiting for official result' });
+      return;
+    }
+    const winner = upWins ? 'UP' : 'DOWN';
+    const bid = upWins ? upBid : downBid;
+    this._setWindowOutcome(w.openTs, winner, 'clob_297s', { upBid, downBid, bid, sampledAt });
+  }
+
+  _setWindowOutcome(openTs, winner, source = 'official', details = null) {
     if (this.outcomes.has(openTs)) return;
     const loser = winner === 'UP' ? 'DOWN' : 'UP';
-    this.outcomes.set(openTs, { winner, source: 'official', price: 1, loser: 0 });
+    this.outcomes.set(openTs, { winner, source, price: 1, loser: 0, ...(details || {}) });
     this.counts[winner] += 1;
     if (this.outcomes.size > 60) this.outcomes.delete(this.outcomes.keys().next().value);
-    this._push({ event: 'OUTCOME', slug: slugForTs(openTs), side: winner,
-      note: 'official Polymarket resolution: ' + winner + ' won ($1/share); ' + loser + ' lost ($0/share)' });
+    const note = source === 'clob_297s'
+      ? '297s CLOB check: ' + winner + ' best bid $' + details.bid.toFixed(3) + ' > $' + cfg.CLOB_WIN_THRESHOLD.toFixed(2) + '; ' + loser + ' loses at $0/share'
+      : 'official Polymarket resolution: ' + winner + ' won ($1/share); ' + loser + ' lost ($0/share)';
+    this._push({ event: 'OUTCOME', slug: slugForTs(openTs), side: winner, note });
   }
 
   async _settlementLoop() {
@@ -273,8 +297,8 @@ class Bot {
       const pendingAtStart = this.pending.slice();
       const settledThisTick = new Set();
       for (const p of pendingAtStart) {
-        if (now < p.closeTs * 1000) continue;
         let winner = this.outcomes.get(p.openTs)?.winner || null;
+        if (!winner && now < p.closeTs * 1000) continue;
         const lastTried = this._resolveTried.get(p.openTs) || 0;
         if (!winner && now - lastTried >= cfg.RESOLUTION_RETRY_MS) {
           this._resolveTried.set(p.openTs, now);
@@ -295,7 +319,7 @@ class Bot {
         if (now - p.firedAt > cfg.SETTLEMENT_GIVE_UP_MS && !p.settlementTimedOut) {
           p.settlementTimedOut = true;
           this._push({ event: 'SETTLEMENT_TIMEOUT', slug: p.slug, side: p.side, shares: p.shares,
-            note: 'official result is still pending; keeping the position open and continuing to check' });
+            note: '297s CLOB check was inconclusive and official result is still pending; keeping the position open and continuing to check' });
         }
       }
       if (settledThisTick.size) this.pending = this.pending.filter((p) => !settledThisTick.has(p));
@@ -328,7 +352,7 @@ class Bot {
     }
     if (this.w && this.w.openTs === p.openTs) this.w.status = 'settled';
     this._push({ event: win ? 'SETTLED_WIN' : 'SETTLED_LOSS', slug: p.slug, side: p.side, shares: p.shares, pnl: round(pnl, 2),
-      note: outcome + ' on official resolution; base size ' + previousBase + ' → ' + this.baseShares + ' shares (' + this.shareAdditions + '/' + cfg.MAX_SHARE_ADDITIONS + ' additions), estimated P&L ' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) });
+      note: outcome + ' on ' + (this.outcomes.get(p.openTs)?.source === 'clob_297s' ? '297s CLOB threshold' : 'official Polymarket resolution') + '; base size ' + previousBase + ' → ' + this.baseShares + ' shares (' + this.shareAdditions + '/' + cfg.MAX_SHARE_ADDITIONS + ' additions), estimated P&L ' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) });
   }
 
   async _balanceLoop() {
@@ -381,7 +405,7 @@ class Bot {
       stats: this.stats,
       cfg: { dipPrice: cfg.DIP_PRICE, entryPrice: cfg.ENTRY_PRICE, minSecondsRemaining: cfg.MIN_SECONDS_REMAINING,
         baseShares: cfg.BASE_SHARES, shareStep: cfg.SHARE_STEP, maxAdditions: cfg.MAX_SHARE_ADDITIONS,
-        candleInterval: cfg.CANDLE_INTERVAL, windowSec: WINDOW_SECONDS },
+        candleInterval: cfg.CANDLE_INTERVAL, windowSec: WINDOW_SECONDS, clobSettlementSecond: cfg.CLOB_SETTLEMENT_SECOND, clobWinThreshold: cfg.CLOB_WIN_THRESHOLD },
       log: this.log.slice(-100).reverse(),
     };
   }
