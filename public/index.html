@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Streak Bot · BTC 5-min</title>
+<title>BTC Rebound Bot · BTC 5-min</title>
 <style>
 :root{--bg:#080a1c;--p1:#12152e;--p2:#181c3b;--line:#262b52;--tx:#eef0ff;--dim:#8a90b8;
 --up:#2ee6a6;--up2:#18b5d8;--dn:#ff5c7c;--dn2:#ff9a5c;--vio:#8b7bff;--amb:#ffc857;--pink:#ff7ad9;--band:#5b6fff}
@@ -68,7 +68,7 @@ svg text{fill:var(--dim);font-size:10px}
 </head>
 <body><div class="wrap">
 <header>
-  <div class="brand"><div class="logo">📈</div><div><h1>Streak Bot</h1><div class="sub">Polymarket · BTC up/down · 5-minute windows</div></div></div>
+  <div class="brand"><div class="logo">📈</div><div><h1>BTC Rebound Bot</h1><div class="sub">Polymarket · BTC up/down · 5-minute windows</div></div></div>
   <div class="pills"><span class="pill" id="mode">…</span><span class="pill" id="up">uptime –</span><span class="pill"><i class="dot" id="conn"></i><span id="connT">connecting</span></span></div>
 </header>
 <div class="err" id="err"></div>
@@ -98,33 +98,31 @@ svg text{fill:var(--dim);font-size:10px}
 </div>
 
 <div class="card" style="margin-bottom:14px">
-  <h2>Live prices this window <span class="dim" style="font-weight:400">green = UP · red = DOWN · shaded end = winner is read</span></h2>
+  <h2>Best asks this window <span class="dim" style="font-weight:400">green = UP · red = DOWN · lines = $0.20 dip / $0.50 entry</span></h2>
   <div class="split"><i id="splitUp" style="width:50%"></i></div>
   <div class="row" style="font-size:12px;color:var(--dim);margin-bottom:6px"><span id="splUp">UP –</span><span id="splDn">DOWN –</span></div>
   <svg id="pxChart" viewBox="0 0 700 220" width="100%"></svg>
 </div>
 
 <div class="card" style="margin-bottom:14px">
-  <h2>Bollinger Bands <span class="dim" style="font-weight:400" id="bbSub">BTC · 5m candles · 20-period, 2σ</span></h2>
+  <h2>Previous closed BTC candle <span class="dim" style="font-weight:400" id="candleSub">BTC · 5m</span></h2>
   <div class="row" style="align-items:center;margin-bottom:10px">
-    <div><span class="chip vi" id="bbState" style="font-size:14px;padding:6px 14px">–</span></div>
-    <div style="text-align:right;font-size:12.5px" class="dim">
-      upper <b id="bbU" style="color:var(--tx)">–</b> &nbsp;·&nbsp; mid <b id="bbM" style="color:var(--tx)">–</b> &nbsp;·&nbsp; lower <b id="bbL" style="color:var(--tx)">–</b> &nbsp;·&nbsp; RSI <b id="bbR" style="color:var(--tx)">–</b>
-    </div>
+    <span class="chip vi" id="candleSignal" style="font-size:14px;padding:6px 14px">Waiting for previous candle…</span>
+    <span id="candleMeta" class="dim" style="font-size:12.5px">–</span>
   </div>
-  <svg id="bbChart" viewBox="0 0 900 220" width="100%"></svg>
-  <div class="box" id="bbRule"></div>
+  <svg id="candleChart" viewBox="0 0 900 220" width="100%"></svg>
+  <div class="box" id="candleRule"></div>
 </div>
 
 <div class="grid g3">
   <div class="card">
-    <h2>Which side won each window <span class="dim" style="font-weight:400">oldest → newest</span></h2>
+    <h2>Officially settled trade windows <span class="dim" style="font-weight:400">oldest → newest</span></h2>
     <div class="cs" id="cs"></div>
     <div class="row" style="margin-top:12px;align-items:center">
-      <div><span class="chip up" id="cUp">UP 0</span> <span class="chip dn" id="cDn">DOWN 0</span> <span class="dim" style="font-size:12px">won since start</span></div></div>
+      <div><span class="chip up" id="cUp">UP 0</span> <span class="chip dn" id="cDn">DOWN 0</span> <span class="dim" style="font-size:12px">official results</span></div></div>
   </div>
   <div class="card">
-    <h2>This window's plan</h2>
+    <h2>This window's trigger</h2>
     <div class="sig" id="sig"></div>
     <div class="box" id="rule"></div>
   </div>
@@ -166,38 +164,28 @@ function pxChart(s){
   const cf=s.cfg,W=700,H=220,l=34,r=8,t=10,b=22,X=x=>l+x/cf.windowSec*(W-l-r),Y=v=>t+(1-v)*(H-t-b);
   let g='';for(const v of [0,.25,.5,.75,1])g+=`<line x1="${l}" x2="${W-r}" y1="${Y(v)}" y2="${Y(v)}" stroke="#ffffff12"/><text x="2" y="${Y(v)+3}">${Math.round(v*100)}¢</text>`;
   for(const m of [0,60,120,180,240,300])g+=`<text x="${X(m)-8}" y="${H-6}">${m}s</text>`;
-  g+=`<rect x="${X(cf.windowSec-cf.endWatchMs/1000)}" y="${t}" width="${X(cf.windowSec)-X(cf.windowSec-cf.endWatchMs/1000)}" height="${H-t-b}" fill="#ffc85730"/>
-  <line x1="${X(cf.entryDelayMs/1000)}" x2="${X(cf.entryDelayMs/1000)}" y1="${t}" y2="${H-b}" stroke="#8b7bff" stroke-dasharray="3 3"/><text x="${X(cf.entryDelayMs/1000)+4}" y="${t+10}" style="fill:#b6acff">entry</text>
-  <line x1="${l}" x2="${W-r}" y1="${Y(cf.winPrice)}" y2="${Y(cf.winPrice)}" stroke="#ffc857" stroke-dasharray="2 4"/><text x="${W-r-70}" y="${Y(cf.winPrice)-3}" style="fill:#ffc857">win ${cf.winPrice*100}¢</text>`;
+  const eligibleAt=cf.windowSec-cf.minSecondsRemaining;
+  g+=`<rect x="${X(eligibleAt)}" y="${t}" width="${X(cf.windowSec)-X(eligibleAt)}" height="${H-t-b}" fill="#ff5c7c18"/>`;
+  for(const [price,label,color] of [[cf.dipPrice,'dip <20¢','#ffc857'],[cf.entryPrice,'entry 50¢','#8b7bff']]){
+    g+=`<line x1="${l}" x2="${W-r}" y1="${Y(price)}" y2="${Y(price)}" stroke="${color}" stroke-dasharray="3 4"/><text x="${W-r-74}" y="${Y(price)-4}" style="fill:${color}">${label}</text>`;
+  }
+  g+=`<line x1="${X(eligibleAt)}" x2="${X(eligibleAt)}" y1="${t}" y2="${H-b}" stroke="#ff5c7c" stroke-dasharray="3 3"/><text x="${X(eligibleAt)+4}" y="${t+10}" style="fill:#ff9aaa">last entry time</text>`;
   const ps=s.priceSeries||[];
-  if(ps.length>1)for(const [k,c] of [['up',GRN],['down',RED]]){
-    g+=`<path d="${ps.map((p,i)=>(i?'L':'M')+X(p.t).toFixed(1)+' '+Y(p[k]).toFixed(1)).join(' ')}" fill="none" stroke="${c}" stroke-width="2.4" stroke-linejoin="round"/>`}
-  else g+=`<text x="${W/2}" y="${H/2}" text-anchor="middle">waiting for prices…</text>`;
+  if(ps.length>1)for(const [k,c] of [['up',GRN],['down',RED]])g+=`<path d="${ps.map((p,i)=>(i?'L':'M')+X(p.t).toFixed(1)+' '+Y(p[k]).toFixed(1)).join(' ')}" fill="none" stroke="${c}" stroke-width="2.4" stroke-linejoin="round"/>`;
+  else g+=`<text x="${W/2}" y="${H/2}" text-anchor="middle">waiting for asks…</text>`;
   $('pxChart').innerHTML=g;
 }
-function bbChart(s){
-  const bb=s.bb,cs=bb.candles||[];
-  if(!bb.bandsReady||cs.length<2){$('bbChart').innerHTML='<text x="450" y="110" text-anchor="middle" fill="#8a90b8" style="fill:#8a90b8;font-size:13px">Waiting for '+ (s.cfg.bbPeriod||20) +' closed 5m BTC candles…</text>';return}
-  const W=900,H=220,l=54,r=8,t=10,b=20;
-  const vals=cs.flatMap(c=>[c.high,c.low]).concat([bb.upper,bb.lower]);
-  const mn=Math.min(...vals),mx=Math.max(...vals),pad=(mx-mn)*.08||1;
-  const lo=mn-pad,hi=mx+pad;
-  const X=i=>l+i*(W-l-r)/(cs.length-1||1),Y=v=>t+(1-(v-lo)/(hi-lo))*(H-t-b);
-  let g='';
-  for(const frac of [0,.25,.5,.75,1]){const v=lo+frac*(hi-lo);g+=`<line x1="${l}" x2="${W-r}" y1="${Y(v)}" y2="${Y(v)}" stroke="#ffffff10"/><text x="2" y="${Y(v)+3}">${v.toFixed(0)}</text>`}
-  g+=`<path d="${cs.map((c,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(bb.upper).toFixed(1)).join(' ')}" fill="none" stroke="var(--band)" stroke-width="1.6"/>`;
-  g+=`<path d="${cs.map((c,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(bb.middle).toFixed(1)).join(' ')}" fill="none" stroke="#ffffff55" stroke-width="1.4" stroke-dasharray="3 4"/>`;
-  g+=`<path d="${cs.map((c,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(bb.lower).toFixed(1)).join(' ')}" fill="none" stroke="var(--band)" stroke-width="1.6"/>`;
-  const cw=Math.max(2,(W-l-r)/cs.length*0.5);
-  cs.forEach((c,i)=>{
-    const prevClose=i>0?cs[i-1].close:c.close,bull=c.close>=prevClose,bc=bull?GRN:RED;
-    g+=`<line x1="${X(i)}" x2="${X(i)}" y1="${Y(c.high)}" y2="${Y(c.low)}" stroke="${bc}" stroke-width="1.3" opacity=".85"/>`;
-    g+=`<rect x="${X(i)-cw/2}" y="${Y(Math.max(c.close,prevClose))}" width="${cw}" height="${Math.max(1,Math.abs(Y(c.close)-Y(prevClose)))}" fill="${bc}" opacity=".85"/>`;
-  });
-  g+=`<circle cx="${X(cs.length-1)}" cy="${Y(cs[cs.length-1].close)}" r="3.5" fill="#fff"/>`;
-  g+=`<text x="${W-r-2}" y="${Y(bb.upper)-4}" text-anchor="end" style="fill:var(--band)">upper</text>`;
-  g+=`<text x="${W-r-2}" y="${Y(bb.lower)+12}" text-anchor="end" style="fill:var(--band)">lower</text>`;
-  $('bbChart').innerHTML=g;
+function candleChart(s){
+  const data=s.strategy.candles||[],W=900,H=220,l=42,r=10,t=10,b=24;
+  if(data.length<2){$('candleChart').innerHTML='<text x="450" y="110" text-anchor="middle" style="fill:#8a90b8;font-size:13px">Waiting for closed BTC candles…</text>';return}
+  const lo=Math.min(...data.map(c=>c.low)),hi=Math.max(...data.map(c=>c.high)),pad=(hi-lo)*.08||1,min=lo-pad,max=hi+pad;
+  const X=i=>l+i*(W-l-r)/(data.length-1||1),Y=v=>t+(1-(v-min)/(max-min))*(H-t-b);
+  let g='';for(const f of [0,.25,.5,.75,1]){const v=min+f*(max-min);g+=`<line x1="${l}" x2="${W-r}" y1="${Y(v)}" y2="${Y(v)}" stroke="#ffffff10"/><text x="2" y="${Y(v)+3}">${v.toFixed(0)}</text>`}
+  const cw=Math.max(3,(W-l-r)/data.length*.48);
+  data.forEach((c,i)=>{const up=c.close>c.open,col=up?GRN:c.close<c.open?RED:'#8a90b8';g+=`<line x1="${X(i)}" x2="${X(i)}" y1="${Y(c.high)}" y2="${Y(c.low)}" stroke="${col}" stroke-width="1.4"/><rect x="${X(i)-cw/2}" y="${Math.min(Y(c.open),Y(c.close))}" width="${cw}" height="${Math.max(1,Math.abs(Y(c.open)-Y(c.close)))}" fill="${col}" opacity=".88"/>`});
+  const last=data[data.length-1],color=last.close>last.open?GRN:last.close<last.open?RED:'#ffc857';
+  g+=`<circle cx="${X(data.length-1)}" cy="${Y(last.close)}" r="4" fill="${color}"/><text x="${W-r-2}" y="${Y(last.close)-6}" text-anchor="end" style="fill:${color}">latest closed</text>`;
+  $('candleChart').innerHTML=g;
 }
 function render(s){
   S=s;skew=s.now-Date.now();
@@ -218,13 +206,14 @@ function render(s){
   $('upB').textContent=cents(P&&P.up.bid);$('upA').textContent=cents(P&&P.up.ask);$('dnB').textContent=cents(P&&P.down.bid);$('dnA').textContent=cents(P&&P.down.ask);
   if(P&&P.up.mid!=null&&P.down.mid!=null){const t=P.up.mid+P.down.mid,u=P.up.mid/t*100;$('splitUp').style.width=u+'%';$('splUp').textContent='UP '+u.toFixed(0)+'% chance';$('splDn').textContent='DOWN '+(100-u).toFixed(0)+'% chance'}
   pxChart(s);
-  bbChart(s);
-  const bb=s.bb,cf=s.cfg;
-  $('bbState').className='chip '+(bb.side==='UP'?'up':bb.side==='DOWN'?'dn':'vi');$('bbState').textContent=bb.label;
-  $('bbU').textContent=bb.upper==null?'–':bb.upper.toFixed(2);$('bbM').textContent=bb.middle==null?'–':bb.middle.toFixed(2);$('bbL').textContent=bb.lower==null?'–':bb.lower.toFixed(2);$('bbR').textContent=bb.rsi==null?'–':bb.rsi.toFixed(1);
-  $('bbRule').innerHTML='<b style="color:var(--tx)">Rule:</b> A wick touch that closes back inside signals a fade toward the middle band (200 shares, dropping to 100 past the middle). A close beyond a band signals that side instead (100 shares/window) until price closes back inside. Before the first touch, RSI picks the signal ('+cf.neutralShares+' shares). <b style="color:var(--tx)">Entry:</b> reverse the signal (UP → BUY DOWN; DOWN → BUY UP). After '+(cf.entryDelayMs/1000)+'s, buy only if the fresh best ask for that entry side is at or below $'+cf.entryPriceMax.toFixed(2)+'. Keep watching until the window closes; reversals close first and use the same price cap.';
-  $('how').innerHTML=`<b style="color:var(--tx)">How a winner is decided:</b> in the last ${cf.endWatchMs/1000}s of a window, the side priced above ${cf.winPrice*100}¢ has won and each winning share pays $1; the other side has lost and pays $0. If no side gets there, that window stays unknown and the bot skips any bet that needs it.`;
-  $('bbSub').textContent=`BTC · 5m candles · ${cf.bbPeriod}-period, ${cf.bbStddev}σ`;
+  candleChart(s);
+  const cf=s.cfg,st=s.strategy,w=s.window,c=st.previousCandle;
+  $('candleSub').textContent=cf.candleInterval+' BTC candles';
+  $('candleSignal').className='chip '+(st.side==='UP'?'up':st.side==='DOWN'?'dn':'vi');
+  $('candleSignal').textContent=st.color?(st.color+' candle → '+(st.side?'BUY '+st.side:'NO TRADE')):'Waiting for previous closed candle';
+  $('candleMeta').textContent=c?'O '+c.open.toFixed(2)+' · H '+c.high.toFixed(2)+' · L '+c.low.toFixed(2)+' · C '+c.close.toFixed(2):'–';
+  $('candleRule').innerHTML='<b style="color:var(--tx)">Entry:</b> green previous BTC candle → UP; red → DOWN; doji → skip. The selected side’s best ask must dip strictly below $'+cf.dipPrice.toFixed(2)+' and then recover to $'+cf.entryPrice.toFixed(2)+'. Buy with a $'+cf.entryPrice.toFixed(2)+' FOK limit only when at least '+cf.minSecondsRemaining+' seconds remain. One filled trade per window.';
+  $('how').innerHTML='<b style="color:var(--tx)">Settlement:</b> the bot waits for Polymarket’s official market result. A win adds $1 per share; a loss pays $0. The next base size moves by '+cf.shareStep+' shares per result, with a '+cf.baseShares+'-share floor and '+cf.maxAdditions+' additions maximum.';
   // window strip
   const ro=s.recentOutcomes;let h='';
   ro.forEach(o=>{const w=o.winner==='UP'?'U':'D';h+=`<div class="c ${w}" title="${hhmm(o.openTs)} · ${o.winner} won at ${cents(o.price)}, ${o.winner==='UP'?'DOWN':'UP'} lost at ${cents(o.loser)}${o.traded?' · bet '+o.traded:''}"><b>${w==='U'?'▲':'▼'}</b><em class="${o.result==='WIN'?'W':o.result==='LOSS'?'L':''}">${o.result==='WIN'?'✓ win':o.result==='LOSS'?'✗ loss':o.traded?'…':''}</em>${hhmm(o.openTs)}<br>${cents(o.price)}</div>`});
@@ -232,8 +221,9 @@ function render(s){
   $('cs').scrollLeft=9999;
   $('cUp').textContent='UP '+s.counts.UP;$('cDn').textContent='DOWN '+s.counts.DOWN;
   const sg=s.lastSignal;
-  $('sig').innerHTML=sg?`<span class="chip am">Signal ${sg.signalSide} → BUY ${sg.side}</span><span class="dim">${sg.shares} shares this window</span>${sg.state==='NEUTRAL'?`<span class="dim">(RSI ${sg.rsi==null?'n/a':sg.rsi} tie-break)</span>`:''}`:'<span class="dim">Waiting for the Bollinger state…</span>';
-  $('rule').innerHTML=bb.bandsReady?`Current state: <b style="color:var(--tx)">${bb.state}</b>. Signal uses 5m BTC candles; signal UP buys DOWN and signal DOWN buys UP. First entry is eligible after ${cf.entryDelayMs/1000}s; buy only when the best ask for the entry side is at or below $${cf.entryPriceMax.toFixed(2)}. Keep watching through the window; reversals close first and use the same limit.`:'Loading BTC candle history…';
+  $('sig').innerHTML=w&&w.side?`<span class="chip ${w.side==='UP'?'up':'dn'}">${w.candleColor} candle → BUY ${w.side}</span><span class="dim">${w.shares} shares · base ${st.baseShares}</span>`:'<span class="dim">Waiting for a green/red previous candle…</span>';
+  const trigger=w&&w.tradeTaken?'One trade already filled this window.':w&&w.reboundSeen?'Dip and recovery confirmed; waiting for a fill at or below $'+cf.entryPrice.toFixed(2)+'.':w&&w.dipSeen?'Dip confirmed; waiting for the selected ask to recover to $'+cf.entryPrice.toFixed(2)+'.':'Waiting for the selected ask to dip below $'+cf.dipPrice.toFixed(2)+'.';
+  $('rule').innerHTML='<b style="color:var(--tx)">Setup:</b> '+trigger+' Current selected-side ask: '+cents(st.currentAsk)+'. Size: '+st.baseShares+' shares ('+st.additions+'/'+st.maxAdditions+' additions). Loss: +'+cf.shareStep+'; win: −'+cf.shareStep+'; floor: '+cf.baseShares+'.';
   stats(s);tables(s);logs(s);
 }
 function stats(s){
@@ -251,16 +241,16 @@ function stats(s){
     box('b',T.length?usd(Math.min(...T.map(t=>t.pnl)),1):'–','Worst trade','neg')+
     box('f',usd(-s.account.maxDrawdown),'Max drawdown','neg')+
     box('e',usd(T.reduce((x,t)=>x+t.fee,0)),'Fees paid (est.)')+
-    box('c2',s.stats.noSignal,'Windows skipped (no streak)')+
+    box('c2',s.stats.noSignal,'Windows skipped (doji candle)')+
     box('d',s.stats.voidNoData+' / '+s.stats.voidNoFill,'Void (no data / no fill)');
 }
 const side=x=>`<span class="chip ${x==='UP'?'up':'dn'}">${x}</span>`;
 function tables(s){
-  $('open').innerHTML=s.pending.length?`<table><thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Entry</th><th>Cost</th><th>Now</th><th>Unrealized</th><th>Closes</th></tr></thead><tbody>${s.pending.map(p=>`<tr><td>${hhmm(p.openTs)}</td><td>${side(p.side)}</td><td>${p.shares}</td><td>${cents(p.price)}</td><td>${usd(p.cost)}</td><td>${cents(p.mark)}</td><td class="${p.unrealized>=0?'pos':'neg'}">${p.unrealized==null?'–':usd(p.unrealized,1)}</td><td>${hhmm(p.closeTs)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No open bets. The bot enters 3s into a window after a '+s.cfg.streakLen+'-window streak.</div>';
+  $('open').innerHTML=s.pending.length?`<table><thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Entry</th><th>Cost</th><th>Now</th><th>Unrealized</th><th>Closes</th></tr></thead><tbody>${s.pending.map(p=>`<tr><td>${hhmm(p.openTs)}</td><td>${side(p.side)}</td><td>${p.shares}</td><td>${cents(p.price)}</td><td>${usd(p.cost)}</td><td>${cents(p.mark)}</td><td class="${p.unrealized>=0?'pos':'neg'}">${p.unrealized==null?'–':usd(p.unrealized,1)}</td><td>${hhmm(p.closeTs)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No open positions; entries wait for the dip-and-rebound trigger.</div>';
   $('trades').innerHTML=s.trades.length?`<table><thead><tr><th>Window</th><th>Bet</th><th>Winner</th><th>Shares</th><th>Entry</th><th>Cost</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>${s.trades.map(t=>`<tr><td>${hhmm(t.openTs)}</td><td>${side(t.side)}</td><td>${side(t.winner)}</td><td>${t.shares}</td><td>${cents(t.price)}</td><td>${usd(t.cost)}</td><td><span class="chip ${t.outcome==='WIN'?'up':'dn'}">${t.outcome}</span></td><td class="${t.pnl>=0?'pos':'neg'}"><b>${usd(t.pnl,1)}</b></td></tr>`).join('')}</tbody></table>`:'<div class="empty">No settled trades yet.</div>';
 }
-const grp={trade:['SIGNAL','FIRING','ENTRY_FILLED','SETTLED_WIN','SETTLED_LOSS','VOID'],out:['OUTCOME','NO_TRADE','WAIT','MISMATCH'],err:['ERROR','SETTLEMENT_TIMEOUT']};
-const col={ENTRY_FILLED:'am',SIGNAL:'am',FIRING:'am',SETTLED_WIN:'up',SETTLED_LOSS:'dn',ERROR:'dn',MISMATCH:'dn',SETTLEMENT_TIMEOUT:'dn',OUTCOME:'vi'};
+const grp={trade:['SIGNAL','NO_SIGNAL','DIP_SEEN','REBOUND_SEEN','FIRING','ENTRY_WAITING','ENTRY_FILLED','SETTLED_WIN','SETTLED_LOSS'],out:['OUTCOME'],err:['ERROR','SETTLEMENT_TIMEOUT']};
+const col={ENTRY_FILLED:'am',ENTRY_WAITING:'gr',SIGNAL:'am',NO_SIGNAL:'gr',DIP_SEEN:'vi',REBOUND_SEEN:'am',FIRING:'am',SETTLED_WIN:'up',SETTLED_LOSS:'dn',ERROR:'dn',SETTLEMENT_TIMEOUT:'dn',OUTCOME:'vi'};
 function logs(s){
   const L=s.log.filter(e=>filter==='all'||grp[filter].includes(e.event));
   $('log').innerHTML=L.map(e=>`<tr><td>${new Date(e.ts).toLocaleTimeString()}</td><td><span class="chip ${col[e.event]||'gr'}">${e.event}</span></td><td>${e.slug?hhmm(+e.slug.split('-').pop()):'–'}</td><td>${e.side?side(e.side):'–'}</td><td>${e.shares??'–'}</td><td class="${e.pnl>=0?'pos':'neg'}">${e.pnl!=null?usd(e.pnl,1):'–'}</td><td class="note">${esc(e.note)}</td></tr>`).join('')||'<tr><td colspan="7" class="empty">Nothing here yet.</td></tr>';
@@ -271,8 +261,8 @@ setInterval(()=>{ // countdown ticks between polls
   if(!S||!S.window)return;const n=Date.now()+skew,el=n/1000-S.window.openTs,rem=Math.max(0,S.cfg.windowSec-el);
   $('cd').textContent=Math.floor(rem/60)+':'+String(Math.floor(rem%60)).padStart(2,'0');
   $('arc').setAttribute('stroke-dashoffset',(276.5*(1-rem/S.cfg.windowSec)).toFixed(1));
-  const st=S.window.status,m={starting:'Starting up',armed:'Signal armed',no_signal:'No streak, sitting out',firing:'Placing bet…',fired:'Holding to resolution',void_no_fill:'Bet not filled',void_no_data:'Skipped, no data'};
-  $('phase').textContent=rem<=S.cfg.endWatchMs/1000?'Reading the winner…':(m[st]||st);
+  const st=S.window.status,m={starting:'Starting up',waiting_for_candle:'Waiting for candle',no_signal:'Doji: no trade',watching_dip:'Watching for dip',waiting_for_rebound:'Waiting for rebound',waiting_for_entry:'Entry trigger reached',entry_expired:'Too late to enter',firing:'Placing bet…',fired:'Holding to resolution',settled:'Settled'};
+  $('phase').textContent=(m[st]||st)+' · '+Math.ceil(rem)+'s left';
   $('winStat').textContent=st;$('winStat').className='chip '+(st==='fired'?'am':st==='armed'||st==='firing'?'vi':'gr');
   $('slug').textContent=S.window.slug;
 },250);

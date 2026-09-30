@@ -1,8 +1,8 @@
 {
-  "name": "polymarket-candle-imbalance-bot",
+  "name": "polymarket-btc-5m-rebound-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "BTC 5-min up/down bot: 4-candle streak signal, price-filtered entry, share-based martingale ladder, holds to resolution. Demo mode by default.",
+  "description": "BTC 5-minute rebound bot: previous-candle direction, below-20c dip, recovery-to-50c entry, adjustable share base. Demo mode by default.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"

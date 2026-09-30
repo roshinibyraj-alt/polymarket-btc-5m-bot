@@ -1,16 +1,13 @@
 'use strict';
 
 const cfg = require('./config');
-const { getActiveWindow, currentWindowOpenTs, slugForTs, WINDOW_SECONDS } = require('./polymarket-market');
-const bollinger = require('./bollinger');
+const { getActiveWindow, currentWindowOpenTs, slugForTs, WINDOW_SECONDS, fetchResolution } = require('./polymarket-market');
+const candleFeed = require('./candle-feed');
+const strategy = require('./strategy');
 
 const POLL_MS = 1000;
-const SETTLEMENT_POLL_MS = 1000;
-const SETTLEMENT_GIVE_UP_MS = 15 * 60_000;
 const MAX_LOG = 300;
 const WINDOW_MS = WINDOW_SECONDS * 1000;
-const RESOLVE_RETRY_MS = 3000;
-const DONE = new Set(['no_signal', 'void_no_fill', 'void_no_data']);
 
 class Bot {
   /** @param trader an authenticated PolymarketTrader */
@@ -20,9 +17,9 @@ class Bot {
     this.w = null;                                 // current window state
     this.pending = [];                             // filled bets awaiting real resolution
     this.stats = { wins: 0, losses: 0, noSignal: 0, voidNoFill: 0, voidNoData: 0, realizedPnl: 0 };
-    this.outcomes = new Map();                     // window openTs -> {winner:'UP'|'DOWN', source:'price'|'resolution'}
+    this.outcomes = new Map();                     // official resolved outcomes by market-window open time
     this._resolveTried = new Map();                // openTs -> last official-resolution lookup time
-    this.lastSignal = null;                        // {signalSide, side, outcomes, slug}
+    this.lastSignal = null;                        // previous-candle direction and planned entry
     this.walletBalance = null;
     this.error = null;
     this.log = [];
@@ -34,10 +31,11 @@ class Bot {
     this.peak = this.capital; this.maxDD = 0;
     this.prices = null;                            // live UP/DOWN quotes for the current window
     this.priceSeries = []; this._seriesSlug = null;
-    this.counts = { UP: 0, DOWN: 0 };              // how many windows each side has won this session
-    this.bb = { state: 'NEUTRAL', upper: null, middle: null, lower: null, candle: null, rsi: null,
-                signalSide: null, side: null, shares: 0, bandsReady: false, candles: [] };  // raw signal and reversed entry side
-    this._lastNeutralSide = null;
+    this.counts = { UP: 0, DOWN: 0 };              // officially resolved traded windows this session
+    this.candles = [];
+    this.baseShares = cfg.BASE_SHARES;
+    this.shareAdditions = 0;
+    this._stopCandleFeed = null;
     this._running = false;
     this._warned = new Set();
   }
@@ -60,7 +58,7 @@ class Bot {
     this._settlementLoop();
     this._balanceLoop();
     this._priceLoop();
-    this._bbLoop();
+    this._candleLoop();
   }
 
   async _loop() {
@@ -71,9 +69,7 @@ class Bot {
         this.error = `tick error: ${e.message}`;
         this._push({ event: 'ERROR', note: this.error });
       }
-      // poll faster during the last seconds of a window, when winners are decided
-      const inWindowMs = Date.now() % WINDOW_MS;
-      await sleep(inWindowMs >= WINDOW_MS - cfg.END_WATCH_MS ? 250 : POLL_MS);
+      await sleep(POLL_MS);
     }
   }
 
@@ -87,8 +83,8 @@ class Bot {
           const up = quote(bu), down = quote(bd);
           this.prices = { slug: w.slug, ts: Date.now(), up, down };
           if (this._seriesSlug !== w.slug) { this._seriesSlug = w.slug; this.priceSeries = []; }
-          if (up.mid != null && down.mid != null) {
-            this.priceSeries.push({ t: Math.round((Date.now() - w.openTs * 1000) / 1000), up: round(up.mid, 3), down: round(down.mid, 3) });
+          if (up.ask != null && down.ask != null) {
+            this.priceSeries.push({ t: Math.round((Date.now() - w.openTs * 1000) / 1000), up: round(up.ask, 3), down: round(down.ask, 3) });
           }
         } catch (_) { /* keep last quote */ }
       }
@@ -96,46 +92,49 @@ class Bot {
     }
   }
 
-  /** Start the event-driven Binance candle feed; REST is used only to seed history. */
-  _bbLoop() {
-    this._stopBbFeed = bollinger.startClosedCandleFeed(
-      cfg.BB_PERIOD + 10,
-      (candles) => this._processBollingerCandles(candles),
+  /** Follow the closed BTC 5-minute candles used to select the direction for each market window. */
+  _candleLoop() {
+    this._stopCandleFeed = candleFeed.startClosedCandleFeed(
+      cfg.CANDLE_LOOKBACK,
+      (candles) => this._processCandles(candles),
       (e) => {
-        this.error = 'Bollinger feed error: ' + e.message;
+        this.error = 'BTC candle feed error: ' + e.message;
         this._push({ event: 'ERROR', note: this.error });
       }
     );
   }
 
-  _processBollingerCandles(candles) {
-    if (!candles || !candles.length) return;
-    if (typeof this.error === 'string' && this.error.startsWith('Bollinger feed error:')) this.error = null;
-    const bands = bollinger.computeBands(candles);
-    if (!bands) return;
-    const isNew = !this.bb.candle || bands.openTs !== this.bb.candle.openTs;
-    if (isNew) {
-      const state = bollinger.nextState(this.bb.state, bands);
-      const rsi = bollinger.computeRSI(candles, cfg.RSI_PERIOD);
-      const signalSide = state === 'NEUTRAL' ? bollinger.sideForNeutral(rsi) : bollinger.SIDE[state];
-      const side = signalSide === 'UP' ? 'DOWN' : signalSide === 'DOWN' ? 'UP' : null;
-      const shares = state === 'NEUTRAL' ? cfg.SHARES_NEUTRAL : bollinger.SHARES[state];
-      this.bb = {
-        state, upper: round(bands.upper, 2), middle: round(bands.middle, 2), lower: round(bands.lower, 2),
-        candle: bands.candle, rsi: rsi == null ? null : round(rsi, 1), signalSide, side, shares,
-        bandsReady: true, candles: candles.slice(-40),
-      };
-      if (state !== 'NEUTRAL' || side !== this._lastNeutralSide) {
-        this._lastNeutralSide = state === 'NEUTRAL' ? side : this._lastNeutralSide;
-        this._push({ event: 'BB_UPDATE', side, shares,
-          note: bollinger.LABEL[state] + ' (close ' + bands.candle.close + ', upper ' + round(bands.upper, 2)
-            + ', mid ' + round(bands.middle, 2) + ', lower ' + round(bands.lower, 2) + ', rsi '
-            + (rsi == null ? 'n/a' : round(rsi, 1)) + ') -> signal ' + signalSide + ', buy ' + side + ' ' + shares + 'sh' });
-      }
-    } else {
-      this.bb.upper = round(bands.upper, 2); this.bb.middle = round(bands.middle, 2); this.bb.lower = round(bands.lower, 2);
-      this.bb.bandsReady = true; this.bb.candles = candles.slice(-40);
+  _processCandles(candles) {
+    if (!Array.isArray(candles) || !candles.length) return;
+    if (typeof this.error === 'string' && this.error.startsWith('BTC candle feed error:')) this.error = null;
+    this.candles = candles.slice(-cfg.CANDLE_LOOKBACK);
+    if (this.w) this._syncWindowSignal(this.w);
+  }
+
+  _syncWindowSignal(w) {
+    const signal = strategy.previousCandleSignal(this.candles, w.openTs, WINDOW_SECONDS);
+    if (!signal.ready) {
+      if (w.status === 'starting') w.status = 'waiting_for_candle';
+      return false;
     }
+    if (w.previousCandleOpenTs === signal.candle.openTs) return true;
+    w.previousCandleOpenTs = signal.candle.openTs;
+    w.previousCandle = signal.candle;
+    w.candleColor = signal.color;
+    w.side = signal.side;
+    w.dipSeen = false;
+    w.reboundSeen = false;
+    w.status = signal.side ? 'watching_dip' : 'no_signal';
+    if (!signal.side) {
+      this.stats.noSignal += 1;
+      this.lastSignal = null;
+      this._push({ event: 'NO_SIGNAL', slug: w.slug, note: 'previous BTC candle was a doji; no direction selected' });
+      return true;
+    }
+    this.lastSignal = { color: signal.color, side: signal.side, shares: this.baseShares, candle: signal.candle, slug: w.slug };
+    this._push({ event: 'SIGNAL', slug: w.slug, side: signal.side, shares: this.baseShares,
+      note: 'previous closed BTC candle was ' + signal.color.toLowerCase() + ' -> BUY ' + signal.side + ' ' + this.baseShares + ' shares; waiting for ask below $' + cfg.DIP_PRICE.toFixed(2) + ' then recovery to $' + cfg.ENTRY_PRICE.toFixed(2) });
+    return true;
   }
 
   // ---- per-window flow -------------------------------------------------------
@@ -144,110 +143,52 @@ class Bot {
     const openTs = currentWindowOpenTs(now);
     const slug = slugForTs(openTs);
     if (!this.w || this.w.slug !== slug) {
-      if (this.w) this._closeOut(this.w);   // window just rolled over -- guarantee it has a winner
-      this.w = { slug, openTs, status: 'starting', window: null, signal: null, outcomeDone: false, position: null, everEntered: false, lastReversalAttemptAt: 0, lastOpenAttemptAt: 0 };
+      this.w = {
+        slug, openTs, status: 'starting', window: null, previousCandle: null, previousCandleOpenTs: null,
+        candleColor: null, side: null, dipSeen: false, reboundSeen: false,
+        tradeTaken: false, entryInFlight: false, position: null, lastOpenAttemptAt: 0,
+      };
+      this.lastSignal = null;
     }
     const w = this.w;
     const elapsed = now - openTs * 1000;
-
     if (!w.window) {
       const { window, reason } = await getActiveWindow(now);
       if (window) { this.error = null; w.window = window; } else { this.error = reason; }
     }
-
-    // every window's winner is tracked (traded or not) because it feeds the streak
-    if (w.window && !w.outcomeDone && elapsed >= WINDOW_MS - cfg.END_WATCH_MS) await this._watchEnd(w);
-
+    this._syncWindowSignal(w);
     await this._entryStep(w, elapsed);
   }
 
-  /** Last END_WATCH_MS of the window: a side priced above WIN_PRICE is the winner. */
-  async _watchEnd(w) {
-    let books;
-    try {
-      books = await Promise.all([this.trader.getOrderBook(w.window.tokenUp), this.trader.getOrderBook(w.window.tokenDown)]);
-    } catch (_) { return; }
-    const up = sidePrice(books[0]);
-    const down = sidePrice(books[1]);
-    const upWins = up !== null && up > cfg.WIN_PRICE;
-    const downWins = down !== null && down > cfg.WIN_PRICE;
-    if (upWins === downWins) return;                 // neither (or both, nonsense) -- keep watching
-    this._setWindowOutcome(w.openTs, upWins ? 'UP' : 'DOWN', 'price', upWins ? up : down, upWins ? down : up);
-    w.outcomeDone = true;
-  }
-
-  _setWindowOutcome(openTs, winner, source, price, loser) {
-    if (this.outcomes.has(openTs)) return;
-    this.outcomes.set(openTs, { winner, source, price: price == null ? null : round(price, 3), loser: loser == null ? null : round(loser, 3) });
-    this.counts[winner] += 1;
-    if (this.outcomes.size > 60) this.outcomes.delete(this.outcomes.keys().next().value);
-    const opp = winner === 'UP' ? 'DOWN' : 'UP';
-    const note = source === 'price'
-      ? `${winner} won ($1/sh): price ${round(price, 3)} > ${cfg.WIN_PRICE} in last ${cfg.END_WATCH_MS / 1000}s, ${opp} lost ($0/sh) at ${loser == null ? '~0' : round(loser, 3)}`
-      : `${winner} won ($1/sh): never crossed ${cfg.WIN_PRICE} in the watch window -- decided at window close, ${winner} ${round(price, 3)} vs ${opp} ${loser == null ? '?' : round(loser, 3)}`;
-    this._push({ event: 'OUTCOME', slug: slugForTs(openTs), side: winner, note });
-  }
-
-  /** Winner of the window that opened at openTs, from our own price reading only (no Polymarket API). */
-  async _outcomeFor(openTs) { return this.outcomes.get(openTs) || null; }
-
-  /** Called the instant a window rolls over. If the >WIN_PRICE watch never fired (thin book, no clean
-   * cross), this guarantees a winner anyway by comparing the last known UP vs DOWN price -- whichever
-   * is higher wins -- so no pending bet is ever left stuck and every window always settles. */
-  _closeOut(w) {
-    if (!w.window || w.outcomeDone || this.outcomes.has(w.openTs)) return;
-    const px = this.prices && this.prices.slug === w.slug ? this.prices : null;
-    if (!px || px.up.mid == null || px.down.mid == null) {
-      this._push({ event: 'NO_TRADE', slug: w.slug, note: 'window closed with no readable price for either side -- winner unknown, any pending bet on it waits for the settlement timeout' });
-      return;
-    }
-    const upWins = px.up.mid >= px.down.mid;
-    this._setWindowOutcome(w.openTs, upWins ? 'UP' : 'DOWN', 'close', upWins ? px.up.mid : px.down.mid, upWins ? px.down.mid : px.up.mid);
-    w.outcomeDone = true;
-  }
-
   async _entryStep(w, elapsed) {
-    if (DONE.has(w.status) || w.status === 'firing' || w.status === 'reversing') return;
-    if (!w.everEntered && !w.signal && elapsed > cfg.SIGNAL_DEADLINE_MS) {
-      const why = 'Bollinger signal not ready within ' + (cfg.SIGNAL_DEADLINE_MS / 1000) + 's ('
-        + (w.window ? 'bands not ready -- still collecting BTC candle history' : 'market not found') + ') -- skipping window';
-      return this._voidNoData(w, why);
-    }
-    if (!w.window || !this.bb.bandsReady) return;
-
-    const signal = { state: this.bb.state, signalSide: this.bb.signalSide, side: this.bb.side, shares: this.bb.shares };
-    if (w.position) {
-      if (!w.outcomeDone && signal.side && signal.side !== w.position.side && elapsed < WINDOW_MS - cfg.END_WATCH_MS
-        && Date.now() - (w.lastReversalAttemptAt || 0) >= cfg.REVERSAL_RETRY_MS) {
-        await this._reverse(w, signal);
+    if (!w.window || !w.side || w.tradeTaken || w.entryInFlight) return;
+    this._syncWindowSignal(w);
+    if (elapsed >= WINDOW_MS) return;
+    const px = this.prices && this.prices.slug === w.slug ? this.prices : null;
+    const ask = px ? (w.side === 'UP' ? px.up.ask : px.down.ask) : null;
+    if (ask == null) return;
+    const now = Date.now();
+    const secondsRemaining = Math.max(0, (w.openTs * 1000 + WINDOW_MS - now) / 1000);
+    const observed = strategy.observeEntryPrice(w, ask, secondsRemaining, cfg);
+    for (const event of observed.events) {
+      if (event === 'DIP_SEEN') {
+        w.status = 'waiting_for_rebound';
+        this._push({ event, slug: w.slug, side: w.side, shares: this.baseShares,
+          note: w.side + ' best ask dipped below $' + cfg.DIP_PRICE.toFixed(2) + '; waiting for recovery to $' + cfg.ENTRY_PRICE.toFixed(2) });
+      } else if (event === 'REBOUND_SEEN') {
+        w.status = 'waiting_for_entry';
+        this._push({ event, slug: w.slug, side: w.side, shares: this.baseShares,
+          note: w.side + ' best ask recovered to $' + cfg.ENTRY_PRICE.toFixed(2) + ' after the dip; FOK buy limit is $' + cfg.ENTRY_PRICE.toFixed(2) });
       }
+    }
+    if (w.reboundSeen && secondsRemaining < cfg.MIN_SECONDS_REMAINING) {
+      w.status = 'entry_expired';
       return;
     }
-
-    // Keep waiting for a valid price until the market closes; do not enter after its winner is locked.
-    if (w.outcomeDone || elapsed >= WINDOW_MS || !signal.side || !signal.shares) return;
-    const changed = !w.signal || w.signal.signalSide !== signal.signalSide || w.signal.side !== signal.side || w.signal.shares !== signal.shares || w.signal.state !== signal.state;
-    if (changed) {
-      const event = w.signal ? 'SIGNAL_UPDATE' : 'SIGNAL';
-      w.signal = signal;
-      this.lastSignal = { ...signal, rsi: this.bb.rsi, upper: this.bb.upper, middle: this.bb.middle, lower: this.bb.lower, slug: w.slug };
-      w.status = 'armed';
-      this._push({ event, slug: w.slug, side: signal.side, shares: signal.shares,
-        note: bollinger.LABEL[signal.state] + ' -> signal ' + signal.signalSide + ', buy ' + signal.side + '; watch entry-side best ask; first buy eligible after ' + (cfg.ENTRY_DELAY_MS / 1000) + 's at $' + cfg.PRICE_CAP + ' or lower' });
-    }
-
-    if (elapsed < cfg.ENTRY_DELAY_MS || Date.now() - (w.lastOpenAttemptAt || 0) < cfg.REVERSAL_RETRY_MS) return;
-    const px = this.prices && this.prices.slug === w.slug ? this.prices : null;
-    const sideAsk = px ? (w.signal.side === 'UP' ? px.up.ask : px.down.ask) : null;
-    if (sideAsk == null || sideAsk > cfg.PRICE_CAP) return;
-    w.lastOpenAttemptAt = Date.now();
-    await this._fire(w, w.signal.side, w.signal.shares, w.signal.side === 'UP' ? w.window.tokenUp : w.window.tokenDown, w.everEntered);
-  }
-
-  _voidNoData(w, why) {
-    w.status = 'void_no_data';
-    this.stats.voidNoData += 1;
-    this._push({ event: 'VOID', slug: w.slug, note: why });
+    if (!observed.shouldBuy || now - (w.lastOpenAttemptAt || 0) < cfg.ENTRY_RETRY_MS) return;
+    w.lastOpenAttemptAt = now;
+    const token = w.side === 'UP' ? w.window.tokenUp : w.window.tokenDown;
+    await this._fire(w, w.side, this.baseShares, token);
   }
 
   async _orderFilled(result, shares) {
@@ -264,20 +205,23 @@ class Bot {
     return { filled, status };
   }
 
-  async _fire(w, side, shares, token, reversal = false) {
+  async _fire(w, side, shares, token) {
+    if (w.tradeTaken || w.entryInFlight) return false;
+    w.entryInFlight = true;
     w.status = 'firing';
     this._push({ event: 'FIRING', slug: w.slug, side, shares,
-      note: (reversal ? 'reversing into ' : 'buying ') + shares + 'sh ' + side + ' (FOK limit $' + cfg.PRICE_CAP + ')' });
+      note: 'buying ' + shares + 'sh ' + side + ' with a FOK limit at $' + cfg.ENTRY_PRICE.toFixed(2) });
 
     const waitForFill = (why) => {
-      w.status = reversal ? 'reversal_pending' : 'armed';
-      this._push({ event: reversal ? 'REVERSAL_ENTRY_FAILED' : 'ENTRY_WAITING', slug: w.slug, side, shares,
-        note: why + (reversal ? '' : '; continuing to watch for a fill at or below $' + cfg.PRICE_CAP) });
+      w.entryInFlight = false;
+      w.status = w.reboundSeen ? 'waiting_for_entry' : w.dipSeen ? 'waiting_for_rebound' : 'watching_dip';
+      this._push({ event: 'ENTRY_WAITING', slug: w.slug, side, shares,
+        note: why + '; will retry only while the one-trade setup remains eligible' });
       return false;
     };
     let result;
     try {
-      result = await this.trader.placeFokLimitOrder(token, 'BUY', cfg.PRICE_CAP, shares);
+      result = await this.trader.placeFokLimitOrder(token, 'BUY', cfg.ENTRY_PRICE, shares);
     } catch (e) {
       return waitForFill('FOK buy failed: ' + e.message);
     }
@@ -289,7 +233,7 @@ class Bot {
     let price = Number(result.avgPrice);
     const paid = parseFloat(raw.makingAmount), got = parseFloat(raw.takingAmount);
     if (paid > 0 && got > 0) price = paid / got;
-    if (!Number.isFinite(price) || price <= 0 || price > cfg.PRICE_CAP + 1e-9) {
+    if (!Number.isFinite(price) || price <= 0 || price > cfg.ENTRY_PRICE + 1e-9) {
       return waitForFill('buy fill returned an invalid or over-limit average price');
     }
 
@@ -298,131 +242,63 @@ class Bot {
     if (!this.live && cost > this.cash) return waitForFill('demo balance too low ($' + this.cash.toFixed(2) + ' < $' + cost.toFixed(2) + ')');
     if (!this.live) this.cash -= cost;
 
-    const position = { slug: w.slug, openTs: w.openTs, closeTs: w.window.closeTs, side, shares, price, fee, cost, firedAt: Date.now() };
+    const position = { slug: w.slug, openTs: w.openTs, closeTs: w.window.closeTs, side, shares, price, fee, cost,
+      baseSharesAtEntry: shares, firedAt: Date.now() };
     this.pending.push(position);
     w.position = position;
-    w.everEntered = true;
-    w.signal = { state: this.bb.state, signalSide: this.bb.signalSide, side, shares };
+    w.tradeTaken = true;
+    w.entryInFlight = false;
     w.status = 'fired';
+    this.lastSignal = { color: w.candleColor, side, shares, candle: w.previousCandle, slug: w.slug };
     this._push({ event: 'ENTRY_FILLED', slug: w.slug, side, shares, price: round(price, 4),
-      note: 'filled ' + shares + 'sh ' + side + ' @ ' + round(price, 4) + (reversal ? ' after reversal' : '; holding until resolution or an opposite 5m signal') });
+      note: 'filled ' + shares + 'sh ' + side + ' @ ' + round(price, 4) + '; one trade this window, holding for official resolution' });
     return true;
   }
 
-  _recordEarlyExit(position, sharesSold, grossProceeds, exitPrice) {
-    const fraction = sharesSold / position.shares;
-    const closedCost = position.cost * fraction;
-    const entryFee = position.fee * fraction;
-    const exitFee = sharesSold * cfg.TAKER_FEE_RATE * exitPrice * (1 - exitPrice);
-    const netProceeds = grossProceeds - exitFee;
-    const pnl = netProceeds - closedCost;
-    const outcome = pnl >= 0 ? 'WIN' : 'LOSS';
-    if (outcome === 'WIN') this.stats.wins += 1; else this.stats.losses += 1;
-    this.stats.realizedPnl += pnl;
-    if (!this.live) this.cash += netProceeds;
-    this.trades.push({ slug: position.slug, openTs: position.openTs, side: position.side, winner: null, outcome,
-      shares: sharesSold, price: round(position.price, 4), exitPrice: round(exitPrice, 4), cost: round(closedCost, 2),
-      fee: round(entryFee + exitFee, 3), exitFee: round(exitFee, 3), proceeds: round(netProceeds, 2), pnl: round(pnl, 2), closedEarly: true, ts: Date.now() });
-    if (this.trades.length > 200) this.trades.shift();
-    if (this.capital != null) {
-      const equity = this.capital + this.stats.realizedPnl;
-      this.equity.push({ ts: Date.now(), v: round(equity, 2) });
-      if (this.equity.length > 500) this.equity.shift();
-      this.peak = Math.max(this.peak, equity);
-      this.maxDD = Math.max(this.maxDD, this.peak - equity);
-    }
-    position.shares -= sharesSold;
-    position.cost -= closedCost;
-    position.fee -= entryFee;
-    if (position.shares < 1e-6) { position.shares = 0; position.cost = 0; position.fee = 0; }
-    return { pnl, exitFee, netProceeds, remainingShares: position.shares };
+  _setWindowOutcome(openTs, winner) {
+    if (this.outcomes.has(openTs)) return;
+    const loser = winner === 'UP' ? 'DOWN' : 'UP';
+    this.outcomes.set(openTs, { winner, source: 'official', price: 1, loser: 0 });
+    this.counts[winner] += 1;
+    if (this.outcomes.size > 60) this.outcomes.delete(this.outcomes.keys().next().value);
+    this._push({ event: 'OUTCOME', slug: slugForTs(openTs), side: winner,
+      note: 'official Polymarket resolution: ' + winner + ' won ($1/share); ' + loser + ' lost ($0/share)' });
   }
 
-  async _reverse(w, signal) {
-    const position = w.position;
-    if (!position || signal.side === position.side) return false;
-    const token = position.side === 'UP' ? w.window.tokenUp : w.window.tokenDown;
-    w.status = 'reversing';
-    w.lastReversalAttemptAt = Date.now();
-    this._push({ event: 'REVERSAL_START', slug: w.slug, side: position.side, shares: position.shares,
-      note: 'new signal ' + signal.signalSide + ' maps to BUY ' + signal.side + ' -- selling ' + position.shares + 'sh before reversing' });
-
-    let result;
-    try {
-      result = await this.trader.placeFokLimitOrder(token, 'SELL', cfg.EXIT_PRICE_FLOOR, position.shares);
-    } catch (e) {
-      w.status = 'fired';
-      this._push({ event: 'REVERSAL_EXIT_FAILED', slug: w.slug, side: position.side, shares: position.shares,
-        note: 'kept existing position; sell did not fill: ' + e.message });
-      return false;
-    }
-    const { filled, status } = await this._orderFilled(result, position.shares);
-    if (!filled) {
-      w.status = 'fired';
-      this._push({ event: 'REVERSAL_EXIT_FAILED', slug: w.slug, side: position.side, shares: position.shares,
-        note: 'kept existing position; FOK sell not filled (status: ' + (status || 'none') + ')' });
-      return false;
-    }
-
-    const raw = result.raw || {};
-    const rawShares = parseFloat(raw.makingAmount);
-    const rawProceeds = parseFloat(raw.takingAmount);
-    let exitPrice = Number(result.avgPrice);
-    if (rawShares > 0 && rawProceeds > 0) exitPrice = rawProceeds / rawShares;
-    if (!Number.isFinite(exitPrice) || exitPrice <= 0) {
-      w.status = 'fired';
-      this._push({ event: 'REVERSAL_EXIT_FAILED', slug: w.slug, side: position.side, shares: position.shares,
-        note: 'sell fill returned an invalid average price; kept existing position' });
-      return false;
-    }
-    const sharesSold = rawShares > 0 ? Math.min(position.shares, rawShares) : position.shares;
-    const grossProceeds = rawShares > 0 && rawProceeds > 0 ? rawProceeds * (sharesSold / rawShares) : sharesSold * exitPrice;
-    const closed = this._recordEarlyExit(position, sharesSold, grossProceeds, exitPrice);
-    this._push({ event: 'EARLY_EXIT', slug: w.slug, side: position.side, shares: sharesSold, pnl: round(closed.pnl, 2),
-      note: 'sold ' + sharesSold + 'sh ' + position.side + ' @ ' + round(exitPrice, 4) + ' before window resolution; realized pnl ' + (closed.pnl >= 0 ? '+' : '') + '$' + closed.pnl.toFixed(2) });
-
-    if (closed.remainingShares > 0) {
-      w.status = 'fired';
-      return false; // FOK should be all-or-none; if a partial is reported, finish closing before reversing.
-    }
-    this.pending = this.pending.filter((p) => p !== position);
-    w.position = null;
-    w.signal = signal;
-    w.status = 'reversal_pending';
-    w.lastOpenAttemptAt = 0;
-    this.lastSignal = { ...signal, rsi: this.bb.rsi, upper: this.bb.upper, middle: this.bb.middle, lower: this.bb.lower, slug: w.slug };
-    this._push({ event: 'REVERSAL_WAITING', slug: w.slug, side: signal.side, shares: signal.shares,
-      note: 'old side closed; waiting to buy ' + signal.side + ' (signal ' + signal.signalSide + ') at or below $' + cfg.PRICE_CAP + ' before buying' });
-    return true;
-  }
-
-  _void(w, side, shares, why) {
-    w.status = 'void_no_fill';
-    this.stats.voidNoFill += 1;
-    this._push({ event: 'VOID', slug: w.slug, side, shares, note: `${why} -- void, no position taken` });
-  }
-
-  // ---- real settlement -----------------------------------------------------------
   async _settlementLoop() {
     while (this._running) {
-      await sleep(SETTLEMENT_POLL_MS);
+      await sleep(cfg.SETTLEMENT_POLL_MS);
       if (!this.pending.length) continue;
       const now = Date.now();
-      const keep = [];
-      for (const p of this.pending) {
-        if (now < p.closeTs * 1000) { keep.push(p); continue; }
-        const o = this.outcomes.get(p.openTs);       // winner read from the last-seconds price
-        const winner = o ? o.winner : null;
-        if (winner === null) {
-          if (now - p.firedAt > SETTLEMENT_GIVE_UP_MS) {
-            this._push({ event: 'SETTLEMENT_TIMEOUT', slug: p.slug, side: p.side, shares: p.shares,
-              note: `winner never observed (no side above ${cfg.WIN_PRICE}) -- position left unsettled, check manually` });
-          } else keep.push(p);
+      const pendingAtStart = this.pending.slice();
+      const settledThisTick = new Set();
+      for (const p of pendingAtStart) {
+        if (now < p.closeTs * 1000) continue;
+        let winner = this.outcomes.get(p.openTs)?.winner || null;
+        const lastTried = this._resolveTried.get(p.openTs) || 0;
+        if (!winner && now - lastTried >= cfg.RESOLUTION_RETRY_MS) {
+          this._resolveTried.set(p.openTs, now);
+          try {
+            winner = await fetchResolution(p.slug);
+          } catch (e) {
+            this._warnOnce('resolution-' + p.openTs, { event: 'ERROR', slug: p.slug,
+              note: 'official market resolution lookup failed: ' + e.message });
+          }
+          if (winner) this._setWindowOutcome(p.openTs, winner);
+        }
+        if (winner) {
+          this._settle(p, winner);
+          this._resolveTried.delete(p.openTs);
+          settledThisTick.add(p);
           continue;
         }
-        this._settle(p, winner);
+        if (now - p.firedAt > cfg.SETTLEMENT_GIVE_UP_MS && !p.settlementTimedOut) {
+          p.settlementTimedOut = true;
+          this._push({ event: 'SETTLEMENT_TIMEOUT', slug: p.slug, side: p.side, shares: p.shares,
+            note: 'official result is still pending; keeping the position open and continuing to check' });
+        }
       }
-      this.pending = keep;
+      if (settledThisTick.size) this.pending = this.pending.filter((p) => !settledThisTick.has(p));
     }
   }
 
@@ -430,14 +306,18 @@ class Bot {
     const win = winner === p.side;
     const outcome = win ? 'WIN' : 'LOSS';
     p.final = true;
+    const previousBase = this.baseShares;
+    this.baseShares = strategy.adjustBaseShares(this.baseShares, outcome, cfg);
+    this.shareAdditions = strategy.additionCount(this.baseShares, cfg);
 
     const fee = p.fee, cost = p.cost;
     const pnl = win ? p.shares - cost : -cost;
     if (win) this.stats.wins += 1; else this.stats.losses += 1;
     this.stats.realizedPnl += pnl;
-    if (win && !this.live) this.cash += p.shares;      // winning shares pay $1 each
+    if (win && !this.live) this.cash += p.shares;
     this.trades.push({ slug: p.slug, openTs: p.openTs, side: p.side, winner, outcome, shares: p.shares,
-      price: round(p.price, 4), cost: round(cost, 2), fee: round(fee, 3), pnl: round(pnl, 2), ts: Date.now() });
+      price: round(p.price, 4), cost: round(cost, 2), fee: round(fee, 3), pnl: round(pnl, 2),
+      baseSharesBefore: previousBase, baseSharesAfter: this.baseShares, additionsAfter: this.shareAdditions, ts: Date.now() });
     if (this.trades.length > 200) this.trades.shift();
     if (this.capital != null) {
       const eq = this.capital + this.stats.realizedPnl;
@@ -446,9 +326,9 @@ class Bot {
       this.peak = Math.max(this.peak, eq);
       this.maxDD = Math.max(this.maxDD, this.peak - eq);
     }
-    this._push({ event: win ? 'SETTLED_WIN' : 'SETTLED_LOSS', slug: p.slug, side: p.side, shares: p.shares,
-      pnl: round(pnl, 2),
-      note: `${winner} won ($1/share) -- ${outcome} on ${p.side} ${p.shares}sh, est. pnl ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (incl. est. fee)` });
+    if (this.w && this.w.openTs === p.openTs) this.w.status = 'settled';
+    this._push({ event: win ? 'SETTLED_WIN' : 'SETTLED_LOSS', slug: p.slug, side: p.side, shares: p.shares, pnl: round(pnl, 2),
+      note: outcome + ' on official resolution; base size ' + previousBase + ' → ' + this.baseShares + ' shares (' + this.shareAdditions + '/' + cfg.MAX_SHARE_ADDITIONS + ' additions), estimated P&L ' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) });
   }
 
   async _balanceLoop() {
@@ -482,11 +362,12 @@ class Bot {
       walletBalance: this.walletBalance,
       walletAddress: this.trader.depositWallet || this.trader.address,
       account: { capital: this.capital, cash, openValue, equity: cash == null ? null : cash + openValue, maxDrawdown: this.maxDD },
-      window: w ? { slug: w.slug, status: w.status, side: w.position ? w.position.side : (w.signal ? w.signal.side : null), shares: w.position ? w.position.shares : (w.signal ? w.signal.shares : null), openTs: w.openTs, closeTs: w.openTs + WINDOW_SECONDS } : null,
+      window: w ? { slug: w.slug, status: w.status, side: w.position ? w.position.side : w.side, shares: w.position ? w.position.shares : (w.side ? this.baseShares : null), openTs: w.openTs, closeTs: w.openTs + WINDOW_SECONDS, candleColor: w.candleColor, dipSeen: w.dipSeen, reboundSeen: w.reboundSeen, tradeTaken: w.tradeTaken } : null,
       prices: px && w && px.slug === w.slug ? px : null,
       priceSeries: this.priceSeries,
-      bb: { state: this.bb.state, label: bollinger.LABEL[this.bb.state], upper: this.bb.upper, middle: this.bb.middle,
-        lower: this.bb.lower, rsi: this.bb.rsi, side: this.bb.side, shares: this.bb.shares, bandsReady: this.bb.bandsReady, candles: this.bb.candles },
+      strategy: { previousCandle: w ? w.previousCandle : null, color: w ? w.candleColor : null, side: w ? w.side : null,
+        dipSeen: !!(w && w.dipSeen), reboundSeen: !!(w && w.reboundSeen), currentAsk: w && this.prices && this.prices.slug === w.slug && w.side ? (w.side === 'UP' ? this.prices.up.ask : this.prices.down.ask) : null,
+        baseShares: this.baseShares, additions: this.shareAdditions, maxAdditions: cfg.MAX_SHARE_ADDITIONS, candles: this.candles.slice(-cfg.CANDLE_LOOKBACK) },
       counts: this.counts,
       recentOutcomes: [...this.outcomes.entries()].slice(-24).map(([t, o]) => {
         const tr = tradeBy.get(t), pd = pendBy.get(t);
@@ -498,9 +379,9 @@ class Bot {
       trades: this.trades.slice(-60).reverse(),
       equity: this.equity,
       stats: this.stats,
-      cfg: { bbPeriod: cfg.BB_PERIOD, bbStddev: cfg.BB_STDDEV, bbNearTouchSigma: cfg.BB_NEAR_TOUCH_SIGMA, bbInterval: cfg.BB_INTERVAL, exitPriceFloor: cfg.EXIT_PRICE_FLOOR, reversalRetryMs: cfg.REVERSAL_RETRY_MS, entryPriceMax: cfg.PRICE_CAP, stage1: cfg.SHARES_STAGE1, stage2: cfg.SHARES_STAGE2, breakShares: cfg.SHARES_BREAK,
-        neutralShares: cfg.SHARES_NEUTRAL, rsiPeriod: cfg.RSI_PERIOD,
-        winPrice: cfg.WIN_PRICE, endWatchMs: cfg.END_WATCH_MS, entryDelayMs: cfg.ENTRY_DELAY_MS, windowSec: WINDOW_SECONDS },
+      cfg: { dipPrice: cfg.DIP_PRICE, entryPrice: cfg.ENTRY_PRICE, minSecondsRemaining: cfg.MIN_SECONDS_REMAINING,
+        baseShares: cfg.BASE_SHARES, shareStep: cfg.SHARE_STEP, maxAdditions: cfg.MAX_SHARE_ADDITIONS,
+        candleInterval: cfg.CANDLE_INTERVAL, windowSec: WINDOW_SECONDS },
       log: this.log.slice(-100).reverse(),
     };
   }
@@ -513,16 +394,6 @@ function quote(book) {
   const asks = ((book && book.asks) || []).filter((a) => num(a.price) > 0 && num(a.size) > 0).map((a) => num(a.price));
   const bid = bids.length ? Math.max(...bids) : null, ask = asks.length ? Math.min(...asks) : null;
   return { bid, ask, mid: bid == null ? null : ask == null ? bid : (bid + ask) / 2 };
-}
-
-/** A side's price = mid of best bid/ask; with no asks, the best bid. No bids -> null (nobody would pay). */
-function sidePrice(book) {
-  const num = (x) => parseFloat(x);
-  const bids = ((book && book.bids) || []).filter((b) => num(b.price) > 0 && num(b.size) > 0).map((b) => num(b.price));
-  const asks = ((book && book.asks) || []).filter((a) => num(a.price) > 0 && num(a.size) > 0).map((a) => num(a.price));
-  if (!bids.length) return null;
-  const bid = Math.max(...bids);
-  return asks.length ? (bid + Math.min(...asks)) / 2 : bid;
 }
 
 const round = (n, d) => Math.round(n * 10 ** d) / 10 ** d;
