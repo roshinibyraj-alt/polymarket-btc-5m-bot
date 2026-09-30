@@ -9,15 +9,15 @@
  *               back toward the middle band.
  *  - "Break"  = a candle CLOSES beyond a band -> follow that side instead of fading.
  *
- * States or        | traded | shares | until
- * -----------------+--------+--------+---------------------------------------
- *  NEUTRAL          | none   | 0      | first touch of either band
- *  UP_200           | UP     | 200    | close reaches the middle band
- *  UP_100           | UP     | 100    | wick touches the upper band (closes back inside)
- *  DOWN_200         | DOWN   | 200    | close reaches the middle band
- *  DOWN_100         | DOWN   | 100    | wick touches the lower band (closes back inside)
- *  BREAK_UP_100     | UP     | 100    | close comes back inside the upper band
- *  BREAK_DOWN_100   | DOWN   | 100    | close comes back inside the lower band
+ * States or        | signal | entry | shares | until
+ * -----------------+--------+-------+--------+---------------------------------------
+ *  NEUTRAL          | RSI    | opp.  | cfg    | first touch of either band
+ *  UP_200           | UP     | DOWN  | 200    | close reaches the middle band
+ *  UP_100           | UP     | DOWN  | 100    | wick touches the upper band (closes back inside)
+ *  DOWN_200         | DOWN   | UP    | 200    | close reaches the middle band
+ *  DOWN_100         | DOWN   | UP    | 100    | wick touches the lower band (closes back inside)
+ *  BREAK_UP_100     | UP     | DOWN  | 100    | close comes back inside the upper band
+ *  BREAK_DOWN_100   | DOWN   | UP    | 100    | close comes back inside the lower band
  */
 
 const cfg = require('./config');
@@ -227,17 +227,17 @@ const SHARES = {
   BREAK_UP_100: cfg.SHARES_BREAK, BREAK_DOWN_100: cfg.SHARES_BREAK,
 };
 const LABEL = {
-  NEUTRAL: 'Neutral — no band touched yet; trading the RSI-favored side at reduced size until one is',
-  UP_200: 'Lower band touched — buying UP every window until the middle band',
-  UP_100: 'Middle band reached from below — buying UP (reduced size) until the upper band',
-  DOWN_200: 'Upper band touched — buying DOWN every window until the middle band',
-  DOWN_100: 'Middle band reached from above — buying DOWN (reduced size) until the lower band',
-  BREAK_UP_100: 'Upper band broken — trading UP only until price closes back inside',
-  BREAK_DOWN_100: 'Lower band broken — trading DOWN only until price closes back inside',
+  NEUTRAL: 'Neutral — RSI selects a signal; buying the opposite side at reduced size until a band is touched',
+  UP_200: 'Lower band touched — signal UP, buy DOWN every window until the middle band',
+  UP_100: 'Middle band reached from below — signal UP, buy DOWN (reduced size) until the upper band',
+  DOWN_200: 'Upper band touched — signal DOWN, buy UP every window until the middle band',
+  DOWN_100: 'Middle band reached from above — signal DOWN, buy UP (reduced size) until the lower band',
+  BREAK_UP_100: 'Upper band broken — signal UP, buy DOWN until price closes back inside',
+  BREAK_DOWN_100: 'Lower band broken — signal DOWN, buy UP until price closes back inside',
 };
 
-/** NEUTRAL tie-break: RSI < 50 (softer recent momentum) leans toward a reversion-up call,
- * RSI >= 50 leans down. Always returns a side -- the bot fires every window, never sits out. */
+/** NEUTRAL tie-break: RSI < 50 signals UP; RSI >= 50 signals DOWN.
+ * bot.js reverses that signal for the purchased side. Always returns a signal; the bot never sits out. */
 function sideForNeutral(rsi) { return rsi == null || rsi < 50 ? 'UP' : 'DOWN'; }
 
 module.exports = { fetchClosedCandles, startClosedCandleFeed, computeBands, computeRSI, nextState, sideForNeutral, SIDE, SHARES, LABEL };

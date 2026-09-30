@@ -22,7 +22,7 @@ class Bot {
     this.stats = { wins: 0, losses: 0, noSignal: 0, voidNoFill: 0, voidNoData: 0, realizedPnl: 0 };
     this.outcomes = new Map();                     // window openTs -> {winner:'UP'|'DOWN', source:'price'|'resolution'}
     this._resolveTried = new Map();                // openTs -> last official-resolution lookup time
-    this.lastSignal = null;                        // {outcomes, side, slug}
+    this.lastSignal = null;                        // {signalSide, side, outcomes, slug}
     this.walletBalance = null;
     this.error = null;
     this.log = [];
@@ -36,7 +36,7 @@ class Bot {
     this.priceSeries = []; this._seriesSlug = null;
     this.counts = { UP: 0, DOWN: 0 };              // how many windows each side has won this session
     this.bb = { state: 'NEUTRAL', upper: null, middle: null, lower: null, candle: null, rsi: null,
-                side: null, shares: 0, bandsReady: false, candles: [] };  // Bollinger strategy state
+                signalSide: null, side: null, shares: 0, bandsReady: false, candles: [] };  // raw signal and reversed entry side
     this._lastNeutralSide = null;
     this._running = false;
     this._warned = new Set();
@@ -117,11 +117,12 @@ class Bot {
     if (isNew) {
       const state = bollinger.nextState(this.bb.state, bands);
       const rsi = bollinger.computeRSI(candles, cfg.RSI_PERIOD);
-      const side = state === 'NEUTRAL' ? bollinger.sideForNeutral(rsi) : bollinger.SIDE[state];
+      const signalSide = state === 'NEUTRAL' ? bollinger.sideForNeutral(rsi) : bollinger.SIDE[state];
+      const side = signalSide === 'UP' ? 'DOWN' : signalSide === 'DOWN' ? 'UP' : null;
       const shares = state === 'NEUTRAL' ? cfg.SHARES_NEUTRAL : bollinger.SHARES[state];
       this.bb = {
         state, upper: round(bands.upper, 2), middle: round(bands.middle, 2), lower: round(bands.lower, 2),
-        candle: bands.candle, rsi: rsi == null ? null : round(rsi, 1), side, shares,
+        candle: bands.candle, rsi: rsi == null ? null : round(rsi, 1), signalSide, side, shares,
         bandsReady: true, candles: candles.slice(-40),
       };
       if (state !== 'NEUTRAL' || side !== this._lastNeutralSide) {
@@ -129,7 +130,7 @@ class Bot {
         this._push({ event: 'BB_UPDATE', side, shares,
           note: bollinger.LABEL[state] + ' (close ' + bands.candle.close + ', upper ' + round(bands.upper, 2)
             + ', mid ' + round(bands.middle, 2) + ', lower ' + round(bands.lower, 2) + ', rsi '
-            + (rsi == null ? 'n/a' : round(rsi, 1)) + ') -> ' + side + ' ' + shares + 'sh' });
+            + (rsi == null ? 'n/a' : round(rsi, 1)) + ') -> signal ' + signalSide + ', buy ' + side + ' ' + shares + 'sh' });
       }
     } else {
       this.bb.upper = round(bands.upper, 2); this.bb.middle = round(bands.middle, 2); this.bb.lower = round(bands.lower, 2);
@@ -214,7 +215,7 @@ class Bot {
     }
     if (!w.window || !this.bb.bandsReady) return;
 
-    const signal = { state: this.bb.state, side: this.bb.side, shares: this.bb.shares };
+    const signal = { state: this.bb.state, signalSide: this.bb.signalSide, side: this.bb.side, shares: this.bb.shares };
     if (w.position) {
       if (!w.outcomeDone && signal.side && signal.side !== w.position.side && elapsed < WINDOW_MS - cfg.END_WATCH_MS
         && Date.now() - (w.lastReversalAttemptAt || 0) >= cfg.REVERSAL_RETRY_MS) {
@@ -225,14 +226,14 @@ class Bot {
 
     // Keep waiting for a valid price until the market closes; do not enter after its winner is locked.
     if (w.outcomeDone || elapsed >= WINDOW_MS || !signal.side || !signal.shares) return;
-    const changed = !w.signal || w.signal.side !== signal.side || w.signal.shares !== signal.shares || w.signal.state !== signal.state;
+    const changed = !w.signal || w.signal.signalSide !== signal.signalSide || w.signal.side !== signal.side || w.signal.shares !== signal.shares || w.signal.state !== signal.state;
     if (changed) {
       const event = w.signal ? 'SIGNAL_UPDATE' : 'SIGNAL';
       w.signal = signal;
       this.lastSignal = { ...signal, rsi: this.bb.rsi, upper: this.bb.upper, middle: this.bb.middle, lower: this.bb.lower, slug: w.slug };
       w.status = 'armed';
       this._push({ event, slug: w.slug, side: signal.side, shares: signal.shares,
-        note: bollinger.LABEL[signal.state] + ' -> watch ' + signal.side + ' best ask; first buy eligible after ' + (cfg.ENTRY_DELAY_MS / 1000) + 's at $' + cfg.PRICE_CAP + ' or lower' });
+        note: bollinger.LABEL[signal.state] + ' -> signal ' + signal.signalSide + ', buy ' + signal.side + '; watch entry-side best ask; first buy eligible after ' + (cfg.ENTRY_DELAY_MS / 1000) + 's at $' + cfg.PRICE_CAP + ' or lower' });
     }
 
     if (elapsed < cfg.ENTRY_DELAY_MS || Date.now() - (w.lastOpenAttemptAt || 0) < cfg.REVERSAL_RETRY_MS) return;
@@ -301,7 +302,7 @@ class Bot {
     this.pending.push(position);
     w.position = position;
     w.everEntered = true;
-    w.signal = { state: this.bb.state, side, shares };
+    w.signal = { state: this.bb.state, signalSide: this.bb.signalSide, side, shares };
     w.status = 'fired';
     this._push({ event: 'ENTRY_FILLED', slug: w.slug, side, shares, price: round(price, 4),
       note: 'filled ' + shares + 'sh ' + side + ' @ ' + round(price, 4) + (reversal ? ' after reversal' : '; holding until resolution or an opposite 5m signal') });
@@ -344,7 +345,7 @@ class Bot {
     w.status = 'reversing';
     w.lastReversalAttemptAt = Date.now();
     this._push({ event: 'REVERSAL_START', slug: w.slug, side: position.side, shares: position.shares,
-      note: 'opposite 5m signal ' + signal.side + ' -- selling ' + position.shares + 'sh before reversing' });
+      note: 'new signal ' + signal.signalSide + ' maps to BUY ' + signal.side + ' -- selling ' + position.shares + 'sh before reversing' });
 
     let result;
     try {
@@ -391,7 +392,7 @@ class Bot {
     w.lastOpenAttemptAt = 0;
     this.lastSignal = { ...signal, rsi: this.bb.rsi, upper: this.bb.upper, middle: this.bb.middle, lower: this.bb.lower, slug: w.slug };
     this._push({ event: 'REVERSAL_WAITING', slug: w.slug, side: signal.side, shares: signal.shares,
-      note: 'old side closed; waiting for ' + signal.side + ' best ask at or below $' + cfg.PRICE_CAP + ' before buying' });
+      note: 'old side closed; waiting to buy ' + signal.side + ' (signal ' + signal.signalSide + ') at or below $' + cfg.PRICE_CAP + ' before buying' });
     return true;
   }
 

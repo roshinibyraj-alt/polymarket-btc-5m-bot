@@ -222,7 +222,7 @@ function render(s){
   const bb=s.bb,cf=s.cfg;
   $('bbState').className='chip '+(bb.side==='UP'?'up':bb.side==='DOWN'?'dn':'vi');$('bbState').textContent=bb.label;
   $('bbU').textContent=bb.upper==null?'–':bb.upper.toFixed(2);$('bbM').textContent=bb.middle==null?'–':bb.middle.toFixed(2);$('bbL').textContent=bb.lower==null?'–':bb.lower.toFixed(2);$('bbR').textContent=bb.rsi==null?'–':bb.rsi.toFixed(1);
-  $('bbRule').innerHTML='<b style="color:var(--tx)">Rule:</b> a wick that reaches a band but closes back inside fades toward the middle band (200 shares, dropping to 100 past the middle). A candle that <i>closes</i> beyond a band means the bot follows that side instead, 100 shares/window, until price closes back inside. Before the first touch, RSI picks the side ('+cf.neutralShares+' shares). <b style="color:var(--tx)">Entry:</b> after '+(cf.entryDelayMs/1000)+'s, buy only if the best ask for the signalled side is at or below $'+cf.entryPriceMax.toFixed(2)+'. Keep watching until the window closes; reversals close first and use the same price cap.';
+  $('bbRule').innerHTML='<b style="color:var(--tx)">Rule:</b> A wick touch that closes back inside signals a fade toward the middle band (200 shares, dropping to 100 past the middle). A close beyond a band signals that side instead (100 shares/window) until price closes back inside. Before the first touch, RSI picks the signal ('+cf.neutralShares+' shares). <b style="color:var(--tx)">Entry:</b> reverse the signal (UP → BUY DOWN; DOWN → BUY UP). After '+(cf.entryDelayMs/1000)+'s, buy only if the fresh best ask for that entry side is at or below $'+cf.entryPriceMax.toFixed(2)+'. Keep watching until the window closes; reversals close first and use the same price cap.';
   $('how').innerHTML=`<b style="color:var(--tx)">How a winner is decided:</b> in the last ${cf.endWatchMs/1000}s of a window, the side priced above ${cf.winPrice*100}¢ has won and each winning share pays $1; the other side has lost and pays $0. If no side gets there, that window stays unknown and the bot skips any bet that needs it.`;
   $('bbSub').textContent=`BTC · 5m candles · ${cf.bbPeriod}-period, ${cf.bbStddev}σ`;
   // window strip
@@ -232,8 +232,8 @@ function render(s){
   $('cs').scrollLeft=9999;
   $('cUp').textContent='UP '+s.counts.UP;$('cDn').textContent='DOWN '+s.counts.DOWN;
   const sg=s.lastSignal;
-  $('sig').innerHTML=sg?`<span class="chip am">Bet ${sg.side}</span><span class="dim">${sg.shares} shares this window</span>${sg.state==='NEUTRAL'?`<span class="dim">(RSI ${sg.rsi==null?'n/a':sg.rsi} tie-break)</span>`:''}`:'<span class="dim">Waiting for the Bollinger state…</span>';
-  $('rule').innerHTML=bb.bandsReady?`Current state: <b style="color:var(--tx)">${bb.state}</b>. Signal uses 5m BTC candles. First entry is eligible after ${cf.entryDelayMs/1000}s; buy only when the best ask for the signalled side is at or below $${cf.entryPriceMax.toFixed(2)}. Keep watching through the window; reversals close first and use the same limit.`:'Loading BTC candle history…';
+  $('sig').innerHTML=sg?`<span class="chip am">Signal ${sg.signalSide} → BUY ${sg.side}</span><span class="dim">${sg.shares} shares this window</span>${sg.state==='NEUTRAL'?`<span class="dim">(RSI ${sg.rsi==null?'n/a':sg.rsi} tie-break)</span>`:''}`:'<span class="dim">Waiting for the Bollinger state…</span>';
+  $('rule').innerHTML=bb.bandsReady?`Current state: <b style="color:var(--tx)">${bb.state}</b>. Signal uses 5m BTC candles; signal UP buys DOWN and signal DOWN buys UP. First entry is eligible after ${cf.entryDelayMs/1000}s; buy only when the best ask for the entry side is at or below $${cf.entryPriceMax.toFixed(2)}. Keep watching through the window; reversals close first and use the same limit.`:'Loading BTC candle history…';
   stats(s);tables(s);logs(s);
 }
 function stats(s){
