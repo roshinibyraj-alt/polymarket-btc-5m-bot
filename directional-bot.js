@@ -6,7 +6,7 @@ const {
 } = require('./polymarket-market');
 const startMarketFeed = require('./clob-feed');
 const CcxtPriceFeed = require('./ccxt-feed');
-const { computeOneSecondMove, sideForMove } = require('./directional-strategy');
+const { computeOneSecondMove, adaptiveMoveThreshold, sideForMove } = require('./directional-strategy');
 const { estimateTakerFee } = require('./strategy');
 
 const EPSILON = 1e-8;
@@ -55,6 +55,7 @@ class Bot {
     this._lastMarketEventAt = 0;
     this._lastRestFetchAt = 0;
     this._btcSamples = [];
+    this._btcMoveHistory = [];
     this._signalBusy = false;
     this._queuedSignal = null;
     this._running = false;
@@ -64,7 +65,14 @@ class Bot {
       symbol: this.ccxtFeed.symbol || cfg.CCXT_SYMBOL || 'BTC/USD',
       pollMs: this.ccxtFeed.pollMs || cfg.CCXT_POLL_MS,
       requestedPollMs: cfg.CCXT_POLL_MS,
-      thresholdUsd: cfg.BTC_MOVE_THRESHOLD_USD,
+      thresholdUsd: null,
+      thresholdReady: false,
+      thresholdSampleCount: 0,
+      thresholdMinSamples: cfg.BTC_MOVE_THRESHOLD_MIN_SAMPLES,
+      thresholdPercentile: cfg.BTC_MOVE_THRESHOLD_PERCENTILE,
+      thresholdWindowMs: cfg.BTC_MOVE_THRESHOLD_WINDOW_MS,
+      thresholdFloorUsd: cfg.BTC_MOVE_THRESHOLD_FLOOR_USD,
+      percentileThresholdUsd: null,
       lookbackMs: cfg.SIGNAL_LOOKBACK_MS,
       price: null, bid: null, ask: null, change1s: null, lookbackObservedMs: null,
       receivedAt: null, status: 'stopped', error: null, candidateSide: null, lastSignal: null,
@@ -152,7 +160,7 @@ class Bot {
         w.status = 'watching_signal';
         this._push({
           event: 'WINDOW_READY', slug: w.slug,
-          note: 'BTC 5-minute market active; watching the CCXT one-second move for a ±$10 signal.',
+          note: 'BTC 5-minute market active; building the rolling adaptive BTC-move threshold.',
         });
         await this._ensureMarketFeed(w);
       } else {
@@ -291,10 +299,24 @@ class Bot {
     };
     this._btcSamples.push(normalized);
     this._btcSamples = this._btcSamples.filter((item) => receivedAt - item.receivedAt <= 5000);
+    this._btcMoveHistory = this._btcMoveHistory.filter((item) =>
+      item.at <= sampledAt && sampledAt - item.at <= cfg.BTC_MOVE_THRESHOLD_WINDOW_MS);
     const move = computeOneSecondMove(this._btcSamples, {
       lookbackMs: cfg.SIGNAL_LOOKBACK_MS,
       toleranceMs: cfg.SIGNAL_LOOKBACK_TOLERANCE_MS,
     });
+    const threshold = adaptiveMoveThreshold(this._btcMoveHistory, {
+      now: sampledAt,
+      windowMs: cfg.BTC_MOVE_THRESHOLD_WINDOW_MS,
+      percentile: cfg.BTC_MOVE_THRESHOLD_PERCENTILE,
+      floorUsd: cfg.BTC_MOVE_THRESHOLD_FLOOR_USD,
+      minSamples: cfg.BTC_MOVE_THRESHOLD_MIN_SAMPLES,
+    });
+    const side = move && threshold.ready
+      ? sideForMove(move.changeUsd, threshold.thresholdUsd) : null;
+    if (move) {
+      this._btcMoveHistory.push({ at: sampledAt, absMoveUsd: Math.abs(move.changeUsd) });
+    }
     this.ccxt = {
       ...this.ccxt,
       exchange: sample.exchange || this.ccxt.exchange,
@@ -308,15 +330,25 @@ class Bot {
         ? null : (Number.isFinite(Number(sample.exchangeTimestamp)) ? Number(sample.exchangeTimestamp) : null),
       change1s: move ? move.changeUsd : null,
       lookbackObservedMs: move ? move.lookbackMs : null,
-      candidateSide: move ? sideForMove(move.changeUsd, cfg.BTC_MOVE_THRESHOLD_USD) : null,
+      thresholdUsd: threshold.thresholdUsd,
+      thresholdReady: threshold.ready,
+      thresholdSampleCount: threshold.sampleCount,
+      thresholdMinSamples: threshold.minSamples,
+      thresholdPercentile: threshold.percentile,
+      thresholdWindowMs: threshold.windowMs,
+      thresholdFloorUsd: threshold.floorUsd,
+      percentileThresholdUsd: threshold.percentileThresholdUsd,
+      candidateSide: side,
       status: 'live',
       error: null,
     };
-    if (!move) return;
-    const side = sideForMove(move.changeUsd, cfg.BTC_MOVE_THRESHOLD_USD);
-    if (!side) return;
-    this.ccxt.lastSignal = { side, changeUsd: move.changeUsd, lookbackMs: move.lookbackMs, ts: receivedAt };
-    await this._handleSignal(side, move);
+    if (!move || !threshold.ready || !side) return;
+    const signalMove = { ...move, thresholdUsd: threshold.thresholdUsd };
+    this.ccxt.lastSignal = {
+      side, changeUsd: move.changeUsd, thresholdUsd: threshold.thresholdUsd,
+      lookbackMs: move.lookbackMs, ts: receivedAt,
+    };
+    await this._handleSignal(side, signalMove);
   }
 
   async _handleSignal(side, move) {
@@ -329,14 +361,19 @@ class Bot {
       return;
     }
 
-    w.lastSignal = { side, changeUsd: move.changeUsd, lookbackMs: move.lookbackMs, ts: now };
+    w.lastSignal = {
+      side, changeUsd: move.changeUsd, thresholdUsd: move.thresholdUsd,
+      lookbackMs: move.lookbackMs, ts: now,
+    };
     if (w.lastLoggedSignalSide !== side) {
       w.lastLoggedSignalSide = side;
       this._push({
         event: 'BTC_MOVE_SIGNAL', slug: w.slug, side,
-        changeUsd: round(move.changeUsd, 2), lookbackMs: move.lookbackMs,
+        changeUsd: round(move.changeUsd, 2), thresholdUsd: round(move.thresholdUsd, 2),
+        lookbackMs: move.lookbackMs,
         note: 'CCXT BTC moved ' + signedUsd(move.changeUsd) + ' over '
-          + move.lookbackMs + ' ms; target side is ' + side + '.',
+          + move.lookbackMs + ' ms against an adaptive $' + Number(move.thresholdUsd).toFixed(2)
+          + ' threshold; target side is ' + side + '.',
       });
     }
     if (w.position && w.position.side === side) {
@@ -632,7 +669,13 @@ class Bot {
       priceSeries: this.priceSeries,
       strategy: {
         baseShares: cfg.BASE_SHARES,
-        thresholdUsd: cfg.BTC_MOVE_THRESHOLD_USD,
+        thresholdUsd: this.ccxt.thresholdUsd,
+        thresholdReady: this.ccxt.thresholdReady,
+        thresholdSampleCount: this.ccxt.thresholdSampleCount,
+        thresholdMinSamples: cfg.BTC_MOVE_THRESHOLD_MIN_SAMPLES,
+        thresholdPercentile: cfg.BTC_MOVE_THRESHOLD_PERCENTILE,
+        thresholdWindowMs: cfg.BTC_MOVE_THRESHOLD_WINDOW_MS,
+        thresholdFloorUsd: cfg.BTC_MOVE_THRESHOLD_FLOOR_USD,
         lookbackMs: cfg.SIGNAL_LOOKBACK_MS,
         pollMs: this.ccxt.pollMs,
         exchange: this.ccxt.exchange,
@@ -644,8 +687,11 @@ class Bot {
         demoCapital: cfg.DEMO_CAPITAL,
         baseShares: cfg.BASE_SHARES,
         windowSec: WINDOW_SECONDS,
-        btcMoveThresholdUsd: cfg.BTC_MOVE_THRESHOLD_USD,
         signalLookbackMs: cfg.SIGNAL_LOOKBACK_MS,
+        btcMoveThresholdWindowMs: cfg.BTC_MOVE_THRESHOLD_WINDOW_MS,
+        btcMoveThresholdPercentile: cfg.BTC_MOVE_THRESHOLD_PERCENTILE,
+        btcMoveThresholdFloorUsd: cfg.BTC_MOVE_THRESHOLD_FLOOR_USD,
+        btcMoveThresholdMinSamples: cfg.BTC_MOVE_THRESHOLD_MIN_SAMPLES,
         ccxtPollMs: this.ccxt.pollMs,
         ccxtExchange: this.ccxt.exchange,
         ccxtSymbol: this.ccxt.symbol,

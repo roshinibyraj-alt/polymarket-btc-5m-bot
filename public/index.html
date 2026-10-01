@@ -20,7 +20,7 @@
 </section>
 <section class="grid">
   <article class="panel"><div class="panelhead"><div><div class="eyebrow">Current five-minute window</div><h2 id="marketTitle">Waiting for market</h2></div><div class="windowmeta"><div id="windowStatus" class="status">Starting</div><div id="timeLeft" style="margin-top:7px">— remaining</div></div></div>
-     <div class="progress"><i id="progress" style="width:0%"></i></div><div class="gate"><span id="elapsedLabel">00:00 elapsed</span><span id="gateLabel">CCXT ±$10 / 1s trigger · 500 ms polling</span><span>05:00</span></div>
+     <div class="progress"><i id="progress" style="width:0%"></i></div><div class="gate"><span id="elapsedLabel">00:00 elapsed</span><span id="gateLabel">Adaptive BTC threshold · 500 ms polling</span><span>05:00</span></div>
     <table class="quoteTable"><thead><tr><th>Outcome</th><th>Best bid</th><th>Best ask</th><th>Midpoint</th><th>State</th></tr></thead><tbody>
       <tr><td><span class="side"><i class="dot"></i>UP</span></td><td class="bid" id="upBid">—</td><td class="ask" id="upAsk">—</td><td class="bid" id="upMid">—</td><td id="upState">—</td></tr>
       <tr><td><span class="side"><i class="dot down"></i>DOWN</span></td><td class="bid" id="downBid">—</td><td class="ask" id="downAsk">—</td><td class="bid" id="downMid">—</td><td id="downState">—</td></tr>
@@ -29,11 +29,11 @@
    <article class="panel"><div class="panelhead"><div><div class="eyebrow">Execution plan</div><h2 id="planTitle">One-second BTC momentum flip</h2></div><span id="signalPill" class="status">Waiting for a qualifying move</span></div>
     <div class="steps">
        <div class="step" id="step1"><div class="stepnum">1</div><div><b>Poll the configured CCXT BTC spot ticker</b><p id="ccxtSummary">Connecting to the configured public spot ticker…</p></div></div>
-       <div class="step" id="step2"><div class="stepnum">2</div><div><b>+$10 over one second → UP; −$10 → DOWN</b><p id="signalText">The signal compares the latest BTC price with a sample about one second earlier.</p></div></div>
+        <div class="step" id="step2"><div class="stepnum">2</div><div><b>Rolling one-second BTC move threshold</b><p id="signalText">The adaptive threshold is calculated from recent BTC moves.</p></div></div>
        <div class="step" id="step3"><div class="stepnum">3</div><div><b>Reverse exposure on the opposite signal</b><p>Sell the held side first, then buy the other side; a residual position is not doubled up.</p></div></div>
     </div>
      <div class="sizing"><div class="sizeLine"><div><div class="label">Fixed order size per entry</div><div class="sizeBig"><span id="baseShares">500</span> <span>shares</span></div></div><div class="small" id="additionCount">One open side at a time</div></div>
-       <div class="ruleTags"><span class="tag entry" id="entryTag">+$10 / 1s → UP · −$10 / 1s → DOWN</span><span class="tag tp" id="tpTag">FLIP ON OPPOSITE SIGNAL</span></div>
+        <div class="ruleTags"><span class="tag entry" id="entryTag">Adaptive threshold · rolling 20m</span><span class="tag tp" id="tpTag">FLIP ON OPPOSITE SIGNAL</span></div>
        <div class="small" style="margin-top:12px"><span id="ccxtExchange">CCXT · BTC/USD</span> · Spot <b id="ccxtPrice">—</b> · 1s Δ <b id="ccxtChange">—</b> · <span id="ccxtStatus" class="status warn">CONNECTING</span></div>
     </div>
   </article>
@@ -69,22 +69,34 @@ function render(s){
   $('ccxtPrice').textContent=usd(cx.price);$('ccxtChange').textContent=signedMove(cx.change1s);
   const feedStatus=String(cx.status||'connecting').toUpperCase();
   statusStyle($('ccxtStatus'),feedStatus,feedStatus==='LIVE'?'good':feedStatus==='ERROR'?'bad':'warn');
-  const pollInterval=validNum(cx.lastPollIntervalMs)?' · last interval '+Math.round(Number(cx.lastPollIntervalMs))+' ms':'';
-  $('ccxtSummary').textContent=cx.error?'Feed error: '+cx.error:'Public spot ticker · target '+(cx.pollMs||st.pollMs||500)+' ms'+pollInterval+' · '+(cx.status==='live'?'last update '+time(cx.receivedAt):'waiting for data');
+   const pollInterval=validNum(cx.lastPollIntervalMs)?' · last interval '+Math.round(Number(cx.lastPollIntervalMs))+' ms':'';
+  const thresholdSummary=st.thresholdReady
+    ?' · threshold ±'+usd(st.thresholdUsd)+' (P'+st.thresholdPercentile+' / rolling 20m)'
+    :' · threshold warm-up '+(st.thresholdSampleCount||0)+'/'+(st.thresholdMinSamples||120)+' moves';
+  $('ccxtSummary').textContent=cx.error?'Feed error: '+cx.error:'Public spot ticker · target '+(cx.pollMs||st.pollMs||500)+' ms'+pollInterval+thresholdSummary+' · '+(cx.status==='live'?'last update '+time(cx.receivedAt):'waiting for data');
   const elapsed=w?Number(w.elapsedSeconds)||0:0;const remain=Math.max(0,300-elapsed);$('marketTitle').textContent=w?(w.slug||'BTC 5-minute market'):'Waiting for active market';$('windowStatus').textContent=w?String(w.status||'starting').replace(/_/g,' '):'Starting';
   $('windowStatus').className='status '+(w&&w.positionSide?'good':w&&w.status==='awaiting_resolution'?'warn':w&&w.closed?'':'');
   $('timeLeft').textContent=w?clock(remain)+' remaining':'— remaining';$('elapsedLabel').textContent=clock(elapsed)+' elapsed';$('progress').style.width=Math.min(100,Math.max(0,elapsed/300*100))+'%';
-  $('gateLabel').textContent=w&&w.closed?'WINDOW CLOSED · OFFICIAL RESOLUTION ONLY':'±$'+(cfg.btcMoveThresholdUsd||10)+' BTC move over '+((cfg.signalLookbackMs||1000)/1000)+' second · '+(cfg.ccxtPollMs||500)+' ms polling';
+  const thresholdLabel=st.thresholdReady
+    ?'ADAPTIVE ±'+usd(st.thresholdUsd)+' · P'+st.thresholdPercentile+' / 20m'
+    :'THRESHOLD WARM-UP '+(st.thresholdSampleCount||0)+'/'+(st.thresholdMinSamples||120);
+  $('gateLabel').textContent=w&&w.closed?'WINDOW CLOSED · OFFICIAL RESOLUTION ONLY':thresholdLabel+' · '+(cfg.ccxtPollMs||500)+' ms polling';
   setSideQuote('UP',px.up,w&&w.positionSide,w&&w.closed);setSideQuote('DOWN',px.down,w&&w.positionSide,w&&w.closed);
   const signal=w&&w.lastSignal;
   statusStyle($('signalPill'),w&&w.positionSide?'Holding '+w.positionSide:signal?signal.side+' signal · '+signedMove(signal.changeUsd):'Waiting for a qualifying move',w&&w.positionSide?'good':signal?'warn':'');
-  $('signalText').textContent=signal?'Latest qualifying move: '+signedMove(signal.changeUsd)+' in '+signal.lookbackMs+' ms → '+signal.side+'.': 'No qualifying one-second move yet; repeated same-side signals do not add another entry.';
+  $('signalText').textContent=signal
+    ?'Latest qualifying move: '+signedMove(signal.changeUsd)+' in '+signal.lookbackMs+' ms; threshold $'+Number(signal.thresholdUsd).toFixed(2)+' → '+signal.side+'.'
+    :!st.thresholdReady
+      ?'Collecting '+(st.thresholdMinSamples||120)+' one-second move samples before signaling; the rolling threshold then adapts over 20 minutes.'
+      :'Signals use the P'+st.thresholdPercentile+' of absolute one-second moves in the prior 20 minutes (minimum $'+Number(st.thresholdFloorUsd||1).toFixed(2)+').';
   const step1=$('step1'),step2=$('step2'),step3=$('step3');[step1,step2,step3].forEach(function(x){x.className='step'});
   if(cx.status==='live')step1.className='step done';else step1.className='step active';
   if(signal)step2.className='step active';
   if(w&&w.positionSide)step3.className='step active';else if(w&&w.closed)step3.className='step done';
   $('baseShares').textContent=qty(st.baseShares);$('additionCount').textContent='One open side · flip only after opposite trigger';
-  $('entryTag').textContent='+$'+(st.thresholdUsd||10)+' / 1s → UP · −$'+(st.thresholdUsd||10)+' / 1s → DOWN';
+  $('entryTag').textContent=st.thresholdReady
+    ?'±'+usd(st.thresholdUsd)+' / 1s · P'+st.thresholdPercentile+' rolling 20m'
+    :'WARMING UP · '+(st.thresholdSampleCount||0)+'/'+(st.thresholdMinSamples||120)+' samples';
   $('tpTag').textContent='SELL HELD SIDE · BUY OPPOSITE';
   $('openCount').textContent=(s.pending||[]).length+' open position'+((s.pending||[]).length===1?'':'s');
   const pending=s.pending||[];

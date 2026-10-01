@@ -43,7 +43,40 @@ function computeOneSecondMove(samples, options = {}) {
   };
 }
 
-function sideForMove(changeUsd, thresholdUsd = 10) {
+function adaptiveMoveThreshold(history, options = {}) {
+  const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
+  const windowMs = Math.max(1, Number(options.windowMs) || 20 * 60 * 1000);
+  const percentile = Math.min(100, Math.max(0, Number(options.percentile) || 99));
+  const floorUsd = Math.max(0, Number(options.floorUsd) || 0);
+  const minSamples = Math.max(1, Math.floor(Number(options.minSamples) || 120));
+  const values = (Array.isArray(history) ? history : [])
+    .filter((item) => {
+      const at = Number(item && item.at);
+      const move = Math.abs(Number(item && item.absMoveUsd));
+      return Number.isFinite(at) && at <= now && now - at <= windowMs
+        && Number.isFinite(move) && move >= 0;
+    })
+    .map((item) => Math.abs(Number(item.absMoveUsd)))
+    .sort((a, b) => a - b);
+  const sampleCount = values.length;
+  const ready = sampleCount >= minSamples;
+  if (!ready) {
+    return {
+      ready: false, thresholdUsd: null, percentileThresholdUsd: null,
+      sampleCount, minSamples, percentile, windowMs, floorUsd,
+    };
+  }
+  const rank = Math.max(1, Math.ceil((percentile / 100) * sampleCount));
+  const percentileThresholdUsd = values[Math.min(values.length - 1, rank - 1)];
+  return {
+    ready: true,
+    thresholdUsd: Math.max(floorUsd, percentileThresholdUsd),
+    percentileThresholdUsd,
+    sampleCount, minSamples, percentile, windowMs, floorUsd,
+  };
+}
+
+function sideForMove(changeUsd, thresholdUsd) {
   const change = Number(changeUsd);
   const threshold = Number(thresholdUsd);
   if (!Number.isFinite(change) || !Number.isFinite(threshold) || threshold <= 0) return null;
@@ -52,4 +85,4 @@ function sideForMove(changeUsd, thresholdUsd = 10) {
   return null;
 }
 
-module.exports = { computeOneSecondMove, sideForMove };
+module.exports = { computeOneSecondMove, adaptiveMoveThreshold, sideForMove };

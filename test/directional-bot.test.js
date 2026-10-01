@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const cfg = require('../config');
 const Bot = require('../directional-bot');
 const { makeWindowState } = require('../directional-bot');
 
@@ -67,6 +68,13 @@ function makeBot(options = {}) {
     start() { return () => {}; },
   };
   const bot = new Bot(trader, { live: !!options.live, ccxtFeed: feed });
+  if (options.seedHistory !== false) {
+    const now = Date.now();
+    bot._btcMoveHistory = Array.from(
+      { length: cfg.BTC_MOVE_THRESHOLD_MIN_SAMPLES },
+      (_, index) => ({ at: now - (index + 1) * 500, absMoveUsd: 2 }),
+    );
+  }
   const openTs = Math.floor(Date.now() / 1000) - 1;
   bot.w = makeWindowState('btc-updown-5m-' + openTs, openTs);
   bot.w.window = { tokenUp: 'up', tokenDown: 'down', closeTs: openTs + 300 };
@@ -74,7 +82,7 @@ function makeBot(options = {}) {
   return { bot, trader };
 }
 
-test('a +$10 one-second move buys UP, then a -$10 move sells UP before buying DOWN', async () => {
+test('an adaptive positive move buys UP, then an adaptive negative move sells UP before buying DOWN', async () => {
   const { bot, trader } = makeBot();
   const start = Date.now();
   await bot._onBtcSample({ price: 80000, receivedAt: start, exchange: 'kraken', symbol: 'BTC/USD' });
@@ -84,6 +92,8 @@ test('a +$10 one-second move buys UP, then a -$10 move sells UP before buying DO
   assert.equal(bot.pending.length, 1);
   assert.equal(bot.pending[0].side, 'UP');
   assert.equal(bot.pending[0].shares, 500);
+  assert.equal(bot.ccxt.thresholdUsd, 2);
+  assert.equal(bot.ccxt.thresholdReady, true);
   assert.equal(trader.calls.length, 1);
   assert.equal(trader.calls[0].tokenId, 'up');
   assert.equal(trader.calls[0].side, 'BUY');
@@ -127,11 +137,27 @@ test('a delayed CCXT response is discarded and cannot trigger an order', async (
   assert.equal(trader.calls.length, 0);
 });
 
+test('signal orders remain disabled during adaptive-threshold warm-up', async () => {
+  const { bot, trader } = makeBot({ seedHistory: false });
+  const start = Date.now();
+  await bot._onBtcSample({ price: 80000, receivedAt: start });
+  await bot._onBtcSample({ price: 80005, receivedAt: start + 500 });
+  await bot._onBtcSample({ price: 80020, receivedAt: start + 1000 });
+  assert.equal(bot.ccxt.thresholdReady, false);
+  assert.equal(bot.ccxt.thresholdUsd, null);
+  assert.equal(trader.calls.length, 0);
+});
+
 test('the live-mode guard blocks signal orders and does not start the CCXT feed', async () => {
   const trader = new FakeDemoTrader();
   let starts = 0;
   const feed = { exchangeId: 'kraken', symbol: 'BTC/USD', start() { starts += 1; return () => {}; } };
   const bot = new Bot(trader, { live: true, ccxtFeed: feed });
+  const now = Date.now();
+  bot._btcMoveHistory = Array.from(
+    { length: cfg.BTC_MOVE_THRESHOLD_MIN_SAMPLES },
+    (_, index) => ({ at: now - (index + 1) * 500, absMoveUsd: 2 }),
+  );
   bot.w = makeWindowState('btc-test', Math.floor(Date.now() / 1000) - 1);
   bot.w.window = { tokenUp: 'up', tokenDown: 'down', closeTs: Math.floor(Date.now() / 1000) + 300 };
 
@@ -148,7 +174,10 @@ test('snapshot exposes the feed and strategy settings', () => {
   const snapshot = bot.snapshot();
   assert.equal(snapshot.mode, 'DEMO');
   assert.equal(snapshot.strategy.pollMs, 500);
-  assert.equal(snapshot.strategy.thresholdUsd, 10);
+  assert.equal(snapshot.strategy.thresholdUsd, null);
+  assert.equal(snapshot.strategy.thresholdReady, false);
+  assert.equal(snapshot.strategy.thresholdMinSamples, 120);
+  assert.equal(snapshot.strategy.thresholdWindowMs, 20 * 60 * 1000);
   assert.equal(snapshot.window.status, 'watching_signal');
 });
 
