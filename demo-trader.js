@@ -64,10 +64,14 @@ class DemoTrader {
     const order = {
       id, tokenId, side: String(side).toUpperCase(), price: Number(price),
       original_size: Number(size), size_matched: 0, status: 'LIVE',
+      makerOnly: true, makerFee: 0, makerRebateEstimate: 0,
     };
     this.orders.set(id, order);
     this._matchAtTouch(order, book);
-    return { id, status: order.status };
+    return {
+      id, status: order.status, makerOnly: true, makerFee: 0,
+      makerRebateEstimate: order.makerRebateEstimate,
+    };
   }
 
   updateQuote(tokenId, quote) {
@@ -106,6 +110,7 @@ class DemoTrader {
     // Visible order-book depth is not used to size the simulated fill.
     order.size_matched = order.original_size;
     order.status = 'MATCHED';
+    order.makerRebateEstimate = strategy.estimateMakerRebate(order.size_matched, order.price);
   }
 
   async cancelOrder(id) {

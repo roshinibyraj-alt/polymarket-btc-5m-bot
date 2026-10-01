@@ -151,7 +151,9 @@ test('an ask touch fills all 500 shares; TP closes and only that side re-arms', 
   assert.equal(bot.pending[0].side, 'UP');
   assert.equal(bot.pending[0].shares, 500);
   assert.equal(bot.pending[0].openShares, 500);
-  assert.equal(bot.cash, cfg.DEMO_CAPITAL - 150);
+  assert.equal(bot.cash, cfg.DEMO_CAPITAL - 150 + 1.47);
+  assert.equal(bot.pending[0].entryRebate, 1.47);
+  assert.equal(bot.stats.estimatedMakerRebates, 1.47);
   const upTp = calls.placements.find((order) => order.side === 'SELL' && order.tokenId === 'up-token');
   assert.ok(upTp);
   assert.equal(upTp.price, 0.70);
@@ -164,7 +166,11 @@ test('an ask touch fills all 500 shares; TP closes and only that side re-arms', 
   assert.equal(bot.trades.length, 1);
   assert.equal(bot.trades[0].reason, 'TAKE_PROFIT');
   assert.equal(bot.trades[0].proceeds, 350);
-  assert.equal(bot.trades[0].pnl, 200);
+  assert.equal(bot.trades[0].entryRebate, 1.47);
+  assert.equal(bot.trades[0].takeProfitRebate, 1.47);
+  assert.equal(bot.trades[0].rebate, 2.94);
+  assert.equal(bot.trades[0].pnl, 202.94);
+  assert.equal(bot.stats.estimatedMakerRebates, 2.94);
 
   setBook('up-token', { bids: [{ price: '0.69', size: '0.01' }], asks: [{ price: '0.31', size: '0.01' }] });
   await bot._manageCycles(w, Date.now(), true);
@@ -258,6 +264,8 @@ test('unresolved windows stay open until the official resolver returns UP or DOW
   assert.equal(bot.trades[0].reason, 'RESOLUTION');
   assert.equal(bot.trades[0].outcome, 'WIN');
   assert.equal(bot.trades[0].proceeds, 500);
+  assert.equal(bot.trades[0].entryRebate, 1.47);
+  assert.equal(bot.trades[0].pnl, 351.47);
 });
 
 test('live mode fails closed before starting loops or placing any orders', async () => {

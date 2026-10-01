@@ -27,3 +27,13 @@ test('take-profit touch requires an executable best bid at or above the limit', 
   assert.equal(strategy.takeProfitTouched(0.699, cfg.TAKE_PROFIT_PRICE), false);
   assert.equal(strategy.takeProfitTouched(null, cfg.TAKE_PROFIT_PRICE), false);
 });
+
+test('maker fills have zero maker fee and receive a fee-curve rebate estimate', () => {
+  assert.equal(cfg.MAKER_FEE_RATE, 0);
+  assert.equal(cfg.CRYPTO_TAKER_FEE_RATE, 0.07);
+  assert.equal(cfg.CRYPTO_MAKER_REBATE_POOL_SHARE, 0.20);
+  assert.equal(strategy.estimateMakerRebate(500, 0.30), 1.47);
+  assert.equal(strategy.estimateMakerRebate(500, 0.70), 1.47);
+  assert.equal(strategy.estimateMakerRebate(500, 1), 0);
+  assert.equal(strategy.estimateMakerRebate(0, 0.30), 0);
+});

@@ -3,6 +3,7 @@
 const cfg = require('./config');
 const { getActiveWindow, currentWindowOpenTs, slugForTs, WINDOW_SECONDS, fetchResolution } = require('./polymarket-market');
 const startMarketFeed = require('./clob-feed');
+const { estimateMakerRebate } = require('./strategy');
 
 const MAX_LOG = 300;
 const EPSILON = 1e-8;
@@ -22,7 +23,7 @@ class Bot {
     this._warned = new Set();
     this.stats = {
       wins: 0, losses: 0, takeProfitFills: 0, expiryWins: 0, expiryLosses: 0,
-      estimatedFees: 0, realizedPnl: 0,
+      estimatedFees: 0, estimatedMakerRebates: 0, realizedPnl: 0,
     };
     this.counts = { UP: 0, DOWN: 0 };
     this.walletBalance = null;
@@ -354,7 +355,7 @@ class Bot {
     const matched = matchedShares(order, cfg.BASE_SHARES);
     const filled = matched >= cfg.BASE_SHARES - EPSILON || (['MATCHED', 'FILLED'].includes(state) && matched <= EPSILON);
     if (filled) {
-      this._recordEntryFill(w, sideState, cycle, cfg.BASE_SHARES);
+      this._recordEntryFill(w, sideState, cycle, cfg.BASE_SHARES, order);
       return;
     }
     if (['CANCELED', 'CANCELLED', 'UNMATCHED', 'EXPIRED', 'REJECTED'].includes(state)) {
@@ -364,10 +365,13 @@ class Bot {
     }
   }
 
-  _recordEntryFill(w, sideState, cycle, shares) {
+  _recordEntryFill(w, sideState, cycle, shares, order = null) {
     if (cycle.position || !(shares > 0)) return;
     const price = cfg.ENTRY_LIMIT_PRICE;
     const notional = shares * price;
+    const reportedRebate = Number(order && order.makerRebateEstimate);
+    const rebate = order && Number.isFinite(reportedRebate) && reportedRebate >= 0
+      ? reportedRebate : estimateMakerRebate(shares, price);
     const position = {
       slug: w.slug, openTs: w.openTs,
       closeTs: Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS,
@@ -376,7 +380,7 @@ class Bot {
       cycle: cycle.number,
       shares, openShares: shares, price,
       entryNotional: notional, entryFee: 0, exitFees: 0, cost: notional,
-      exitProceeds: 0, makerRebate: 0, tpSharesSold: 0,
+      exitProceeds: 0, entryRebate: rebate, takeProfitRebate: 0, makerRebate: rebate, tpSharesSold: 0,
       status: 'open_position', firedAt: Date.now(), settled: false,
       expiryLogged: false, settlementTimedOut: false,
     };
@@ -384,10 +388,13 @@ class Bot {
     cycle.entryMatched = shares;
     cycle.status = 'position_open';
     this.pending.push(position);
-    this.cash -= notional;
+    this.cash += rebate - notional;
+    this.stats.estimatedMakerRebates += rebate;
     this._push({
       event: 'BUY_LIMIT_FILLED', slug: w.slug, side: sideState.side, shares: round(shares, 4), price,
-      note: 'demo best ask touched $' + cfg.ENTRY_LIMIT_PRICE.toFixed(2) + '; counted all ' + shares + ' shares as filled, without using visible depth.',
+      rebate: round(rebate, 5),
+      note: 'demo maker BUY filled on ask touch; maker fee $0, estimated rebate $' + rebate.toFixed(5)
+        + ' credited. Full ' + shares + ' shares counted without using visible depth.',
     });
   }
 
@@ -441,15 +448,19 @@ class Bot {
       cycle.position.openShares = Math.max(0, cycle.position.openShares - delta);
       cycle.position.tpSharesSold += delta;
       const proceeds = delta * cfg.TAKE_PROFIT_PRICE;
-      const rebate = delta * cfg.MAKER_REBATE_PER_SHARE;
+      const rebate = estimateMakerRebate(delta, cfg.TAKE_PROFIT_PRICE);
       cycle.position.exitProceeds += proceeds;
       cycle.position.makerRebate += rebate;
+      cycle.position.takeProfitRebate += rebate;
       this.cash += proceeds + rebate;
       this.stats.takeProfitFills += 1;
+      this.stats.estimatedMakerRebates += rebate;
       this._push({
         event: 'TP_LIMIT_FILLED', slug: w.slug, side: sideState.side,
         shares: round(delta, 4), price: cfg.TAKE_PROFIT_PRICE,
-        note: 'demo best bid touched $' + cfg.TAKE_PROFIT_PRICE.toFixed(2) + '; counted all ' + round(delta, 4) + ' resting TP shares as filled.',
+        rebate: round(rebate, 5),
+        note: 'demo maker SELL filled on bid touch; maker fee $0, estimated rebate $' + rebate.toFixed(5)
+          + ' credited. All ' + round(delta, 4) + ' remaining shares counted as filled.',
       });
     }
     if (['CANCELED', 'CANCELLED', 'UNMATCHED', 'EXPIRED', 'REJECTED'].includes(state)) {
@@ -636,6 +647,8 @@ class Bot {
       entryPrice: round(position.price, 4), price: round(position.price, 4),
       entryNotional: round(position.entryNotional, 4), cost: round(position.cost, 4),
       fee: round(position.entryFee + position.exitFees, 4), rebate: round(position.makerRebate || 0, 4),
+      entryRebate: round(position.entryRebate || 0, 5),
+      takeProfitRebate: round(position.takeProfitRebate || 0, 5),
       proceeds: round(position.exitProceeds, 4), pnl: round(pnl, 2),
       outcomeValuePerShare: reason === 'TAKE_PROFIT' ? cfg.TAKE_PROFIT_PRICE : (reason === 'RESOLUTION' && outcome === 'WIN' ? 1 : null),
       ts: Date.now(),
@@ -721,7 +734,8 @@ class Bot {
         baseShares: cfg.BASE_SHARES,
         entryPrice: cfg.ENTRY_LIMIT_PRICE,
         takeProfitPrice: cfg.TAKE_PROFIT_PRICE,
-        feeRateEstimate: 0,
+        feeRateEstimate: cfg.MAKER_FEE_RATE,
+        rebateIsEstimate: true,
       },
       counts: this.counts, recentOutcomes: outcomeRows, pending,
       trades: this.trades.slice(-60).reverse(), equity: this.equity, stats: this.stats,
@@ -731,7 +745,9 @@ class Bot {
         takeProfitPrice: cfg.TAKE_PROFIT_PRICE,
         baseShares: cfg.BASE_SHARES,
         windowSec: WINDOW_SECONDS,
-        makerRebatePerShare: cfg.MAKER_REBATE_PER_SHARE,
+        makerFeeRate: cfg.MAKER_FEE_RATE,
+        cryptoTakerFeeRate: cfg.CRYPTO_TAKER_FEE_RATE,
+        makerRebatePoolShare: cfg.CRYPTO_MAKER_REBATE_POOL_SHARE,
       },
       log: this.log.slice(-100).reverse(),
     };

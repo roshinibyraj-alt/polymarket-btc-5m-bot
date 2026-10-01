@@ -1,5 +1,7 @@
 'use strict';
 
+const cfg = require('./config');
+
 function buyLimitTouched(bestAsk, limitPrice) {
   const ask = Number(bestAsk);
   const limit = Number(limitPrice);
@@ -12,4 +14,16 @@ function takeProfitTouched(bestBid, limitPrice) {
   return Number.isFinite(bid) && Number.isFinite(limit) && bid > 0 && bid >= limit;
 }
 
-module.exports = { buyLimitTouched, takeProfitTouched };
+// Demo estimate only: Polymarket distributes a daily, market-specific rebate
+// pool. This applies the Crypto pool share to this fill's fee-curve equivalent.
+function estimateMakerRebate(shares, price) {
+  const quantity = Number(shares);
+  const p = Number(price);
+  if (!Number.isFinite(quantity) || quantity <= 0
+    || !Number.isFinite(p) || p <= 0 || p >= 1) return 0;
+  const feeEquivalent = quantity * cfg.CRYPTO_TAKER_FEE_RATE * p * (1 - p);
+  const estimate = feeEquivalent * cfg.CRYPTO_MAKER_REBATE_POOL_SHARE;
+  return Math.round((estimate + Number.EPSILON) * 100000) / 100000;
+}
+
+module.exports = { buyLimitTouched, takeProfitTouched, estimateMakerRebate };

@@ -12,10 +12,14 @@ test('demo GTC buy fills all 500 shares on an ask touch without using visible de
     const trader = new DemoTrader();
     const order = await trader.placeGtcOrder('token', 'BUY', 0.30, 500);
     assert.equal(order.status, 'LIVE');
+    assert.equal(order.makerOnly, true);
+    assert.equal(order.makerFee, 0);
     book = { bids: [{ price: '0.29', size: '0.01' }], asks: [{ price: '0.30', size: '0.01' }] };
     const state = await trader.getOrder(order.id);
     assert.equal(Number(state.size_matched), 500);
     assert.equal(state.status, 'MATCHED');
+    assert.equal(state.makerFee, 0);
+    assert.equal(state.makerRebateEstimate, 1.47);
   } finally { global.fetch = originalFetch; }
 });
 
@@ -27,6 +31,8 @@ test('demo GTC take-profit fills all shares on a bid touch without using visible
     const trader = new DemoTrader();
     const order = await trader.placeGtcOrder('token', 'SELL', 0.70, 500);
     assert.equal(order.status, 'LIVE');
+    assert.equal(order.makerOnly, true);
+    assert.equal(order.makerFee, 0);
     let state = await trader.getOrder(order.id);
     assert.equal(Number(state.size_matched), 0);
     assert.equal(state.status, 'LIVE');
@@ -34,6 +40,8 @@ test('demo GTC take-profit fills all shares on a bid touch without using visible
     state = await trader.getOrder(order.id);
     assert.equal(Number(state.size_matched), 500);
     assert.equal(state.status, 'MATCHED');
+    assert.equal(state.makerFee, 0);
+    assert.equal(state.makerRebateEstimate, 1.47);
   } finally { global.fetch = originalFetch; }
 });
 
