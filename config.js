@@ -3,10 +3,10 @@
 module.exports = {
   DEMO_CAPITAL: 10000,
   ENTRY_RUNGS: [
-    { entryPrice: 0.45, takeProfitPrice: 0.55 },
-    { entryPrice: 0.40, takeProfitPrice: 0.60 },
-    { entryPrice: 0.35, takeProfitPrice: 0.65 },
-    { entryPrice: 0.30, takeProfitPrice: 0.70 },
+    { entryPrice: 0.45, takeProfitPrice: 0.70 },
+    { entryPrice: 0.40, takeProfitPrice: 0.65 },
+    { entryPrice: 0.35, takeProfitPrice: 0.60 },
+    { entryPrice: 0.30, takeProfitPrice: 0.50 },
   ],
   SECOND_FILL_TAKE_PROFIT_PRICE: 0.99,
   BASE_SHARES: 500,

@@ -9,10 +9,10 @@ test('strategy uses four 500-share paired entry rungs and a second-fill TP at 99
   assert.equal(cfg.DEMO_CAPITAL, 10000);
   assert.equal(cfg.BASE_SHARES, 500);
   assert.deepEqual(cfg.ENTRY_RUNGS, [
-    { entryPrice: 0.45, takeProfitPrice: 0.55 },
-    { entryPrice: 0.40, takeProfitPrice: 0.60 },
-    { entryPrice: 0.35, takeProfitPrice: 0.65 },
-    { entryPrice: 0.30, takeProfitPrice: 0.70 },
+    { entryPrice: 0.45, takeProfitPrice: 0.70 },
+    { entryPrice: 0.40, takeProfitPrice: 0.65 },
+    { entryPrice: 0.35, takeProfitPrice: 0.60 },
+    { entryPrice: 0.30, takeProfitPrice: 0.50 },
   ]);
   assert.equal(cfg.SECOND_FILL_TAKE_PROFIT_PRICE, 0.99);
   assert.equal(Object.hasOwn(cfg, 'STOP_LOSS_PRICE'), false);
@@ -27,9 +27,9 @@ test('buy limit touch requires an executable best ask at or below the limit', ()
 });
 
 test('take-profit touch requires an executable best bid at or above the limit', () => {
-  assert.equal(strategy.takeProfitTouched(0.55, cfg.ENTRY_RUNGS[0].takeProfitPrice), true);
+  assert.equal(strategy.takeProfitTouched(0.70, cfg.ENTRY_RUNGS[0].takeProfitPrice), true);
   assert.equal(strategy.takeProfitTouched(0.99, cfg.SECOND_FILL_TAKE_PROFIT_PRICE), true);
-  assert.equal(strategy.takeProfitTouched(0.549, cfg.ENTRY_RUNGS[0].takeProfitPrice), false);
+  assert.equal(strategy.takeProfitTouched(0.699, cfg.ENTRY_RUNGS[0].takeProfitPrice), false);
   assert.equal(strategy.takeProfitTouched(null, cfg.ENTRY_RUNGS[0].takeProfitPrice), false);
 });
 

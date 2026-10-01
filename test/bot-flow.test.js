@@ -188,7 +188,7 @@ test('each rung pairs one UP and one DOWN fill: first gets rung TP, second gets 
   await bot._manageCycles(w, Date.now(), true);
   assert.equal(rung.firstFillSide, 'UP');
   assert.equal(rung.fillCount, 1);
-  assert.equal(rung.sides.UP.position.takeProfitPrice, 0.55);
+  assert.equal(rung.sides.UP.position.takeProfitPrice, 0.70);
   assert.ok(getRung(w, 0.40).sides.UP.entryOrderId);
   assert.ok(rung.sides.DOWN.entryOrderId);
   assert.equal(calls.cancels.length, 0);
@@ -198,14 +198,14 @@ test('each rung pairs one UP and one DOWN fill: first gets rung TP, second gets 
   assert.equal(rung.fillCount, 2);
   assert.equal(rung.sides.DOWN.position.takeProfitPrice, 0.99);
   assert.equal(bot.pending.length, 2);
-  assert.equal(calls.placements.find((order) => order.side === 'SELL' && order.tokenId === 'up-token').price, 0.55);
+  assert.equal(calls.placements.find((order) => order.side === 'SELL' && order.tokenId === 'up-token').price, 0.70);
   assert.equal(calls.placements.find((order) => order.side === 'SELL' && order.tokenId === 'down-token').price, 0.99);
 
-  setBook('up-token', { bids: [{ price: '0.55', size: '0.01' }], asks: [{ price: '0.56', size: '0.01' }] });
+  setBook('up-token', { bids: [{ price: '0.70', size: '0.01' }], asks: [{ price: '0.71', size: '0.01' }] });
   await bot._manageCycles(w, Date.now(), true);
   const firstTrade = bot.trades.find((trade) => trade.rungPrice === 0.45 && trade.side === 'UP');
-  assert.equal(firstTrade.proceeds, 275);
-  assert.equal(firstTrade.takeProfitPrice, 0.55);
+  assert.equal(firstTrade.proceeds, 350);
+  assert.equal(firstTrade.takeProfitPrice, 0.70);
 
   setBook('down-token', { bids: [{ price: '0.99', size: '0.01' }], asks: [{ price: '1.00', size: '0.01' }] });
   await bot._manageCycles(w, Date.now(), true);
@@ -213,7 +213,7 @@ test('each rung pairs one UP and one DOWN fill: first gets rung TP, second gets 
   assert.equal(secondTrade.proceeds, 495);
   assert.equal(secondTrade.takeProfitPrice, 0.99);
   assert.equal(secondTrade.pnl, 271.8);
-  assert.ok(Math.abs(bot.cash - 10325.2668) < 1e-8);
+  assert.ok(Math.abs(bot.cash - 10400.0043) < 1e-8);
   assert.equal(rung.fillCount, 2);
   assert.equal(buyOrdersFor(calls, 'up-token', 0.45).length, 1);
   assert.equal(buyOrdersFor(calls, 'down-token', 0.45).length, 1);
@@ -229,9 +229,9 @@ test('fill sequencing resets for each rung and one rung can close without re-arm
   await bot._manageCycles(w, Date.now(), true);
   const rung40 = getRung(w, 0.40);
   assert.equal(rung40.firstFillSide, 'UP');
-  assert.equal(rung40.sides.UP.position.takeProfitPrice, 0.60);
+  assert.equal(rung40.sides.UP.position.takeProfitPrice, 0.65);
 
-  setBook('up-token', { bids: [{ price: '0.60', size: '0.01' }], asks: [{ price: '0.61', size: '0.01' }] });
+  setBook('up-token', { bids: [{ price: '0.65', size: '0.01' }], asks: [{ price: '0.66', size: '0.01' }] });
   await bot._manageCycles(w, Date.now(), true);
   assert.equal(rung40.sides.UP.position, null);
   assert.equal(rung40.sides.UP.entryFilled, true);
