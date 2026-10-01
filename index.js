@@ -1,6 +1,6 @@
 'use strict';
 
-// This limit-cycle strategy is demo-only. Fail before loading a wallet trader
+// This four-rung limit ladder is demo-only. Fail before loading a wallet trader
 // or authenticating if a live-trading flag is present.
 const LIVE = process.env.LIVE_TRADING === 'true';
 

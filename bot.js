@@ -27,7 +27,7 @@ class Bot {
     };
     this.counts = { UP: 0, DOWN: 0 };
     this.walletBalance = null;
-    this.error = this.strategyBlocked ? 'This limit-cycle strategy is demo-only; order submission is disabled outside DemoTrader.' : null;
+    this.error = this.strategyBlocked ? 'This four-rung strategy is demo-only; order submission is disabled outside DemoTrader.' : null;
     this.executionHalt = this.strategyBlocked;
     this.log = [];
     this.startedAt = Date.now();
@@ -63,7 +63,7 @@ class Bot {
     if (this._running || this.strategyBlocked) {
       if (this.strategyBlocked) this._warnOnce('live-strategy-blocked', {
         event: 'LIVE_BLOCKED',
-        note: 'The fixed limit-cycle strategy requires the DemoTrader adapter; no live order methods will be called.',
+        note: 'The four-rung strategy requires the DemoTrader adapter; no live order methods will be called.',
       });
       return;
     }
@@ -112,7 +112,7 @@ class Bot {
         w.status = 'placing_orders';
         this._push({
           event: 'WINDOW_READY', slug: w.slug,
-          note: 'BTC 5-minute market is active; placing independent 500-share $0.30 limit buys on UP and DOWN.',
+          note: 'BTC 5-minute market is active; placing four 500-share entry rungs on both UP and DOWN.',
         });
         await this._startWindowOrders(w);
       } else {
@@ -243,7 +243,7 @@ class Bot {
   async _startWindowOrders(w) {
     if (!w || !w.window || w.ordersStarted || w.closing || w.closed || this.strategyBlocked) return;
     w.ordersStarted = true;
-    await Promise.all(SIDES.map((side) => this._ensureCycle(w, side, Date.now())));
+    await this._manageCycles(w, Date.now(), true);
     this._updateWindowStatus(w);
   }
 
@@ -265,109 +265,98 @@ class Bot {
       await this._closeWindowOrders(w);
       return;
     }
-    await Promise.all(SIDES.map((side) => this._ensureCycle(w, side, now, forcePoll)));
-    if (!w.closing && !w.closed) {
-      await Promise.all(SIDES.filter((side) => !w.sides[side].active)
-        .map((side) => this._ensureCycle(w, side, Date.now(), forcePoll)));
-    }
+    await Promise.all(w.rungs.map((rung) => this._manageRung(w, rung, now, forcePoll)));
     this._updateWindowStatus(w);
   }
 
-  async _ensureCycle(w, side, now, forcePoll = false) {
-    const sideState = w.sides[side];
-    if (sideState.inFlight || w.closing || w.closed) return;
-    if (!sideState.active) {
-      sideState.cycleNumber += 1;
-      sideState.active = {
-        number: sideState.cycleNumber,
-        status: 'buy_pending',
-        entryOrderId: null,
-        entryMatched: 0,
-        entryInFlight: false,
-        position: null,
-        tpOrderId: null,
-        tpOrderShares: 0,
-        tpMatched: 0,
-        lastPollAt: 0,
-        nextEntryAttemptAt: 0,
-      };
-    }
-    const cycle = sideState.active;
-    sideState.inFlight = true;
+  async _manageRung(w, rung, now, forcePoll = false) {
+    if (!rung || rung.inFlight || w.closing || w.closed) return;
+    rung.inFlight = true;
     try {
-      if (!cycle.entryOrderId) {
-        if (now < cycle.nextEntryAttemptAt) return;
-        await this._placeEntryOrder(w, sideState, cycle, now);
-      }
-      if (cycle.entryOrderId) {
-        await this._refreshEntryOrder(w, sideState, cycle, now, forcePoll);
-      }
-      if (cycle.position && cycle.position.openShares > EPSILON) {
-        const hadTpOrder = !!cycle.tpOrderId;
-        if (!hadTpOrder) await this._placeTakeProfit(w, sideState, cycle, now);
-        if (cycle.tpOrderId) await this._refreshTakeProfit(w, sideState, cycle, now, forcePoll || !hadTpOrder);
-      }
+      await Promise.all(SIDES.map((side) => this._placeEntryOrder(w, rung, rung.sides[side], now)));
+      await this._refreshRungEntries(w, rung, now, forcePoll);
+      await Promise.all(SIDES.map(async (side) => {
+        const sideState = rung.sides[side];
+        if (!sideState.position || sideState.position.openShares <= EPSILON) return;
+        const hadTpOrder = !!sideState.tpOrderId;
+        if (!hadTpOrder) await this._placeTakeProfit(w, rung, sideState, Date.now());
+        if (sideState.tpOrderId) {
+          await this._refreshTakeProfit(w, rung, sideState, Date.now(), forcePoll || !hadTpOrder);
+        }
+      }));
     } finally {
-      sideState.inFlight = false;
+      rung.inFlight = false;
     }
   }
 
-  async _placeEntryOrder(w, sideState, cycle, now) {
-    if (this.strategyBlocked || !w.window || w.closing || w.closed || cycle.entryInFlight) return;
-    cycle.entryInFlight = true;
-    cycle.nextEntryAttemptAt = now + cfg.ENTRY_RETRY_MS;
+  async _placeEntryOrder(w, rung, sideState, now) {
+    if (this.strategyBlocked || !w.window || w.closing || w.closed
+      || sideState.entryOrderId || sideState.entryFilled || now < sideState.nextEntryAttemptAt) return;
+    sideState.nextEntryAttemptAt = now + cfg.ENTRY_RETRY_MS;
     const tokenId = sideState.side === 'UP' ? w.window.tokenUp : w.window.tokenDown;
     try {
-      const order = await this.trader.placeGtcOrder(tokenId, 'BUY', cfg.ENTRY_LIMIT_PRICE, cfg.BASE_SHARES);
+      const order = await this.trader.placeGtcOrder(tokenId, 'BUY', rung.entryPrice, cfg.BASE_SHARES);
       if (!order || !order.id) throw new Error('demo GTC buy returned no order ID');
-      cycle.entryOrderId = order.id;
-      cycle.status = 'buy_resting';
-      cycle.lastPollAt = 0;
+      sideState.entryOrderId = order.id;
+      sideState.status = 'buy_resting';
+      sideState.entryLastPollAt = 0;
       this._push({
-        event: 'BUY_LIMIT_PLACED', slug: w.slug, side: sideState.side, shares: cfg.BASE_SHARES,
-        note: 'GTC limit BUY placed at $' + cfg.ENTRY_LIMIT_PRICE.toFixed(2) + ' for exactly ' + cfg.BASE_SHARES + ' shares.',
+        event: 'BUY_LIMIT_PLACED', slug: w.slug, side: sideState.side,
+        rungPrice: rung.entryPrice, shares: cfg.BASE_SHARES,
+        note: 'GTC ' + sideState.side + ' BUY limit placed at $' + rung.entryPrice.toFixed(2)
+          + ' for exactly ' + cfg.BASE_SHARES + ' shares.',
       });
     } catch (error) {
-      cycle.status = 'buy_retry';
+      sideState.status = 'buy_retry';
       this._push({
-        event: 'BUY_LIMIT_RETRY', slug: w.slug, side: sideState.side, shares: cfg.BASE_SHARES,
-        note: 'could not place demo limit BUY; retrying while the five-minute window is open: ' + error.message,
+        event: 'BUY_LIMIT_RETRY', slug: w.slug, side: sideState.side,
+        rungPrice: rung.entryPrice, shares: cfg.BASE_SHARES,
+        note: 'could not place demo BUY at $' + rung.entryPrice.toFixed(2)
+          + '; retrying while the five-minute window is open: ' + error.message,
       });
-    } finally {
-      cycle.entryInFlight = false;
     }
   }
 
-  async _refreshEntryOrder(w, sideState, cycle, now, force = false) {
-    if (!cycle.entryOrderId || cycle.position) return;
-    if (!force && now - cycle.lastPollAt < cfg.ORDER_STATUS_POLL_MS) return;
-    cycle.lastPollAt = now;
-    let order;
-    try { order = await this.trader.getOrder(cycle.entryOrderId); }
-    catch (error) {
-      this._warnOnce('entry-poll-' + cycle.entryOrderId, {
-        event: 'ERROR', slug: w.slug, side: sideState.side, note: 'entry order status lookup failed: ' + error.message,
-      });
-      return;
-    }
-    if (!order) return;
-    const state = orderState(order);
-    const matched = matchedShares(order, cfg.BASE_SHARES);
-    const filled = matched >= cfg.BASE_SHARES - EPSILON || (['MATCHED', 'FILLED'].includes(state) && matched <= EPSILON);
-    if (filled) {
-      this._recordEntryFill(w, sideState, cycle, cfg.BASE_SHARES, order);
-      return;
-    }
-    if (['CANCELED', 'CANCELLED', 'UNMATCHED', 'EXPIRED', 'REJECTED'].includes(state)) {
-      cycle.entryOrderId = null;
-      cycle.status = 'buy_retry';
-      cycle.nextEntryAttemptAt = now + cfg.ENTRY_RETRY_MS;
-    }
+  async _refreshRungEntries(w, rung, now, force = false) {
+    const fills = await Promise.all(SIDES.map(async (side) => {
+      const sideState = rung.sides[side];
+      if (!sideState.entryOrderId || sideState.entryFilled) return null;
+      if (!force && now - sideState.entryLastPollAt < cfg.ORDER_STATUS_POLL_MS) return null;
+      sideState.entryLastPollAt = now;
+      let order;
+      try { order = await this.trader.getOrder(sideState.entryOrderId); }
+      catch (error) {
+        this._warnOnce('entry-poll-' + sideState.entryOrderId, {
+          event: 'ERROR', slug: w.slug, side, rungPrice: rung.entryPrice,
+          note: 'entry order status lookup failed: ' + error.message,
+        });
+        return null;
+      }
+      if (!order) return null;
+      const state = orderState(order);
+      const matched = matchedShares(order, cfg.BASE_SHARES);
+      const filled = matched >= cfg.BASE_SHARES - EPSILON || (['MATCHED', 'FILLED'].includes(state) && matched <= EPSILON);
+      if (filled) return { side, sideState, order, matchedAt: Number(order.matchedAt || order.filledAt) || 0 };
+      if (['CANCELED', 'CANCELLED', 'UNMATCHED', 'EXPIRED', 'REJECTED'].includes(state)) {
+        sideState.entryOrderId = null;
+        sideState.status = w.closing || w.closed ? 'window_closed' : 'buy_retry';
+        sideState.nextEntryAttemptAt = now + cfg.ENTRY_RETRY_MS;
+      }
+      return null;
+    }));
+    fills.filter(Boolean).sort((a, b) => {
+      if (a.matchedAt && b.matchedAt && a.matchedAt !== b.matchedAt) return a.matchedAt - b.matchedAt;
+      return SIDES.indexOf(a.side) - SIDES.indexOf(b.side);
+    }).forEach(({ side, sideState, order }) => this._recordEntryFill(w, rung, side, sideState, order));
   }
 
-  _recordEntryFill(w, sideState, cycle, shares, order = null) {
-    if (cycle.position || !(shares > 0)) return;
-    const price = cfg.ENTRY_LIMIT_PRICE;
+  _recordEntryFill(w, rung, side, sideState, order = null) {
+    if (sideState.entryFilled || rung.fillCount >= SIDES.length) return;
+    const shares = cfg.BASE_SHARES;
+    const price = rung.entryPrice;
+    const fillNumber = rung.fillCount + 1;
+    if (fillNumber === 1) rung.firstFillSide = side;
+    const takeProfitPrice = fillNumber === 1 ? rung.takeProfitPrice : cfg.SECOND_FILL_TAKE_PROFIT_PRICE;
     const notional = shares * price;
     const reportedRebate = Number(order && order.makerRebateEstimate);
     const rebate = order && Number.isFinite(reportedRebate) && reportedRebate >= 0
@@ -375,118 +364,126 @@ class Bot {
     const position = {
       slug: w.slug, openTs: w.openTs,
       closeTs: Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS,
-      side: sideState.side,
-      tokenId: sideState.side === 'UP' ? w.window.tokenUp : w.window.tokenDown,
-      cycle: cycle.number,
+      side, tokenId: side === 'UP' ? w.window.tokenUp : w.window.tokenDown,
+      rungPrice: price, takeProfitPrice, rungFillNumber: fillNumber,
+      firstFillSide: rung.firstFillSide,
       shares, openShares: shares, price,
       entryNotional: notional, entryFee: 0, exitFees: 0, cost: notional,
       exitProceeds: 0, entryRebate: rebate, takeProfitRebate: 0, makerRebate: rebate, tpSharesSold: 0,
       status: 'open_position', firedAt: Date.now(), settled: false,
       expiryLogged: false, settlementTimedOut: false,
     };
-    cycle.position = position;
-    cycle.entryMatched = shares;
-    cycle.status = 'position_open';
+    sideState.entryFilled = true;
+    sideState.position = position;
+    sideState.status = 'position_open';
+    rung.fillCount = fillNumber;
     this.pending.push(position);
     this.cash += rebate - notional;
     this.stats.estimatedMakerRebates += rebate;
     this._push({
-      event: 'BUY_LIMIT_FILLED', slug: w.slug, side: sideState.side, shares: round(shares, 4), price,
+      event: 'BUY_LIMIT_FILLED', slug: w.slug, side, rungPrice: price,
+      fillNumber, takeProfitPrice, shares: round(shares, 4), price,
       rebate: round(rebate, 5),
-      note: 'demo maker BUY filled on ask touch; maker fee $0, estimated rebate $' + rebate.toFixed(5)
-        + ' credited. Full ' + shares + ' shares counted without using visible depth.',
+      note: 'demo maker BUY filled on ask touch for the $' + price.toFixed(2) + ' rung; this is fill '
+        + fillNumber + ' of 2 for the rung and TP is $' + takeProfitPrice.toFixed(2)
+        + '. Maker fee $0; estimated rebate $' + rebate.toFixed(5) + ' credited.',
     });
   }
 
-  async _placeTakeProfit(w, sideState, cycle, now) {
-    if (this.strategyBlocked || !cycle.position || cycle.position.openShares <= EPSILON || cycle.tpOrderId || w.closing || w.closed) return;
-    cycle.lastPollAt = now;
+  async _placeTakeProfit(w, rung, sideState, now) {
+    const position = sideState.position;
+    if (this.strategyBlocked || !position || position.openShares <= EPSILON
+      || sideState.tpOrderId || w.closing || w.closed) return;
+    sideState.tpLastPollAt = now;
     try {
       const order = await this.trader.placeGtcOrder(
-        cycle.position.tokenId, 'SELL', cfg.TAKE_PROFIT_PRICE, cycle.position.openShares,
+        position.tokenId, 'SELL', position.takeProfitPrice, position.openShares,
       );
       if (!order || !order.id) throw new Error('demo GTC take-profit returned no order ID');
-      cycle.tpOrderId = order.id;
-      cycle.tpOrderShares = cycle.position.openShares;
-      cycle.tpMatched = 0;
-      cycle.position.tpOrderId = order.id;
-      cycle.position.status = 'tp_resting';
-      cycle.status = 'tp_resting';
+      sideState.tpOrderId = order.id;
+      sideState.tpOrderShares = position.openShares;
+      sideState.tpMatched = 0;
+      position.tpOrderId = order.id;
+      position.status = 'tp_resting';
+      sideState.status = 'tp_resting';
       this._push({
-        event: 'TP_LIMIT_PLACED', slug: w.slug, side: sideState.side, shares: round(cycle.position.openShares, 4),
-        note: 'GTC limit SELL placed at $' + cfg.TAKE_PROFIT_PRICE.toFixed(2) + ' for acquired shares.',
+        event: 'TP_LIMIT_PLACED', slug: w.slug, side: position.side,
+        rungPrice: rung.entryPrice, takeProfitPrice: position.takeProfitPrice,
+        shares: round(position.openShares, 4),
+        note: 'GTC limit SELL placed at $' + position.takeProfitPrice.toFixed(2)
+          + ' for the $' + rung.entryPrice.toFixed(2) + ' rung trade.',
       });
     } catch (error) {
-      cycle.status = 'tp_retry';
-      cycle.position.status = 'open_position';
+      sideState.status = 'tp_retry';
+      position.status = 'open_position';
       this._push({
-        event: 'TP_LIMIT_RETRY', slug: w.slug, side: sideState.side,
-        note: 'could not place demo take-profit limit; retrying while the window is open: ' + error.message,
+        event: 'TP_LIMIT_RETRY', slug: w.slug, side: position.side, rungPrice: rung.entryPrice,
+        note: 'could not place demo take-profit at $' + position.takeProfitPrice.toFixed(2)
+          + '; retrying while the window is open: ' + error.message,
       });
     }
   }
 
-  async _refreshTakeProfit(w, sideState, cycle, now, force = false) {
-    if (!cycle.tpOrderId || !cycle.position) return null;
-    if (!force && now - cycle.lastPollAt < cfg.ORDER_STATUS_POLL_MS) return null;
-    cycle.lastPollAt = now;
+  async _refreshTakeProfit(w, rung, sideState, now, force = false) {
+    if (!sideState.tpOrderId || !sideState.position) return null;
+    if (!force && now - sideState.tpLastPollAt < cfg.ORDER_STATUS_POLL_MS) return null;
+    sideState.tpLastPollAt = now;
     let order;
-    try { order = await this.trader.getOrder(cycle.tpOrderId); }
+    try { order = await this.trader.getOrder(sideState.tpOrderId); }
     catch (error) {
-      this._warnOnce('tp-poll-' + cycle.tpOrderId, {
-        event: 'ERROR', slug: w.slug, side: sideState.side, note: 'take-profit order status lookup failed: ' + error.message,
+      this._warnOnce('tp-poll-' + sideState.tpOrderId, {
+        event: 'ERROR', slug: w.slug, side: sideState.side, rungPrice: rung.entryPrice,
+        note: 'take-profit order status lookup failed: ' + error.message,
       });
       return null;
     }
     if (!order) return null;
     const state = orderState(order);
-    let matched = matchedShares(order, cycle.tpOrderShares);
-    if (['MATCHED', 'FILLED'].includes(state) && matched <= EPSILON) matched = cycle.tpOrderShares;
-    const delta = Math.min(cycle.position.openShares, Math.max(0, matched - cycle.tpMatched));
+    const position = sideState.position;
+    let matched = matchedShares(order, sideState.tpOrderShares);
+    if (['MATCHED', 'FILLED'].includes(state) && matched <= EPSILON) matched = sideState.tpOrderShares;
+    const delta = Math.min(position.openShares, Math.max(0, matched - sideState.tpMatched));
     if (delta > EPSILON) {
-      cycle.tpMatched += delta;
-      cycle.position.openShares = Math.max(0, cycle.position.openShares - delta);
-      cycle.position.tpSharesSold += delta;
-      const proceeds = delta * cfg.TAKE_PROFIT_PRICE;
-      const rebate = estimateMakerRebate(delta, cfg.TAKE_PROFIT_PRICE);
-      cycle.position.exitProceeds += proceeds;
-      cycle.position.makerRebate += rebate;
-      cycle.position.takeProfitRebate += rebate;
+      sideState.tpMatched += delta;
+      position.openShares = Math.max(0, position.openShares - delta);
+      position.tpSharesSold += delta;
+      const proceeds = delta * position.takeProfitPrice;
+      const rebate = estimateMakerRebate(delta, position.takeProfitPrice);
+      position.exitProceeds += proceeds;
+      position.makerRebate += rebate;
+      position.takeProfitRebate += rebate;
       this.cash += proceeds + rebate;
       this.stats.takeProfitFills += 1;
       this.stats.estimatedMakerRebates += rebate;
       this._push({
         event: 'TP_LIMIT_FILLED', slug: w.slug, side: sideState.side,
-        shares: round(delta, 4), price: cfg.TAKE_PROFIT_PRICE,
+        rungPrice: rung.entryPrice, shares: round(delta, 4), price: position.takeProfitPrice,
         rebate: round(rebate, 5),
-        note: 'demo maker SELL filled on bid touch; maker fee $0, estimated rebate $' + rebate.toFixed(5)
-          + ' credited. All ' + round(delta, 4) + ' remaining shares counted as filled.',
+        note: 'demo maker SELL filled on bid touch at $' + position.takeProfitPrice.toFixed(2)
+          + '; actual proceeds use that price. Maker fee $0, estimated rebate $'
+          + rebate.toFixed(5) + ' credited.',
       });
     }
     if (['CANCELED', 'CANCELLED', 'UNMATCHED', 'EXPIRED', 'REJECTED'].includes(state)) {
-      cycle.tpOrderId = null;
-      cycle.tpOrderShares = 0;
-      cycle.tpMatched = 0;
-      if (cycle.position.openShares > EPSILON) {
-        cycle.status = 'position_open';
-        cycle.position.status = 'open_position';
+      sideState.tpOrderId = null;
+      sideState.tpOrderShares = 0;
+      sideState.tpMatched = 0;
+      if (position.openShares > EPSILON) {
+        sideState.status = 'position_open';
+        position.status = 'open_position';
       }
     }
-    if (cycle.position.openShares <= EPSILON) {
-      const completed = cycle.position;
+    if (position.openShares <= EPSILON) {
+      const completed = position;
       this._finalizePosition(completed, 'WIN', 'TAKE_PROFIT');
-      cycle.position = null;
-      cycle.tpOrderId = null;
-      cycle.status = 'cycle_complete';
-      sideState.active = null;
+      sideState.position = null;
+      sideState.tpOrderId = null;
+      sideState.status = 'trade_complete';
       this._push({
-        event: 'SIDE_REARM', slug: w.slug, side: sideState.side,
-        note: 'this side fully TP-closed; re-placing its independent 500-share $0.30 buy limit for the rest of the window.',
+        event: 'RUNG_TRADE_CLOSED', slug: w.slug, side: sideState.side,
+        rungPrice: rung.entryPrice,
+        note: 'the $' + rung.entryPrice.toFixed(2) + ' rung trade closed; it will not re-arm this window.',
       });
-      const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
-      if (!w.closing && !w.closed && Date.now() < closeTs * 1000) {
-        await this._ensureCycle(w, sideState.side, Date.now());
-      }
     }
     return { order, state };
   }
@@ -498,39 +495,43 @@ class Bot {
     }
     w.closing = true;
     w.status = 'closing_orders';
-    for (const side of SIDES) {
-      const sideState = w.sides[side];
-      const cycle = sideState.active;
-      if (!cycle) continue;
-      await this._refreshEntryOrder(w, sideState, cycle, Date.now(), true);
-      if (cycle.entryOrderId) {
-        await this._cancelAndRefresh(cycle.entryOrderId, () => this._refreshEntryOrder(w, sideState, cycle, Date.now(), true), w, side);
-        if (!cycle.position) {
-          const state = await this._readOrderState(cycle.entryOrderId);
-          if (state && ['CANCELED', 'CANCELLED', 'UNMATCHED', 'EXPIRED'].includes(orderState(state))) {
-            cycle.entryOrderId = null;
+    for (const rung of w.rungs) {
+      await this._refreshRungEntries(w, rung, Date.now(), true);
+      for (const side of SIDES) {
+        const sideState = rung.sides[side];
+        if (sideState.entryOrderId && !sideState.entryFilled) {
+          const entryOrderId = sideState.entryOrderId;
+          await this._cancelAndRefresh(entryOrderId,
+            () => this._refreshRungEntries(w, rung, Date.now(), true), w, side);
+          if (sideState.entryOrderId === entryOrderId) sideState.entryOrderId = null;
+        }
+      }
+    }
+    for (const rung of w.rungs) {
+      for (const side of SIDES) {
+        const sideState = rung.sides[side];
+        if (sideState.tpOrderId) {
+          await this._refreshTakeProfit(w, rung, sideState, Date.now(), true);
+          if (sideState.tpOrderId) {
+            const tpOrderId = sideState.tpOrderId;
+            await this._cancelAndRefresh(tpOrderId,
+              () => this._refreshTakeProfit(w, rung, sideState, Date.now(), true), w, side);
           }
         }
-      }
-      if (cycle.tpOrderId) {
-        await this._refreshTakeProfit(w, sideState, cycle, Date.now(), true);
-        if (cycle.tpOrderId) {
-          await this._cancelAndRefresh(cycle.tpOrderId,
-            () => this._refreshTakeProfit(w, sideState, cycle, Date.now(), true), w, side);
+        if (sideState.position && sideState.position.openShares > EPSILON) {
+          sideState.position.status = 'awaiting_resolution';
+          if (!sideState.position.expiryLogged) {
+            sideState.position.expiryLogged = true;
+            this._push({
+              event: 'EXPIRY_HOLD', slug: w.slug, side,
+              rungPrice: rung.entryPrice, shares: round(sideState.position.openShares, 4),
+              note: 'window closed; canceled resting orders and holding unsold shares for official Polymarket resolution.',
+            });
+          }
+          sideState.status = 'awaiting_resolution';
+        } else if (!sideState.position && !sideState.entryOrderId) {
+          sideState.status = 'window_closed';
         }
-      }
-      if (cycle.position && cycle.position.openShares > EPSILON) {
-        cycle.position.status = 'awaiting_resolution';
-        if (!cycle.position.expiryLogged) {
-          cycle.position.expiryLogged = true;
-          this._push({
-            event: 'EXPIRY_HOLD', slug: w.slug, side, shares: round(cycle.position.openShares, 4),
-            note: 'window closed; canceled resting entry/TP orders and holding remaining shares for the official Polymarket resolution.',
-          });
-        }
-        cycle.status = 'awaiting_resolution';
-      } else if (!cycle.position) {
-        cycle.status = 'window_closed';
       }
     }
     w.closed = true;
@@ -560,9 +561,11 @@ class Bot {
 
   _updateWindowStatus(w) {
     if (!w || w.closed || w.closing) return;
-    const states = SIDES.map((side) => w.sides[side].active && w.sides[side].active.status);
     if (this.pending.some((position) => position.openTs === w.openTs && !position.settled)) w.status = 'positions_active';
-    else if (states.some((state) => state && state.startsWith('buy'))) w.status = 'buy_limits_resting';
+    else if (w.rungs.some((rung) => SIDES.some((side) => {
+      const state = rung.sides[side];
+      return state.entryOrderId && !state.entryFilled;
+    }))) w.status = 'buy_limits_resting';
     else w.status = 'orders_active';
   }
 
@@ -642,6 +645,9 @@ class Bot {
     else this.stats.losses += 1;
     const trade = {
       slug: position.slug, openTs: position.openTs, side: position.side,
+      rungPrice: round(position.rungPrice, 4),
+      takeProfitPrice: round(position.takeProfitPrice, 4),
+      rungFillNumber: position.rungFillNumber,
       winner: winner || (reason === 'TAKE_PROFIT' ? position.side : null),
       outcome, reason, shares: position.shares, tpShares: position.tpSharesSold || 0,
       entryPrice: round(position.price, 4), price: round(position.price, 4),
@@ -650,7 +656,7 @@ class Bot {
       entryRebate: round(position.entryRebate || 0, 5),
       takeProfitRebate: round(position.takeProfitRebate || 0, 5),
       proceeds: round(position.exitProceeds, 4), pnl: round(pnl, 2),
-      outcomeValuePerShare: reason === 'TAKE_PROFIT' ? cfg.TAKE_PROFIT_PRICE : (reason === 'RESOLUTION' && outcome === 'WIN' ? 1 : null),
+      outcomeValuePerShare: reason === 'TAKE_PROFIT' ? position.takeProfitPrice : (reason === 'RESOLUTION' && outcome === 'WIN' ? 1 : null),
       ts: Date.now(),
     };
     this.trades.push(trade);
@@ -704,16 +710,24 @@ class Bot {
     });
     const elapsed = w ? Math.max(0, (now - w.openTs * 1000) / 1000) : 0;
     const sideCycles = w ? Object.fromEntries(SIDES.map((side) => {
-      const sideState = w.sides[side];
-      const cycle = sideState.active;
-      return [side, {
-        status: cycle ? cycle.status : (w.closed ? 'window_closed' : 'rearming'),
-        cycle: sideState.cycleNumber,
-        entryOrderId: cycle && cycle.entryOrderId,
-        tpOrderId: cycle && cycle.tpOrderId,
-        openShares: cycle && cycle.position ? cycle.position.openShares : 0,
-        shares: cfg.BASE_SHARES,
-      }];
+      const rungStates = w.rungs.map((rung) => {
+        const state = rung.sides[side];
+        return {
+          entryPrice: rung.entryPrice, takeProfitPrice: rung.takeProfitPrice,
+          firstFillSide: rung.firstFillSide, fillCount: rung.fillCount,
+          status: state.status, entryOrderId: state.entryOrderId,
+          tpOrderId: state.tpOrderId, entryFilled: state.entryFilled,
+          openShares: state.position ? state.position.openShares : 0,
+          shares: cfg.BASE_SHARES,
+        };
+      });
+      const openShares = rungStates.reduce((sum, rung) => sum + (Number(rung.openShares) || 0), 0);
+      const openTrades = rungStates.filter((rung) => Number(rung.openShares) > EPSILON).length;
+      const entriesResting = rungStates.filter((rung) => rung.entryOrderId && !rung.entryFilled).length;
+      const filledCount = rungStates.filter((rung) => rung.entryFilled).length;
+      const status = w.closed ? 'window_closed' : openShares > 0 ? 'positions_active'
+        : entriesResting > 0 ? 'buy_limits_resting' : filledCount > 0 ? 'trades_complete' : 'starting';
+      return [side, { status, openShares, openTrades, entriesResting, filledCount, shares: cfg.BASE_SHARES, rungs: rungStates }];
     })) : null;
     return {
       now, mode: this.live ? 'LIVE' : 'DEMO', uptimeSec: Math.floor((now - this.startedAt) / 1000),
@@ -732,8 +746,8 @@ class Bot {
       priceSeries: this.priceSeries,
       strategy: {
         baseShares: cfg.BASE_SHARES,
-        entryPrice: cfg.ENTRY_LIMIT_PRICE,
-        takeProfitPrice: cfg.TAKE_PROFIT_PRICE,
+        entryRungs: cfg.ENTRY_RUNGS,
+        secondFillTakeProfitPrice: cfg.SECOND_FILL_TAKE_PROFIT_PRICE,
         feeRateEstimate: cfg.MAKER_FEE_RATE,
         rebateIsEstimate: true,
       },
@@ -741,8 +755,8 @@ class Bot {
       trades: this.trades.slice(-60).reverse(), equity: this.equity, stats: this.stats,
       cfg: {
         demoCapital: cfg.DEMO_CAPITAL,
-        entryPrice: cfg.ENTRY_LIMIT_PRICE,
-        takeProfitPrice: cfg.TAKE_PROFIT_PRICE,
+        entryRungs: cfg.ENTRY_RUNGS,
+        secondFillTakeProfitPrice: cfg.SECOND_FILL_TAKE_PROFIT_PRICE,
         baseShares: cfg.BASE_SHARES,
         windowSec: WINDOW_SECONDS,
         makerFeeRate: cfg.MAKER_FEE_RATE,
@@ -758,10 +772,27 @@ function makeWindowState(slug, openTs) {
   return {
     slug, openTs, status: 'starting', window: null, ordersStarted: false,
     closing: false, closed: false,
-    sides: {
-      UP: { side: 'UP', cycleNumber: 0, active: null, inFlight: false },
-      DOWN: { side: 'DOWN', cycleNumber: 0, active: null, inFlight: false },
-    },
+    rungs: cfg.ENTRY_RUNGS.map((rung) => ({
+      id: 'rung-' + rung.entryPrice.toFixed(2),
+      entryPrice: rung.entryPrice,
+      takeProfitPrice: rung.takeProfitPrice,
+      firstFillSide: null,
+      fillCount: 0,
+      inFlight: false,
+      sides: {
+        UP: makeRungSide('UP'),
+        DOWN: makeRungSide('DOWN'),
+      },
+    })),
+  };
+}
+
+function makeRungSide(side) {
+  return {
+    side, status: 'buy_pending', entryOrderId: null, entryFilled: false,
+    nextEntryAttemptAt: 0, entryLastPollAt: 0,
+    position: null, tpOrderId: null, tpOrderShares: 0,
+    tpMatched: 0, tpLastPollAt: 0,
   };
 }
 

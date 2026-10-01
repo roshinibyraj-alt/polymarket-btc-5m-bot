@@ -2,7 +2,7 @@
   "name": "polymarket-btc-5m-rebound-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only BTC 5-minute UP/DOWN limit-cycle strategy with fixed 500-share entries and $0.70 take-profit.",
+  "description": "Demo-only BTC 5-minute UP/DOWN four-rung limit ladder with per-rung paired fills.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

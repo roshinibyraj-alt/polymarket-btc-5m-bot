@@ -10,7 +10,7 @@
 </style>
 </head>
 <body><main>
-<header class="top"><div class="brand"><div class="logo">↗</div><div><div class="title">BTC 5-minute strategy</div><div class="sub">Independent fixed-size UP/DOWN limit cycles · demo only</div></div></div><div class="headright"><span id="mode" class="pill demo">DEMO MODE</span><span class="fresh" id="fresh">Connecting…</span></div></header>
+<header class="top"><div class="brand"><div class="logo">↗</div><div><div class="title">BTC 5-minute strategy</div><div class="sub">Four paired UP/DOWN limit rungs · demo only</div></div></div><div class="headright"><span id="mode" class="pill demo">DEMO MODE</span><span class="fresh" id="fresh">Connecting…</span></div></header>
 <div id="error" class="error"></div>
 <section class="cards">
   <div class="card"><div class="label">Starting capital</div><div class="value" id="capital">—</div><div class="small" id="address">Paper balance · no wallet</div></div>
@@ -26,14 +26,14 @@
       <tr><td><span class="side"><i class="dot down"></i>DOWN</span></td><td class="bid" id="downBid">—</td><td class="ask" id="downAsk">—</td><td class="bid" id="downMid">—</td><td id="downState">—</td></tr>
     </tbody></table>
   </article>
-  <article class="panel"><div class="panelhead"><div><div class="eyebrow">Execution plan</div><h2 id="planTitle">Independent limit cycles</h2></div><span id="signalPill" class="status">Both sides independent</span></div>
+  <article class="panel"><div class="panelhead"><div><div class="eyebrow">Execution plan</div><h2 id="planTitle">Four-rung paired limit ladder</h2></div><span id="signalPill" class="status">One UP + one DOWN per rung</span></div>
     <div class="steps">
-      <div class="step" id="step1"><div class="stepnum">1</div><div><b>Place both $0.30 buy limits</b><p>At window start, rest one 500-share GTC buy for UP and one for DOWN.</p></div></div>
-      <div class="step" id="step2"><div class="stepnum">2</div><div><b>Take profit at $0.70</b><p id="signalText">A best ask at or below $0.30 fills the buy; a best bid at or above $0.70 fills the whole TP in demo.</p></div></div>
-      <div class="step" id="step3"><div class="stepnum">3</div><div><b>Re-arm that side only</b><p>After a side fully TP-closes, it places its next 500-share buy if the same window is still open.</p></div></div>
+      <div class="step" id="step1"><div class="stepnum">1</div><div><b>Rest four buys per outcome</b><p>At window start, place 500-share UP and DOWN limits at each rung price.</p></div></div>
+      <div class="step" id="step2"><div class="stepnum">2</div><div><b>First fill gets rung TP; opposite fill gets $0.99</b><p id="signalText">The first side filled on a rung uses that rung's TP; the second side uses $0.99.</p></div></div>
+      <div class="step" id="step3"><div class="stepnum">3</div><div><b>One UP and one DOWN per rung</b><p>A rung can fill once per outcome per five-minute window; completed rung trades do not re-arm.</p></div></div>
     </div>
-    <div class="sizing"><div class="sizeLine"><div><div class="label">Fixed order size per side</div><div class="sizeBig"><span id="baseShares">500</span> <span>shares</span></div></div><div class="small" id="additionCount">No stop loss · no size scaling</div></div>
-      <div class="ruleTags"><span class="tag entry" id="entryTag">BUY LIMIT $0.30</span><span class="tag tp" id="tpTag">TP LIMIT $0.70</span></div>
+    <div class="sizing"><div class="sizeLine"><div><div class="label">Fixed order size per trade</div><div class="sizeBig"><span id="baseShares">500</span> <span>shares</span></div></div><div class="small" id="additionCount">No stop loss · no size scaling</div></div>
+      <div class="ruleTags"><span class="tag entry" id="entryTag">BUY RUNGS $0.45 / $0.40 / $0.35 / $0.30</span><span class="tag tp" id="tpTag">RUNG TP · SECOND FILL $0.99</span></div>
     </div>
   </article>
 </section>
@@ -52,7 +52,7 @@ const clock=function(seconds){const n=Math.max(0,Math.floor(Number(seconds)||0))
 const time=function(ts){return new Date(Number(ts)||Date.now()).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})};
 function statusStyle(el,txt,kind){el.textContent=txt;el.className='status'+(kind?' '+kind:'')}
 function rowEmpty(message,cols){return '<div class="empty">'+esc(message)+'</div>'}
-function setSideQuote(side,quote,cycle,entryPrice,tpPrice){const bid=quote&&quote.bid,ask=quote&&quote.ask;$(side.toLowerCase()+'Bid').textContent=cents(bid);$(side.toLowerCase()+'Ask').textContent=cents(ask);$(side.toLowerCase()+'Mid').textContent=cents(quote&&quote.mid);const state=$(side.toLowerCase()+'State');if(cycle&&Number(cycle.openShares)>0)statusStyle(state,bid!=null&&Number(bid)>=tpPrice?'TP TOUCH':'TP RESTING',bid!=null&&Number(bid)>=tpPrice?'good':'warn');else if(ask!=null&&Number(ask)<=entryPrice)statusStyle(state,'BUY TOUCH','good');else if(cycle&&String(cycle.status||'').startsWith('buy'))statusStyle(state,'BUY LIMIT','warn');else statusStyle(state,cycle&&cycle.status==='window_closed'?'CLOSED':'RE-ARMING','')}
+function setSideQuote(side,quote,summary,entryRungs){const bid=quote&&quote.bid,ask=quote&&quote.ask;$(side.toLowerCase()+'Bid').textContent=cents(bid);$(side.toLowerCase()+'Ask').textContent=cents(ask);$(side.toLowerCase()+'Mid').textContent=cents(quote&&quote.mid);const state=$(side.toLowerCase()+'State');if(summary&&Number(summary.openShares)>0)statusStyle(state,qty(summary.openTrades)+' OPEN RUNG(S)','warn');else if(ask!=null&&(entryRungs||[]).some(function(r){return Number(ask)<=Number(r.entryPrice)}))statusStyle(state,'BUY TOUCH','good');else if(summary&&Number(summary.entriesResting)>0)statusStyle(state,summary.entriesResting+' RUNG LIMITS','warn');else statusStyle(state,summary&&summary.status==='window_closed'?'CLOSED':summary&&summary.status==='trades_complete'?'RUNG TRADES DONE':'WAITING','')}
 function render(s){
   const cfg=s.cfg||{},st=s.strategy||{},w=s.window||null,px=s.prices||{};
   $('mode').textContent=s.mode==='LIVE'?'LIVE TRADING':'DEMO MODE';$('mode').className='pill '+(s.mode==='LIVE'?'live':'demo');
@@ -66,24 +66,25 @@ function render(s){
   const elapsed=w?Number(w.elapsedSeconds)||0:0;const remain=Math.max(0,300-elapsed);$('marketTitle').textContent=w?(w.slug||'BTC 5-minute market'):'Waiting for active market';$('windowStatus').textContent=w?String(w.status||'starting').replace(/_/g,' '):'Starting';
   $('windowStatus').className='status '+(w&&['positions_active','buy_limits_resting','orders_active'].includes(w.status)?'good':w&&w.status==='awaiting_resolution'?'warn':s.mode==='LIVE'?'bad':'');
   $('timeLeft').textContent=w?clock(remain)+' remaining':'— remaining';$('elapsedLabel').textContent=clock(elapsed)+' elapsed';$('progress').style.width=Math.min(100,Math.max(0,elapsed/300*100))+'%';
-  $('gateLabel').textContent=w&&w.closed?'ORDERS CLOSED · OFFICIAL RESOLUTION ONLY':'BOTH-SIDE LIMIT CYCLES ACTIVE';
-  const cycles=w&&w.sideCycles||{};setSideQuote('UP',px.up,cycles.UP,cfg.entryPrice,cfg.takeProfitPrice);setSideQuote('DOWN',px.down,cycles.DOWN,cfg.entryPrice,cfg.takeProfitPrice);
+   $('gateLabel').textContent=w&&w.closed?'ORDERS CLOSED · OFFICIAL RESOLUTION ONLY':'FOUR-RUNG LIMIT LADDER ACTIVE';
+   const cycles=w&&w.sideCycles||{},rungs=cfg.entryRungs||[];setSideQuote('UP',px.up,cycles.UP,rungs);setSideQuote('DOWN',px.down,cycles.DOWN,rungs);
   const upStatus=cycles.UP&&cycles.UP.status||'waiting',downStatus=cycles.DOWN&&cycles.DOWN.status||'waiting';
-  statusStyle($('signalPill'),'UP '+upStatus.replace(/_/g,' ')+' · DOWN '+downStatus.replace(/_/g,' '),'');
-  $('signalText').textContent='Best ask ≤ '+usd(cfg.entryPrice)+' fills a full 500-share buy; best bid ≥ '+usd(cfg.takeProfitPrice)+' fills all remaining TP shares.';
+   statusStyle($('signalPill'),'UP '+(cycles.UP&&cycles.UP.filledCount||0)+'/4 · DOWN '+(cycles.DOWN&&cycles.DOWN.filledCount||0)+'/4 fills','');
+   $('signalText').textContent=rungs.map(function(r){return usd(r.entryPrice)+' buy → '+usd(r.takeProfitPrice)+' first TP'}).join(' · ')+'; second side on each rung uses $0.99.';
   const step1=$('step1'),step2=$('step2'),step3=$('step3');[step1,step2,step3].forEach(function(x){x.className='step'});
   if(w&&w.sideCycles)step1.className='step done';else step1.className='step active';
   if((s.pending||[]).length)step2.className='step active';else if(w&&w.sideCycles)step2.className='step done';
   if(w&&w.closed)step3.className='step done';else if(w&&w.sideCycles)step3.className='step active';
-  $('baseShares').textContent=qty(st.baseShares);$('additionCount').textContent='No stop loss · no size scaling';
-  $('entryTag').textContent='BUY LIMIT '+usd(cfg.entryPrice);$('tpTag').textContent='LIMIT TP '+usd(cfg.takeProfitPrice);
+   $('baseShares').textContent=qty(st.baseShares);$('additionCount').textContent='No stop loss · max 1 per side/rung';
+   $('entryTag').textContent='BUY RUNGS '+rungs.map(function(r){return usd(r.entryPrice)}).join(' / ');
+   $('tpTag').textContent='FIRST TP '+rungs.map(function(r){return usd(r.takeProfitPrice)}).join(' / ')+' · SECOND $0.99';
   $('openCount').textContent=(s.pending||[]).length+' open position'+((s.pending||[]).length===1?'':'s');
    const pending=s.pending||[];
-   if(!pending.length){$('openPositions').innerHTML=rowEmpty('No open positions',9)}else{
-     const rows=pending.map(function(p){return '<tr><td>'+esc(time(Number(p.openTs)*1000))+'</td><td>'+esc(p.side)+'</td><td>'+qty(p.shares)+'</td><td>'+qty(p.openShares)+'</td><td>'+cents(p.price)+'</td><td>'+cents(p.mark)+'</td><td>'+esc(p.status||'open')+'</td><td class="positive">'+usd(p.makerRebate)+'</td><td class="'+(validNum(p.unrealized)?(Number(p.unrealized)>=0?'positive':'negative'):'neutral')+'">'+usd(p.unrealized)+'</td></tr>'}).join('');
-     $('openPositions').innerHTML='<table class="data"><thead><tr><th>Window</th><th>Side</th><th>Entry shares</th><th>Open shares</th><th>Entry avg</th><th>Mark</th><th>TP order</th><th>Est. maker rebate</th><th>Unrealized</th></tr></thead><tbody>'+rows+'</tbody></table>';
+   if(!pending.length){$('openPositions').innerHTML=rowEmpty('No open positions',11)}else{
+     const rows=pending.map(function(p){return '<tr><td>'+esc(time(Number(p.openTs)*1000))+'</td><td>'+esc(p.side)+'</td><td>'+cents(p.rungPrice)+'</td><td>'+esc(p.rungFillNumber===1?'First':'Second')+'</td><td>'+qty(p.shares)+'</td><td>'+qty(p.openShares)+'</td><td>'+cents(p.mark)+'</td><td>'+cents(p.takeProfitPrice)+'</td><td>'+esc(p.status||'open')+'</td><td class="positive">'+usd(p.makerRebate)+'</td><td class="'+(validNum(p.unrealized)?(Number(p.unrealized)>=0?'positive':'negative'):'neutral')+'">'+usd(p.unrealized)+'</td></tr>'}).join('');
+     $('openPositions').innerHTML='<table class="data"><thead><tr><th>Window</th><th>Side</th><th>Rung entry</th><th>Fill</th><th>Entry shares</th><th>Open shares</th><th>Mark</th><th>TP target</th><th>Status</th><th>Est. maker rebate</th><th>Unrealized</th></tr></thead><tbody>'+rows+'</tbody></table>';
    }
-   const trades=s.trades||[];$('tradeCount').textContent=trades.length+' shown';if(!trades.length){$('trades').innerHTML=rowEmpty('No completed positions yet',8)}else{$('trades').innerHTML='<table class="data"><thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Entry avg</th><th>Exit proceeds</th><th>Reason</th><th>Result</th><th>Net P&amp;L</th></tr></thead><tbody>'+trades.map(function(t){return '<tr><td>'+esc(time(Number(t.openTs)*1000))+'</td><td>'+esc(t.side)+'</td><td>'+qty(t.shares)+'</td><td>'+cents(t.entryPrice)+'</td><td>'+usd(t.proceeds)+(Number(t.rebate)>0?' · est. maker rebate '+usd(t.rebate):'')+'</td><td>'+esc(String(t.reason||'').replace(/_/g,' '))+'</td><td>'+esc(t.outcome)+'</td><td class="'+(Number(t.pnl)>=0?'positive':'negative')+'">'+usd(t.pnl)+'</td></tr>'}).join('')+'</tbody></table>'}
+   const trades=s.trades||[];$('tradeCount').textContent=trades.length+' shown';if(!trades.length){$('trades').innerHTML=rowEmpty('No completed positions yet',10)}else{$('trades').innerHTML='<table class="data"><thead><tr><th>Window</th><th>Side</th><th>Rung entry</th><th>Fill</th><th>Shares</th><th>TP target</th><th>Exit proceeds</th><th>Reason</th><th>Result</th><th>Net P&amp;L</th></tr></thead><tbody>'+trades.map(function(t){return '<tr><td>'+esc(time(Number(t.openTs)*1000))+'</td><td>'+esc(t.side)+'</td><td>'+cents(t.rungPrice)+'</td><td>'+esc(t.rungFillNumber===1?'First':'Second')+'</td><td>'+qty(t.shares)+'</td><td>'+cents(t.takeProfitPrice)+'</td><td>'+usd(t.proceeds)+(Number(t.rebate)>0?' · est. maker rebate '+usd(t.rebate):'')+'</td><td>'+esc(String(t.reason||'').replace(/_/g,' '))+'</td><td>'+esc(t.outcome)+'</td><td class="'+(Number(t.pnl)>=0?'positive':'negative')+'">'+usd(t.pnl)+'</td></tr>'}).join('')+'</tbody></table>'}
   $('uptime').textContent='Uptime '+clock(s.uptimeSec||0);const logs=s.log||[];if(!logs.length){$('log').innerHTML=rowEmpty('Waiting for bot events',1)}else{$('log').innerHTML=logs.slice(0,35).map(function(item){return '<div class="logrow"><span class="logtime">'+esc(time(item.ts))+'</span><span class="logevent">'+esc(item.event||'EVENT')+'</span><span>'+esc(item.note||'')+'</span></div>'}).join('')}
 }
 async function refresh(){try{const response=await fetch('/api/state',{cache:'no-store'});if(!response.ok)throw new Error('state '+response.status);render(await response.json())}catch(error){$('fresh').textContent='Dashboard reconnecting';$('error').textContent=error.message;$('error').className='error show'}}

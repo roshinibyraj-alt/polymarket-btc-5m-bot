@@ -12,6 +12,7 @@ class DemoTrader {
     this.depositWallet = null;
     this._n = 0;
     this.orders = new Map();
+    this.quotes = new Map();
   }
 
   async prepareMarket() { return true; }
@@ -58,7 +59,8 @@ class DemoTrader {
   }
 
   async placeGtcOrder(tokenId, side, price, size) {
-    const book = await this.getOrderBook(tokenId);
+    const cachedQuote = this.quotes.get(tokenId);
+    const book = cachedQuote ? null : await this.getOrderBook(tokenId);
     this._n += 1;
     const id = 'demo-maker-' + this._n;
     const order = {
@@ -67,10 +69,11 @@ class DemoTrader {
       makerOnly: true, makerFee: 0, makerRebateEstimate: 0,
     };
     this.orders.set(id, order);
-    this._matchAtTouch(order, book);
+    if (cachedQuote) this._matchAtPrices(order, cachedQuote.bid, cachedQuote.ask);
+    else this._matchAtTouch(order, book);
     return {
       id, status: order.status, makerOnly: true, makerFee: 0,
-      makerRebateEstimate: order.makerRebateEstimate,
+      makerRebateEstimate: order.makerRebateEstimate, matchedAt: order.matchedAt || null,
     };
   }
 
@@ -79,6 +82,7 @@ class DemoTrader {
     const ask = Number(quote && quote.ask);
     const bestBid = Number.isFinite(bid) && bid > 0 ? bid : null;
     const bestAsk = Number.isFinite(ask) && ask > 0 ? ask : null;
+    this.quotes.set(tokenId, { bid: bestBid, ask: bestAsk, updatedAt: Date.now() });
     for (const order of this.orders.values()) {
       if (order.tokenId === tokenId && order.status === 'LIVE') this._matchAtPrices(order, bestBid, bestAsk);
     }
@@ -87,7 +91,11 @@ class DemoTrader {
   async getOrder(id) {
     const order = this.orders.get(id);
     if (!order) return null;
-    if (order.status === 'LIVE') this._matchAtTouch(order, await this.getOrderBook(order.tokenId));
+    if (order.status === 'LIVE') {
+      const cachedQuote = this.quotes.get(order.tokenId);
+      if (cachedQuote) this._matchAtPrices(order, cachedQuote.bid, cachedQuote.ask);
+      else this._matchAtTouch(order, await this.getOrderBook(order.tokenId));
+    }
     return { ...order, price: String(order.price), original_size: String(order.original_size), size_matched: String(order.size_matched) };
   }
 
@@ -110,6 +118,7 @@ class DemoTrader {
     // Visible order-book depth is not used to size the simulated fill.
     order.size_matched = order.original_size;
     order.status = 'MATCHED';
+    order.matchedAt = Date.now();
     order.makerRebateEstimate = strategy.estimateMakerRebate(order.size_matched, order.price);
   }
 

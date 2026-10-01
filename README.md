@@ -1,6 +1,8 @@
 # Polymarket BTC 5-minute strategy
 
-At the start of each BTC 5-minute UP/DOWN market, the demo bot independently places one GTC limit BUY on each outcome: 500 shares at $0.30 per side. A demo BUY counts as filled in full when the best ask is at or below $0.30; visible order-book depth is intentionally ignored. After a BUY fills, the bot rests a GTC limit SELL for the acquired shares at $0.70. A best bid at or above $0.70 counts the entire remaining TP order as filled. Once a side's position is fully TP-closed, that side places a fresh 500-share $0.30 BUY if the same window is still open. The two sides cycle independently.
+At the start of each BTC 5-minute UP/DOWN market, the demo bot places four 500-share GTC limit BUYs on each outcome, at $0.45, $0.40, $0.35, and $0.30. Each rung can fill once on UP and once on DOWN, for up to eight entries per window. The first side to fill on a rung gets that rung's take-profit ($0.55, $0.60, $0.65, or $0.70, respectively); if the opposite side fills on that same rung, its take-profit is $0.99. Fill order is independent for each rung. Completed rung/side slots do not re-arm.
+
+A demo BUY counts as filled in full when the best ask is at or below its limit, and a demo TP counts as filled in full when the best bid is at or above its limit. Visible order-book depth and queue position are intentionally ignored. A $0.99 TP is accounted as $0.99 per share in demo cash and P&L.
 
 There is no stop loss and no adaptive sizing. At the 5-minute close, the bot cancels resting entry and TP orders. Shares that were not TP-sold remain open until the existing official-resolution check returns a decisive market result; live prices are never used to guess the resolution.
 
