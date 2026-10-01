@@ -30,10 +30,10 @@
     <div class="steps">
        <div class="step" id="step1"><div class="stepnum">1</div><div><b>Poll the configured CCXT BTC spot ticker</b><p id="ccxtSummary">Connecting to the configured public spot ticker…</p></div></div>
         <div class="step" id="step2"><div class="stepnum">2</div><div><b>Rolling one-second BTC move threshold</b><p id="signalText">The adaptive threshold is calculated from recent BTC moves.</p></div></div>
-       <div class="step" id="step3"><div class="stepnum">3</div><div><b>Reverse exposure on the opposite signal</b><p>Sell the held side first, then buy the other side; a residual position is not doubled up.</p></div></div>
+        <div class="step" id="step3"><div class="stepnum">3</div><div><b>Reverse exposure on the opposite signal</b><p>Sell only when the average entry fill is at or below <b id="sellEntryLimit">$0.40</b>; above that, hold the position and do not open the opposite side.</p></div></div>
     </div>
      <div class="sizing"><div class="sizeLine"><div><div class="label">Fixed order size per entry</div><div class="sizeBig"><span id="baseShares">500</span> <span>shares</span></div></div><div class="small" id="additionCount">One open side at a time</div></div>
-        <div class="ruleTags"><span class="tag entry" id="entryTag">Adaptive threshold · rolling 20m</span><span class="tag tp" id="tpTag">FLIP ON OPPOSITE SIGNAL</span></div>
+        <div class="ruleTags"><span class="tag entry" id="entryTag">Adaptive threshold · rolling 20m</span><span class="tag tp" id="tpTag">FLIP ON OPPOSITE SIGNAL</span><span class="tag stop" id="sellGuardTag">NO SELL ABOVE $0.40 ENTRY</span></div>
        <div class="small" style="margin-top:12px"><span id="ccxtExchange">CCXT · BTC/USD</span> · Spot <b id="ccxtPrice">—</b> · 1s Δ <b id="ccxtChange">—</b> · <span id="ccxtStatus" class="status warn">CONNECTING</span></div>
     </div>
   </article>
@@ -81,6 +81,9 @@ function render(s){
     ?'ADAPTIVE ±'+usd(st.thresholdUsd)+' · P'+st.thresholdPercentile+' / 20m'
     :'THRESHOLD WARM-UP '+(st.thresholdSampleCount||0)+'/'+(st.thresholdMinSamples||120);
   $('gateLabel').textContent=w&&w.closed?'WINDOW CLOSED · OFFICIAL RESOLUTION ONLY':thresholdLabel+' · '+(cfg.ccxtPollMs||500)+' ms polling';
+  $('sellEntryLimit').textContent=usd(st.maxSellEntryPrice);
+  $('sellGuardTag').textContent='NO SELL IF ENTRY > '+usd(st.maxSellEntryPrice);
+  $('tpTag').textContent='FLIP IF ENTRY ≤ '+usd(st.maxSellEntryPrice);
   setSideQuote('UP',px.up,w&&w.positionSide,w&&w.closed);setSideQuote('DOWN',px.down,w&&w.positionSide,w&&w.closed);
   const signal=w&&w.lastSignal;
   statusStyle($('signalPill'),w&&w.positionSide?'Holding '+w.positionSide:signal?signal.side+' signal · '+signedMove(signal.changeUsd):'Waiting for a qualifying move',w&&w.positionSide?'good':signal?'warn':'');

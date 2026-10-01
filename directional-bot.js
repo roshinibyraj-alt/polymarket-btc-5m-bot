@@ -475,6 +475,20 @@ class Bot {
   }
 
   async _sellPosition(w, position, reason) {
+    const entryPrice = Number(position.entryPrice ?? position.price);
+    if (Number.isFinite(entryPrice) && entryPrice > cfg.MAX_SELL_ENTRY_PRICE_USD) {
+      w.status = 'position_open';
+      this._push({
+        event: 'SIGNAL_SELL_BLOCKED_HIGH_ENTRY',
+        slug: w.slug,
+        side: position.side,
+        entryPrice: round(entryPrice, 4),
+        note: 'Sell blocked: the position entry price $' + entryPrice.toFixed(4)
+          + ' is above the $' + cfg.MAX_SELL_ENTRY_PRICE_USD.toFixed(2)
+          + ' limit. Holding the position; the opposite side will not be opened.',
+      });
+      return false;
+    }
     const book = await this.trader.getOrderBook(position.tokenId);
     const bids = sortedLevels(book && book.bids, 'desc');
     const bestBid = bids.length ? bids[0].price : null;
@@ -676,6 +690,7 @@ class Bot {
         thresholdPercentile: cfg.BTC_MOVE_THRESHOLD_PERCENTILE,
         thresholdWindowMs: cfg.BTC_MOVE_THRESHOLD_WINDOW_MS,
         thresholdFloorUsd: cfg.BTC_MOVE_THRESHOLD_FLOOR_USD,
+        maxSellEntryPrice: cfg.MAX_SELL_ENTRY_PRICE_USD,
         lookbackMs: cfg.SIGNAL_LOOKBACK_MS,
         pollMs: this.ccxt.pollMs,
         exchange: this.ccxt.exchange,

@@ -14,7 +14,7 @@ The default source is Coinbase `BTC/USD`; configure another CCXT exchange with `
 ## What to check
 
 - The CCXT feed targets a 500 ms poll. The one-second trigger is the P99 of absolute BTC moves from the previous rolling 20-minute window, with a $1 minimum. After restart, it starts signaling after 120 valid moves (about one minute); the window fills to 20 minutes as samples accumulate. The dashboard shows the threshold and sample warm-up count. A move at or above the threshold buys UP; a move at or below its negative buys DOWN.
-- The order size is 500 shares. A same-direction signal does not add shares. An opposite signal first attempts to sell the held side; the new side is not opened if any of the old position remains.
+- The order size is 500 shares. A same-direction signal does not add shares. On an opposite signal, the bot sells only if the position's average entry fill was at or below $0.40. If entry was above $0.40, it holds and does not open the opposite side. A permitted reversal also blocks the new side if any of the old position remains after a partial sale.
 - Demo marketable orders consume visible book depth but are limited to the observed best ask/bid. Empty or thin books can produce no fill or a partial fill. Estimated taker fees are included in paper P&L.
 - At window close, any position still open is held until Gamma reports a closed market with a decisive outcome; no price-based resolution guess is used.
 

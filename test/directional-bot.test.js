@@ -84,6 +84,7 @@ function makeBot(options = {}) {
 
 test('an adaptive positive move buys UP, then an adaptive negative move sells UP before buying DOWN', async () => {
   const { bot, trader } = makeBot();
+  trader.books.up.asks[0].price = 0.40;
   const start = Date.now();
   await bot._onBtcSample({ price: 80000, receivedAt: start, exchange: 'kraken', symbol: 'BTC/USD' });
   await bot._onBtcSample({ price: 80004, receivedAt: start + 500, exchange: 'kraken', symbol: 'BTC/USD' });
@@ -110,8 +111,27 @@ test('an adaptive positive move buys UP, then an adaptive negative move sells UP
   assert.equal(bot.w.position.side, 'DOWN');
 });
 
+test('a position entered above $0.40 is held and blocks the opposite entry on reversal', async () => {
+  const { bot, trader } = makeBot();
+  const start = Date.now();
+  await bot._onBtcSample({ price: 80000, receivedAt: start });
+  await bot._onBtcSample({ price: 80004, receivedAt: start + 500 });
+  await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
+
+  assert.equal(bot.w.position.entryPrice, 0.50);
+  await bot._onBtcSample({ price: 79990, receivedAt: start + 1500 });
+
+  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [['up', 'BUY']]);
+  assert.equal(bot.w.position.side, 'UP');
+  assert.equal(bot.w.position.openShares, 500);
+  assert.equal(bot.w.position.status, 'position_open');
+  assert.equal(bot.trades.length, 0);
+  assert.ok(bot.log.some((item) => item.event === 'SIGNAL_SELL_BLOCKED_HIGH_ENTRY'));
+});
+
 test('a partial sell blocks opening the opposite side', async () => {
   const trader = new FakeDemoTrader();
+  trader.books.up.asks[0].price = 0.40;
   const { bot } = makeBot({ trader });
   const start = Date.now();
   await bot._onBtcSample({ price: 80000, receivedAt: start });
@@ -178,6 +198,7 @@ test('snapshot exposes the feed and strategy settings', () => {
   assert.equal(snapshot.strategy.thresholdReady, false);
   assert.equal(snapshot.strategy.thresholdMinSamples, 120);
   assert.equal(snapshot.strategy.thresholdWindowMs, 20 * 60 * 1000);
+  assert.equal(snapshot.strategy.maxSellEntryPrice, 0.40);
   assert.equal(snapshot.window.status, 'watching_signal');
 });
 
