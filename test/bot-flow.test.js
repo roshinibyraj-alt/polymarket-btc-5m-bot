@@ -75,8 +75,8 @@ test('a complete maker TP closes as a win using actual 99-cent proceeds', async 
 test('a stop cancels the maker order, sells as taker, and adds 50 to the next size', async () => {
   const { bot, w, state } = fixture();
   await bot._fire(w, 'UP', 'up-token');
-  bot.prices.up.bid = 0.60;
-  bot.prices.up.ask = 0.61;
+  bot.prices.up.bid = 0.52;
+  bot.prices.up.ask = 0.53;
   await bot._managePosition(w.position);
   assert.equal(state.canceled, true);
   assert.equal(bot.pending.length, 0);
