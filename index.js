@@ -1,7 +1,7 @@
 'use strict';
 
-// This four-rung limit ladder is demo-only. Fail before loading a wallet trader
-// or authenticating if a live-trading flag is present.
+// This CCXT-triggered directional strategy is demo-only. Fail before loading
+// a wallet trader or authenticating if a live-trading flag is present.
 const LIVE = process.env.LIVE_TRADING === 'true';
 
 async function main() {
@@ -11,7 +11,7 @@ async function main() {
     return;
   }
 
-  const Bot = require('./bot');
+  const Bot = require('./directional-bot');
   const startServer = require('./server');
   const DemoTrader = require('./demo-trader');
   const trader = new DemoTrader();

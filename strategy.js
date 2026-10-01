@@ -26,4 +26,13 @@ function estimateMakerRebate(shares, price) {
   return Math.round((estimate + Number.EPSILON) * 100000) / 100000;
 }
 
-module.exports = { buyLimitTouched, takeProfitTouched, estimateMakerRebate };
+function estimateTakerFee(shares, price) {
+  const quantity = Number(shares);
+  const p = Number(price);
+  if (!Number.isFinite(quantity) || quantity <= 0
+    || !Number.isFinite(p) || p <= 0 || p >= 1) return 0;
+  const fee = quantity * cfg.CRYPTO_TAKER_FEE_RATE * p * (1 - p);
+  return Math.round((fee + Number.EPSILON) * 100000) / 100000;
+}
+
+module.exports = { buyLimitTouched, takeProfitTouched, estimateMakerRebate, estimateTakerFee };

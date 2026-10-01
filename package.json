@@ -1,8 +1,8 @@
 {
-  "name": "polymarket-btc-5m-rebound-bot",
+  "name": "polymarket-btc-5m-momentum-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only BTC 5-minute UP/DOWN four-rung limit ladder with per-rung paired fills.",
+  "description": "Demo-only BTC 5-minute UP/DOWN momentum flip strategy triggered by a CCXT spot feed.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -15,6 +15,7 @@
     "viem": "^2.21.0",
     "@polymarket/clob-client-v2": "1.1.0",
     "@polymarket/builder-relayer-client": "latest",
+    "ccxt": "^4.5.85",
     "ws": "^8.18.0"
   }
 }

@@ -1,6 +1,6 @@
 'use strict';
 
-// Demo trader reads the public CLOB and simulates full-size GTC fills on executable price touches.
+// Demo trader reads the public CLOB and simulates orders locally.
 // It never signs, sends an order, or accesses a wallet.
 const CLOB_HOST = 'https://clob.polymarket.com';
 const strategy = require('./strategy');
@@ -25,13 +25,16 @@ class DemoTrader {
     } catch (_) { return null; }
   }
 
-  async placeFakMarketOrder(tokenId, side, amount) {
+  async placeFakMarketOrder(tokenId, side, amount, options = {}) {
     const book = await this.getOrderBook(tokenId);
     if (!book) return { id: null, status: 'unmatched', isFilled: false, avgPrice: 0, raw: {} };
     const buying = String(side).toUpperCase() === 'BUY';
+    const priceLimit = Number(options && options.priceLimit);
+    const hasPriceLimit = Number.isFinite(priceLimit) && priceLimit > 0;
     const levels = (buying ? (book.asks || []) : (book.bids || []))
       .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
-      .filter((level) => level.price > 0 && level.size > 0)
+      .filter((level) => level.price > 0 && level.size > 0
+        && (!hasPriceLimit || (buying ? level.price <= priceLimit : level.price >= priceLimit)))
       .sort(buying ? (a, b) => a.price - b.price : (a, b) => b.price - a.price);
     let shares = 0;
     let notional = 0;

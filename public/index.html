@@ -10,7 +10,7 @@
 </style>
 </head>
 <body><main>
-<header class="top"><div class="brand"><div class="logo">↗</div><div><div class="title">BTC 5-minute strategy</div><div class="sub">Four paired UP/DOWN limit rungs · demo only</div></div></div><div class="headright"><span id="mode" class="pill demo">DEMO MODE</span><span class="fresh" id="fresh">Connecting…</span></div></header>
+<header class="top"><div class="brand"><div class="logo">↗</div><div><div class="title">BTC 5-minute strategy</div><div class="sub">One-second BTC momentum flips · demo only</div></div></div><div class="headright"><span id="mode" class="pill demo">DEMO MODE</span><span class="fresh" id="fresh">Connecting…</span></div></header>
 <div id="error" class="error"></div>
 <section class="cards">
   <div class="card"><div class="label">Starting capital</div><div class="value" id="capital">—</div><div class="small" id="address">Paper balance · no wallet</div></div>
@@ -20,26 +20,27 @@
 </section>
 <section class="grid">
   <article class="panel"><div class="panelhead"><div><div class="eyebrow">Current five-minute window</div><h2 id="marketTitle">Waiting for market</h2></div><div class="windowmeta"><div id="windowStatus" class="status">Starting</div><div id="timeLeft" style="margin-top:7px">— remaining</div></div></div>
-    <div class="progress"><i id="progress" style="width:0%"></i></div><div class="gate"><span id="elapsedLabel">00:00 elapsed</span><span id="gateLabel">Both-side limits place at market start</span><span>05:00</span></div>
+     <div class="progress"><i id="progress" style="width:0%"></i></div><div class="gate"><span id="elapsedLabel">00:00 elapsed</span><span id="gateLabel">CCXT ±$10 / 1s trigger · 500 ms polling</span><span>05:00</span></div>
     <table class="quoteTable"><thead><tr><th>Outcome</th><th>Best bid</th><th>Best ask</th><th>Midpoint</th><th>State</th></tr></thead><tbody>
       <tr><td><span class="side"><i class="dot"></i>UP</span></td><td class="bid" id="upBid">—</td><td class="ask" id="upAsk">—</td><td class="bid" id="upMid">—</td><td id="upState">—</td></tr>
       <tr><td><span class="side"><i class="dot down"></i>DOWN</span></td><td class="bid" id="downBid">—</td><td class="ask" id="downAsk">—</td><td class="bid" id="downMid">—</td><td id="downState">—</td></tr>
     </tbody></table>
   </article>
-  <article class="panel"><div class="panelhead"><div><div class="eyebrow">Execution plan</div><h2 id="planTitle">Four-rung paired limit ladder</h2></div><span id="signalPill" class="status">One UP + one DOWN per rung</span></div>
+   <article class="panel"><div class="panelhead"><div><div class="eyebrow">Execution plan</div><h2 id="planTitle">One-second BTC momentum flip</h2></div><span id="signalPill" class="status">Waiting for a qualifying move</span></div>
     <div class="steps">
-      <div class="step" id="step1"><div class="stepnum">1</div><div><b>Rest four buys per outcome</b><p>At window start, place 500-share UP and DOWN limits at each rung price.</p></div></div>
-      <div class="step" id="step2"><div class="stepnum">2</div><div><b>First fill gets rung TP; opposite fill gets $0.99</b><p id="signalText">The first side filled on a rung uses that rung's TP; the second side uses $0.99.</p></div></div>
-      <div class="step" id="step3"><div class="stepnum">3</div><div><b>One UP and one DOWN per rung</b><p>A rung can fill once per outcome per five-minute window; completed rung trades do not re-arm.</p></div></div>
+       <div class="step" id="step1"><div class="stepnum">1</div><div><b>Poll the configured CCXT BTC spot ticker</b><p id="ccxtSummary">Connecting to the configured public spot ticker…</p></div></div>
+       <div class="step" id="step2"><div class="stepnum">2</div><div><b>+$10 over one second → UP; −$10 → DOWN</b><p id="signalText">The signal compares the latest BTC price with a sample about one second earlier.</p></div></div>
+       <div class="step" id="step3"><div class="stepnum">3</div><div><b>Reverse exposure on the opposite signal</b><p>Sell the held side first, then buy the other side; a residual position is not doubled up.</p></div></div>
     </div>
-    <div class="sizing"><div class="sizeLine"><div><div class="label">Fixed order size per trade</div><div class="sizeBig"><span id="baseShares">500</span> <span>shares</span></div></div><div class="small" id="additionCount">No stop loss · no size scaling</div></div>
-      <div class="ruleTags"><span class="tag entry" id="entryTag">BUY RUNGS $0.45 / $0.40 / $0.35 / $0.30</span><span class="tag tp" id="tpTag">RUNG TP · SECOND FILL $0.99</span></div>
+     <div class="sizing"><div class="sizeLine"><div><div class="label">Fixed order size per entry</div><div class="sizeBig"><span id="baseShares">500</span> <span>shares</span></div></div><div class="small" id="additionCount">One open side at a time</div></div>
+       <div class="ruleTags"><span class="tag entry" id="entryTag">+$10 / 1s → UP · −$10 / 1s → DOWN</span><span class="tag tp" id="tpTag">FLIP ON OPPOSITE SIGNAL</span></div>
+       <div class="small" style="margin-top:12px"><span id="ccxtExchange">CCXT · BTC/USD</span> · Spot <b id="ccxtPrice">—</b> · 1s Δ <b id="ccxtChange">—</b> · <span id="ccxtStatus" class="status warn">CONNECTING</span></div>
     </div>
   </article>
 </section>
-<section class="panel wide"><div class="panelhead"><div><div class="eyebrow">Risk and exits</div><h2>Position management</h2></div><span class="small" id="openCount">No open positions</span></div><div class="tablewrap" id="openPositions"></div><div class="small" style="margin-top:10px">There is no stop loss. At window close, remaining entry/TP orders are canceled; unsold shares are held until the official Polymarket resolution. Demo touch fills count the full order size without using visible book depth.</div></section>
- <section class="panel wide"><div class="panelhead"><div><div class="eyebrow">Completed positions</div><h2>Trade history</h2></div><span class="small" id="tradeCount">0 trades</span></div><div class="tablewrap" id="trades"></div><div class="small" style="margin-top:8px">Maker rebate values are fee-curve estimates, not actual daily Polymarket payouts.</div></section>
-<section class="panel"><div class="panelhead"><div><div class="eyebrow">Bot activity</div><h2>Recent events</h2></div><span class="small" id="uptime">Uptime —</span></div><div class="log" id="log"></div><div class="foot"><span>Demo orders simulate full-size fills on executable ask/bid touches; no live orders are submitted by this strategy.</span><span id="modeNote">Demo mode never sends real orders.</span></div></section>
+<section class="panel wide"><div class="panelhead"><div><div class="eyebrow">Risk and exits</div><h2>Position management</h2></div><span class="small" id="openCount">No open positions</span></div><div class="tablewrap" id="openPositions"></div><div class="small" style="margin-top:10px">Demo marketable orders use visible Polymarket book depth and an observed top-of-book price limit. If a reversal only sells part of the current position, the bot waits rather than opening the opposite side. Any position still open at window close awaits official resolution.</div></section>
+ <section class="panel wide"><div class="panelhead"><div><div class="eyebrow">Completed positions</div><h2>Trade history</h2></div><span class="small" id="tradeCount">0 trades</span></div><div class="tablewrap" id="trades"></div><div class="small" style="margin-top:8px">Taker fees are estimates based on the configured crypto fee curve; simulated execution is not a profitability guarantee.</div></section>
+<section class="panel"><div class="panelhead"><div><div class="eyebrow">Bot activity</div><h2>Recent events</h2></div><span class="small" id="uptime">Uptime —</span></div><div class="log" id="log"></div><div class="foot"><span>Demo mode only: no live orders are submitted by this strategy.</span><span id="modeNote">Demo mode never sends real orders.</span></div></section>
 </main>
 <script>
 const $=function(id){return document.getElementById(id)};
@@ -52,41 +53,48 @@ const clock=function(seconds){const n=Math.max(0,Math.floor(Number(seconds)||0))
 const time=function(ts){return new Date(Number(ts)||Date.now()).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})};
 function statusStyle(el,txt,kind){el.textContent=txt;el.className='status'+(kind?' '+kind:'')}
 function rowEmpty(message,cols){return '<div class="empty">'+esc(message)+'</div>'}
-function setSideQuote(side,quote,summary,entryRungs){const bid=quote&&quote.bid,ask=quote&&quote.ask;$(side.toLowerCase()+'Bid').textContent=cents(bid);$(side.toLowerCase()+'Ask').textContent=cents(ask);$(side.toLowerCase()+'Mid').textContent=cents(quote&&quote.mid);const state=$(side.toLowerCase()+'State');if(summary&&Number(summary.openShares)>0)statusStyle(state,qty(summary.openTrades)+' OPEN RUNG(S)','warn');else if(ask!=null&&(entryRungs||[]).some(function(r){return Number(ask)<=Number(r.entryPrice)}))statusStyle(state,'BUY TOUCH','good');else if(summary&&Number(summary.entriesResting)>0)statusStyle(state,summary.entriesResting+' RUNG LIMITS','warn');else statusStyle(state,summary&&summary.status==='window_closed'?'CLOSED':summary&&summary.status==='trades_complete'?'RUNG TRADES DONE':'WAITING','')}
+function signedMove(value){if(!validNum(value))return '—';const n=Number(value);return (n>=0?'+':'−')+'$'+Math.abs(n).toFixed(2)}
+function setSideQuote(side,quote,positionSide,closed){const bid=quote&&quote.bid,ask=quote&&quote.ask;$(side.toLowerCase()+'Bid').textContent=cents(bid);$(side.toLowerCase()+'Ask').textContent=cents(ask);$(side.toLowerCase()+'Mid').textContent=cents(quote&&quote.mid);const state=$(side.toLowerCase()+'State');if(positionSide===side)statusStyle(state,'OPEN POSITION','warn');else if(closed)statusStyle(state,'CLOSED','');else statusStyle(state,'WATCHING','')}
 function render(s){
-  const cfg=s.cfg||{},st=s.strategy||{},w=s.window||null,px=s.prices||{};
+  const cfg=s.cfg||{},st=s.strategy||{},w=s.window||null,px=s.prices||{},cx=s.ccxt||{};
   $('mode').textContent=s.mode==='LIVE'?'LIVE TRADING':'DEMO MODE';$('mode').className='pill '+(s.mode==='LIVE'?'live':'demo');
   $('modeNote').textContent=s.mode==='LIVE'?'This strategy is blocked in LIVE mode; no orders can be sent.':'Demo mode never sends real orders.';
   $('fresh').textContent='Updated '+time(s.now);
   $('capital').textContent=usd(s.account&&s.account.capital);$('cash').textContent=usd(s.account&&s.account.cash);$('equity').textContent=usd(s.account&&s.account.equity);
   $('address').textContent=s.mode==='LIVE'?(s.walletAddress||'Wallet connected'):'Paper balance · no wallet';$('drawdown').textContent='Peak drawdown '+usd(s.account&&s.account.maxDrawdown);
   const pnl=Number(s.stats&&s.stats.realizedPnl)||0;$('pnl').textContent=(pnl>=0?'+':'')+usd(pnl);$('pnl').className='value '+(pnl>0?'positive':pnl<0?'negative':'');
-   $('record').textContent=(s.stats&&s.stats.wins||0)+' wins · '+(s.stats&&s.stats.losses||0)+' losses · est. rebates '+usd(s.stats&&s.stats.estimatedMakerRebates);
+  $('record').textContent=(s.stats&&s.stats.wins||0)+' wins · '+(s.stats&&s.stats.losses||0)+' losses · est. fees '+usd(s.stats&&s.stats.estimatedFees);
   const error=$('error');if(s.error||s.executionHalt){error.textContent=s.executionHalt?'This strategy is demo-only and is blocked in LIVE mode; no orders were sent.':s.error;error.className='error show'}else error.className='error';
+  $('ccxtExchange').textContent=(cx.exchange||cfg.ccxtExchange||'CCXT')+' · '+(cx.symbol||cfg.ccxtSymbol||'BTC/USD');
+  $('ccxtPrice').textContent=usd(cx.price);$('ccxtChange').textContent=signedMove(cx.change1s);
+  const feedStatus=String(cx.status||'connecting').toUpperCase();
+  statusStyle($('ccxtStatus'),feedStatus,feedStatus==='LIVE'?'good':feedStatus==='ERROR'?'bad':'warn');
+  const pollInterval=validNum(cx.lastPollIntervalMs)?' · last interval '+Math.round(Number(cx.lastPollIntervalMs))+' ms':'';
+  $('ccxtSummary').textContent=cx.error?'Feed error: '+cx.error:'Public spot ticker · target '+(cx.pollMs||st.pollMs||500)+' ms'+pollInterval+' · '+(cx.status==='live'?'last update '+time(cx.receivedAt):'waiting for data');
   const elapsed=w?Number(w.elapsedSeconds)||0:0;const remain=Math.max(0,300-elapsed);$('marketTitle').textContent=w?(w.slug||'BTC 5-minute market'):'Waiting for active market';$('windowStatus').textContent=w?String(w.status||'starting').replace(/_/g,' '):'Starting';
-  $('windowStatus').className='status '+(w&&['positions_active','buy_limits_resting','orders_active'].includes(w.status)?'good':w&&w.status==='awaiting_resolution'?'warn':s.mode==='LIVE'?'bad':'');
+  $('windowStatus').className='status '+(w&&w.positionSide?'good':w&&w.status==='awaiting_resolution'?'warn':w&&w.closed?'':'');
   $('timeLeft').textContent=w?clock(remain)+' remaining':'— remaining';$('elapsedLabel').textContent=clock(elapsed)+' elapsed';$('progress').style.width=Math.min(100,Math.max(0,elapsed/300*100))+'%';
-   $('gateLabel').textContent=w&&w.closed?'ORDERS CLOSED · OFFICIAL RESOLUTION ONLY':'FOUR-RUNG LIMIT LADDER ACTIVE';
-   const cycles=w&&w.sideCycles||{},rungs=cfg.entryRungs||[];setSideQuote('UP',px.up,cycles.UP,rungs);setSideQuote('DOWN',px.down,cycles.DOWN,rungs);
-  const upStatus=cycles.UP&&cycles.UP.status||'waiting',downStatus=cycles.DOWN&&cycles.DOWN.status||'waiting';
-   statusStyle($('signalPill'),'UP '+(cycles.UP&&cycles.UP.filledCount||0)+'/4 · DOWN '+(cycles.DOWN&&cycles.DOWN.filledCount||0)+'/4 fills','');
-   $('signalText').textContent=rungs.map(function(r){return usd(r.entryPrice)+' buy → '+usd(r.takeProfitPrice)+' first TP'}).join(' · ')+'; second side on each rung uses $0.99.';
+  $('gateLabel').textContent=w&&w.closed?'WINDOW CLOSED · OFFICIAL RESOLUTION ONLY':'±$'+(cfg.btcMoveThresholdUsd||10)+' BTC move over '+((cfg.signalLookbackMs||1000)/1000)+' second · '+(cfg.ccxtPollMs||500)+' ms polling';
+  setSideQuote('UP',px.up,w&&w.positionSide,w&&w.closed);setSideQuote('DOWN',px.down,w&&w.positionSide,w&&w.closed);
+  const signal=w&&w.lastSignal;
+  statusStyle($('signalPill'),w&&w.positionSide?'Holding '+w.positionSide:signal?signal.side+' signal · '+signedMove(signal.changeUsd):'Waiting for a qualifying move',w&&w.positionSide?'good':signal?'warn':'');
+  $('signalText').textContent=signal?'Latest qualifying move: '+signedMove(signal.changeUsd)+' in '+signal.lookbackMs+' ms → '+signal.side+'.': 'No qualifying one-second move yet; repeated same-side signals do not add another entry.';
   const step1=$('step1'),step2=$('step2'),step3=$('step3');[step1,step2,step3].forEach(function(x){x.className='step'});
-  if(w&&w.sideCycles)step1.className='step done';else step1.className='step active';
-  if((s.pending||[]).length)step2.className='step active';else if(w&&w.sideCycles)step2.className='step done';
-  if(w&&w.closed)step3.className='step done';else if(w&&w.sideCycles)step3.className='step active';
-   $('baseShares').textContent=qty(st.baseShares);$('additionCount').textContent='No stop loss · max 1 per side/rung';
-   $('entryTag').textContent='BUY RUNGS '+rungs.map(function(r){return usd(r.entryPrice)}).join(' / ');
-   $('tpTag').textContent='FIRST TP '+rungs.map(function(r){return usd(r.takeProfitPrice)}).join(' / ')+' · SECOND $0.99';
+  if(cx.status==='live')step1.className='step done';else step1.className='step active';
+  if(signal)step2.className='step active';
+  if(w&&w.positionSide)step3.className='step active';else if(w&&w.closed)step3.className='step done';
+  $('baseShares').textContent=qty(st.baseShares);$('additionCount').textContent='One open side · flip only after opposite trigger';
+  $('entryTag').textContent='+$'+(st.thresholdUsd||10)+' / 1s → UP · −$'+(st.thresholdUsd||10)+' / 1s → DOWN';
+  $('tpTag').textContent='SELL HELD SIDE · BUY OPPOSITE';
   $('openCount').textContent=(s.pending||[]).length+' open position'+((s.pending||[]).length===1?'':'s');
-   const pending=s.pending||[];
-   if(!pending.length){$('openPositions').innerHTML=rowEmpty('No open positions',11)}else{
-     const rows=pending.map(function(p){return '<tr><td>'+esc(time(Number(p.openTs)*1000))+'</td><td>'+esc(p.side)+'</td><td>'+cents(p.rungPrice)+'</td><td>'+esc(p.rungFillNumber===1?'First':'Second')+'</td><td>'+qty(p.shares)+'</td><td>'+qty(p.openShares)+'</td><td>'+cents(p.mark)+'</td><td>'+cents(p.takeProfitPrice)+'</td><td>'+esc(p.status||'open')+'</td><td class="positive">'+usd(p.makerRebate)+'</td><td class="'+(validNum(p.unrealized)?(Number(p.unrealized)>=0?'positive':'negative'):'neutral')+'">'+usd(p.unrealized)+'</td></tr>'}).join('');
-     $('openPositions').innerHTML='<table class="data"><thead><tr><th>Window</th><th>Side</th><th>Rung entry</th><th>Fill</th><th>Entry shares</th><th>Open shares</th><th>Mark</th><th>TP target</th><th>Status</th><th>Est. maker rebate</th><th>Unrealized</th></tr></thead><tbody>'+rows+'</tbody></table>';
-   }
-   const trades=s.trades||[];$('tradeCount').textContent=trades.length+' shown';if(!trades.length){$('trades').innerHTML=rowEmpty('No completed positions yet',10)}else{$('trades').innerHTML='<table class="data"><thead><tr><th>Window</th><th>Side</th><th>Rung entry</th><th>Fill</th><th>Shares</th><th>TP target</th><th>Exit proceeds</th><th>Reason</th><th>Result</th><th>Net P&amp;L</th></tr></thead><tbody>'+trades.map(function(t){return '<tr><td>'+esc(time(Number(t.openTs)*1000))+'</td><td>'+esc(t.side)+'</td><td>'+cents(t.rungPrice)+'</td><td>'+esc(t.rungFillNumber===1?'First':'Second')+'</td><td>'+qty(t.shares)+'</td><td>'+cents(t.takeProfitPrice)+'</td><td>'+usd(t.proceeds)+(Number(t.rebate)>0?' · est. maker rebate '+usd(t.rebate):'')+'</td><td>'+esc(String(t.reason||'').replace(/_/g,' '))+'</td><td>'+esc(t.outcome)+'</td><td class="'+(Number(t.pnl)>=0?'positive':'negative')+'">'+usd(t.pnl)+'</td></tr>'}).join('')+'</tbody></table>'}
+  const pending=s.pending||[];
+  if(!pending.length){$('openPositions').innerHTML=rowEmpty('No open positions',8)}else{
+    const rows=pending.map(function(p){return '<tr><td>'+esc(time(Number(p.openTs)*1000))+'</td><td>'+esc(p.side)+'</td><td>'+qty(p.shares)+'</td><td>'+qty(p.openShares)+'</td><td>'+cents(p.entryPrice)+'</td><td>'+cents(p.mark)+'</td><td>'+esc(p.status||'open')+'</td><td class="'+(validNum(p.unrealized)?(Number(p.unrealized)>=0?'positive':'negative'):'neutral')+'">'+usd(p.unrealized)+'</td></tr>'}).join('');
+    $('openPositions').innerHTML='<table class="data"><thead><tr><th>Window</th><th>Side</th><th>Entry shares</th><th>Open shares</th><th>Entry avg.</th><th>Mark</th><th>Status</th><th>Unrealized</th></tr></thead><tbody>'+rows+'</tbody></table>';
+  }
+  const trades=s.trades||[];$('tradeCount').textContent=trades.length+' shown';if(!trades.length){$('trades').innerHTML=rowEmpty('No completed positions yet',9)}else{$('trades').innerHTML='<table class="data"><thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Entry avg.</th><th>Exit avg.</th><th>Exit proceeds</th><th>Fees</th><th>Reason</th><th>Result</th><th>Net P&amp;L</th></tr></thead><tbody>'+trades.map(function(t){return '<tr><td>'+esc(time(Number(t.openTs)*1000))+'</td><td>'+esc(t.side)+'</td><td>'+qty(t.shares)+'</td><td>'+cents(t.entryPrice)+'</td><td>'+cents(t.exitPrice)+'</td><td>'+usd(t.exitProceeds)+'</td><td>'+usd(t.fee)+'</td><td>'+esc(String(t.reason||'').replace(/_/g,' '))+'</td><td>'+esc(t.outcome)+'</td><td class="'+(Number(t.pnl)>=0?'positive':'negative')+'">'+usd(t.pnl)+'</td></tr>'}).join('')+'</tbody></table>'}
   $('uptime').textContent='Uptime '+clock(s.uptimeSec||0);const logs=s.log||[];if(!logs.length){$('log').innerHTML=rowEmpty('Waiting for bot events',1)}else{$('log').innerHTML=logs.slice(0,35).map(function(item){return '<div class="logrow"><span class="logtime">'+esc(time(item.ts))+'</span><span class="logevent">'+esc(item.event||'EVENT')+'</span><span>'+esc(item.note||'')+'</span></div>'}).join('')}
 }
 async function refresh(){try{const response=await fetch('/api/state',{cache:'no-store'});if(!response.ok)throw new Error('state '+response.status);render(await response.json())}catch(error){$('fresh').textContent='Dashboard reconnecting';$('error').textContent=error.message;$('error').className='error show'}}
-refresh();setInterval(refresh,1000);
+refresh();setInterval(refresh,500);
 </script></body></html>

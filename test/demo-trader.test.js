@@ -56,3 +56,35 @@ test('demo can cancel a resting entry or take-profit order without changing a fi
     assert.equal((await trader.getOrder(order.id)).status, 'CANCELED');
   } finally { global.fetch = originalFetch; }
 });
+
+test('demo marketable BUY respects the observed maximum price and visible depth', async () => {
+  const originalFetch = global.fetch;
+  const book = {
+    bids: [{ price: '0.48', size: '20' }],
+    asks: [{ price: '0.50', size: '4' }, { price: '0.51', size: '100' }],
+  };
+  global.fetch = async () => ({ ok: true, json: async () => book });
+  try {
+    const trader = new DemoTrader();
+    const order = await trader.placeFakMarketOrder('token', 'BUY', 5, { priceLimit: 0.50 });
+    assert.equal(order.status, 'matched');
+    assert.equal(Number(order.raw.takingAmount), 4);
+    assert.equal(Number(order.raw.makingAmount), 2);
+  } finally { global.fetch = originalFetch; }
+});
+
+test('demo marketable SELL respects the observed minimum price and visible depth', async () => {
+  const originalFetch = global.fetch;
+  const book = {
+    bids: [{ price: '0.50', size: '4' }, { price: '0.49', size: '100' }],
+    asks: [{ price: '0.52', size: '20' }],
+  };
+  global.fetch = async () => ({ ok: true, json: async () => book });
+  try {
+    const trader = new DemoTrader();
+    const order = await trader.placeFakMarketOrder('token', 'SELL', 10, { priceLimit: 0.50 });
+    assert.equal(order.status, 'matched');
+    assert.equal(Number(order.raw.makingAmount), 4);
+    assert.equal(Number(order.raw.takingAmount), 2);
+  } finally { global.fetch = originalFetch; }
+});

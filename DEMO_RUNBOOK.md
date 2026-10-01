@@ -1,22 +1,23 @@
 # Demo-mode runbook
 
-Use this checklist to review behavior without enabling real trading. Demo mode consumes public Polymarket market data; the demo adapter simulates fills and does not sign or submit orders. This strategy is blocked in live mode.
+Use this checklist to review behavior without enabling real trading. The bot reads public CCXT BTC spot data and Polymarket books; `DemoTrader` simulates fills and does not sign or submit orders. This strategy is blocked in live mode.
 
 ## Safe startup
 
 1. Keep `LIVE_TRADING` unset or set to a value other than the exact text `true`. No wallet key is needed for demo mode.
-2. From the repository root, install dependencies once with npm install, then run npm test.
-3. Start the app with npm start and open http://localhost:3000.
-4. Confirm the dashboard says DEMO MODE and shows $10,000 starting capital. If `LIVE_TRADING=true`, startup is refused before wallet authentication; no live client or orders are created.
+2. From this directory, run `npm install`, then `npm test`.
+3. Start the app with `npm start` and open http://localhost:3000.
+4. Confirm the dashboard says DEMO MODE, shows $10,000 starting capital, and reports a live CCXT price. `LIVE_TRADING=true` is refused before wallet authentication.
+
+The default source is Coinbase `BTC/USD`; configure another CCXT exchange with `CCXT_EXCHANGE` and `CCXT_SYMBOL`. The feed honors the exchange's minimum rate limit, so a provider may require a slower interval than 500 ms. Binance returned a location restriction from the development runtime; verify the chosen deployment source before relying on the feed.
 
 ## What to check
 
-- As soon as the active window tokens are available, the bot places four 500-share GTC BUY limits on each outcome: $0.45, $0.40, $0.35, and $0.30. That is one UP and one DOWN entry at each rung, up to eight trades in a window.
-- For each rung independently, the first side to fill gets its regular TP: $0.45→$0.70, $0.40→$0.65, $0.35→$0.60, and $0.30→$0.50. If the opposite side fills at that rung, its TP is $0.99. There is no same-side re-arm at a rung during that window.
-- In demo, an executable best ask at or below an entry limit fills that entire 500-share order regardless of visible depth. A best bid at or above the assigned TP fills all remaining shares; a $0.99 TP credits $0.99 per share to cash and P&L.
-- Simulated maker fills have a $0 maker fee and accrue a fee-curve-based rebate estimate. The demo credits that estimate immediately; actual Polymarket rebates are paid daily in pUSD and depend on the market's rebate pool and filled maker liquidity.
-- There is no stop loss or adaptive sizing. At window close, resting entry and TP orders are canceled. Remaining shares are held until Gamma reports a closed market with a decisive outcome; no price-based resolution guess is used.
+- The CCXT feed polls every 500 ms. A BTC move of at least +$10 over about one second buys UP; a move of at most −$10 buys DOWN.
+- The order size is 500 shares. A same-direction signal does not add shares. An opposite signal first attempts to sell the held side; the new side is not opened if any of the old position remains.
+- Demo marketable orders consume visible book depth but are limited to the observed best ask/bid. Empty or thin books can produce no fill or a partial fill. Estimated taker fees are included in paper P&L.
+- At window close, any position still open is held until Gamma reports a closed market with a decisive outcome; no price-based resolution guess is used.
 
 ## Finish and interpret results
 
-Stop the process with Ctrl+C. Demo cash and trade history are in memory and reset when the process restarts. Treat touch-based fills, estimated rebates, and P&L as simplified behavior checks, not as evidence of queue position, actual rebate payout, live execution, or profitability.
+Stop the process with Ctrl+C. Demo cash and trade history are in memory and reset when the process restarts. Treat simulated book fills, estimated fees, and P&L as behavior checks—not as evidence of live execution or profitability.
