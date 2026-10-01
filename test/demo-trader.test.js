@@ -4,36 +4,47 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const DemoTrader = require('../demo-trader');
 
-test('demo FAK buys spend USDC across asks and sells requested shares across bids', async () => {
+test('demo GTC buy fills all 500 shares on an ask touch without using visible depth', async () => {
   const originalFetch = global.fetch;
-  let book = { asks: [{ price: '0.50', size: '10' }, { price: '0.60', size: '10' }], bids: [{ price: '0.61', size: '7' }, { price: '0.60', size: '20' }] };
+  let book = { bids: [{ price: '0.29', size: '0.01' }], asks: [{ price: '0.31', size: '0.01' }] };
   global.fetch = async () => ({ ok: true, json: async () => book });
   try {
     const trader = new DemoTrader();
-    const buy = await trader.placeFakMarketOrder('token', 'BUY', 8);
-    assert.equal(buy.status, 'matched');
-    assert.equal(Number(buy.raw.makingAmount), 8);
-    assert.equal(Number(buy.raw.takingAmount), 15);
-    const sell = await trader.placeFakMarketOrder('token', 'SELL', 12);
-    assert.equal(Number(sell.raw.makingAmount), 12);
-    assert.equal(Number(Number(sell.raw.takingAmount).toFixed(2)), 7.27);
+    const order = await trader.placeGtcOrder('token', 'BUY', 0.30, 500);
+    assert.equal(order.status, 'LIVE');
+    book = { bids: [{ price: '0.29', size: '0.01' }], asks: [{ price: '0.30', size: '0.01' }] };
+    const state = await trader.getOrder(order.id);
+    assert.equal(Number(state.size_matched), 500);
+    assert.equal(state.status, 'MATCHED');
   } finally { global.fetch = originalFetch; }
 });
 
-test('demo maker TP rests post-only and accumulates only newly available crossing liquidity', async () => {
+test('demo GTC take-profit fills all shares on a bid touch without using visible depth', async () => {
   const originalFetch = global.fetch;
-  let book = { bids: [{ price: '0.98', size: '10' }], asks: [{ price: '0.99', size: '10' }] };
+  let book = { bids: [{ price: '0.69', size: '0.01' }], asks: [{ price: '0.70', size: '0.01' }] };
   global.fetch = async () => ({ ok: true, json: async () => book });
   try {
     const trader = new DemoTrader();
-    const order = await trader.placeGtcOrder('token', 'SELL', 0.99, 5);
-    book = { bids: [{ price: '0.99', size: '4' }], asks: [{ price: '1.00', size: '10' }] };
+    const order = await trader.placeGtcOrder('token', 'SELL', 0.70, 500);
+    assert.equal(order.status, 'LIVE');
     let state = await trader.getOrder(order.id);
-    assert.equal(Number(state.size_matched), 4);
+    assert.equal(Number(state.size_matched), 0);
     assert.equal(state.status, 'LIVE');
-    book = { bids: [{ price: '0.99', size: '5' }], asks: [{ price: '1.00', size: '10' }] };
+    book = { bids: [{ price: '0.70', size: '0.01' }], asks: [{ price: '0.71', size: '0.01' }] };
     state = await trader.getOrder(order.id);
-    assert.equal(Number(state.size_matched), 5);
+    assert.equal(Number(state.size_matched), 500);
     assert.equal(state.status, 'MATCHED');
+  } finally { global.fetch = originalFetch; }
+});
+
+test('demo can cancel a resting entry or take-profit order without changing a filled order', async () => {
+  const originalFetch = global.fetch;
+  const book = { bids: [{ price: '0.29', size: '0.01' }], asks: [{ price: '0.31', size: '0.01' }] };
+  global.fetch = async () => ({ ok: true, json: async () => book });
+  try {
+    const trader = new DemoTrader();
+    const order = await trader.placeGtcOrder('token', 'BUY', 0.30, 500);
+    await trader.cancelOrder(order.id);
+    assert.equal((await trader.getOrder(order.id)).status, 'CANCELED');
   } finally { global.fetch = originalFetch; }
 });

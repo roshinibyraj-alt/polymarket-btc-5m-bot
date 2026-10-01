@@ -2,7 +2,7 @@
   "name": "polymarket-btc-5m-rebound-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "BTC 5-minute Polymarket strategy with delayed taker entries, maker take-profit, stop loss, and adaptive share sizing.",
+  "description": "Demo-only BTC 5-minute UP/DOWN limit-cycle strategy with fixed 500-share entries and $0.70 take-profit.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

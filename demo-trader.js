@@ -1,11 +1,13 @@
 'use strict';
 
-// Demo trader reads the public CLOB and simulates immediate taker fills/resting maker exits.
+// Demo trader reads the public CLOB and simulates full-size GTC fills on executable price touches.
 // It never signs, sends an order, or accesses a wallet.
 const CLOB_HOST = 'https://clob.polymarket.com';
+const strategy = require('./strategy');
 
 class DemoTrader {
   constructor() {
+    this.demoMode = true;
     this.address = 'DEMO MODE (no wallet, no real orders)';
     this.depositWallet = null;
     this._n = 0;
@@ -57,29 +59,53 @@ class DemoTrader {
 
   async placeGtcOrder(tokenId, side, price, size) {
     const book = await this.getOrderBook(tokenId);
-    const bestBid = Math.max(0, ...((book && book.bids) || []).map((level) => Number(level.price) || 0));
-    if (String(side).toUpperCase() === 'SELL' && bestBid >= Number(price)) {
-      throw new Error('demo: post-only order would take liquidity at the current best bid');
-    }
     this._n += 1;
     const id = 'demo-maker-' + this._n;
-    this.orders.set(id, { id, tokenId, side: String(side).toUpperCase(), price: Number(price), original_size: Number(size), size_matched: 0, status: 'LIVE' });
-    return { id, status: 'LIVE' };
+    const order = {
+      id, tokenId, side: String(side).toUpperCase(), price: Number(price),
+      original_size: Number(size), size_matched: 0, status: 'LIVE',
+    };
+    this.orders.set(id, order);
+    this._matchAtTouch(order, book);
+    return { id, status: order.status };
+  }
+
+  updateQuote(tokenId, quote) {
+    const bid = Number(quote && quote.bid);
+    const ask = Number(quote && quote.ask);
+    const bestBid = Number.isFinite(bid) && bid > 0 ? bid : null;
+    const bestAsk = Number.isFinite(ask) && ask > 0 ? ask : null;
+    for (const order of this.orders.values()) {
+      if (order.tokenId === tokenId && order.status === 'LIVE') this._matchAtPrices(order, bestBid, bestAsk);
+    }
   }
 
   async getOrder(id) {
     const order = this.orders.get(id);
     if (!order) return null;
-    if (order.status === 'LIVE' && order.side === 'SELL') {
-      const book = await this.getOrderBook(order.tokenId);
-      const bids = ((book && book.bids) || []).map((x) => ({ price: Number(x.price), size: Number(x.size) }))
-        .filter((x) => x.price >= order.price && x.size > 0).sort((a, b) => b.price - a.price);
-      const liquidity = bids.reduce((sum, x) => sum + x.size, 0);
-      const add = Math.min(order.original_size - order.size_matched, liquidity);
-      if (add > 0) order.size_matched += add;
-      if (order.size_matched >= order.original_size - 1e-9) order.status = 'MATCHED';
-    }
+    if (order.status === 'LIVE') this._matchAtTouch(order, await this.getOrderBook(order.tokenId));
     return { ...order, price: String(order.price), original_size: String(order.original_size), size_matched: String(order.size_matched) };
+  }
+
+  _matchAtTouch(order, book) {
+    if (!book || order.status !== 'LIVE') return;
+    const bids = (book.bids || []).map((level) => Number(level.price)).filter((price) => Number.isFinite(price) && price > 0);
+    const asks = (book.asks || []).map((level) => Number(level.price)).filter((price) => Number.isFinite(price) && price > 0);
+    const bestBid = bids.length ? Math.max(...bids) : null;
+    const bestAsk = asks.length ? Math.min(...asks) : null;
+    this._matchAtPrices(order, bestBid, bestAsk);
+  }
+
+  _matchAtPrices(order, bestBid, bestAsk) {
+    if (order.status !== 'LIVE') return;
+    const touched = order.side === 'BUY'
+      ? strategy.buyLimitTouched(bestAsk, order.price)
+      : strategy.takeProfitTouched(bestBid, order.price);
+    if (!touched) return;
+    // Demo execution is intentionally all-or-none on an executable price touch.
+    // Visible order-book depth is not used to size the simulated fill.
+    order.size_matched = order.original_size;
+    order.status = 'MATCHED';
   }
 
   async cancelOrder(id) {

@@ -1,9 +1,9 @@
 # Polymarket BTC 5-minute strategy
 
-The bot monitors BTC 5-minute UP/DOWN markets. It checks both outcome midpoints as soon as each window opens. A crossing of $0.75 in either direction triggers an entry on whichever side crosses; a tick may jump over $0.75 (for example, $0.74 to $0.76) and still trigger. The entry is an immediate CLOB FAK market buy with no $0.75 ask-price cap, so its execution price can differ from the midpoint signal. Polymarket's market-buy API takes a USDC amount rather than a share count, so the bot estimates the notional for the configured share target from the live ask book and records the actual filled quantity.
+At the start of each BTC 5-minute UP/DOWN market, the demo bot independently places one GTC limit BUY on each outcome: 500 shares at $0.30 per side. A demo BUY counts as filled in full when the best ask is at or below $0.30; visible order-book depth is intentionally ignored. After a BUY fills, the bot rests a GTC limit SELL for the acquired shares at $0.70. A best bid at or above $0.70 counts the entire remaining TP order as filled. Once a side's position is fully TP-closed, that side places a fresh 500-share $0.30 BUY if the same window is still open. The two sides cycle independently.
 
-After entry, it rests a post-only GTC sell at $0.99. A best bid at or below $0.45 triggers a FAK market sell after the take-profit order is canceled and confirmed. Each stop-loss hit adds 50 shares to the next window, up to 550; each win subtracts 50, down to 50. An open position at the window close has its resting TP canceled and is held to the official market resolution. A resolution loss without a stop-loss hit does not add shares.
+There is no stop loss and no adaptive sizing. At the 5-minute close, the bot cancels resting entry and TP orders. Shares that were not TP-sold remain open until the existing official-resolution check returns a decisive market result; live prices are never used to guess the resolution.
 
-Demo mode starts with $1,000 and never signs or submits real orders. Taker fees in demo P&L use the configured estimate; maker rebates default to $0 until an actual amount is verified. Live orders require LIVE_TRADING=true and the existing wallet secret.
+This strategy is demo-only and fails closed when `LIVE_TRADING=true`; the bot does not submit real orders. Demo mode starts with $1,000 and reads public Polymarket market data. The simulated touch behavior is a simplified fill assumption, not a claim about actual queue position, depth, fees, or live execution.
 
-Run npm test for the strategy and fill-sizing checks; npm start starts the dashboard and bot.
+Run `npm test` to verify strategy behavior. `npm start` is not part of the test-only workflow.

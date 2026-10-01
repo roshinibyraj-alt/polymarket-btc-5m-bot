@@ -3,30 +3,35 @@
 const cfg = require('./config');
 const { getActiveWindow, currentWindowOpenTs, slugForTs, WINDOW_SECONDS, fetchResolution } = require('./polymarket-market');
 const startMarketFeed = require('./clob-feed');
-const strategy = require('./strategy');
 
 const MAX_LOG = 300;
 const EPSILON = 1e-8;
+const SIDES = ['UP', 'DOWN'];
 
 class Bot {
   constructor(trader, opts = {}) {
     this.trader = trader;
     this.live = !!opts.live;
+    this.demoMode = !this.live && !!(trader && trader.demoMode === true);
+    this.strategyBlocked = this.live || !this.demoMode;
     this.w = null;
     this.pending = [];
     this.trades = [];
     this.outcomes = new Map();
     this._resolveTried = new Map();
     this._warned = new Set();
-    this.stats = { wins: 0, losses: 0, takeProfitFills: 0, stopLosses: 0, expiryWins: 0, expiryLosses: 0, noEntry: 0, estimatedFees: 0, realizedPnl: 0 };
+    this.stats = {
+      wins: 0, losses: 0, takeProfitFills: 0, expiryWins: 0, expiryLosses: 0,
+      estimatedFees: 0, realizedPnl: 0,
+    };
     this.counts = { UP: 0, DOWN: 0 };
     this.walletBalance = null;
-    this.error = null;
-    this.executionHalt = false;
+    this.error = this.strategyBlocked ? 'This limit-cycle strategy is demo-only; order submission is disabled outside DemoTrader.' : null;
+    this.executionHalt = this.strategyBlocked;
     this.log = [];
     this.startedAt = Date.now();
-    this.capital = this.live ? null : cfg.DEMO_CAPITAL;
-    this.cash = this.live ? null : cfg.DEMO_CAPITAL;
+    this.capital = this.demoMode ? cfg.DEMO_CAPITAL : null;
+    this.cash = this.demoMode ? cfg.DEMO_CAPITAL : null;
     this.peak = this.capital;
     this.maxDD = 0;
     this.equity = this.capital == null ? [] : [{ ts: Date.now(), v: this.capital }];
@@ -40,8 +45,6 @@ class Bot {
     this._lastMarketEventAt = 0;
     this._lastRestFetchAt = 0;
     this._running = false;
-    this.baseShares = cfg.BASE_SHARES;
-    this.shareAdditions = 0;
   }
 
   _push(entry) {
@@ -56,7 +59,13 @@ class Bot {
   }
 
   start() {
-    if (this._running) return;
+    if (this._running || this.strategyBlocked) {
+      if (this.strategyBlocked) this._warnOnce('live-strategy-blocked', {
+        event: 'LIVE_BLOCKED',
+        note: 'The fixed limit-cycle strategy requires the DemoTrader adapter; no live order methods will be called.',
+      });
+      return;
+    }
     this._running = true;
     this._loop();
     this._priceLoop();
@@ -85,15 +94,13 @@ class Bot {
   }
 
   async _tick() {
+    if (this.strategyBlocked) return;
     const now = Date.now();
     const openTs = currentWindowOpenTs(now);
     const slug = slugForTs(openTs);
     if (!this.w || this.w.slug !== slug) {
-      if (this.w && this.w.window && !this.w.tradeTaken) this.stats.noEntry += 1;
-      this.w = {
-        slug, openTs, status: 'starting', window: null, previousMids: {}, entrySignal: null,
-        tradeTaken: false, entryInFlight: false, position: null, lastOpenAttemptAt: 0,
-      };
+      if (this.w) await this._closeWindowOrders(this.w);
+      this.w = makeWindowState(slug, openTs);
     }
     const w = this.w;
     if (!w.window) {
@@ -101,21 +108,24 @@ class Bot {
       if (result.window) {
         this.error = null;
         w.window = result.window;
-        w.status = 'entry_blocked';
-        this._push({ event: 'WINDOW_READY', slug: w.slug, note: 'BTC 5-minute market active; entry checks start immediately' });
+        w.status = 'placing_orders';
+        this._push({
+          event: 'WINDOW_READY', slug: w.slug,
+          note: 'BTC 5-minute market is active; placing independent 500-share $0.30 limit buys on UP and DOWN.',
+        });
+        await this._startWindowOrders(w);
       } else {
         this.error = result.reason || 'active market unavailable';
         w.status = 'waiting_for_market';
       }
     }
     if (!w.window) return;
-    const elapsedSeconds = (now - w.openTs * 1000) / 1000;
-    if (elapsedSeconds < cfg.ENTRY_START_SECONDS) {
-      if (!w.tradeTaken) w.status = 'entry_blocked';
+    const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
+    if (now >= closeTs * 1000) {
+      await this._closeWindowOrders(w);
       return;
     }
-    if (elapsedSeconds >= WINDOW_SECONDS) return;
-    await this._entryStep(w, elapsedSeconds);
+    if (!w.ordersStarted) await this._startWindowOrders(w);
   }
 
   async _priceLoop() {
@@ -144,7 +154,9 @@ class Bot {
     try {
       if (typeof this.trader.prepareMarket === 'function') {
         void this.trader.prepareMarket([w.window.tokenUp, w.window.tokenDown]).catch((error) => {
-          this._warnOnce('market-meta-' + w.slug, { event: 'ERROR', slug: w.slug, note: 'market metadata warm-up failed: ' + error.message });
+          this._warnOnce('market-meta-' + w.slug, {
+            event: 'ERROR', slug: w.slug, note: 'market metadata warm-up failed: ' + error.message,
+          });
         });
       }
       this._feedStop = startMarketFeed([w.window.tokenUp, w.window.tokenDown],
@@ -172,13 +184,23 @@ class Bot {
       this._onQuote(w.slug, w.window.tokenUp, quote(books[0]));
       this._onQuote(w.slug, w.window.tokenDown, quote(books[1]));
     } catch (error) {
-      this._warnOnce('seed-' + w.slug, { event: 'ERROR', slug: w.slug, note: 'CLOB quote refresh failed: ' + error.message });
+      this._warnOnce('seed-' + w.slug, {
+        event: 'ERROR', slug: w.slug, note: 'CLOB quote refresh failed: ' + error.message,
+      });
     }
   }
 
   _onQuote(slug, tokenId, update) {
     const w = this.w;
-    if (!w || w.slug !== slug || !w.window) return;
+    if (!w || w.slug !== slug || !w.window || w.closing || w.closed) return;
+    const now = Date.now();
+    const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
+    if (now >= closeTs * 1000) {
+      void this._closeWindowOrders(w).catch((error) => {
+        this._push({ event: 'ERROR', slug, note: 'window close order cancellation failed: ' + error.message });
+      });
+      return;
+    }
     const side = tokenId === w.window.tokenUp ? 'UP' : tokenId === w.window.tokenDown ? 'DOWN' : null;
     if (!side) return;
     const previous = this._quotesByToken.get(tokenId) || emptyQuote();
@@ -188,9 +210,9 @@ class Bot {
     };
     next.mid = next.bid == null || next.ask == null ? null : (next.bid + next.ask) / 2;
     this._quotesByToken.set(tokenId, next);
+    if (typeof this.trader.updateQuote === 'function') this.trader.updateQuote(tokenId, next);
     const up = this._quotesByToken.get(w.window.tokenUp) || emptyQuote();
     const down = this._quotesByToken.get(w.window.tokenDown) || emptyQuote();
-    const now = Date.now();
     this.prices = { slug, ts: now, up: { ...up }, down: { ...down } };
     this._lastMarketEventAt = now;
     if (this.error && (this.error.startsWith('CLOB WebSocket') || this.error.startsWith('CLOB quote'))) this.error = null;
@@ -208,473 +230,382 @@ class Bot {
   }
 
   async _processPriceUpdate(w, now) {
-    if (!this._running || !this.w || this.w.slug !== w.slug) return;
-    await this._managePositions();
-    const elapsed = (now - w.openTs * 1000) / 1000;
-    if (elapsed >= cfg.ENTRY_START_SECONDS && elapsed < WINDOW_SECONDS) await this._entryStep(w, elapsed);
+    if (!this._running || this.strategyBlocked || !this.w || this.w.slug !== w.slug) return;
+    const closeTs = w.window && (Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS);
+    if (closeTs && now >= closeTs * 1000) {
+      await this._closeWindowOrders(w);
+      return;
+    }
+    await this._manageCycles(w, now, true);
   }
 
-  async _entryStep(w, elapsedSeconds) {
-    if (!w.window || w.tradeTaken || w.entryInFlight || this.executionHalt) return;
-    if (elapsedSeconds < cfg.ENTRY_START_SECONDS || elapsedSeconds >= WINDOW_SECONDS) return;
-    const px = this.prices && this.prices.slug === w.slug ? this.prices : null;
-    if (!px) return;
-    const observed = strategy.observeEntry(w, { UP: px.up.mid, DOWN: px.down.mid }, elapsedSeconds, cfg);
-    if (observed.shouldBuy) {
-      w.entrySignal = { side: observed.side, direction: observed.direction };
-      w.status = 'entry_ready';
-      this._push({ event: 'ENTRY_READY', slug: w.slug, side: observed.side, shares: this.baseShares,
-        note: observed.side + ' midpoint crossed $' + cfg.ENTRY_TRIGGER_PRICE.toFixed(2) + ' ' + (observed.direction === 'up' ? 'upward' : 'downward') + '; submitting an immediate taker market order' });
-    }
-    const signal = w.entrySignal;
-    if (!signal) {
-      w.status = 'watching_for_midpoint_cross';
-      return;
-    }
-    const rawMid = signal.side === 'UP' ? px.up.mid : px.down.mid;
-    const mid = rawMid === null || rawMid === undefined ? NaN : Number(rawMid);
-    if (!Number.isFinite(mid) || mid <= 0 || mid >= 1) {
-      w.status = 'entry_waiting';
-      return;
-    }
-    const signalStillActive = signal.direction === 'up' ? mid >= cfg.ENTRY_TRIGGER_PRICE : mid <= cfg.ENTRY_TRIGGER_PRICE;
-    if (!signalStillActive) {
-      w.entrySignal = null;
-      w.status = 'watching_for_midpoint_cross';
-      return;
-    }
-    if (Date.now() - w.lastOpenAttemptAt < cfg.ENTRY_RETRY_MS) return;
-    w.lastOpenAttemptAt = Date.now();
-    const tokenId = signal.side === 'UP' ? w.window.tokenUp : w.window.tokenDown;
-    await this._fire(w, signal.side, tokenId);
-  }
-  async _fire(w, side, tokenId) {
-    if (w.tradeTaken || w.entryInFlight || this.executionHalt) return false;
-    w.entryInFlight = true;
-    w.status = 'firing';
-    const targetShares = this.baseShares;
-    this._push({ event: 'FIRING', slug: w.slug, side, shares: targetShares,
-      note: 'submitting a CLOB FAK market buy sized from the live ask book for about ' + targetShares + ' shares' });
-    try {
-      const book = await this.trader.getOrderBook(tokenId);
-      const best = quote(book);
-      if (!book || best.ask == null) {
-        w.entryInFlight = false;
-        w.status = 'entry_waiting';
-        this._push({ event: 'ENTRY_WAITING', slug: w.slug, side, shares: targetShares, note: 'order book unavailable; retrying while the crossed-side signal remains active' });
-        return false;
-      }
-      const budget = strategy.estimateMarketBuyBudget(book, targetShares);
-      if (!(budget.amount > 0) || !(budget.shares > 0)) {
-        w.entryInFlight = false;
-        w.status = 'entry_waiting';
-        this._push({ event: 'ENTRY_WAITING', slug: w.slug, side, shares: targetShares, note: 'no ask liquidity available for a market buy; retrying while the crossed-side signal remains active' });
-        return false;
-      }
-      const estimatedEntryPrice = budget.averagePrice;
-      const estimatedFee = feeForTrade(budget.shares, estimatedEntryPrice);
-      if (!this.live && budget.amount + estimatedFee > this.cash) {
-        w.entryInFlight = false;
-        w.status = 'entry_waiting';
-        this._push({ event: 'ENTRY_WAITING', slug: w.slug, side, shares: targetShares, note: 'demo balance too low for the estimated market buy and taker fee' });
-        return false;
-      }
-      const result = await this.trader.placeFakMarketOrder(tokenId, 'BUY', budget.amount);
-      let fill = strategy.normalizeMarketFill(result, 'BUY');
-      if (!(fill.shares > 0) && result && result.id && typeof this.trader.getOrder === 'function') {
-        try {
-          const order = await this.trader.getOrder(result.id);
-          fill = strategy.normalizeMarketFill({ ...result, raw: { ...(result.raw || {}), ...(order || {}) } }, 'BUY');
-        } catch (_) {}
-      }
-      if (!(fill.shares > 0) || !(fill.notional > 0)) {
-        const status = String((result && result.raw && result.raw.status) || (result && result.status) || '').toUpperCase();
-        const knownNoFill = /UNMATCHED|CANCEL|FAILED|REJECT/.test(status);
-        if (!knownNoFill && result && result.id && this.live) {
-          this.executionHalt = true;
-          w.tradeTaken = true;
-          w.status = 'entry_ambiguous';
-          this._push({ event: 'ENTRY_AMBIGUOUS', slug: w.slug, side, shares: targetShares,
-            note: 'CLOB returned an order ID without a confirmed fill; automatic entries halted to avoid duplicating an uncertain order' });
-        } else {
-          w.status = 'entry_waiting';
-          this._push({ event: 'ENTRY_WAITING', slug: w.slug, side, shares: targetShares, note: 'market order did not fill (status: ' + (status || 'unknown') + '); will retry if the trigger remains active' });
-        }
-        w.entryInFlight = false;
-        return false;
-      }
-      const shares = fill.shares;
-      const price = fill.averagePrice;
-      const entryFee = feeForTrade(shares, price);
-      const cost = fill.notional + entryFee;
-      if (!this.live && cost > this.cash + 1e-8) {
-        w.entryInFlight = false;
-        w.status = 'entry_waiting';
-        this._push({ event: 'ENTRY_WAITING', slug: w.slug, side, shares: targetShares, note: 'simulated fill plus taker fee exceeded available demo cash; no position recorded' });
-        return false;
-      }
-      if (!this.live) this.cash -= cost;
-      const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
-      const position = {
-        slug: w.slug, openTs: w.openTs, closeTs, side, tokenId,
-        shares, openShares: shares, price, entryNotional: fill.notional,
-        entryFee, exitFees: 0, cost, exitProceeds: 0, makerRebate: 0,
-        tpOrderId: null, tpOrderShares: 0, tpMatched: 0, tpSharesSold: 0,
-        stopLossHit: false, appliedSizeAdjustments: [], sizeAdjustments: [],
-        tpPlacementAmbiguous: false, lastOrderPollAt: 0, nextTpAttemptAt: 0,
-        nextStopAttemptAt: 0, stopInFlight: false, managementInFlight: false,
-        expired: false, expiryLogged: false, settled: false, firedAt: Date.now(), status: 'open',
-      };
-      this.pending.push(position);
-      w.position = position;
-      w.tradeTaken = true;
-      w.entryInFlight = false;
-      w.status = 'open_position';
-      this._push({ event: 'ENTRY_FILLED', slug: w.slug, side, shares: round(shares, 4), price: round(price, 4),
-        note: 'taker market buy filled ' + round(shares, 4) + ' shares at average $' + round(price, 4) + '; estimated taker fee $' + round(entryFee, 3) });
-      await this._managePosition(position);
-      return true;
-    } catch (error) {
-      w.entryInFlight = false;
-      if (this.live) {
-        this.executionHalt = true;
-        w.tradeTaken = true;
-        w.status = 'entry_ambiguous';
-        this._push({ event: 'ENTRY_AMBIGUOUS', slug: w.slug, side, shares: targetShares,
-          note: 'market-order request failed after submission began; automatic entries halted until the wallet/order state is reconciled: ' + error.message });
-      } else {
-        w.status = 'entry_waiting';
-        this._push({ event: 'ENTRY_WAITING', slug: w.slug, side, shares: targetShares, note: 'demo market order failed: ' + error.message });
-      }
-      return false;
-    }
+  async _startWindowOrders(w) {
+    if (!w || !w.window || w.ordersStarted || w.closing || w.closed || this.strategyBlocked) return;
+    w.ordersStarted = true;
+    await Promise.all(SIDES.map((side) => this._ensureCycle(w, side, Date.now())));
+    this._updateWindowStatus(w);
   }
 
   async _managePositions() {
-    for (const position of this.pending.slice()) await this._managePosition(position);
-  }
-
-  async _managePosition(position) {
-    if (!position || position.settled || position.managementInFlight) return;
-    position.managementInFlight = true;
-    try {
-      const now = Date.now();
-      if (position.stopExecutionAmbiguous) return;
-      if (now >= position.closeTs * 1000) {
-        if (position.tpOrderId) {
-          const safe = await this._cancelTakeProfit(position);
-          if (!safe) return;
-        }
-        if (position.openShares <= EPSILON) {
-          this._finalizePosition(position, 'WIN', 'TAKE_PROFIT');
-          return;
-        }
-        position.expired = true;
-        position.status = 'awaiting_resolution';
-        if (!position.expiryLogged) {
-          position.expiryLogged = true;
-          this._push({ event: 'EXPIRY_HOLD', slug: position.slug, side: position.side, shares: round(position.openShares, 4),
-            note: 'no full TP or stop exit before the five-minute close; canceled the resting maker order and holding remaining shares to official resolution' });
-        }
-        return;
-      }
-
-      if (position.tpPlacementAmbiguous) {
-        const reconciled = await this._reconcileAmbiguousTakeProfit(position);
-        if (!reconciled) return;
-      }
-      const px = this.prices && this.prices.slug === position.slug ? this.prices : null;
-      const sideQuote = px ? (position.side === 'UP' ? px.up : px.down) : null;
-      const bid = sideQuote ? sideQuote.bid : null;
-      if (position.tpOrderId && now - position.lastOrderPollAt >= cfg.ORDER_STATUS_POLL_MS) {
-        position.lastOrderPollAt = now;
-        await this._refreshTakeProfit(position);
-      }
-      if (position.openShares <= EPSILON) {
-        this._finalizePosition(position, 'WIN', 'TAKE_PROFIT');
-        return;
-      }
-      if (bid != null && bid <= cfg.STOP_LOSS_PRICE && now >= position.nextStopAttemptAt) {
-        await this._stopPosition(position, bid);
-        return;
-      }
-      if (!position.tpOrderId && !position.tpPlacementAmbiguous && now >= position.nextTpAttemptAt) {
-        await this._placeTakeProfit(position, bid);
-      }
-    } catch (error) {
-      this._push({ event: 'ERROR', slug: position.slug, note: 'position management failed: ' + error.message });
-    } finally {
-      position.managementInFlight = false;
-    }
-  }
-
-  async _placeTakeProfit(position, bestBid) {
-    if (position.openShares <= EPSILON || position.tpOrderId || position.tpPlacementAmbiguous) return;
-    if (bestBid != null && bestBid >= cfg.TAKE_PROFIT_PRICE) {
-      position.nextTpAttemptAt = Date.now() + 500;
+    if (this.strategyBlocked || !this.w || !this.w.window) return;
+    const now = Date.now();
+    const closeTs = Number(this.w.window.closeTs) || this.w.openTs + WINDOW_SECONDS;
+    if (now >= closeTs * 1000) {
+      await this._closeWindowOrders(this.w);
       return;
     }
-    position.nextTpAttemptAt = Date.now() + 1000;
+    await this._manageCycles(this.w, now);
+  }
+
+  async _manageCycles(w, now = Date.now(), forcePoll = false) {
+    if (this.strategyBlocked || !w || !w.window || w.closing || w.closed) return;
+    const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
+    if (now >= closeTs * 1000) {
+      await this._closeWindowOrders(w);
+      return;
+    }
+    await Promise.all(SIDES.map((side) => this._ensureCycle(w, side, now, forcePoll)));
+    if (!w.closing && !w.closed) {
+      await Promise.all(SIDES.filter((side) => !w.sides[side].active)
+        .map((side) => this._ensureCycle(w, side, Date.now(), forcePoll)));
+    }
+    this._updateWindowStatus(w);
+  }
+
+  async _ensureCycle(w, side, now, forcePoll = false) {
+    const sideState = w.sides[side];
+    if (sideState.inFlight || w.closing || w.closed) return;
+    if (!sideState.active) {
+      sideState.cycleNumber += 1;
+      sideState.active = {
+        number: sideState.cycleNumber,
+        status: 'buy_pending',
+        entryOrderId: null,
+        entryMatched: 0,
+        entryInFlight: false,
+        position: null,
+        tpOrderId: null,
+        tpOrderShares: 0,
+        tpMatched: 0,
+        lastPollAt: 0,
+        nextEntryAttemptAt: 0,
+      };
+    }
+    const cycle = sideState.active;
+    sideState.inFlight = true;
     try {
-      const order = await this.trader.placeGtcOrder(position.tokenId, 'SELL', cfg.TAKE_PROFIT_PRICE, position.openShares);
-      if (!order || !order.id) throw new Error('maker order returned no order ID');
-      position.tpOrderId = order.id;
-      position.tpOrderShares = position.openShares;
-      position.tpMatched = 0;
-      position.lastOrderPollAt = 0;
-      position.status = 'tp_resting';
-      this._push({ event: 'TP_PLACED', slug: position.slug, side: position.side, shares: round(position.openShares, 4),
-        note: 'post-only GTC take-profit resting at $' + cfg.TAKE_PROFIT_PRICE.toFixed(2) + ' for ' + round(position.openShares, 4) + ' shares' });
-    } catch (error) {
-      position.tpPlacementAmbiguous = this.live;
-      position.status = this.live ? 'tp_placement_ambiguous' : 'open_position';
-      this._push({ event: this.live ? 'TP_AMBIGUOUS' : 'ERROR', slug: position.slug, side: position.side,
-        note: 'could not confirm maker-only take-profit order; ' + (this.live ? 'automatic position actions are paused to avoid a duplicate or over-sell' : error.message) });
+      if (!cycle.entryOrderId) {
+        if (now < cycle.nextEntryAttemptAt) return;
+        await this._placeEntryOrder(w, sideState, cycle, now);
+      }
+      if (cycle.entryOrderId) {
+        await this._refreshEntryOrder(w, sideState, cycle, now, forcePoll);
+      }
+      if (cycle.position && cycle.position.openShares > EPSILON) {
+        const hadTpOrder = !!cycle.tpOrderId;
+        if (!hadTpOrder) await this._placeTakeProfit(w, sideState, cycle, now);
+        if (cycle.tpOrderId) await this._refreshTakeProfit(w, sideState, cycle, now, forcePoll || !hadTpOrder);
+      }
+    } finally {
+      sideState.inFlight = false;
     }
   }
 
-  async _refreshTakeProfit(position) {
-    if (!position.tpOrderId) return null;
-    let order;
-    try { order = await this.trader.getOrder(position.tpOrderId); }
-    catch (_) { return null; }
-    if (!order) return null;
-    const matchedRaw = order.size_matched ?? order.sizeMatched ?? order.filled_size ?? order.filledSize;
-    let cumulative = Number(matchedRaw);
-    const state = String(order.status || order.state || '').toUpperCase();
-    if (!(cumulative >= 0)) cumulative = 0;
-    if ((state === 'MATCHED' || state === 'FILLED') && cumulative <= 0) cumulative = position.tpOrderShares;
-    cumulative = Math.min(position.tpOrderShares, cumulative);
-    const delta = Math.min(position.openShares, Math.max(0, cumulative - position.tpMatched));
-    if (delta > EPSILON) {
-      position.tpMatched += delta;
-      position.tpSharesSold += delta;
-      position.openShares = Math.max(0, position.openShares - delta);
-      const fillPrice = Number(order.avg_fill_price || order.avgPrice || order.price) || cfg.TAKE_PROFIT_PRICE;
-      const proceeds = delta * fillPrice;
-      const rebate = delta * cfg.MAKER_REBATE_PER_SHARE;
-      position.exitProceeds += proceeds;
-      position.makerRebate += rebate;
-      if (!this.live) this.cash += proceeds + rebate;
-      this.stats.takeProfitFills += 1;
-      this._applySizeAdjustment(position, 'WIN');
-      this._push({ event: 'TP_FILL', slug: position.slug, side: position.side, shares: round(delta, 4), price: round(fillPrice, 4),
-        note: 'maker TP filled ' + round(delta, 4) + ' shares at $' + round(fillPrice, 4) + '; TP counts as a $1/share win for strategy sizing' });
+  async _placeEntryOrder(w, sideState, cycle, now) {
+    if (this.strategyBlocked || !w.window || w.closing || w.closed || cycle.entryInFlight) return;
+    cycle.entryInFlight = true;
+    cycle.nextEntryAttemptAt = now + cfg.ENTRY_RETRY_MS;
+    const tokenId = sideState.side === 'UP' ? w.window.tokenUp : w.window.tokenDown;
+    try {
+      const order = await this.trader.placeGtcOrder(tokenId, 'BUY', cfg.ENTRY_LIMIT_PRICE, cfg.BASE_SHARES);
+      if (!order || !order.id) throw new Error('demo GTC buy returned no order ID');
+      cycle.entryOrderId = order.id;
+      cycle.status = 'buy_resting';
+      cycle.lastPollAt = 0;
+      this._push({
+        event: 'BUY_LIMIT_PLACED', slug: w.slug, side: sideState.side, shares: cfg.BASE_SHARES,
+        note: 'GTC limit BUY placed at $' + cfg.ENTRY_LIMIT_PRICE.toFixed(2) + ' for exactly ' + cfg.BASE_SHARES + ' shares.',
+      });
+    } catch (error) {
+      cycle.status = 'buy_retry';
+      this._push({
+        event: 'BUY_LIMIT_RETRY', slug: w.slug, side: sideState.side, shares: cfg.BASE_SHARES,
+        note: 'could not place demo limit BUY; retrying while the five-minute window is open: ' + error.message,
+      });
+    } finally {
+      cycle.entryInFlight = false;
     }
-    if (['CANCELED', 'CANCELLED', 'UNMATCHED', 'EXPIRED'].includes(state)) {
-      position.tpOrderId = null;
-      position.tpOrderShares = 0;
-      position.tpMatched = 0;
-      position.tpPlacementAmbiguous = false;
-      position.nextTpAttemptAt = Date.now() + 500;
+  }
+
+  async _refreshEntryOrder(w, sideState, cycle, now, force = false) {
+    if (!cycle.entryOrderId || cycle.position) return;
+    if (!force && now - cycle.lastPollAt < cfg.ORDER_STATUS_POLL_MS) return;
+    cycle.lastPollAt = now;
+    let order;
+    try { order = await this.trader.getOrder(cycle.entryOrderId); }
+    catch (error) {
+      this._warnOnce('entry-poll-' + cycle.entryOrderId, {
+        event: 'ERROR', slug: w.slug, side: sideState.side, note: 'entry order status lookup failed: ' + error.message,
+      });
+      return;
+    }
+    if (!order) return;
+    const state = orderState(order);
+    const matched = matchedShares(order, cfg.BASE_SHARES);
+    const filled = matched >= cfg.BASE_SHARES - EPSILON || (['MATCHED', 'FILLED'].includes(state) && matched <= EPSILON);
+    if (filled) {
+      this._recordEntryFill(w, sideState, cycle, cfg.BASE_SHARES);
+      return;
+    }
+    if (['CANCELED', 'CANCELLED', 'UNMATCHED', 'EXPIRED', 'REJECTED'].includes(state)) {
+      cycle.entryOrderId = null;
+      cycle.status = 'buy_retry';
+      cycle.nextEntryAttemptAt = now + cfg.ENTRY_RETRY_MS;
+    }
+  }
+
+  _recordEntryFill(w, sideState, cycle, shares) {
+    if (cycle.position || !(shares > 0)) return;
+    const price = cfg.ENTRY_LIMIT_PRICE;
+    const notional = shares * price;
+    const position = {
+      slug: w.slug, openTs: w.openTs,
+      closeTs: Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS,
+      side: sideState.side,
+      tokenId: sideState.side === 'UP' ? w.window.tokenUp : w.window.tokenDown,
+      cycle: cycle.number,
+      shares, openShares: shares, price,
+      entryNotional: notional, entryFee: 0, exitFees: 0, cost: notional,
+      exitProceeds: 0, makerRebate: 0, tpSharesSold: 0,
+      status: 'open_position', firedAt: Date.now(), settled: false,
+      expiryLogged: false, settlementTimedOut: false,
+    };
+    cycle.position = position;
+    cycle.entryMatched = shares;
+    cycle.status = 'position_open';
+    this.pending.push(position);
+    this.cash -= notional;
+    this._push({
+      event: 'BUY_LIMIT_FILLED', slug: w.slug, side: sideState.side, shares: round(shares, 4), price,
+      note: 'demo best ask touched $' + cfg.ENTRY_LIMIT_PRICE.toFixed(2) + '; counted all ' + shares + ' shares as filled, without using visible depth.',
+    });
+  }
+
+  async _placeTakeProfit(w, sideState, cycle, now) {
+    if (this.strategyBlocked || !cycle.position || cycle.position.openShares <= EPSILON || cycle.tpOrderId || w.closing || w.closed) return;
+    cycle.lastPollAt = now;
+    try {
+      const order = await this.trader.placeGtcOrder(
+        cycle.position.tokenId, 'SELL', cfg.TAKE_PROFIT_PRICE, cycle.position.openShares,
+      );
+      if (!order || !order.id) throw new Error('demo GTC take-profit returned no order ID');
+      cycle.tpOrderId = order.id;
+      cycle.tpOrderShares = cycle.position.openShares;
+      cycle.tpMatched = 0;
+      cycle.position.tpOrderId = order.id;
+      cycle.position.status = 'tp_resting';
+      cycle.status = 'tp_resting';
+      this._push({
+        event: 'TP_LIMIT_PLACED', slug: w.slug, side: sideState.side, shares: round(cycle.position.openShares, 4),
+        note: 'GTC limit SELL placed at $' + cfg.TAKE_PROFIT_PRICE.toFixed(2) + ' for acquired shares.',
+      });
+    } catch (error) {
+      cycle.status = 'tp_retry';
+      cycle.position.status = 'open_position';
+      this._push({
+        event: 'TP_LIMIT_RETRY', slug: w.slug, side: sideState.side,
+        note: 'could not place demo take-profit limit; retrying while the window is open: ' + error.message,
+      });
+    }
+  }
+
+  async _refreshTakeProfit(w, sideState, cycle, now, force = false) {
+    if (!cycle.tpOrderId || !cycle.position) return null;
+    if (!force && now - cycle.lastPollAt < cfg.ORDER_STATUS_POLL_MS) return null;
+    cycle.lastPollAt = now;
+    let order;
+    try { order = await this.trader.getOrder(cycle.tpOrderId); }
+    catch (error) {
+      this._warnOnce('tp-poll-' + cycle.tpOrderId, {
+        event: 'ERROR', slug: w.slug, side: sideState.side, note: 'take-profit order status lookup failed: ' + error.message,
+      });
+      return null;
+    }
+    if (!order) return null;
+    const state = orderState(order);
+    let matched = matchedShares(order, cycle.tpOrderShares);
+    if (['MATCHED', 'FILLED'].includes(state) && matched <= EPSILON) matched = cycle.tpOrderShares;
+    const delta = Math.min(cycle.position.openShares, Math.max(0, matched - cycle.tpMatched));
+    if (delta > EPSILON) {
+      cycle.tpMatched += delta;
+      cycle.position.openShares = Math.max(0, cycle.position.openShares - delta);
+      cycle.position.tpSharesSold += delta;
+      const proceeds = delta * cfg.TAKE_PROFIT_PRICE;
+      const rebate = delta * cfg.MAKER_REBATE_PER_SHARE;
+      cycle.position.exitProceeds += proceeds;
+      cycle.position.makerRebate += rebate;
+      this.cash += proceeds + rebate;
+      this.stats.takeProfitFills += 1;
+      this._push({
+        event: 'TP_LIMIT_FILLED', slug: w.slug, side: sideState.side,
+        shares: round(delta, 4), price: cfg.TAKE_PROFIT_PRICE,
+        note: 'demo best bid touched $' + cfg.TAKE_PROFIT_PRICE.toFixed(2) + '; counted all ' + round(delta, 4) + ' resting TP shares as filled.',
+      });
+    }
+    if (['CANCELED', 'CANCELLED', 'UNMATCHED', 'EXPIRED', 'REJECTED'].includes(state)) {
+      cycle.tpOrderId = null;
+      cycle.tpOrderShares = 0;
+      cycle.tpMatched = 0;
+      if (cycle.position.openShares > EPSILON) {
+        cycle.status = 'position_open';
+        cycle.position.status = 'open_position';
+      }
+    }
+    if (cycle.position.openShares <= EPSILON) {
+      const completed = cycle.position;
+      this._finalizePosition(completed, 'WIN', 'TAKE_PROFIT');
+      cycle.position = null;
+      cycle.tpOrderId = null;
+      cycle.status = 'cycle_complete';
+      sideState.active = null;
+      this._push({
+        event: 'SIDE_REARM', slug: w.slug, side: sideState.side,
+        note: 'this side fully TP-closed; re-placing its independent 500-share $0.30 buy limit for the rest of the window.',
+      });
+      const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
+      if (!w.closing && !w.closed && Date.now() < closeTs * 1000) {
+        await this._ensureCycle(w, sideState.side, Date.now());
+      }
     }
     return { order, state };
   }
 
-  async _reconcileAmbiguousTakeProfit(position) {
-    if (!position.tpPlacementAmbiguous) return true;
-    try {
-      if (typeof this.trader.getOpenOrders === 'function') {
-        const orders = await this.trader.getOpenOrders();
-        const matches = (Array.isArray(orders) ? orders : []).filter((order) =>
-          String(order.asset_id || order.assetId || '') === String(position.tokenId)
-          && String(order.side || '').toUpperCase() === 'SELL'
-          && Math.abs(Number(order.price) - cfg.TAKE_PROFIT_PRICE) < 1e-8);
-        if (matches.length === 1) {
-          const order = matches[0];
-          position.tpOrderId = order.id || order.orderID || null;
-          if (!position.tpOrderId) return false;
-          position.tpOrderShares = Number(order.original_size || order.size) || position.openShares;
-          position.tpMatched = 0;
-          position.tpPlacementAmbiguous = false;
-          await this._refreshTakeProfit(position);
-          return true;
-        }
-      }
-      if (typeof this.trader.cancelMarketOrders !== 'function') return false;
-      await this.trader.cancelMarketOrders(position.tokenId);
-      if (typeof this.trader.getOpenOrders === 'function') {
-        const remaining = await this.trader.getOpenOrders();
-        const matchingOpen = (Array.isArray(remaining) ? remaining : []).some((order) =>
-          String(order.asset_id || order.assetId || '') === String(position.tokenId)
-          && String(order.side || '').toUpperCase() === 'SELL'
-          && Math.abs(Number(order.price) - cfg.TAKE_PROFIT_PRICE) < 1e-8);
-        if (matchingOpen) return false;
-      }
-      if (typeof this.trader.getTokenBalance === 'function') {
-        const balance = await this.trader.getTokenBalance(position.tokenId);
-        if (Number.isFinite(balance)) {
-          const before = position.openShares;
-          const remaining = Math.min(before, Math.max(0, balance));
-          const sold = before - remaining;
-          if (sold > EPSILON) {
-            const proceeds = sold * cfg.TAKE_PROFIT_PRICE;
-            const rebate = sold * cfg.MAKER_REBATE_PER_SHARE;
-            position.tpSharesSold += sold;
-            position.openShares = remaining;
-            position.exitProceeds += proceeds;
-            position.makerRebate += rebate;
-            if (!this.live) this.cash += proceeds + rebate;
-            this._applySizeAdjustment(position, 'WIN');
+  async _closeWindowOrders(w) {
+    if (!w || !w.window || w.closed || w.closing) {
+      if (w && !w.window) w.closed = true;
+      return;
+    }
+    w.closing = true;
+    w.status = 'closing_orders';
+    for (const side of SIDES) {
+      const sideState = w.sides[side];
+      const cycle = sideState.active;
+      if (!cycle) continue;
+      await this._refreshEntryOrder(w, sideState, cycle, Date.now(), true);
+      if (cycle.entryOrderId) {
+        await this._cancelAndRefresh(cycle.entryOrderId, () => this._refreshEntryOrder(w, sideState, cycle, Date.now(), true), w, side);
+        if (!cycle.position) {
+          const state = await this._readOrderState(cycle.entryOrderId);
+          if (state && ['CANCELED', 'CANCELLED', 'UNMATCHED', 'EXPIRED'].includes(orderState(state))) {
+            cycle.entryOrderId = null;
           }
         }
       }
-      position.tpPlacementAmbiguous = false;
-      position.tpOrderId = null;
-      position.tpOrderShares = 0;
-      position.tpMatched = 0;
-      return true;
-    } catch (error) {
-      this._warnOnce('tp-reconcile-' + position.slug, { event: 'ERROR', slug: position.slug,
-        note: 'could not reconcile/cancel uncertain TP order: ' + error.message });
-      return false;
+      if (cycle.tpOrderId) {
+        await this._refreshTakeProfit(w, sideState, cycle, Date.now(), true);
+        if (cycle.tpOrderId) {
+          await this._cancelAndRefresh(cycle.tpOrderId,
+            () => this._refreshTakeProfit(w, sideState, cycle, Date.now(), true), w, side);
+        }
+      }
+      if (cycle.position && cycle.position.openShares > EPSILON) {
+        cycle.position.status = 'awaiting_resolution';
+        if (!cycle.position.expiryLogged) {
+          cycle.position.expiryLogged = true;
+          this._push({
+            event: 'EXPIRY_HOLD', slug: w.slug, side, shares: round(cycle.position.openShares, 4),
+            note: 'window closed; canceled resting entry/TP orders and holding remaining shares for the official Polymarket resolution.',
+          });
+        }
+        cycle.status = 'awaiting_resolution';
+      } else if (!cycle.position) {
+        cycle.status = 'window_closed';
+      }
+    }
+    w.closed = true;
+    w.closing = false;
+    w.status = this.pending.some((position) => position.openTs === w.openTs && !position.settled)
+      ? 'awaiting_resolution' : 'window_closed';
+    this._push({
+      event: 'WINDOW_CLOSED', slug: w.slug,
+      note: 'window ended; no new orders will be placed and any unresolved shares await the official market result.',
+    });
+  }
+
+  async _cancelAndRefresh(orderId, refresh, w, side) {
+    try { await this.trader.cancelOrder(orderId); }
+    catch (error) {
+      this._push({ event: 'CANCEL_WARNING', slug: w.slug, side, note: 'cancel request failed for resting order: ' + error.message });
+    }
+    try { await refresh(); }
+    catch (error) {
+      this._push({ event: 'CANCEL_WARNING', slug: w.slug, side, note: 'could not refresh order after cancellation: ' + error.message });
     }
   }
 
-  async _cancelTakeProfit(position) {
-    if (position.tpPlacementAmbiguous) {
-      const resolved = await this._reconcileAmbiguousTakeProfit(position);
-      if (!resolved) return false;
-    }
-    if (!position.tpOrderId) return true;
-    const id = position.tpOrderId;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try { await this.trader.cancelOrder(id); } catch (_) {}
-      const refreshed = await this._refreshTakeProfit(position);
-      if (position.openShares <= EPSILON) return true;
-      if (position.tpOrderId !== id) return true;
-      const state = refreshed && refreshed.state;
-      if (state && !['LIVE', 'OPEN', 'DELAYED', 'PENDING'].includes(state)) {
-        position.tpOrderId = null;
-        position.tpOrderShares = 0;
-        position.tpMatched = 0;
-        return true;
-      }
-    }
-    this._push({ event: 'CANCEL_PENDING', slug: position.slug, side: position.side,
-      note: 'maker TP cancellation is not confirmed; holding off on a market sell to prevent selling shares twice' });
-    return false;
+  async _readOrderState(id) {
+    try { return await this.trader.getOrder(id); } catch (_) { return null; }
   }
 
-  async _stopPosition(position, triggerBid) {
-    if (position.stopInFlight || position.openShares <= EPSILON) return;
-    position.stopInFlight = true;
-    try {
-      if (position.tpOrderId || position.tpPlacementAmbiguous) {
-        const canceled = await this._cancelTakeProfit(position);
-        if (!canceled) { position.nextStopAttemptAt = Date.now() + 500; return; }
-      }
-      if (position.openShares <= EPSILON) {
-        this._finalizePosition(position, 'WIN', 'TAKE_PROFIT');
-        return;
-      }
-      if (!position.stopLossHit) {
-        position.stopLossHit = true;
-        this.stats.stopLosses += 1;
-        this._applySizeAdjustment(position, 'STOP_LOSS');
-      }
-      const requestedShares = position.openShares;
-      this._push({ event: 'STOP_TRIGGERED', slug: position.slug, side: position.side, shares: round(position.openShares, 4), price: triggerBid,
-        note: 'best bid reached $' + round(triggerBid, 3) + ' (stop $' + cfg.STOP_LOSS_PRICE.toFixed(2) + '); submitting a taker market sell' });
-      let result;
-      try { result = await this.trader.placeFakMarketOrder(position.tokenId, 'SELL', requestedShares); }
-      catch (error) {
-        if (this.live) this.executionHalt = true;
-        position.status = 'stop_exit_ambiguous';
-        position.stopExecutionAmbiguous = true;
-        position.nextStopAttemptAt = Number.MAX_SAFE_INTEGER;
-        this._push({ event: 'STOP_AMBIGUOUS', slug: position.slug, side: position.side, shares: round(requestedShares, 4),
-          note: 'market-sell result is uncertain; no automatic retry until the order state is reconciled: ' + error.message });
-        return;
-      }
-      const fill = strategy.normalizeMarketFill(result, 'SELL');
-      if (!(fill.shares > 0) || !(fill.notional > 0)) {
-        position.nextStopAttemptAt = Date.now() + 500;
-        this._push({ event: 'STOP_NO_FILL', slug: position.slug, side: position.side, shares: round(requestedShares, 4),
-          note: 'stop market order did not fill; will retry while the position remains open' });
-        return;
-      }
-      const shares = Math.min(requestedShares, fill.shares);
-      const avgPrice = fill.notional / fill.shares;
-      const proceeds = fill.notional * (shares / fill.shares);
-      const fee = feeForTrade(shares, avgPrice);
-      position.exitFees += fee;
-      position.exitProceeds += proceeds - fee;
-      position.openShares = Math.max(0, position.openShares - shares);
-      if (!this.live) this.cash += proceeds - fee;
-      position.status = position.openShares <= EPSILON ? 'stop_closed' : 'stop_exit_partial';
-      this._push({ event: 'STOP_FILLED', slug: position.slug, side: position.side, shares: round(shares, 4), price: round(avgPrice, 4),
-        note: 'taker stop exit filled ' + round(shares, 4) + ' shares at average $' + round(avgPrice, 4) + '; next-window size adjusted after the stop hit' });
-      if (position.openShares <= EPSILON) this._finalizePosition(position, 'LOSS', 'STOP_LOSS');
-      else position.nextStopAttemptAt = Date.now() + 500;
-    } finally {
-      position.stopInFlight = false;
-    }
-  }
-
-  _applySizeAdjustment(position, outcome) {
-    if (!position.appliedSizeAdjustments) position.appliedSizeAdjustments = [];
-    if (position.appliedSizeAdjustments.includes(outcome)) return;
-    position.appliedSizeAdjustments.push(outcome);
-    const before = this.baseShares;
-    this.baseShares = strategy.adjustBaseShares(this.baseShares, outcome, cfg);
-    this.shareAdditions = strategy.additionCount(this.baseShares, cfg);
-    position.sizeAdjustments.push({ outcome, before, after: this.baseShares });
-    this._push({ event: 'SIZE_ADJUSTED', slug: position.slug, side: position.side, shares: this.baseShares,
-      note: outcome + ': next-window size ' + before + ' → ' + this.baseShares + ' shares (' + this.shareAdditions + '/' + cfg.MAX_SHARE_ADDITIONS + ' additions)' });
+  _updateWindowStatus(w) {
+    if (!w || w.closed || w.closing) return;
+    const states = SIDES.map((side) => w.sides[side].active && w.sides[side].active.status);
+    if (this.pending.some((position) => position.openTs === w.openTs && !position.settled)) w.status = 'positions_active';
+    else if (states.some((state) => state && state.startsWith('buy'))) w.status = 'buy_limits_resting';
+    else w.status = 'orders_active';
   }
 
   async _settlementLoop() {
     while (this._running) {
       await sleep(cfg.SETTLEMENT_POLL_MS);
-      const now = Date.now();
-      for (const position of this.pending.slice()) {
-        if (position.settled || now < position.closeTs * 1000 || position.managementInFlight || position.stopExecutionAmbiguous) continue;
-        position.managementInFlight = true;
-        try {
-          if (position.tpOrderId || position.tpPlacementAmbiguous) {
-            const safe = await this._cancelTakeProfit(position);
-            if (!safe) continue;
-          }
-          if (position.openShares <= EPSILON) {
-            this._finalizePosition(position, 'WIN', 'TAKE_PROFIT');
-            continue;
-          }
-          const prior = this.outcomes.get(position.openTs);
-          let winner = prior && prior.winner;
-          const lastTried = this._resolveTried.get(position.openTs) || 0;
-          if (!winner && now - lastTried >= cfg.RESOLUTION_RETRY_MS) {
-            this._resolveTried.set(position.openTs, now);
-            try { winner = await fetchResolution(position.slug); }
-            catch (error) {
-              this._warnOnce('resolution-' + position.openTs, { event: 'ERROR', slug: position.slug, note: 'official result lookup failed: ' + error.message });
-            }
-            if (winner) this._recordOutcome(position.openTs, position.slug, winner, 'official');
-          }
-          if (winner) {
-            const payout = winner === position.side ? position.openShares : 0;
-            if (!this.live) this.cash += payout;
-            position.exitProceeds += payout;
-            position.openShares = 0;
-            position.resolutionPayout = payout;
-            const outcome = winner === position.side ? 'WIN' : 'LOSS';
-            if (outcome === 'WIN') {
-              this.stats.expiryWins += 1;
-              this._applySizeAdjustment(position, 'WIN');
-            } else {
-              this.stats.expiryLosses += 1;
-            }
-            this._finalizePosition(position, outcome, 'RESOLUTION', winner);
-            this._resolveTried.delete(position.openTs);
-          } else if (now - position.firedAt > cfg.SETTLEMENT_GIVE_UP_MS && !position.settlementTimedOut) {
-            position.settlementTimedOut = true;
-            this._push({ event: 'SETTLEMENT_TIMEOUT', slug: position.slug, side: position.side, shares: round(position.openShares, 4),
-              note: 'official result is still pending; position remains open and resolution checks continue' });
-          }
-        } finally {
-          position.managementInFlight = false;
-        }
+      await this._settleClosedPositions(Date.now());
+    }
+  }
+
+  async _settleClosedPositions(now = Date.now()) {
+    for (const position of this.pending.slice()) {
+      if (position.settled || now < position.closeTs * 1000) continue;
+      if (this.w && this.w.openTs === position.openTs && !this.w.closed) {
+        if (this.w.closing) continue;
+        await this._closeWindowOrders(this.w);
       }
+      const prior = this.outcomes.get(position.openTs);
+      let winner = prior && prior.winner;
+      const lastTried = this._resolveTried.get(position.openTs) || 0;
+      if (!winner && now - lastTried >= cfg.RESOLUTION_RETRY_MS) {
+        this._resolveTried.set(position.openTs, now);
+        try {
+          // Preserve the official-resolution filter: fetchResolution returns a side only
+          // when Gamma says closed=true and an outcome price is decisive (>= 0.99).
+          winner = await fetchResolution(position.slug);
+        } catch (error) {
+          this._warnOnce('resolution-' + position.openTs, {
+            event: 'ERROR', slug: position.slug, note: 'official result lookup failed: ' + error.message,
+          });
+        }
+        if (winner) this._recordOutcome(position.openTs, position.slug, winner, 'official');
+      }
+      if (winner !== 'UP' && winner !== 'DOWN') {
+        if (now - position.firedAt > cfg.SETTLEMENT_GIVE_UP_MS && !position.settlementTimedOut) {
+          position.settlementTimedOut = true;
+          this._push({
+            event: 'SETTLEMENT_TIMEOUT', slug: position.slug, side: position.side,
+            shares: round(position.openShares, 4),
+            note: 'official result is still pending; position remains open and resolution checks continue.',
+          });
+        }
+        continue;
+      }
+      const payout = winner === position.side ? position.openShares : 0;
+      this.cash += payout;
+      position.exitProceeds += payout;
+      position.openShares = 0;
+      position.resolutionPayout = payout;
+      const outcome = winner === position.side ? 'WIN' : 'LOSS';
+      if (outcome === 'WIN') this.stats.expiryWins += 1;
+      else this.stats.expiryLosses += 1;
+      this._finalizePosition(position, outcome, 'RESOLUTION', winner);
+      this._resolveTried.delete(position.openTs);
     }
   }
 
@@ -683,8 +614,10 @@ class Bot {
     this.outcomes.set(openTs, { winner, source, price: 1, loser: 0 });
     this.counts[winner] = (this.counts[winner] || 0) + 1;
     if (this.outcomes.size > 60) this.outcomes.delete(this.outcomes.keys().next().value);
-    this._push({ event: 'OUTCOME', slug, side: winner,
-      note: 'official Polymarket resolution: ' + winner + ' won ($1/share); ' + (winner === 'UP' ? 'DOWN' : 'UP') + ' lost ($0/share)' });
+    this._push({
+      event: 'OUTCOME', slug, side: winner,
+      note: 'official Polymarket resolution: ' + winner + ' won ($1/share); ' + (winner === 'UP' ? 'DOWN' : 'UP') + ' lost ($0/share).',
+    });
   }
 
   _finalizePosition(position, outcome, reason, winner = null) {
@@ -692,49 +625,42 @@ class Bot {
     position.settled = true;
     position.status = 'closed';
     const pnl = position.exitProceeds + (position.makerRebate || 0) - position.cost;
-    const baseBefore = position.sizeAdjustments.length ? position.sizeAdjustments[0].before : this.baseShares;
     this.stats.realizedPnl += pnl;
     this.stats.estimatedFees += position.entryFee + position.exitFees;
-    if (outcome === 'WIN') this.stats.wins += 1; else this.stats.losses += 1;
+    if (outcome === 'WIN') this.stats.wins += 1;
+    else this.stats.losses += 1;
     const trade = {
       slug: position.slug, openTs: position.openTs, side: position.side,
-      winner: winner || (reason === 'TAKE_PROFIT' ? position.side : null), outcome, reason,
-      shares: position.shares, tpShares: position.tpSharesSold || 0,
+      winner: winner || (reason === 'TAKE_PROFIT' ? position.side : null),
+      outcome, reason, shares: position.shares, tpShares: position.tpSharesSold || 0,
       entryPrice: round(position.price, 4), price: round(position.price, 4),
       entryNotional: round(position.entryNotional, 4), cost: round(position.cost, 4),
       fee: round(position.entryFee + position.exitFees, 4), rebate: round(position.makerRebate || 0, 4),
       proceeds: round(position.exitProceeds, 4), pnl: round(pnl, 2),
-      outcomeValuePerShare: reason === 'TAKE_PROFIT' ? 1 : (reason === 'RESOLUTION' && outcome === 'WIN' ? 1 : null),
-      baseSharesBefore: baseBefore, baseSharesAfter: this.baseShares,
-      additionsAfter: this.shareAdditions, ts: Date.now(),
+      outcomeValuePerShare: reason === 'TAKE_PROFIT' ? cfg.TAKE_PROFIT_PRICE : (reason === 'RESOLUTION' && outcome === 'WIN' ? 1 : null),
+      ts: Date.now(),
     };
     this.trades.push(trade);
     if (this.trades.length > 200) this.trades.shift();
     this.pending = this.pending.filter((item) => item !== position);
-    if (this.w && this.w.openTs === position.openTs) this.w.status = 'settled';
-    if (this.capital != null) {
-      const equity = this.live && this.walletBalance != null ? this.walletBalance : this.cash;
-      if (equity != null) {
-        this.equity.push({ ts: Date.now(), v: round(equity, 2) });
-        if (this.equity.length > 500) this.equity.shift();
-        this.peak = Math.max(this.peak == null ? equity : this.peak, equity);
-        this.maxDD = Math.max(this.maxDD, this.peak - equity);
-      }
-    }
     const event = outcome === 'WIN' ? 'SETTLED_WIN' : 'SETTLED_LOSS';
-    this._push({ event, slug: position.slug, side: position.side, shares: round(position.shares, 4), pnl: round(pnl, 2),
-      note: reason + ' · ' + outcome + ' · actual-fill P&L ' + (pnl >= 0 ? '+' : '') + '$' + round(pnl, 2) + '; next-window base ' + this.baseShares + ' shares' });
+    this._push({
+      event, slug: position.slug, side: position.side, shares: round(position.shares, 4), pnl: round(pnl, 2),
+      note: reason + ' · ' + outcome + ' · demo P&L ' + (pnl >= 0 ? '+' : '') + '$' + round(pnl, 2) + '.',
+    });
+    if (this.capital != null) {
+      const equity = this.cash;
+      this.equity.push({ ts: Date.now(), v: round(equity, 2) });
+      if (this.equity.length > 500) this.equity.shift();
+      this.peak = Math.max(this.peak == null ? equity : this.peak, equity);
+      this.maxDD = Math.max(this.maxDD, this.peak - equity);
+    }
   }
 
   async _balanceLoop() {
     while (this._running) {
       try {
         this.walletBalance = await this.trader.getBalance();
-        if (this.live && this.capital == null && this.walletBalance != null) {
-          this.capital = this.walletBalance;
-          this.peak = this.capital;
-          this.equity = [{ ts: Date.now(), v: this.capital }];
-        }
       } catch (error) {
         this._push({ event: 'ERROR', note: 'balance check failed: ' + error.message });
       }
@@ -746,7 +672,7 @@ class Bot {
     const now = Date.now();
     const w = this.w;
     const px = this.prices;
-    const pending = this.pending.slice(-10).map((position) => {
+    const pending = this.pending.slice(-20).map((position) => {
       const q = px && px.slug === position.slug ? (position.side === 'UP' ? px.up : px.down) : null;
       const mark = q ? (q.bid == null ? q.mid : q.bid) : null;
       const openCost = position.shares > 0 ? position.cost * (position.openShares / position.shares) : 0;
@@ -757,39 +683,81 @@ class Bot {
     const outcomeRows = [...this.outcomes.entries()].slice(-24).map(([openTs, outcome]) => {
       const trade = this.trades.find((item) => item.openTs === openTs);
       const open = this.pending.find((item) => item.openTs === openTs);
-      return { openTs, winner: outcome.winner, source: outcome.source, price: outcome.price, loser: outcome.loser,
-        traded: trade ? trade.side : open ? open.side : null, result: trade ? trade.outcome : null, pnl: trade ? trade.pnl : null };
+      return {
+        openTs, winner: outcome.winner, source: outcome.source, price: outcome.price, loser: outcome.loser,
+        traded: trade ? trade.side : open ? open.side : null,
+        result: trade ? trade.outcome : null, pnl: trade ? trade.pnl : null,
+      };
     });
     const elapsed = w ? Math.max(0, (now - w.openTs * 1000) / 1000) : 0;
+    const sideCycles = w ? Object.fromEntries(SIDES.map((side) => {
+      const sideState = w.sides[side];
+      const cycle = sideState.active;
+      return [side, {
+        status: cycle ? cycle.status : (w.closed ? 'window_closed' : 'rearming'),
+        cycle: sideState.cycleNumber,
+        entryOrderId: cycle && cycle.entryOrderId,
+        tpOrderId: cycle && cycle.tpOrderId,
+        openShares: cycle && cycle.position ? cycle.position.openShares : 0,
+        shares: cfg.BASE_SHARES,
+      }];
+    })) : null;
     return {
       now, mode: this.live ? 'LIVE' : 'DEMO', uptimeSec: Math.floor((now - this.startedAt) / 1000),
       error: this.error, executionHalt: this.executionHalt, walletBalance: this.walletBalance,
       walletAddress: this.trader.depositWallet || this.trader.address,
-      account: { capital: this.capital, cash, openValue, equity: cash == null ? null : cash + openValue, maxDrawdown: this.maxDD },
-      window: w ? { slug: w.slug, status: w.status, side: w.position ? w.position.side : (w.entrySignal ? w.entrySignal.side : null),
-        entrySide: w.entrySignal ? w.entrySignal.side : null, crossingDirection: w.entrySignal ? w.entrySignal.direction : null,
-        shares: w.position ? w.position.shares : this.baseShares,
-        openTs: w.openTs, closeTs: w.openTs + WINDOW_SECONDS, elapsedSeconds: elapsed,
-        tradeTaken: w.tradeTaken, entryReady: w.status === 'entry_ready', positionStatus: w.position ? w.position.status : null } : null,
+      account: {
+        capital: this.capital, cash, openValue,
+        equity: cash == null ? null : cash + openValue, maxDrawdown: this.maxDD,
+      },
+      window: w ? {
+        slug: w.slug, status: w.status, openTs: w.openTs,
+        closeTs: Number(w.window && w.window.closeTs) || w.openTs + WINDOW_SECONDS,
+        elapsedSeconds: elapsed, closed: w.closed, sideCycles,
+      } : null,
       prices: px && w && px.slug === w.slug ? px : null,
       priceSeries: this.priceSeries,
-      strategy: { entrySide: w && w.entrySignal ? w.entrySignal.side : null,
-        crossingDirection: w && w.entrySignal ? w.entrySignal.direction : null,
-        currentMid: w && px && px.slug === w.slug && w.entrySignal ? (w.entrySignal.side === 'UP' ? px.up.mid : px.down.mid) : null,
-        baseShares: this.baseShares, additions: this.shareAdditions, maxAdditions: cfg.MAX_SHARE_ADDITIONS,
-        entryStartSeconds: cfg.ENTRY_START_SECONDS, entryPrice: cfg.ENTRY_TRIGGER_PRICE,
-        stopLossPrice: cfg.STOP_LOSS_PRICE, takeProfitPrice: cfg.TAKE_PROFIT_PRICE,
-        feeRateEstimate: cfg.TAKER_FEE_RATE },
-      counts: this.counts, recentOutcomes: outcomeRows, pending, trades: this.trades.slice(-60).reverse(),
-      equity: this.equity, stats: this.stats,
-      cfg: { demoCapital: cfg.DEMO_CAPITAL, entryStartSeconds: cfg.ENTRY_START_SECONDS,
-        entryPrice: cfg.ENTRY_TRIGGER_PRICE,
-        stopLossPrice: cfg.STOP_LOSS_PRICE, takeProfitPrice: cfg.TAKE_PROFIT_PRICE,
-        baseShares: cfg.BASE_SHARES, shareStep: cfg.SHARE_STEP, maxAdditions: cfg.MAX_SHARE_ADDITIONS,
-        windowSec: WINDOW_SECONDS, makerRebatePerShare: cfg.MAKER_REBATE_PER_SHARE },
+      strategy: {
+        baseShares: cfg.BASE_SHARES,
+        entryPrice: cfg.ENTRY_LIMIT_PRICE,
+        takeProfitPrice: cfg.TAKE_PROFIT_PRICE,
+        feeRateEstimate: 0,
+      },
+      counts: this.counts, recentOutcomes: outcomeRows, pending,
+      trades: this.trades.slice(-60).reverse(), equity: this.equity, stats: this.stats,
+      cfg: {
+        demoCapital: cfg.DEMO_CAPITAL,
+        entryPrice: cfg.ENTRY_LIMIT_PRICE,
+        takeProfitPrice: cfg.TAKE_PROFIT_PRICE,
+        baseShares: cfg.BASE_SHARES,
+        windowSec: WINDOW_SECONDS,
+        makerRebatePerShare: cfg.MAKER_REBATE_PER_SHARE,
+      },
       log: this.log.slice(-100).reverse(),
     };
   }
+}
+
+function makeWindowState(slug, openTs) {
+  return {
+    slug, openTs, status: 'starting', window: null, ordersStarted: false,
+    closing: false, closed: false,
+    sides: {
+      UP: { side: 'UP', cycleNumber: 0, active: null, inFlight: false },
+      DOWN: { side: 'DOWN', cycleNumber: 0, active: null, inFlight: false },
+    },
+  };
+}
+
+function orderState(order) {
+  return String(order && (order.status || order.state) || '').toUpperCase();
+}
+
+function matchedShares(order, requested) {
+  const raw = order && (order.size_matched ?? order.sizeMatched ?? order.filled_size ?? order.filledSize);
+  const n = Number(raw);
+  if (Number.isFinite(n) && n >= 0) return Math.min(Number(requested) || n, n);
+  return 0;
 }
 
 function emptyQuote() { return { bid: null, ask: null, mid: null }; }
@@ -805,14 +773,8 @@ function quote(book) {
   return { bid, ask, mid: bid == null || ask == null ? null : (bid + ask) / 2 };
 }
 
-function feeForTrade(shares, price) {
-  const p = Number(price);
-  const n = Number(shares);
-  if (!(p > 0 && p < 1) || !(n > 0)) return 0;
-  return n * cfg.TAKER_FEE_RATE * p * (1 - p);
-}
-
-const round = (value, digits = 2) => Number.isFinite(Number(value)) ? Math.round(Number(value) * (10 ** digits)) / (10 ** digits) : null;
+const round = (value, digits = 2) => Number.isFinite(Number(value))
+  ? Math.round(Number(value) * (10 ** digits)) / (10 ** digits) : null;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 module.exports = Bot;
