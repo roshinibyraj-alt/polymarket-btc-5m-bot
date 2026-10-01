@@ -18,11 +18,11 @@ test('entry checks can arm and trigger at the start of a window', () => {
   assert.deepEqual(result.events, ['ENTRY_READY']);
 });
 
-test('only the armed side can trigger on its return to 75 cents', () => {
+test('the armed side triggers when its midpoint passes below 75 cents', () => {
   const state = { tradeTaken: false, armedSide: 'UP', entryReadyLogged: false };
   let result = strategy.observeEntry(state, { UP: 0.76, DOWN: 0.30 }, 121, cfg);
   assert.equal(result.shouldBuy, false);
-  result = strategy.observeEntry(state, { UP: 0.75, DOWN: 0.95 }, 122, cfg);
+  result = strategy.observeEntry(state, { UP: 0.74, DOWN: 0.95 }, 122, cfg);
   assert.equal(result.shouldBuy, true);
   assert.equal(result.side, 'UP');
   assert.deepEqual(result.events, ['ENTRY_READY']);

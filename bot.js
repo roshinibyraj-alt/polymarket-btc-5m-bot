@@ -187,7 +187,7 @@ class Bot {
       bid: update && Object.prototype.hasOwnProperty.call(update, 'bid') ? update.bid : previous.bid,
       ask: update && Object.prototype.hasOwnProperty.call(update, 'ask') ? update.ask : previous.ask,
     };
-    next.mid = next.bid == null ? next.ask : next.ask == null ? next.bid : (next.bid + next.ask) / 2;
+    next.mid = next.bid == null || next.ask == null ? null : (next.bid + next.ask) / 2;
     this._quotesByToken.set(tokenId, next);
     const up = this._quotesByToken.get(w.window.tokenUp) || emptyQuote();
     const down = this._quotesByToken.get(w.window.tokenDown) || emptyQuote();
@@ -220,24 +220,24 @@ class Bot {
     if (elapsedSeconds < cfg.ENTRY_START_SECONDS || elapsedSeconds >= WINDOW_SECONDS) return;
     const px = this.prices && this.prices.slug === w.slug ? this.prices : null;
     if (!px) return;
-    const observed = strategy.observeEntry(w, { UP: px.up.ask, DOWN: px.down.ask }, elapsedSeconds, cfg);
+    const observed = strategy.observeEntry(w, { UP: px.up.mid, DOWN: px.down.mid }, elapsedSeconds, cfg);
     for (const event of observed.events) {
       if (event === 'SIDE_ARMED') {
         w.status = 'waiting_for_return';
         this._push({ event, slug: w.slug, side: observed.side, shares: this.baseShares,
-          note: observed.side + ' best ask traded above $' + cfg.ENTRY_ARM_PRICE.toFixed(2) + '; waiting for that same side to return to $' + cfg.ENTRY_TRIGGER_PRICE.toFixed(2) });
+          note: observed.side + ' midpoint moved above $' + cfg.ENTRY_ARM_PRICE.toFixed(2) + '; waiting for that same side to return to $' + cfg.ENTRY_TRIGGER_PRICE.toFixed(2) });
       } else if (event === 'ENTRY_READY') {
         w.status = 'entry_ready';
         this._push({ event, slug: w.slug, side: observed.side, shares: this.baseShares,
-          note: observed.side + ' best ask returned to $' + cfg.ENTRY_TRIGGER_PRICE.toFixed(2) + '; submitting an immediate taker market order' });
+          note: observed.side + ' midpoint reached or fell below $' + cfg.ENTRY_TRIGGER_PRICE.toFixed(2) + '; submitting an immediate taker market order' });
       }
     }
     if (!observed.side) {
       w.status = 'watching_above_threshold';
       return;
     }
-    const sideAsk = observed.side === 'UP' ? px.up.ask : px.down.ask;
-    if (sideAsk == null || sideAsk > cfg.ENTRY_TRIGGER_PRICE) {
+    const sideMid = observed.side === 'UP' ? px.up.mid : px.down.mid;
+    if (sideMid == null || sideMid > cfg.ENTRY_TRIGGER_PRICE) {
       if (!w.tradeTaken) w.status = 'waiting_for_return';
       return;
     }
@@ -804,7 +804,7 @@ function quote(book) {
     .filter((level) => level.price > 0 && level.size > 0);
   const bid = bids.length ? Math.max(...bids.map((level) => level.price)) : null;
   const ask = asks.length ? Math.min(...asks.map((level) => level.price)) : null;
-  return { bid, ask, mid: bid == null ? ask : ask == null ? bid : (bid + ask) / 2 };
+  return { bid, ask, mid: bid == null || ask == null ? null : (bid + ask) / 2 };
 }
 
 function feeForTrade(shares, price) {

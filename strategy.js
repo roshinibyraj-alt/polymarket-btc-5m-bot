@@ -1,6 +1,6 @@
 'use strict';
 
-function observeEntry(windowState, asks, elapsedSeconds, config) {
+function observeEntry(windowState, mids, elapsedSeconds, config) {
   const events = [];
   if (!windowState || windowState.tradeTaken) return { events, shouldBuy: false, side: null };
   if (!Number.isFinite(elapsedSeconds) || elapsedSeconds < config.ENTRY_START_SECONDS) {
@@ -9,9 +9,9 @@ function observeEntry(windowState, asks, elapsedSeconds, config) {
 
   if (!windowState.armedSide) {
     const candidates = ['UP', 'DOWN']
-      .map((side) => ({ side, ask: Number(asks && asks[side]) }))
-      .filter((item) => Number.isFinite(item.ask) && item.ask > config.ENTRY_ARM_PRICE && item.ask < 1)
-      .sort((a, b) => b.ask - a.ask);
+      .map((side) => ({ side, mid: Number(mids && mids[side]) }))
+      .filter((item) => Number.isFinite(item.mid) && item.mid > config.ENTRY_ARM_PRICE && item.mid < 1)
+      .sort((a, b) => b.mid - a.mid);
     if (candidates.length) {
       windowState.armedSide = candidates[0].side;
       windowState.entryReadyLogged = false;
@@ -20,8 +20,8 @@ function observeEntry(windowState, asks, elapsedSeconds, config) {
   }
 
   const side = windowState.armedSide || null;
-  const ask = side ? Number(asks && asks[side]) : NaN;
-  const shouldBuy = !!side && Number.isFinite(ask) && ask > 0 && ask <= config.ENTRY_TRIGGER_PRICE;
+  const mid = side ? Number(mids && mids[side]) : NaN;
+  const shouldBuy = !!side && Number.isFinite(mid) && mid > 0 && mid <= config.ENTRY_TRIGGER_PRICE;
   if (shouldBuy && !windowState.entryReadyLogged) {
     windowState.entryReadyLogged = true;
     events.push('ENTRY_READY');
