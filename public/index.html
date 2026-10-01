@@ -20,7 +20,7 @@
 </section>
 <section class="grid">
   <article class="panel"><div class="panelhead"><div><div class="eyebrow">Current five-minute window</div><h2 id="marketTitle">Waiting for market</h2></div><div class="windowmeta"><div id="windowStatus" class="status">Starting</div><div id="timeLeft" style="margin-top:7px">— remaining</div></div></div>
-    <div class="progress"><i id="progress" style="width:0%"></i></div><div class="gate"><span id="elapsedLabel">00:00 elapsed</span><span id="gateLabel">No entries for first 120s</span><span>05:00</span></div>
+    <div class="progress"><i id="progress" style="width:0%"></i></div><div class="gate"><span id="elapsedLabel">00:00 elapsed</span><span id="gateLabel">Entry checks start at window open</span><span>05:00</span></div>
     <table class="quoteTable"><thead><tr><th>Outcome</th><th>Best bid</th><th>Best ask</th><th>State</th></tr></thead><tbody>
       <tr><td><span class="side"><i class="dot"></i>UP</span></td><td class="bid" id="upBid">—</td><td class="ask" id="upAsk">—</td><td id="upState">—</td></tr>
       <tr><td><span class="side"><i class="dot down"></i>DOWN</span></td><td class="bid" id="downBid">—</td><td class="ask" id="downAsk">—</td><td id="downState">—</td></tr>
@@ -28,7 +28,7 @@
   </article>
   <article class="panel"><div class="panelhead"><div><div class="eyebrow">Execution plan</div><h2 id="planTitle">Current strategy</h2></div><span id="armedPill" class="status">No side armed</span></div>
     <div class="steps">
-      <div class="step" id="step1"><div class="stepnum">1</div><div><b>Wait 120 seconds</b><p>No new entry orders in the first two minutes of a window.</p></div></div>
+      <div class="step" id="step1"><div class="stepnum">1</div><div><b>Scan from window start</b><p>Entry checks are active immediately; the side still must arm above $0.75 and return to $0.75.</p></div></div>
       <div class="step" id="step2"><div class="stepnum">2</div><div><b>Arm the side above $0.75</b><p id="armText">Watch both best asks; keep the same side once armed.</p></div></div>
       <div class="step" id="step3"><div class="stepnum">3</div><div><b>Buy on return to $0.75</b><p>Immediate taker FAK market order; actual filled shares are recorded.</p></div></div>
     </div>

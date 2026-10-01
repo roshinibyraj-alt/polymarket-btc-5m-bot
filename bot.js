@@ -103,7 +103,7 @@ class Bot {
         this.error = null;
         w.window = result.window;
         w.status = 'entry_blocked';
-        this._push({ event: 'WINDOW_READY', slug: w.slug, note: 'BTC 5-minute market active; entries unlock after ' + cfg.ENTRY_START_SECONDS + ' seconds' });
+        this._push({ event: 'WINDOW_READY', slug: w.slug, note: 'BTC 5-minute market active; entry checks start immediately' });
       } else {
         this.error = result.reason || 'active market unavailable';
         w.status = 'waiting_for_market';

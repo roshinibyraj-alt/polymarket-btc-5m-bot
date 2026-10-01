@@ -5,15 +5,17 @@ const assert = require('node:assert/strict');
 const cfg = require('../config');
 const strategy = require('../strategy');
 
-test('entries remain blocked until second 120, then arm the first side above 75 cents', () => {
+test('entry checks can arm and trigger at the start of a window', () => {
   const state = { tradeTaken: false, armedSide: null };
-  let result = strategy.observeEntry(state, { UP: 0.80, DOWN: 0.20 }, 119.99, cfg);
+  let result = strategy.observeEntry(state, { UP: 0.80, DOWN: 0.20 }, 0, cfg);
   assert.equal(result.shouldBuy, false);
-  assert.equal(state.armedSide, null);
-  result = strategy.observeEntry(state, { UP: 0.80, DOWN: 0.20 }, 120, cfg);
   assert.equal(result.side, 'UP');
   assert.equal(state.armedSide, 'UP');
   assert.deepEqual(result.events, ['SIDE_ARMED']);
+  result = strategy.observeEntry(state, { UP: 0.75, DOWN: 0.20 }, 0, cfg);
+  assert.equal(result.shouldBuy, true);
+  assert.equal(result.side, 'UP');
+  assert.deepEqual(result.events, ['ENTRY_READY']);
 });
 
 test('only the armed side can trigger on its return to 75 cents', () => {
