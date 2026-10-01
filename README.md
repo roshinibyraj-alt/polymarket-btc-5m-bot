@@ -4,6 +4,6 @@ At the start of each BTC 5-minute UP/DOWN market, the demo bot independently pla
 
 There is no stop loss and no adaptive sizing. At the 5-minute close, the bot cancels resting entry and TP orders. Shares that were not TP-sold remain open until the existing official-resolution check returns a decisive market result; live prices are never used to guess the resolution.
 
-This strategy is demo-only and fails closed when `LIVE_TRADING=true`; the bot does not submit real orders. Demo mode starts with $1,000 and reads public Polymarket market data. The simulated touch behavior is a simplified fill assumption, not a claim about actual queue position, depth, fees, or live execution.
+This strategy is demo-only and fails closed when `LIVE_TRADING=true`; the bot does not submit real orders. Demo mode starts with $10,000 and reads public Polymarket market data. The simulated touch behavior is a simplified fill assumption, not a claim about actual queue position, depth, fees, or live execution.
 
-Run `npm test` to verify strategy behavior. `npm start` is not part of the test-only workflow.
+Run `npm test` to verify strategy behavior. For local demo startup and dashboard checks, follow `DEMO_RUNBOOK.md`.

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const startServer = require('../server');
 
 test('state endpoint accepts the dashboard cache-buster query string', async (t) => {
-  const expected = { mode: 'DEMO', account: { capital: 1000 } };
+  const expected = { mode: 'DEMO', account: { capital: 10000 } };
   const server = startServer({ snapshot: () => expected }, 0);
   await new Promise((resolve) => server.once('listening', resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));

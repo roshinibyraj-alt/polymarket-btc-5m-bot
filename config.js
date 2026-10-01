@@ -1,7 +1,7 @@
 'use strict';
 
 module.exports = {
-  DEMO_CAPITAL: 1000,
+  DEMO_CAPITAL: 10000,
   ENTRY_LIMIT_PRICE: 0.30,
   TAKE_PROFIT_PRICE: 0.70,
   BASE_SHARES: 500,

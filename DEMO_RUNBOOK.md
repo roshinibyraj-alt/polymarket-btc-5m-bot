@@ -7,7 +7,7 @@ Use this checklist to review behavior without enabling real trading. Demo mode c
 1. Keep `LIVE_TRADING` unset or set to a value other than the exact text `true`. No wallet key is needed for demo mode.
 2. From the repository root, install dependencies once with npm install, then run npm test.
 3. Start the app with npm start and open http://localhost:3000.
-4. Confirm the dashboard says DEMO MODE and shows $1,000 starting capital. If `LIVE_TRADING=true`, startup is refused before wallet authentication; no live client or orders are created.
+4. Confirm the dashboard says DEMO MODE and shows $10,000 starting capital. If `LIVE_TRADING=true`, startup is refused before wallet authentication; no live client or orders are created.
 
 ## What to check
 

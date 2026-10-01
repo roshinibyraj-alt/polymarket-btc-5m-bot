@@ -6,6 +6,7 @@ const cfg = require('../config');
 const strategy = require('../strategy');
 
 test('strategy uses fixed 500-share entries at 30 cents and TP at 70 cents', () => {
+  assert.equal(cfg.DEMO_CAPITAL, 10000);
   assert.equal(cfg.BASE_SHARES, 500);
   assert.equal(cfg.ENTRY_LIMIT_PRICE, 0.30);
   assert.equal(cfg.TAKE_PROFIT_PRICE, 0.70);

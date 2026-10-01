@@ -151,7 +151,7 @@ test('an ask touch fills all 500 shares; TP closes and only that side re-arms', 
   assert.equal(bot.pending[0].side, 'UP');
   assert.equal(bot.pending[0].shares, 500);
   assert.equal(bot.pending[0].openShares, 500);
-  assert.equal(bot.cash, 850);
+  assert.equal(bot.cash, cfg.DEMO_CAPITAL - 150);
   const upTp = calls.placements.find((order) => order.side === 'SELL' && order.tokenId === 'up-token');
   assert.ok(upTp);
   assert.equal(upTp.price, 0.70);
