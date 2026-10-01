@@ -21,7 +21,7 @@ function fixture() {
     address: 'mock', depositWallet: null,
     async getOrderBook() { return book; },
     async placeFakMarketOrder(tokenId, side, amount) {
-      if (side === 'BUY') return { id: 'entry-1', status: 'matched', isFilled: true, avgPrice: 0.75, raw: { status: 'matched', makingAmount: '37.5', takingAmount: '50' } };
+      if (side === 'BUY') { state.entryAmount = amount; return { id: 'entry-1', status: 'matched', isFilled: true, avgPrice: 0.75, raw: { status: 'matched', makingAmount: '37.5', takingAmount: '50' } }; }
       return { id: 'exit-1', status: 'matched', isFilled: true, avgPrice: 0.60, raw: { status: 'matched', makingAmount: '50', takingAmount: '30' } };
     },
     async placeGtcOrder(tokenId, side, price, size) { return { id: 'tp-1', status: 'LIVE' }; },
@@ -41,7 +41,7 @@ function fixture() {
     tradeTaken: false, entryInFlight: false, status: 'entry_ready', position: null, lastOpenAttemptAt: 0 };
   bot.w = w;
   bot.prices = { slug: w.slug, ts: Date.now(), up: { bid: 0.74, ask: 0.75, mid: 0.745 }, down: { bid: 0.24, ask: 0.25, mid: 0.245 } };
-  return { bot, w, trader, state };
+  return { bot, w, trader, state, book };
 }
 
 test('entry uses the live-book market notional, then rests a maker-only TP', async () => {
@@ -55,6 +55,19 @@ test('entry uses the live-book market notional, then rests a maker-only TP', asy
   assert.equal(bot.pending[0].cost > 37.5, true);
   assert.equal(bot.cash < 1000, true);
   assert.equal(await bot._fire(w, 'UP', 'up-token'), false);
+});
+
+test('an upward midpoint crossing submits a FAK buy when ask is above 75 cents', async () => {
+  const { bot, w, book, state } = fixture();
+  await bot._entryStep(w, 1);
+  assert.equal(w.tradeTaken, false);
+  bot.prices.up = { bid: 0.75, ask: 0.77, mid: 0.76 };
+  book.asks = [{ price: '0.77', size: '100' }];
+  await bot._entryStep(w, 2);
+  assert.equal(w.tradeTaken, true);
+  assert.equal(w.entrySignal.direction, 'up');
+  assert.equal(state.entryAmount, 38.5);
+  assert.equal(bot.pending.length, 1);
 });
 
 test('a complete maker TP closes as a win using actual 99-cent proceeds', async () => {

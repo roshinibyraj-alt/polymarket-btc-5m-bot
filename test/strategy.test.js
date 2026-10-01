@@ -5,36 +5,43 @@ const assert = require('node:assert/strict');
 const cfg = require('../config');
 const strategy = require('../strategy');
 
-test('entry checks can arm and trigger at the start of a window', () => {
-  const state = { tradeTaken: false, armedSide: null };
-  let result = strategy.observeEntry(state, { UP: 0.80, DOWN: 0.20 }, 0, cfg);
+test('an upward midpoint crossing triggers even when the quote jumps over 75 cents', () => {
+  const state = { tradeTaken: false };
+  let result = strategy.observeEntry(state, { UP: 0.74, DOWN: 0.26 }, 0, cfg);
   assert.equal(result.shouldBuy, false);
-  assert.equal(result.side, 'UP');
-  assert.equal(state.armedSide, 'UP');
-  assert.deepEqual(result.events, ['SIDE_ARMED']);
-  result = strategy.observeEntry(state, { UP: 0.75, DOWN: 0.20 }, 0, cfg);
+  result = strategy.observeEntry(state, { UP: 0.76, DOWN: 0.24 }, 1, cfg);
   assert.equal(result.shouldBuy, true);
   assert.equal(result.side, 'UP');
+  assert.equal(result.direction, 'up');
+  assert.deepEqual(result.events, ['ENTRY_READY']);
+  result = strategy.observeEntry(state, { UP: 0.77, DOWN: 0.23 }, 2, cfg);
+  assert.equal(result.shouldBuy, false);
+});
+
+test('a downward midpoint crossing triggers for whichever side crosses first', () => {
+  const state = { tradeTaken: false };
+  let result = strategy.observeEntry(state, { UP: 0.24, DOWN: 0.76 }, 0, cfg);
+  assert.equal(result.shouldBuy, false);
+  result = strategy.observeEntry(state, { UP: 0.25, DOWN: 0.74 }, 1, cfg);
+  assert.equal(result.shouldBuy, true);
+  assert.equal(result.side, 'DOWN');
+  assert.equal(result.direction, 'down');
   assert.deepEqual(result.events, ['ENTRY_READY']);
 });
 
-test('the armed side triggers when its midpoint passes below 75 cents', () => {
-  const state = { tradeTaken: false, armedSide: 'UP', entryReadyLogged: false };
-  let result = strategy.observeEntry(state, { UP: 0.76, DOWN: 0.30 }, 121, cfg);
-  assert.equal(result.shouldBuy, false);
-  result = strategy.observeEntry(state, { UP: 0.74, DOWN: 0.95 }, 122, cfg);
-  assert.equal(result.shouldBuy, true);
-  assert.equal(result.side, 'UP');
-  assert.deepEqual(result.events, ['ENTRY_READY']);
-});
-
-test('exactly 75 cents does not arm a side; a trade already taken never re-enters', () => {
-  const state = { tradeTaken: false, armedSide: null };
-  strategy.observeEntry(state, { UP: 0.75, DOWN: 0.25 }, 150, cfg);
-  assert.equal(state.armedSide, null);
-  state.armedSide = 'UP';
-  state.tradeTaken = true;
-  const result = strategy.observeEntry(state, { UP: 0.70, DOWN: 0.30 }, 151, cfg);
+test('touching 75 cents triggers in either direction; taken trades never re-enter', () => {
+  const upState = { tradeTaken: false };
+  strategy.observeEntry(upState, { UP: 0.74, DOWN: 0.26 }, 0, cfg);
+  const up = strategy.observeEntry(upState, { UP: 0.75, DOWN: 0.25 }, 1, cfg);
+  assert.equal(up.shouldBuy, true);
+  assert.equal(up.direction, 'up');
+  const downState = { tradeTaken: false };
+  strategy.observeEntry(downState, { UP: 0.24, DOWN: 0.76 }, 0, cfg);
+  const down = strategy.observeEntry(downState, { UP: 0.25, DOWN: 0.75 }, 1, cfg);
+  assert.equal(down.shouldBuy, true);
+  assert.equal(down.direction, 'down');
+  downState.tradeTaken = true;
+  const result = strategy.observeEntry(downState, { UP: 0.30, DOWN: 0.70 }, 2, cfg);
   assert.equal(result.shouldBuy, false);
 });
 

@@ -91,9 +91,8 @@ class Bot {
     if (!this.w || this.w.slug !== slug) {
       if (this.w && this.w.window && !this.w.tradeTaken) this.stats.noEntry += 1;
       this.w = {
-        slug, openTs, status: 'starting', window: null, armedSide: null,
-        entryReadyLogged: false, tradeTaken: false, entryInFlight: false,
-        position: null, lastOpenAttemptAt: 0,
+        slug, openTs, status: 'starting', window: null, previousMids: {}, entrySignal: null,
+        tradeTaken: false, entryInFlight: false, position: null, lastOpenAttemptAt: 0,
       };
     }
     const w = this.w;
@@ -221,32 +220,34 @@ class Bot {
     const px = this.prices && this.prices.slug === w.slug ? this.prices : null;
     if (!px) return;
     const observed = strategy.observeEntry(w, { UP: px.up.mid, DOWN: px.down.mid }, elapsedSeconds, cfg);
-    for (const event of observed.events) {
-      if (event === 'SIDE_ARMED') {
-        w.status = 'waiting_for_return';
-        this._push({ event, slug: w.slug, side: observed.side, shares: this.baseShares,
-          note: observed.side + ' midpoint moved above $' + cfg.ENTRY_ARM_PRICE.toFixed(2) + '; waiting for that same side to return to $' + cfg.ENTRY_TRIGGER_PRICE.toFixed(2) });
-      } else if (event === 'ENTRY_READY') {
-        w.status = 'entry_ready';
-        this._push({ event, slug: w.slug, side: observed.side, shares: this.baseShares,
-          note: observed.side + ' midpoint reached or fell below $' + cfg.ENTRY_TRIGGER_PRICE.toFixed(2) + '; submitting an immediate taker market order' });
-      }
+    if (observed.shouldBuy) {
+      w.entrySignal = { side: observed.side, direction: observed.direction };
+      w.status = 'entry_ready';
+      this._push({ event: 'ENTRY_READY', slug: w.slug, side: observed.side, shares: this.baseShares,
+        note: observed.side + ' midpoint crossed $' + cfg.ENTRY_TRIGGER_PRICE.toFixed(2) + ' ' + (observed.direction === 'up' ? 'upward' : 'downward') + '; submitting an immediate taker market order' });
     }
-    if (!observed.side) {
-      w.status = 'watching_above_threshold';
+    const signal = w.entrySignal;
+    if (!signal) {
+      w.status = 'watching_for_midpoint_cross';
       return;
     }
-    const sideMid = observed.side === 'UP' ? px.up.mid : px.down.mid;
-    if (sideMid == null || sideMid > cfg.ENTRY_TRIGGER_PRICE) {
-      if (!w.tradeTaken) w.status = 'waiting_for_return';
+    const rawMid = signal.side === 'UP' ? px.up.mid : px.down.mid;
+    const mid = rawMid === null || rawMid === undefined ? NaN : Number(rawMid);
+    if (!Number.isFinite(mid) || mid <= 0 || mid >= 1) {
+      w.status = 'entry_waiting';
       return;
     }
-    if (!observed.shouldBuy || Date.now() - w.lastOpenAttemptAt < cfg.ENTRY_RETRY_MS) return;
+    const signalStillActive = signal.direction === 'up' ? mid >= cfg.ENTRY_TRIGGER_PRICE : mid <= cfg.ENTRY_TRIGGER_PRICE;
+    if (!signalStillActive) {
+      w.entrySignal = null;
+      w.status = 'watching_for_midpoint_cross';
+      return;
+    }
+    if (Date.now() - w.lastOpenAttemptAt < cfg.ENTRY_RETRY_MS) return;
     w.lastOpenAttemptAt = Date.now();
-    const tokenId = observed.side === 'UP' ? w.window.tokenUp : w.window.tokenDown;
-    await this._fire(w, observed.side, tokenId);
+    const tokenId = signal.side === 'UP' ? w.window.tokenUp : w.window.tokenDown;
+    await this._fire(w, signal.side, tokenId);
   }
-
   async _fire(w, side, tokenId) {
     if (w.tradeTaken || w.entryInFlight || this.executionHalt) return false;
     w.entryInFlight = true;
@@ -259,28 +260,22 @@ class Bot {
       const best = quote(book);
       if (!book || best.ask == null) {
         w.entryInFlight = false;
-        w.status = 'waiting_for_return';
-        this._push({ event: 'ENTRY_WAITING', slug: w.slug, side, shares: targetShares, note: 'order book unavailable; keeping the side armed and waiting for the next quote' });
-        return false;
-      }
-      if (best.ask > cfg.ENTRY_TRIGGER_PRICE) {
-        w.entryInFlight = false;
-        w.status = 'waiting_for_return';
-        this._push({ event: 'ENTRY_WAITING', slug: w.slug, side, shares: targetShares, note: 'best ask moved above $' + cfg.ENTRY_TRIGGER_PRICE.toFixed(2) + ' before submission; no order sent' });
+        w.status = 'entry_waiting';
+        this._push({ event: 'ENTRY_WAITING', slug: w.slug, side, shares: targetShares, note: 'order book unavailable; retrying while the crossed-side signal remains active' });
         return false;
       }
       const budget = strategy.estimateMarketBuyBudget(book, targetShares);
       if (!(budget.amount > 0) || !(budget.shares > 0)) {
         w.entryInFlight = false;
-        w.status = 'waiting_for_return';
-        this._push({ event: 'ENTRY_WAITING', slug: w.slug, side, shares: targetShares, note: 'no ask liquidity available for a market buy; will retry while the trigger remains active' });
+        w.status = 'entry_waiting';
+        this._push({ event: 'ENTRY_WAITING', slug: w.slug, side, shares: targetShares, note: 'no ask liquidity available for a market buy; retrying while the crossed-side signal remains active' });
         return false;
       }
       const estimatedEntryPrice = budget.averagePrice;
       const estimatedFee = feeForTrade(budget.shares, estimatedEntryPrice);
       if (!this.live && budget.amount + estimatedFee > this.cash) {
         w.entryInFlight = false;
-        w.status = 'waiting_for_return';
+        w.status = 'entry_waiting';
         this._push({ event: 'ENTRY_WAITING', slug: w.slug, side, shares: targetShares, note: 'demo balance too low for the estimated market buy and taker fee' });
         return false;
       }
@@ -302,7 +297,7 @@ class Bot {
           this._push({ event: 'ENTRY_AMBIGUOUS', slug: w.slug, side, shares: targetShares,
             note: 'CLOB returned an order ID without a confirmed fill; automatic entries halted to avoid duplicating an uncertain order' });
         } else {
-          w.status = 'waiting_for_return';
+          w.status = 'entry_waiting';
           this._push({ event: 'ENTRY_WAITING', slug: w.slug, side, shares: targetShares, note: 'market order did not fill (status: ' + (status || 'unknown') + '); will retry if the trigger remains active' });
         }
         w.entryInFlight = false;
@@ -314,7 +309,7 @@ class Bot {
       const cost = fill.notional + entryFee;
       if (!this.live && cost > this.cash + 1e-8) {
         w.entryInFlight = false;
-        w.status = 'waiting_for_return';
+        w.status = 'entry_waiting';
         this._push({ event: 'ENTRY_WAITING', slug: w.slug, side, shares: targetShares, note: 'simulated fill plus taker fee exceeded available demo cash; no position recorded' });
         return false;
       }
@@ -348,7 +343,7 @@ class Bot {
         this._push({ event: 'ENTRY_AMBIGUOUS', slug: w.slug, side, shares: targetShares,
           note: 'market-order request failed after submission began; automatic entries halted until the wallet/order state is reconciled: ' + error.message });
       } else {
-        w.status = 'waiting_for_return';
+        w.status = 'entry_waiting';
         this._push({ event: 'ENTRY_WAITING', slug: w.slug, side, shares: targetShares, note: 'demo market order failed: ' + error.message });
       }
       return false;
@@ -771,21 +766,24 @@ class Bot {
       error: this.error, executionHalt: this.executionHalt, walletBalance: this.walletBalance,
       walletAddress: this.trader.depositWallet || this.trader.address,
       account: { capital: this.capital, cash, openValue, equity: cash == null ? null : cash + openValue, maxDrawdown: this.maxDD },
-      window: w ? { slug: w.slug, status: w.status, side: w.position ? w.position.side : w.armedSide,
-        armedSide: w.armedSide, shares: w.position ? w.position.shares : this.baseShares,
+      window: w ? { slug: w.slug, status: w.status, side: w.position ? w.position.side : (w.entrySignal ? w.entrySignal.side : null),
+        entrySide: w.entrySignal ? w.entrySignal.side : null, crossingDirection: w.entrySignal ? w.entrySignal.direction : null,
+        shares: w.position ? w.position.shares : this.baseShares,
         openTs: w.openTs, closeTs: w.openTs + WINDOW_SECONDS, elapsedSeconds: elapsed,
         tradeTaken: w.tradeTaken, entryReady: w.status === 'entry_ready', positionStatus: w.position ? w.position.status : null } : null,
       prices: px && w && px.slug === w.slug ? px : null,
       priceSeries: this.priceSeries,
-      strategy: { armedSide: w ? w.armedSide : null, currentAsk: w && px && px.slug === w.slug && w.armedSide ? (w.armedSide === 'UP' ? px.up.ask : px.down.ask) : null,
+      strategy: { entrySide: w && w.entrySignal ? w.entrySignal.side : null,
+        crossingDirection: w && w.entrySignal ? w.entrySignal.direction : null,
+        currentMid: w && px && px.slug === w.slug && w.entrySignal ? (w.entrySignal.side === 'UP' ? px.up.mid : px.down.mid) : null,
         baseShares: this.baseShares, additions: this.shareAdditions, maxAdditions: cfg.MAX_SHARE_ADDITIONS,
-        entryStartSeconds: cfg.ENTRY_START_SECONDS, armPrice: cfg.ENTRY_ARM_PRICE, entryPrice: cfg.ENTRY_TRIGGER_PRICE,
+        entryStartSeconds: cfg.ENTRY_START_SECONDS, entryPrice: cfg.ENTRY_TRIGGER_PRICE,
         stopLossPrice: cfg.STOP_LOSS_PRICE, takeProfitPrice: cfg.TAKE_PROFIT_PRICE,
         feeRateEstimate: cfg.TAKER_FEE_RATE },
       counts: this.counts, recentOutcomes: outcomeRows, pending, trades: this.trades.slice(-60).reverse(),
       equity: this.equity, stats: this.stats,
       cfg: { demoCapital: cfg.DEMO_CAPITAL, entryStartSeconds: cfg.ENTRY_START_SECONDS,
-        armPrice: cfg.ENTRY_ARM_PRICE, entryPrice: cfg.ENTRY_TRIGGER_PRICE,
+        entryPrice: cfg.ENTRY_TRIGGER_PRICE,
         stopLossPrice: cfg.STOP_LOSS_PRICE, takeProfitPrice: cfg.TAKE_PROFIT_PRICE,
         baseShares: cfg.BASE_SHARES, shareStep: cfg.SHARE_STEP, maxAdditions: cfg.MAX_SHARE_ADDITIONS,
         windowSec: WINDOW_SECONDS, makerRebatePerShare: cfg.MAKER_REBATE_PER_SHARE },

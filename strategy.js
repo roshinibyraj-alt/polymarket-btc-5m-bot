@@ -2,31 +2,41 @@
 
 function observeEntry(windowState, mids, elapsedSeconds, config) {
   const events = [];
-  if (!windowState || windowState.tradeTaken) return { events, shouldBuy: false, side: null };
+  if (!windowState || windowState.tradeTaken) return { events, shouldBuy: false, side: null, direction: null };
   if (!Number.isFinite(elapsedSeconds) || elapsedSeconds < config.ENTRY_START_SECONDS) {
-    return { events, shouldBuy: false, side: windowState.armedSide || null };
+    return { events, shouldBuy: false, side: null, direction: null };
   }
 
-  if (!windowState.armedSide) {
-    const candidates = ['UP', 'DOWN']
-      .map((side) => ({ side, mid: Number(mids && mids[side]) }))
-      .filter((item) => Number.isFinite(item.mid) && item.mid > config.ENTRY_ARM_PRICE && item.mid < 1)
-      .sort((a, b) => b.mid - a.mid);
-    if (candidates.length) {
-      windowState.armedSide = candidates[0].side;
-      windowState.entryReadyLogged = false;
-      events.push('SIDE_ARMED');
+  if (!windowState.previousMids || typeof windowState.previousMids !== 'object') windowState.previousMids = {};
+  const threshold = Number(config.ENTRY_TRIGGER_PRICE);
+  if (!Number.isFinite(threshold)) return { events, shouldBuy: false, side: null, direction: null };
+  let side = null;
+  let direction = null;
+
+  for (const outcome of ['UP', 'DOWN']) {
+    const rawMid = mids && mids[outcome];
+    const current = rawMid === null || rawMid === undefined || rawMid === '' ? NaN : Number(rawMid);
+    const previousRaw = windowState.previousMids[outcome];
+    const previous = previousRaw === null || previousRaw === undefined ? NaN : Number(previousRaw);
+    const currentIsValid = Number.isFinite(current) && current > 0 && current < 1;
+    const previousIsValid = Number.isFinite(previous) && previous > 0 && previous < 1;
+
+    if (currentIsValid && previousIsValid && !side) {
+      if (previous < threshold && current >= threshold) {
+        side = outcome;
+        direction = 'up';
+      } else if (previous > threshold && current <= threshold) {
+        side = outcome;
+        direction = 'down';
+      }
     }
+    if (currentIsValid) windowState.previousMids[outcome] = current;
+    else delete windowState.previousMids[outcome];
   }
 
-  const side = windowState.armedSide || null;
-  const mid = side ? Number(mids && mids[side]) : NaN;
-  const shouldBuy = !!side && Number.isFinite(mid) && mid > 0 && mid <= config.ENTRY_TRIGGER_PRICE;
-  if (shouldBuy && !windowState.entryReadyLogged) {
-    windowState.entryReadyLogged = true;
-    events.push('ENTRY_READY');
-  }
-  return { events, shouldBuy, side };
+  const shouldBuy = !!side;
+  if (shouldBuy) events.push('ENTRY_READY');
+  return { events, shouldBuy, side, direction };
 }
 
 function estimateMarketBuyBudget(book, targetShares) {
