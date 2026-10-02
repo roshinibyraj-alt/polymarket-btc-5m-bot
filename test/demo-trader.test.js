@@ -79,18 +79,18 @@ test('demo marketable BUY sweeps depth to the price cap and targets shares at th
     bids: [{ price: '0.48', size: '20' }],
     asks: [
       { price: '0.50', size: '4' },
-      { price: '0.52', size: '496' },
-      { price: '0.53', size: '1000' },
+      { price: '0.74', size: '496' },
+      { price: '0.76', size: '1000' },
     ],
   };
   global.fetch = async () => ({ ok: true, json: async () => book });
   try {
     const trader = new DemoTrader();
-    const order = await trader.placeFakMarketOrder('token', 'BUY', 500 * 0.525, { priceLimit: 0.525 });
+    const order = await trader.placeFakMarketOrder('token', 'BUY', 500 * 0.75, { priceLimit: 0.75 });
     assert.equal(order.status, 'matched');
     assert.equal(Number(order.raw.takingAmount), 500);
-    assert.equal(Number(order.raw.makingAmount), 259.92);
-    assert.equal(order.avgPrice, 259.92 / 500);
+    assert.equal(Number(order.raw.makingAmount), 369.04);
+    assert.equal(order.avgPrice, 369.04 / 500);
   } finally { global.fetch = originalFetch; }
 });
 

@@ -123,8 +123,8 @@ test('a BUY sweeps visible asks up to the configured slippage cap while targetin
   const { bot, trader } = makeBot();
   trader.books.up.asks = [
     { price: 0.50, size: 4 },
-    { price: 0.52, size: 496 },
-    { price: 0.53, size: 1000 },
+    { price: 0.74, size: 496 },
+    { price: 0.76, size: 1000 },
   ];
   const start = Date.now();
   await bot._onBtcSample({ price: 80000, receivedAt: start });
@@ -132,12 +132,12 @@ test('a BUY sweeps visible asks up to the configured slippage cap while targetin
   await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
 
   assert.equal(trader.calls.length, 1);
-  assert.equal(trader.calls[0].priceLimit, 0.525);
-  assert.equal(trader.calls[0].amount, 500 * 0.525);
+  assert.equal(trader.calls[0].priceLimit, 0.75);
+  assert.equal(trader.calls[0].amount, 500 * 0.75);
   assert.equal(bot.w.position.shares, 500);
   assert.ok(bot.w.position.entryPrice > 0.50);
-  assert.ok(bot.w.position.entryPrice < 0.525);
-  assert.ok(Math.abs(bot.w.position.entryNotional - 259.92) < 1e-8);
+  assert.ok(bot.w.position.entryPrice < 0.75);
+  assert.ok(Math.abs(bot.w.position.entryNotional - 369.04) < 1e-8);
 });
 
 test('a position entered above $0.40 is held and blocks the opposite entry on reversal', async () => {
@@ -323,7 +323,7 @@ test('snapshot exposes the feed and strategy settings', () => {
   assert.equal(snapshot.strategy.thresholdReady, false);
   assert.equal(snapshot.strategy.thresholdMinSamples, 120);
   assert.equal(snapshot.strategy.thresholdWindowMs, 20 * 60 * 1000);
-  assert.equal(snapshot.strategy.maxBuySlippagePercent, 5);
+  assert.equal(snapshot.strategy.maxBuySlippagePercent, 50);
   assert.equal(snapshot.strategy.maxSellEntryPrice, 0.40);
   assert.equal(snapshot.strategy.clobWinSettlementPrice, 0.99);
   assert.equal(snapshot.strategy.clobLossSettlementPrice, 0.01);
