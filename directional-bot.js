@@ -452,15 +452,6 @@ class Bot {
       w.status = 'waiting_for_window_delay';
       return false;
     }
-    const currentQuote = this.prices && this.prices.slug === w.slug
-      ? (signal.side === 'UP' ? this.prices.up : this.prices.down) : null;
-    const ask = currentQuote && currentQuote.ask != null ? Number(currentQuote.ask) : NaN;
-    if (!Number.isFinite(ask) || ask < cfg.MIN_BUY_ENTRY_PRICE_USD
-      || ask > cfg.MAX_BUY_ENTRY_PRICE_USD) {
-      w.status = 'waiting_for_entry_price';
-      return false;
-    }
-
     this._signalBusy = true;
     w.tradeInFlight = true;
     try {
@@ -492,25 +483,11 @@ class Bot {
     const bids = sortedLevels(book && book.bids, 'desc');
     const bestAsk = asks.length ? asks[0].price : null;
     if (bestAsk == null) {
-      w.status = 'waiting_for_entry_price';
+      w.status = 'waiting_for_order_book';
       this._push({
         event: 'SIGNAL_BUY_NO_BOOK', slug: w.slug, side,
         note: 'No executable ask for ' + side + '; the signal remains active until an opposite signal.',
       });
-      return false;
-    }
-    if (bestAsk < cfg.MIN_BUY_ENTRY_PRICE_USD || bestAsk > cfg.MAX_BUY_ENTRY_PRICE_USD) {
-      w.status = 'waiting_for_entry_price';
-      if (w.lastPriceWaitSignalSide !== side) {
-        w.lastPriceWaitSignalSide = side;
-        this._push({
-          event: 'SIGNAL_WAITING_FOR_ENTRY_PRICE', slug: w.slug, side,
-          ask: round(bestAsk, 4),
-          note: side + ' signal remains active; waiting for its best ask to enter the $'
-            + cfg.MIN_BUY_ENTRY_PRICE_USD.toFixed(2) + '–$'
-            + cfg.MAX_BUY_ENTRY_PRICE_USD.toFixed(2) + ' range or for an opposite signal.',
-        });
-      }
       return false;
     }
     if (!w.activeSignal || w.activeSignal.side !== side) {
@@ -833,8 +810,6 @@ class Bot {
         baseShares: cfg.BASE_SHARES,
         entryDelayAfterWindowStartSeconds: cfg.ENTRY_DELAY_AFTER_WINDOW_START_SECONDS,
         maxBuySlippagePercent: cfg.MAX_BUY_SLIPPAGE_PERCENT,
-        minBuyEntryPrice: cfg.MIN_BUY_ENTRY_PRICE_USD,
-        maxBuyEntryPrice: cfg.MAX_BUY_ENTRY_PRICE_USD,
         thresholdUsd: this.ccxt.thresholdUsd,
         thresholdReady: this.ccxt.thresholdReady,
         thresholdSampleCount: this.ccxt.thresholdSampleCount,
