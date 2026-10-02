@@ -493,8 +493,12 @@ class Bot {
     if (!w.activeSignal || w.activeSignal.side !== side) {
       return false;
     }
+    if (bestAsk >= 0.50) {
+      w.status = 'waiting_for_price_limit';
+      return false;
+    }
     const targetShares = cfg.BASE_SHARES;
-    const priceLimit = Math.min(0.99, bestAsk * (1 + cfg.MAX_BUY_SLIPPAGE_PERCENT / 100));
+    const priceLimit = Math.min(cfg.MAX_SIGNAL_ENTRY_PRICE, bestAsk * (1 + cfg.MAX_BUY_SLIPPAGE_PERCENT / 100));
     const spendLimit = targetShares * priceLimit;
     const estimatedFee = estimateTakerFee(targetShares, 0.5);
     if (this.cash == null || this.cash + EPSILON < spendLimit + estimatedFee) {
@@ -810,6 +814,7 @@ class Bot {
         baseShares: cfg.BASE_SHARES,
         entryDelayAfterWindowStartSeconds: cfg.ENTRY_DELAY_AFTER_WINDOW_START_SECONDS,
         maxBuySlippagePercent: cfg.MAX_BUY_SLIPPAGE_PERCENT,
+        maxSignalEntryPrice: cfg.MAX_SIGNAL_ENTRY_PRICE,
         thresholdUsd: this.ccxt.thresholdUsd,
         thresholdReady: this.ccxt.thresholdReady,
         thresholdSampleCount: this.ccxt.thresholdSampleCount,

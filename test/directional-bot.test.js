@@ -120,10 +120,10 @@ test('an opposite signal does not sell or open a second position in the same win
   assert.equal(bot.w.entryTaken, true);
 });
 
-test('a qualifying signal waits 15 seconds from window open before buying', async () => {
+test('a qualifying signal waits 60 seconds from window open before buying', async () => {
   const { bot, trader } = makeBot();
   const nowSeconds = Math.floor(Date.now() / 1000);
-  bot.w.openTs = nowSeconds - 14;
+  bot.w.openTs = nowSeconds - 59;
   bot.w.window.closeTs = bot.w.openTs + 300;
   const start = Date.now();
   await bot._onBtcSample({ price: 80000, receivedAt: start });
@@ -137,19 +137,19 @@ test('a qualifying signal waits 15 seconds from window open before buying', asyn
   await bot._onQuote(bot.w.slug, 'up', { bid: 0.39, ask: 0.40 });
   assert.equal(trader.calls.length, 0);
 
-  bot.w.openTs = Math.floor(Date.now() / 1000) - 15;
+  bot.w.openTs = Math.floor(Date.now() / 1000) - 60;
   bot.w.window.closeTs = bot.w.openTs + 300;
   await bot._onQuote(bot.w.slug, 'up', { bid: 0.39, ask: 0.40 });
   assert.equal(trader.calls.length, 1);
   assert.equal(bot.w.position.side, 'UP');
 });
 
-test('a BUY sweeps visible asks up to the configured slippage cap while targeting 500 shares', async () => {
+test('a BUY respects the slippage cap and the strict below-$0.50 execution cap', async () => {
   const { bot, trader } = makeBot();
   trader.books.up.asks = [
     { price: 0.34, size: 4 },
-    { price: 0.50, size: 496 },
-    { price: 0.52, size: 1000 },
+    { price: 0.49, size: 496 },
+    { price: 0.50, size: 1000 },
   ];
   const start = Date.now();
   await bot._onBtcSample({ price: 80000, receivedAt: start });
@@ -157,32 +157,33 @@ test('a BUY sweeps visible asks up to the configured slippage cap while targetin
   await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
 
   assert.equal(trader.calls.length, 1);
-  assert.equal(trader.calls[0].priceLimit, 0.51);
-  assert.equal(trader.calls[0].amount, 500 * 0.51);
+  assert.equal(trader.calls[0].priceLimit, 0.4999);
+  assert.equal(trader.calls[0].amount, 500 * 0.4999);
   assert.equal(bot.w.position.shares, 500);
   assert.ok(bot.w.position.entryPrice > 0.45);
-  assert.ok(bot.w.position.entryPrice < 0.51);
-  assert.ok(Math.abs(bot.w.position.entryNotional - 249.36) < 1e-8);
+  assert.ok(bot.w.position.entryPrice < 0.50);
+  assert.ok(Math.abs(bot.w.position.entryNotional - 244.4) < 1e-8);
 });
 
-test('an ask above $0.45 is eligible without a price band and stays within the slippage and $0.99 caps', async () => {
+test('a signaled side waits until its best ask is below $0.50', async () => {
   const { bot, trader } = makeBot();
-  trader.books.up.asks = [
-    { price: 0.80, size: 100 },
-    { price: 0.90, size: 400 },
-    { price: 1.00, size: 1000 },
-  ];
+  trader.books.up.asks = [{ price: 0.50, size: 1000 }, { price: 0.80, size: 1000 }];
   const start = Date.now();
   await bot._onBtcSample({ price: 80000, receivedAt: start });
   await bot._onBtcSample({ price: 80004, receivedAt: start + 500 });
   await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
 
+  assert.equal(trader.calls.length, 0);
+  assert.equal(bot.w.status, 'waiting_for_price_limit');
+  assert.equal(bot.w.activeSignal.side, 'UP');
+
+  trader.books.up.asks = [{ price: 0.49, size: 1000 }];
+  await bot._onQuote(bot.w.slug, 'up', { bid: 0.48, ask: 0.49 });
   assert.equal(trader.calls.length, 1);
+  assert.equal(trader.calls[0].tokenId, 'up');
+  assert.equal(trader.calls[0].priceLimit, 0.4999);
   assert.equal(bot.w.position.side, 'UP');
-  assert.equal(trader.calls[0].priceLimit, 0.99);
-  assert.equal(bot.w.position.shares, 500);
-  assert.ok(bot.w.position.entryPrice > 0.45);
-  assert.equal(bot.w.position.entryPrice, 0.88);
+  assert.equal(bot.w.position.entryPrice, 0.49);
 });
 
 test('an ask below $0.15 is eligible with slippage calculated from the observed ask', async () => {
@@ -198,9 +199,9 @@ test('an ask below $0.15 is eligible with slippage calculated from the observed 
   assert.equal(bot.w.position.entryPrice, 0.10);
 });
 
-test('an opposite signal replaces a latched signal during the 15-second delay', async () => {
+test('an opposite signal replaces a latched signal during the 60-second delay', async () => {
   const { bot, trader } = makeBot();
-  bot.w.openTs = Math.floor(Date.now() / 1000) - 14;
+  bot.w.openTs = Math.floor(Date.now() / 1000) - 59;
   bot.w.window.closeTs = bot.w.openTs + 300;
   trader.books.up.asks[0].price = 0.40;
   trader.books.down.asks[0].price = 0.44;
@@ -214,7 +215,7 @@ test('an opposite signal replaces a latched signal during the 15-second delay', 
   assert.equal(bot.w.activeSignal.side, 'DOWN');
   assert.equal(trader.calls.length, 0);
 
-  bot.w.openTs = Math.floor(Date.now() / 1000) - 15;
+  bot.w.openTs = Math.floor(Date.now() / 1000) - 60;
   bot.w.window.closeTs = bot.w.openTs + 300;
   await bot._onQuote(bot.w.slug, 'up', { bid: 0.38, ask: 0.40 });
   assert.equal(trader.calls.length, 0);
@@ -410,7 +411,8 @@ test('snapshot exposes the feed and strategy settings', () => {
   assert.equal(snapshot.strategy.thresholdMinSamples, 120);
   assert.equal(snapshot.strategy.thresholdWindowMs, 20 * 60 * 1000);
   assert.equal(snapshot.strategy.maxBuySlippagePercent, 50);
-  assert.equal(snapshot.strategy.entryDelayAfterWindowStartSeconds, 15);
+  assert.equal(snapshot.strategy.entryDelayAfterWindowStartSeconds, 60);
+  assert.equal(snapshot.strategy.maxSignalEntryPrice, 0.4999);
   assert.equal('minBuyEntryPrice' in snapshot.strategy, false);
   assert.equal('maxBuyEntryPrice' in snapshot.strategy, false);
   assert.equal(snapshot.strategy.clobWinSettlementPrice, 0.99);
