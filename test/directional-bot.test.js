@@ -129,6 +129,72 @@ test('a position entered above $0.40 is held and blocks the opposite entry on re
   assert.ok(bot.log.some((item) => item.event === 'SIGNAL_SELL_BLOCKED_HIGH_ENTRY'));
 });
 
+test('held-side CLOB midpoint at $0.99 settles remaining shares as a $1 win', async () => {
+  const { bot, trader } = makeBot();
+  const start = Date.now();
+  await bot._onBtcSample({ price: 80000, receivedAt: start });
+  await bot._onBtcSample({ price: 80004, receivedAt: start + 500 });
+  await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
+  const cost = bot.w.position.cost;
+
+  bot._onQuote(bot.w.slug, 'up', { bid: null, ask: 0.50 });
+  assert.equal(bot.pending.length, 1);
+  bot._onQuote(bot.w.slug, 'up', { bid: 0.97, ask: 0.99 });
+  assert.equal(bot.pending.length, 1);
+  bot._onQuote(bot.w.slug, 'up', { bid: 0.98, ask: 1 });
+
+  assert.equal(bot.pending.length, 0);
+  assert.equal(bot.trades[0].outcome, 'WIN');
+  assert.equal(bot.trades[0].reason, 'CLOB_THRESHOLD');
+  assert.equal(bot.trades[0].winner, 'UP');
+  assert.equal(bot.trades[0].exitProceeds, 500);
+  assert.ok(Math.abs(bot.cash - (cfg.DEMO_CAPITAL - cost + 500)) < 1e-8);
+  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [['up', 'BUY']]);
+  assert.ok(bot.log.some((item) => item.event === 'CLOB_THRESHOLD_SETTLEMENT'));
+});
+
+test('held-side CLOB midpoint at $0.01 settles remaining shares as a $0 loss', async () => {
+  const { bot, trader } = makeBot();
+  const start = Date.now();
+  await bot._onBtcSample({ price: 80000, receivedAt: start });
+  await bot._onBtcSample({ price: 80004, receivedAt: start + 500 });
+  await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
+  const cashAfterEntry = bot.cash;
+
+  bot._onQuote(bot.w.slug, 'up', { bid: 0.01, ask: 0.03 });
+  assert.equal(bot.pending.length, 1);
+  bot._onQuote(bot.w.slug, 'up', { bid: 0.001, ask: 0.019 });
+
+  assert.equal(bot.pending.length, 0);
+  assert.equal(bot.trades[0].outcome, 'LOSS');
+  assert.equal(bot.trades[0].reason, 'CLOB_THRESHOLD');
+  assert.equal(bot.trades[0].winner, 'DOWN');
+  assert.equal(bot.trades[0].exitProceeds, 0);
+  assert.equal(bot.cash, cashAfterEntry);
+  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [['up', 'BUY']]);
+});
+
+test('after window close, CLOB threshold can settle before official resolution returns', async () => {
+  const { bot, trader } = makeBot();
+  const start = Date.now();
+  await bot._onBtcSample({ price: 80000, receivedAt: start });
+  await bot._onBtcSample({ price: 80004, receivedAt: start + 500 });
+  await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
+  const position = bot.w.position;
+  position.closeTs = Math.floor(Date.now() / 1000) - 1;
+  bot.w.window.closeTs = position.closeTs;
+  await bot._closeWindow(bot.w);
+  trader.books.up.bids = [{ price: 0.98, size: 1000 }];
+  trader.books.up.asks = [{ price: 1, size: 1000 }];
+
+  await bot._settleClosedPositions(Date.now());
+
+  assert.equal(bot.pending.length, 0);
+  assert.equal(bot.trades[0].reason, 'CLOB_THRESHOLD');
+  assert.equal(bot.trades[0].outcome, 'WIN');
+  assert.equal(bot._resolveTried.has(position.openTs), false);
+});
+
 test('a partial sell blocks opening the opposite side', async () => {
   const trader = new FakeDemoTrader();
   trader.books.up.asks[0].price = 0.40;
@@ -145,6 +211,36 @@ test('a partial sell blocks opening the opposite side', async () => {
   ]);
   assert.equal(bot.w.position.side, 'UP');
   assert.equal(bot.w.position.openShares, 400);
+  const snapshot = bot.snapshot();
+  assert.ok(snapshot.stats.realizedPnl > 0);
+  assert.ok(Math.abs(snapshot.account.totalPnl
+    - (snapshot.stats.realizedPnl + snapshot.account.unrealizedPnl)) < 1e-8);
+  assert.ok(Math.abs(snapshot.account.equity
+    - (cfg.DEMO_CAPITAL + snapshot.account.totalPnl)) < 1e-8);
+});
+
+test('equity keeps a prior-window CLOB mark and reconciles to total P&L', async () => {
+  const { bot } = makeBot();
+  const start = Date.now();
+  await bot._onBtcSample({ price: 80000, receivedAt: start });
+  await bot._onBtcSample({ price: 80004, receivedAt: start + 500 });
+  await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
+  const oldWindow = bot.w;
+  bot._onQuote(oldWindow.slug, 'up', { bid: 0.60, ask: 0.62 });
+  bot.w = makeWindowState('next-window', oldWindow.openTs + 300);
+  bot.w.window = { tokenUp: 'next-up', tokenDown: 'next-down', closeTs: oldWindow.openTs + 600 };
+  bot.prices = {
+    slug: bot.w.slug, ts: Date.now(),
+    up: { bid: null, ask: null, mid: null },
+    down: { bid: null, ask: null, mid: null },
+  };
+
+  const snapshot = bot.snapshot();
+  assert.equal(snapshot.pending[0].mark, 0.60);
+  assert.equal(snapshot.account.openValue, 300);
+  assert.ok(Math.abs(snapshot.account.equity - (snapshot.account.cash + 300)) < 1e-8);
+  assert.ok(Math.abs(snapshot.account.equity
+    - (cfg.DEMO_CAPITAL + snapshot.stats.realizedPnl + snapshot.account.unrealizedPnl)) < 1e-8);
 });
 
 test('a delayed CCXT response is discarded and cannot trigger an order', async () => {
@@ -199,6 +295,8 @@ test('snapshot exposes the feed and strategy settings', () => {
   assert.equal(snapshot.strategy.thresholdMinSamples, 120);
   assert.equal(snapshot.strategy.thresholdWindowMs, 20 * 60 * 1000);
   assert.equal(snapshot.strategy.maxSellEntryPrice, 0.40);
+  assert.equal(snapshot.strategy.clobWinSettlementPrice, 0.99);
+  assert.equal(snapshot.strategy.clobLossSettlementPrice, 0.01);
   assert.equal(snapshot.window.status, 'watching_signal');
 });
 

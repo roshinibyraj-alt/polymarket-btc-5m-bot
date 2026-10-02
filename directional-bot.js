@@ -28,6 +28,7 @@ class Bot {
     this.trades = [];
     this.outcomes = new Map();
     this._resolveTried = new Map();
+    this._clobTried = new Map();
     this._warned = new Set();
     this.stats = {
       wins: 0, losses: 0, signalEntries: 0, signalReversals: 0,
@@ -250,6 +251,11 @@ class Bot {
     const now = Date.now();
     this.prices = { slug, ts: now, up: { ...up }, down: { ...down } };
     this._lastMarketEventAt = now;
+    if (w.position && w.position.side === side && w.position.openShares > EPSILON) {
+      const mark = next.bid == null ? next.mid : next.bid;
+      if (mark != null && Number.isFinite(Number(mark))) w.position.lastClobMark = Number(mark);
+      if (!this._settlePositionAtClobPrice(w.position, next.mid)) this._recordEquity();
+    }
     if (up.ask != null && down.ask != null) {
       if (this._seriesSlug !== slug) { this._seriesSlug = slug; this.priceSeries = []; }
       if (now - this._lastSeriesAt >= 250) {
@@ -410,6 +416,7 @@ class Bot {
     const tokenId = side === 'UP' ? w.window.tokenUp : w.window.tokenDown;
     const book = await this.trader.getOrderBook(tokenId);
     const asks = sortedLevels(book && book.asks, 'asc');
+    const bids = sortedLevels(book && book.bids, 'desc');
     const bestAsk = asks.length ? asks[0].price : null;
     if (bestAsk == null || bestAsk >= 1) {
       this._push({ event: 'SIGNAL_BUY_NO_BOOK', slug: w.slug, side, note: 'No executable ask for ' + side + '; waiting for another signal.' });
@@ -454,6 +461,8 @@ class Bot {
       price: averagePrice, entryPrice: averagePrice, entryNotional: notional,
       entryFee: fee, exitFees: 0, cost: notional + fee,
       exitProceeds: 0, status: 'position_open', firedAt: Date.now(),
+      lastClobMark: bids.length ? bids[0].price : averagePrice,
+      realizedPnl: 0,
       signalChangeUsd: move.changeUsd, signalLookbackMs: move.lookbackMs,
       settled: false, settlementTimedOut: false,
     };
@@ -463,6 +472,8 @@ class Bot {
     w.signalSide = side;
     w.status = 'position_open';
     this.stats.signalEntries += 1;
+    this.stats.estimatedFees += fee;
+    this._recordEquity();
     this._push({
       event: 'SIGNAL_BUY_FILLED', slug: w.slug, side,
       shares: round(shares, 4), price: round(averagePrice, 4),
@@ -496,24 +507,33 @@ class Bot {
       this._push({ event: 'SIGNAL_SELL_NO_BOOK', slug: w.slug, side: position.side, note: 'No executable bid to close the current position.' });
       return false;
     }
+    position.lastClobMark = bestBid;
+    this._recordEquity();
     const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
     if (this.w !== w || w.closed || Date.now() >= closeTs * 1000) return false;
     const requestedShares = position.openShares;
     const order = await this.trader.placeFakMarketOrder(
       position.tokenId, 'SELL', requestedShares, { priceLimit: bestBid },
     );
-    const soldShares = positive(order && order.raw && order.raw.makingAmount);
-    const proceeds = positive(order && order.raw && order.raw.takingAmount);
-    if (soldShares == null || proceeds == null) {
+    const filledShares = positive(order && order.raw && order.raw.makingAmount);
+    const filledProceeds = positive(order && order.raw && order.raw.takingAmount);
+    if (filledShares == null || filledProceeds == null) {
       this._push({ event: 'SIGNAL_SELL_UNFILLED', slug: w.slug, side: position.side, note: 'No shares sold at the observed best bid; holding the current position.' });
       return false;
     }
-    const exitPrice = proceeds / soldShares;
-    const fee = estimateTakerFee(soldShares, exitPrice);
-    const actualSold = Math.min(position.openShares, soldShares);
+    const exitPrice = filledProceeds / filledShares;
+    const actualSold = Math.min(position.openShares, filledShares);
+    const proceeds = filledProceeds * (actualSold / filledShares);
+    const fee = estimateTakerFee(actualSold, exitPrice);
+    const entryBasis = (position.entryNotional + position.entryFee)
+      * (actualSold / position.shares);
+    const realizedPnl = proceeds - fee - entryBasis;
     position.openShares = Math.max(0, position.openShares - actualSold);
     position.exitProceeds += proceeds;
     position.exitFees += fee;
+    position.realizedPnl = (position.realizedPnl || 0) + realizedPnl;
+    this.stats.realizedPnl += realizedPnl;
+    this.stats.estimatedFees += fee;
     this.cash += proceeds - fee;
     position.lastExitPrice = exitPrice;
     position.status = position.openShares <= EPSILON ? 'closed' : 'partial_exit';
@@ -525,6 +545,7 @@ class Bot {
         + '; estimated taker fee $' + fee.toFixed(5) + '.',
     });
     if (position.openShares > EPSILON) {
+      this._recordEquity();
       this._push({
         event: 'SIGNAL_SELL_PARTIAL', slug: w.slug, side: position.side,
         shares: round(position.openShares, 4),
@@ -549,7 +570,7 @@ class Bot {
       this._push({
         event: 'EXPIRY_HOLD', slug: w.slug, side: w.position.side,
         shares: round(w.position.openShares, 4),
-        note: 'Window closed; remaining demo shares are held for official Polymarket resolution.',
+        note: 'Window closed; remaining shares are watched for decisive CLOB prices, then official resolution.',
       });
     }
     w.closed = true;
@@ -567,12 +588,40 @@ class Bot {
 
   async _settleClosedPositions(now = Date.now()) {
     for (const position of this.pending.slice()) {
-      if (position.settled || now < position.closeTs * 1000) continue;
+      if (position.settled) continue;
+      const closeTime = Number(position.closeTs) * 1000;
+      const activeWindow = this.w && this.w.openTs === position.openTs && !this.w.closed;
+      if (activeWindow && this.prices && this.prices.slug === position.slug
+        && now - this.prices.ts <= cfg.PRICE_STALE_MS) {
+        const currentQuote = position.side === 'UP' ? this.prices.up : this.prices.down;
+        if (currentQuote) {
+          const mark = currentQuote.bid == null ? currentQuote.mid : currentQuote.bid;
+          if (mark != null && Number.isFinite(Number(mark))) position.lastClobMark = Number(mark);
+        }
+        if (currentQuote && this._settlePositionAtClobPrice(position, currentQuote.mid)) continue;
+      }
+      if (now < closeTime) continue;
       if (this.w && this.w.openTs === position.openTs && !this.w.closed) {
         if (this.w.closing) continue;
         await this._closeWindow(this.w);
       }
       let winner = this.outcomes.get(position.openTs)?.winner;
+      const lastClobCheck = this._clobTried.get(position) || 0;
+      if (!winner && now - lastClobCheck >= cfg.RESOLUTION_RETRY_MS) {
+        this._clobTried.set(position, now);
+        try {
+          const heldQuote = quote(await this.trader.getOrderBook(position.tokenId));
+          const mark = heldQuote.bid == null ? heldQuote.mid : heldQuote.bid;
+          if (mark != null && Number.isFinite(Number(mark))) position.lastClobMark = Number(mark);
+          if (this._settlePositionAtClobPrice(position, heldQuote.mid)) continue;
+          this._recordEquity();
+        } catch (error) {
+          this._warnOnce('clob-settlement-' + position.slug, {
+            event: 'ERROR', slug: position.slug,
+            note: 'CLOB threshold check failed; waiting for another quote or official result: ' + error.message,
+          });
+        }
+      }
       const lastTried = this._resolveTried.get(position.openTs) || 0;
       if (!winner && now - lastTried >= cfg.RESOLUTION_RETRY_MS) {
         this._resolveTried.set(position.openTs, now);
@@ -592,7 +641,49 @@ class Bot {
       position.resolutionPayout = payout;
       this._finalizePosition(position, winner === position.side ? 'WIN' : 'LOSS', 'RESOLUTION', winner);
       this._resolveTried.delete(position.openTs);
+      this._clobTried.delete(position);
     }
+  }
+
+  _settlePositionAtClobPrice(position, midpoint) {
+    if (!position || position.settled || midpoint == null || midpoint === ''
+      || !Number.isFinite(Number(midpoint)) || position.openShares <= EPSILON) return false;
+    const price = Number(midpoint);
+    if (price < 0 || price > 1) return false;
+    const won = price >= cfg.CLOB_WIN_SETTLEMENT_PRICE;
+    const lost = price <= cfg.CLOB_LOSS_SETTLEMENT_PRICE;
+    if (!won && !lost) return false;
+
+    const remainingShares = position.openShares;
+    const payout = won ? remainingShares : 0;
+    const winner = won ? position.side : (position.side === 'UP' ? 'DOWN' : 'UP');
+    if (this.cash != null) this.cash += payout;
+    position.exitProceeds += payout;
+    position.openShares = 0;
+    position.resolutionPayout = payout;
+    position.clobThresholdPrice = price;
+    this._clobTried.delete(position);
+    this._resolveTried.delete(position.openTs);
+    const window = this.w && this.w.openTs === position.openTs && this.w.position === position
+      ? this.w : null;
+    if (window) {
+      window.position = null;
+      window.signalSide = null;
+      window.status = window.closed ? 'window_closed' : 'watching_signal';
+    }
+    this._push({
+      event: 'CLOB_THRESHOLD_SETTLEMENT',
+      slug: position.slug,
+      side: position.side,
+      price: round(price, 4),
+      shares: round(remainingShares, 4),
+      payout: round(payout, 2),
+      note: 'Held-side CLOB midpoint reached $' + price.toFixed(4)
+        + '; demo settlement counts ' + round(remainingShares, 4) + ' remaining shares at $'
+        + (won ? '1.00' : '0.00') + ' each.',
+    });
+    this._finalizePosition(position, won ? 'WIN' : 'LOSS', 'CLOB_THRESHOLD', winner);
+    return true;
   }
 
   _recordOutcome(openTs, slug, winner) {
@@ -609,8 +700,8 @@ class Bot {
     position.status = 'closed';
     const totalCost = position.entryNotional + position.entryFee + position.exitFees;
     const pnl = position.exitProceeds - totalCost;
-    this.stats.realizedPnl += pnl;
-    this.stats.estimatedFees += position.entryFee + position.exitFees;
+    this.stats.realizedPnl += pnl - (position.realizedPnl || 0);
+    position.realizedPnl = pnl;
     if (outcome === 'WIN') this.stats.wins += 1;
     else if (outcome === 'LOSS') this.stats.losses += 1;
     const trade = {
@@ -630,12 +721,24 @@ class Bot {
       slug: position.slug, side: position.side, pnl: round(pnl, 2),
       note: reason + ' · ' + outcome + ' · demo P&L ' + (pnl >= 0 ? '+' : '') + '$' + round(pnl, 2) + '.',
     });
-    if (this.capital != null) {
-      const equity = this.cash;
-      this.equity.push({ ts: Date.now(), v: round(equity, 2) });
+    this._recordEquity();
+  }
+
+  _recordEquity() {
+    if (this.capital == null || this.cash == null) return;
+    const now = Date.now();
+    const openValue = this.pending.reduce((sum, position) => {
+      const mark = position.lastClobMark != null && Number.isFinite(Number(position.lastClobMark))
+        ? Number(position.lastClobMark) : Number(position.entryPrice);
+      return sum + position.openShares * (Number.isFinite(mark) ? mark : 0);
+    }, 0);
+    const equity = this.cash + openValue;
+    this.peak = Math.max(this.peak == null ? equity : this.peak, equity);
+    this.maxDD = Math.max(this.maxDD, this.peak - equity);
+    const last = this.equity[this.equity.length - 1];
+    if (!last || Math.abs(equity - last.v) >= 0.01 || now - last.ts >= 1000) {
+      this.equity.push({ ts: now, v: round(equity, 2) });
       if (this.equity.length > 500) this.equity.shift();
-      this.peak = Math.max(this.peak == null ? equity : this.peak, equity);
-      this.maxDD = Math.max(this.maxDD, this.peak - equity);
     }
   }
 
@@ -651,14 +754,22 @@ class Bot {
     const now = Date.now();
     const w = this.w;
     const px = this.prices;
-    const pending = this.pending.slice(-20).map((position) => {
+    const allPending = this.pending.map((position) => {
       const q = px && px.slug === position.slug ? (position.side === 'UP' ? px.up : px.down) : null;
-      const mark = q ? (q.bid == null ? q.mid : q.bid) : null;
+      const currentMark = q ? (q.bid == null ? q.mid : q.bid) : null;
+      const mark = currentMark == null
+        ? (position.lastClobMark != null && Number.isFinite(Number(position.lastClobMark))
+          ? Number(position.lastClobMark)
+          : (Number.isFinite(Number(position.entryPrice)) ? Number(position.entryPrice) : null))
+        : currentMark;
       const costBasis = position.shares > 0
         ? (position.entryNotional + position.entryFee) * (position.openShares / position.shares) : 0;
       return { ...position, mark, unrealized: mark == null ? null : position.openShares * mark - costBasis };
     });
-    const openValue = pending.reduce((sum, position) => sum + (position.mark != null ? position.openShares * position.mark : 0), 0);
+    const pending = allPending.slice(-20);
+    const openValue = allPending.reduce((sum, position) => sum + (position.mark != null ? position.openShares * position.mark : 0), 0);
+    const unrealizedPnl = allPending.reduce((sum, position) => sum + (position.unrealized || 0), 0);
+    const equity = this.cash == null ? null : this.cash + openValue;
     const elapsed = w ? Math.max(0, (now - w.openTs * 1000) / 1000) : 0;
     const ccxtAgeMs = this.ccxt.receivedAt == null ? null : Math.max(0, now - this.ccxt.receivedAt);
     const ccxtStatus = ccxtAgeMs != null && ccxtAgeMs > cfg.CCXT_STALE_MS ? 'stale' : this.ccxt.status;
@@ -667,8 +778,9 @@ class Bot {
       error: this.error, executionHalt: this.executionHalt, walletBalance: this.walletBalance,
       walletAddress: this.trader.depositWallet || this.trader.address,
       account: {
-        capital: this.capital, cash: this.cash, openValue,
-        equity: this.cash == null ? null : this.cash + openValue, maxDrawdown: this.maxDD,
+        capital: this.capital, cash: this.cash, openValue, unrealizedPnl,
+        equity, totalPnl: equity == null || this.capital == null ? null : equity - this.capital,
+        maxDrawdown: this.maxDD,
       },
       window: w ? {
         slug: w.slug, status: w.status, openTs: w.openTs,
@@ -691,6 +803,8 @@ class Bot {
         thresholdWindowMs: cfg.BTC_MOVE_THRESHOLD_WINDOW_MS,
         thresholdFloorUsd: cfg.BTC_MOVE_THRESHOLD_FLOOR_USD,
         maxSellEntryPrice: cfg.MAX_SELL_ENTRY_PRICE_USD,
+        clobWinSettlementPrice: cfg.CLOB_WIN_SETTLEMENT_PRICE,
+        clobLossSettlementPrice: cfg.CLOB_LOSS_SETTLEMENT_PRICE,
         lookbackMs: cfg.SIGNAL_LOOKBACK_MS,
         pollMs: this.ccxt.pollMs,
         exchange: this.ccxt.exchange,

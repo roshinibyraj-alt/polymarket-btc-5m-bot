@@ -16,7 +16,7 @@
   <div class="card"><div class="label">Starting capital</div><div class="value" id="capital">—</div><div class="small" id="address">Paper balance · no wallet</div></div>
   <div class="card"><div class="label">Available cash</div><div class="value" id="cash">—</div><div class="small">Excludes current open position value</div></div>
   <div class="card"><div class="label">Account equity</div><div class="value" id="equity">—</div><div class="small" id="drawdown">Peak drawdown —</div></div>
-  <div class="card"><div class="label">Realized P&amp;L</div><div class="value" id="pnl">—</div><div class="small" id="record">0 wins · 0 losses</div></div>
+  <div class="card"><div class="label">Total P&amp;L</div><div class="value" id="pnl">—</div><div class="small" id="record">Realized — · Unrealized —</div></div>
 </section>
 <section class="grid">
   <article class="panel"><div class="panelhead"><div><div class="eyebrow">Current five-minute window</div><h2 id="marketTitle">Waiting for market</h2></div><div class="windowmeta"><div id="windowStatus" class="status">Starting</div><div id="timeLeft" style="margin-top:7px">— remaining</div></div></div>
@@ -33,12 +33,12 @@
         <div class="step" id="step3"><div class="stepnum">3</div><div><b>Reverse exposure on the opposite signal</b><p>Sell only when the average entry fill is at or below <b id="sellEntryLimit">$0.40</b>; above that, hold the position and do not open the opposite side.</p></div></div>
     </div>
      <div class="sizing"><div class="sizeLine"><div><div class="label">Fixed order size per entry</div><div class="sizeBig"><span id="baseShares">500</span> <span>shares</span></div></div><div class="small" id="additionCount">One open side at a time</div></div>
-        <div class="ruleTags"><span class="tag entry" id="entryTag">Adaptive threshold · rolling 20m</span><span class="tag tp" id="tpTag">FLIP ON OPPOSITE SIGNAL</span><span class="tag stop" id="sellGuardTag">NO SELL ABOVE $0.40 ENTRY</span></div>
+        <div class="ruleTags"><span class="tag entry" id="entryTag">Adaptive threshold · rolling 20m</span><span class="tag tp" id="tpTag">FLIP ON OPPOSITE SIGNAL</span><span class="tag stop" id="sellGuardTag">NO SELL ABOVE $0.40 ENTRY</span><span class="tag tp" id="clobSettleTag">CLOB ≥$0.99→$1 / ≤$0.01→$0</span></div>
        <div class="small" style="margin-top:12px"><span id="ccxtExchange">CCXT · BTC/USD</span> · Spot <b id="ccxtPrice">—</b> · 1s Δ <b id="ccxtChange">—</b> · <span id="ccxtStatus" class="status warn">CONNECTING</span></div>
     </div>
   </article>
 </section>
-<section class="panel wide"><div class="panelhead"><div><div class="eyebrow">Risk and exits</div><h2>Position management</h2></div><span class="small" id="openCount">No open positions</span></div><div class="tablewrap" id="openPositions"></div><div class="small" style="margin-top:10px">Demo marketable orders use visible Polymarket book depth and an observed top-of-book price limit. If a reversal only sells part of the current position, the bot waits rather than opening the opposite side. Any position still open at window close awaits official resolution.</div></section>
+<section class="panel wide"><div class="panelhead"><div><div class="eyebrow">Risk and exits</div><h2>Position management</h2></div><span class="small" id="openCount">No open positions</span></div><div class="tablewrap" id="openPositions"></div><div class="small" style="margin-top:10px">Demo marketable orders use visible Polymarket book depth and an observed top-of-book price limit. If a reversal only sells part of the current position, the bot waits rather than opening the opposite side. A held-side CLOB midpoint of at least $0.99 is counted as $1 per remaining share; $0.01 or lower is counted as $0.00. Other open positions remain subject to official resolution.</div></section>
  <section class="panel wide"><div class="panelhead"><div><div class="eyebrow">Completed positions</div><h2>Trade history</h2></div><span class="small" id="tradeCount">0 trades</span></div><div class="tablewrap" id="trades"></div><div class="small" style="margin-top:8px">Taker fees are estimates based on the configured crypto fee curve; simulated execution is not a profitability guarantee.</div></section>
 <section class="panel"><div class="panelhead"><div><div class="eyebrow">Bot activity</div><h2>Recent events</h2></div><span class="small" id="uptime">Uptime —</span></div><div class="log" id="log"></div><div class="foot"><span>Demo mode only: no live orders are submitted by this strategy.</span><span id="modeNote">Demo mode never sends real orders.</span></div></section>
 </main>
@@ -46,7 +46,7 @@
 const $=function(id){return document.getElementById(id)};
 const esc=function(value){return String(value==null?'':value).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})};
 const validNum=function(value){return value!==null&&value!==undefined&&value!==''&&Number.isFinite(Number(value))};
-const usd=function(value){const n=validNum(value)?Number(value):NaN;return Number.isFinite(n)?'$'+n.toFixed(2):'—'};
+const usd=function(value){const n=validNum(value)?Number(value):NaN;return Number.isFinite(n)?(n<0?'−$':'$')+Math.abs(n).toFixed(2):'—'};
 const cents=function(value){const n=validNum(value)?Number(value):NaN;return Number.isFinite(n)?'$'+n.toFixed(3):'—'};
 const qty=function(value){const n=validNum(value)?Number(value):NaN;return Number.isFinite(n)?n.toLocaleString(undefined,{maximumFractionDigits:2}):'—'};
 const clock=function(seconds){const n=Math.max(0,Math.floor(Number(seconds)||0));return String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0')};
@@ -62,8 +62,11 @@ function render(s){
   $('fresh').textContent='Updated '+time(s.now);
   $('capital').textContent=usd(s.account&&s.account.capital);$('cash').textContent=usd(s.account&&s.account.cash);$('equity').textContent=usd(s.account&&s.account.equity);
   $('address').textContent=s.mode==='LIVE'?(s.walletAddress||'Wallet connected'):'Paper balance · no wallet';$('drawdown').textContent='Peak drawdown '+usd(s.account&&s.account.maxDrawdown);
-  const pnl=Number(s.stats&&s.stats.realizedPnl)||0;$('pnl').textContent=(pnl>=0?'+':'')+usd(pnl);$('pnl').className='value '+(pnl>0?'positive':pnl<0?'negative':'');
-  $('record').textContent=(s.stats&&s.stats.wins||0)+' wins · '+(s.stats&&s.stats.losses||0)+' losses · est. fees '+usd(s.stats&&s.stats.estimatedFees);
+   const realizedPnl=Number(s.stats&&s.stats.realizedPnl)||0;
+   const pnl=validNum(s.account&&s.account.totalPnl)?Number(s.account.totalPnl):realizedPnl;
+   $('pnl').textContent=(pnl>=0?'+':'')+usd(pnl);$('pnl').className='value '+(pnl>0?'positive':pnl<0?'negative':'');
+   $('record').textContent='Realized '+usd(realizedPnl)+' · Open '+usd(s.account&&s.account.unrealizedPnl)
+     +' · '+(s.stats&&s.stats.wins||0)+'W/'+(s.stats&&s.stats.losses||0)+'L · fees '+usd(s.stats&&s.stats.estimatedFees);
   const error=$('error');if(s.error||s.executionHalt){error.textContent=s.executionHalt?'This strategy is demo-only and is blocked in LIVE mode; no orders were sent.':s.error;error.className='error show'}else error.className='error';
   $('ccxtExchange').textContent=(cx.exchange||cfg.ccxtExchange||'CCXT')+' · '+(cx.symbol||cfg.ccxtSymbol||'BTC/USD');
   $('ccxtPrice').textContent=usd(cx.price);$('ccxtChange').textContent=signedMove(cx.change1s);
@@ -80,10 +83,11 @@ function render(s){
   const thresholdLabel=st.thresholdReady
     ?'ADAPTIVE ±'+usd(st.thresholdUsd)+' · P'+st.thresholdPercentile+' / 20m'
     :'THRESHOLD WARM-UP '+(st.thresholdSampleCount||0)+'/'+(st.thresholdMinSamples||120);
-  $('gateLabel').textContent=w&&w.closed?'WINDOW CLOSED · OFFICIAL RESOLUTION ONLY':thresholdLabel+' · '+(cfg.ccxtPollMs||500)+' ms polling';
+  $('gateLabel').textContent=w&&w.closed?'WINDOW CLOSED · CLOB THRESHOLD THEN OFFICIAL RESULT':thresholdLabel+' · '+(cfg.ccxtPollMs||500)+' ms polling';
   $('sellEntryLimit').textContent=usd(st.maxSellEntryPrice);
   $('sellGuardTag').textContent='NO SELL IF ENTRY > '+usd(st.maxSellEntryPrice);
   $('tpTag').textContent='FLIP IF ENTRY ≤ '+usd(st.maxSellEntryPrice);
+  $('clobSettleTag').textContent='CLOB ≥'+usd(st.clobWinSettlementPrice)+'→$1 / ≤'+usd(st.clobLossSettlementPrice)+'→$0';
   setSideQuote('UP',px.up,w&&w.positionSide,w&&w.closed);setSideQuote('DOWN',px.down,w&&w.positionSide,w&&w.closed);
   const signal=w&&w.lastSignal;
   statusStyle($('signalPill'),w&&w.positionSide?'Holding '+w.positionSide:signal?signal.side+' signal · '+signedMove(signal.changeUsd):'Waiting for a qualifying move',w&&w.positionSide?'good':signal?'warn':'');
@@ -100,7 +104,7 @@ function render(s){
   $('entryTag').textContent=st.thresholdReady
     ?'±'+usd(st.thresholdUsd)+' / 1s · P'+st.thresholdPercentile+' rolling 20m'
     :'WARMING UP · '+(st.thresholdSampleCount||0)+'/'+(st.thresholdMinSamples||120)+' samples';
-  $('tpTag').textContent='SELL HELD SIDE · BUY OPPOSITE';
+   $('tpTag').textContent='FLIP IF ENTRY ≤ '+usd(st.maxSellEntryPrice);
   $('openCount').textContent=(s.pending||[]).length+' open position'+((s.pending||[]).length===1?'':'s');
   const pending=s.pending||[];
   if(!pending.length){$('openPositions').innerHTML=rowEmpty('No open positions',8)}else{
