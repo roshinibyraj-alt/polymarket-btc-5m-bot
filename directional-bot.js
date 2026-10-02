@@ -409,6 +409,10 @@ class Bot {
           + ' threshold; target side is ' + side + '.',
       });
     }
+    if (!entryDelayElapsed(w)) {
+      w.status = 'waiting_for_window_delay';
+      return;
+    }
     if (w.entryTaken || (w.position && w.position.openShares > EPSILON)) {
       w.status = w.position && w.position.openShares > EPSILON
         ? 'position_open' : 'trade_taken';
@@ -444,6 +448,10 @@ class Bot {
     const signal = w.activeSignal;
     const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
     if (Date.now() >= closeTs * 1000) return false;
+    if (!entryDelayElapsed(w)) {
+      w.status = 'waiting_for_window_delay';
+      return false;
+    }
     const currentQuote = this.prices && this.prices.slug === w.slug
       ? (signal.side === 'UP' ? this.prices.up : this.prices.down) : null;
     const ask = currentQuote && currentQuote.ask != null ? Number(currentQuote.ask) : NaN;
@@ -474,6 +482,10 @@ class Bot {
 
   async _buyPosition(w, side, move) {
     if (w.entryTaken || w.position || !w.activeSignal || w.activeSignal.side !== side) return false;
+    if (!entryDelayElapsed(w)) {
+      w.status = 'waiting_for_window_delay';
+      return false;
+    }
     const tokenId = side === 'UP' ? w.window.tokenUp : w.window.tokenDown;
     const book = await this.trader.getOrderBook(tokenId);
     const asks = sortedLevels(book && book.asks, 'asc');
@@ -519,6 +531,7 @@ class Bot {
     const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
     if (this.w !== w || w.closed || w.entryTaken || w.position
       || Date.now() >= closeTs * 1000
+      || !entryDelayElapsed(w)
       || !w.activeSignal || w.activeSignal.side !== side) return false;
 
     const order = await this.trader.placeFakMarketOrder(tokenId, 'BUY', spendLimit, {
@@ -806,6 +819,7 @@ class Bot {
         slug: w.slug, status: w.status, openTs: w.openTs,
         closeTs: Number(w.window && w.window.closeTs) || w.openTs + WINDOW_SECONDS,
         elapsedSeconds: elapsed, closed: w.closed,
+        entryDelayRemainingSeconds: Math.max(0, cfg.ENTRY_DELAY_AFTER_WINDOW_START_SECONDS - elapsed),
         positionSide: w.position && w.position.openShares > EPSILON ? w.position.side : null,
         openShares: w.position ? w.position.openShares : 0,
         lastSignal: w.lastSignal || null,
@@ -817,6 +831,7 @@ class Bot {
       priceSeries: this.priceSeries,
       strategy: {
         baseShares: cfg.BASE_SHARES,
+        entryDelayAfterWindowStartSeconds: cfg.ENTRY_DELAY_AFTER_WINDOW_START_SECONDS,
         maxBuySlippagePercent: cfg.MAX_BUY_SLIPPAGE_PERCENT,
         minBuyEntryPrice: cfg.MIN_BUY_ENTRY_PRICE_USD,
         maxBuyEntryPrice: cfg.MAX_BUY_ENTRY_PRICE_USD,
@@ -863,6 +878,12 @@ function makeWindowState(slug, openTs) {
 }
 
 function emptyQuote() { return { bid: null, ask: null, mid: null }; }
+
+function entryDelayElapsed(window) {
+  const openTs = Number(window && window.openTs);
+  return Number.isFinite(openTs)
+    && Date.now() >= (openTs + cfg.ENTRY_DELAY_AFTER_WINDOW_START_SECONDS) * 1000;
+}
 
 function sortedLevels(levels, order) {
   return (levels || [])

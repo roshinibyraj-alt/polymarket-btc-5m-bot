@@ -83,7 +83,7 @@ function makeBot(options = {}) {
       (_, index) => ({ at: now - (index + 1) * 500, absMoveUsd: 2 }),
     );
   }
-  const openTs = Math.floor(Date.now() / 1000) - 1;
+  const openTs = Math.floor(Date.now() / 1000) - cfg.ENTRY_DELAY_AFTER_WINDOW_START_SECONDS - 1;
   bot.w = makeWindowState('btc-updown-5m-' + openTs, openTs);
   bot.w.window = { tokenUp: 'up', tokenDown: 'down', closeTs: openTs + 300 };
   bot.w.status = 'watching_signal';
@@ -118,6 +118,30 @@ test('an opposite signal does not sell or open a second position in the same win
   assert.equal(bot.w.position.openShares, 100);
   assert.equal(bot.w.activeSignal.side, 'DOWN');
   assert.equal(bot.w.entryTaken, true);
+});
+
+test('a qualifying signal waits 15 seconds from window open before buying', async () => {
+  const { bot, trader } = makeBot();
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  bot.w.openTs = nowSeconds - 14;
+  bot.w.window.closeTs = bot.w.openTs + 300;
+  const start = Date.now();
+  await bot._onBtcSample({ price: 80000, receivedAt: start });
+  await bot._onBtcSample({ price: 80004, receivedAt: start + 500 });
+  await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
+
+  assert.equal(bot.trader.calls.length, 0);
+  assert.equal(bot.w.activeSignal.side, 'UP');
+  assert.equal(bot.w.status, 'waiting_for_window_delay');
+
+  await bot._onQuote(bot.w.slug, 'up', { bid: 0.39, ask: 0.40 });
+  assert.equal(trader.calls.length, 0);
+
+  bot.w.openTs = Math.floor(Date.now() / 1000) - 15;
+  bot.w.window.closeTs = bot.w.openTs + 300;
+  await bot._onQuote(bot.w.slug, 'up', { bid: 0.39, ask: 0.40 });
+  assert.equal(trader.calls.length, 1);
+  assert.equal(bot.w.position.side, 'UP');
 });
 
 test('a BUY sweeps visible asks up to the configured slippage cap while targeting 500 shares', async () => {
@@ -391,6 +415,7 @@ test('snapshot exposes the feed and strategy settings', () => {
   assert.equal(snapshot.strategy.thresholdMinSamples, 120);
   assert.equal(snapshot.strategy.thresholdWindowMs, 20 * 60 * 1000);
   assert.equal(snapshot.strategy.maxBuySlippagePercent, 50);
+  assert.equal(snapshot.strategy.entryDelayAfterWindowStartSeconds, 15);
   assert.equal(snapshot.strategy.minBuyEntryPrice, 0.15);
   assert.equal(snapshot.strategy.maxBuyEntryPrice, 0.45);
   assert.equal(snapshot.strategy.clobWinSettlementPrice, 0.99);
