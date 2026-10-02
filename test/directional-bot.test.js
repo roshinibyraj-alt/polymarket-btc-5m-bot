@@ -90,9 +90,10 @@ function makeBot(options = {}) {
   return { bot, trader };
 }
 
-test('an adaptive positive move buys UP, then an adaptive negative move sells UP before buying DOWN', async () => {
+test('an opposite signal does not sell or open a second position in the same window', async () => {
   const { bot, trader } = makeBot();
   trader.books.up.asks[0].price = 0.40;
+  trader.books.up.asks[0].size = 100;
   const start = Date.now();
   await bot._onBtcSample({ price: 80000, receivedAt: start, exchange: 'kraken', symbol: 'BTC/USD' });
   await bot._onBtcSample({ price: 80004, receivedAt: start + 500, exchange: 'kraken', symbol: 'BTC/USD' });
@@ -100,7 +101,7 @@ test('an adaptive positive move buys UP, then an adaptive negative move sells UP
 
   assert.equal(bot.pending.length, 1);
   assert.equal(bot.pending[0].side, 'UP');
-  assert.equal(bot.pending[0].shares, 500);
+  assert.equal(bot.pending[0].shares, 100);
   assert.equal(bot.ccxt.thresholdUsd, 2);
   assert.equal(bot.ccxt.thresholdReady, true);
   assert.equal(trader.calls.length, 1);
@@ -108,15 +109,15 @@ test('an adaptive positive move buys UP, then an adaptive negative move sells UP
   assert.equal(trader.calls[0].side, 'BUY');
 
   await bot._onBtcSample({ price: 79990, receivedAt: start + 1500, exchange: 'kraken', symbol: 'BTC/USD' });
-  assert.equal(trader.calls.length, 3);
-  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [
-    ['up', 'BUY'], ['up', 'SELL'], ['down', 'BUY'],
-  ]);
+  assert.equal(trader.calls.length, 1);
+  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [['up', 'BUY']]);
   assert.equal(bot.pending.length, 1);
-  assert.equal(bot.pending[0].side, 'DOWN');
-  assert.equal(bot.trades.length, 1);
-  assert.equal(bot.trades[0].reason, 'SIGNAL_REVERSAL');
-  assert.equal(bot.w.position.side, 'DOWN');
+  assert.equal(bot.pending[0].side, 'UP');
+  assert.equal(bot.trades.length, 0);
+  assert.equal(bot.w.position.side, 'UP');
+  assert.equal(bot.w.position.openShares, 100);
+  assert.equal(bot.w.activeSignal.side, 'DOWN');
+  assert.equal(bot.w.entryTaken, true);
 });
 
 test('a BUY sweeps visible asks up to the configured slippage cap while targeting 500 shares', async () => {
@@ -140,7 +141,7 @@ test('a BUY sweeps visible asks up to the configured slippage cap while targetin
   assert.ok(Math.abs(bot.w.position.entryNotional - 249.36) < 1e-8);
 });
 
-test('a signal stays active until the ask falls below $0.45, then enters', async () => {
+test('a signal waits for the inclusive ask range and keeps 50% slippage after triggering', async () => {
   const { bot, trader } = makeBot();
   trader.books.up.asks[0].price = 0.50;
   const start = Date.now();
@@ -153,15 +154,31 @@ test('a signal stays active until the ask falls below $0.45, then enters', async
   assert.equal(bot.w.status, 'waiting_for_entry_price');
 
   trader.books.up.asks = [
-    { price: 0.44, size: 100 },
+    { price: 0.45, size: 100 },
     { price: 0.50, size: 400 },
+    { price: 0.68, size: 1000 },
   ];
-  await bot._onQuote(bot.w.slug, 'up', { bid: 0.43, ask: 0.45 });
-  assert.equal(trader.calls.length, 0);
-  await bot._onQuote(bot.w.slug, 'up', { bid: 0.42, ask: 0.44 });
+  await bot._onQuote(bot.w.slug, 'up', { bid: 0.44, ask: 0.45 });
   assert.equal(trader.calls.length, 1);
   assert.equal(bot.w.position.side, 'UP');
-  assert.ok(bot.w.position.entryPrice > 0.44);
+  assert.equal(trader.calls[0].priceLimit, 0.675);
+  assert.ok(bot.w.position.entryPrice > 0.45);
+});
+
+test('an ask below $0.15 waits; exactly $0.15 is an eligible trigger', async () => {
+  const { bot, trader } = makeBot();
+  trader.books.up.asks[0].price = 0.14;
+  const start = Date.now();
+  await bot._onBtcSample({ price: 80000, receivedAt: start });
+  await bot._onBtcSample({ price: 80004, receivedAt: start + 500 });
+  await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
+  assert.equal(trader.calls.length, 0);
+  assert.equal(bot.w.activeSignal.side, 'UP');
+
+  trader.books.up.asks[0].price = 0.15;
+  await bot._onQuote(bot.w.slug, 'up', { bid: 0.14, ask: 0.15 });
+  assert.equal(trader.calls.length, 1);
+  assert.equal(bot.w.position.entryPrice, 0.15);
 });
 
 test('an opposite signal replaces a waiting signal before a later entry quote', async () => {
@@ -186,25 +203,6 @@ test('an opposite signal replaces a waiting signal before a later entry quote', 
   await bot._onQuote(bot.w.slug, 'down', { bid: 0.42, ask: 0.44 });
   assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [['down', 'BUY']]);
   assert.equal(bot.w.position.side, 'DOWN');
-});
-
-test('a position entered above $0.40 is held and blocks the opposite entry on reversal', async () => {
-  const { bot, trader } = makeBot();
-  trader.books.up.asks[0].price = 0.43;
-  const start = Date.now();
-  await bot._onBtcSample({ price: 80000, receivedAt: start });
-  await bot._onBtcSample({ price: 80004, receivedAt: start + 500 });
-  await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
-
-  assert.equal(bot.w.position.entryPrice, 0.43);
-  await bot._onBtcSample({ price: 79990, receivedAt: start + 1500 });
-
-  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [['up', 'BUY']]);
-  assert.equal(bot.w.position.side, 'UP');
-  assert.equal(bot.w.position.openShares, 500);
-  assert.equal(bot.w.position.status, 'position_open');
-  assert.equal(bot.trades.length, 0);
-  assert.ok(bot.log.some((item) => item.event === 'SIGNAL_SELL_BLOCKED_HIGH_ENTRY'));
 });
 
 test('held-side CLOB midpoint at $0.99 settles remaining shares as a $1 win', async () => {
@@ -273,7 +271,7 @@ test('after window close, CLOB threshold can settle before official resolution r
   assert.equal(bot._resolveTried.has(position.openTs), false);
 });
 
-test('a partial sell blocks opening the opposite side', async () => {
+test('a settled position cannot be re-entered in the same window', async () => {
   const trader = new FakeDemoTrader();
   trader.books.up.asks[0].price = 0.40;
   const { bot } = makeBot({ trader });
@@ -281,18 +279,22 @@ test('a partial sell blocks opening the opposite side', async () => {
   await bot._onBtcSample({ price: 80000, receivedAt: start });
   await bot._onBtcSample({ price: 80001, receivedAt: start + 500 });
   await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
-  trader.books.up.bids[0].size = 100;
 
   await bot._onBtcSample({ price: 79990, receivedAt: start + 1500 });
-  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [
-    ['up', 'BUY'], ['up', 'SELL'],
-  ]);
+  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [['up', 'BUY']]);
   assert.equal(bot.w.position.side, 'UP');
-  assert.equal(bot.w.position.openShares, 400);
+  assert.equal(bot.w.entryTaken, true);
+  await bot._onQuote(bot.w.slug, 'up', { bid: 0.98, ask: 1 });
+  assert.equal(bot.w.position, null);
+  assert.equal(bot.pending.length, 0);
+  assert.equal(bot.trades.length, 1);
+
+  trader.books.down.asks[0].price = 0.30;
+  await bot._onQuote(bot.w.slug, 'down', { bid: 0.29, ask: 0.30 });
+  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [['up', 'BUY']]);
+  assert.equal(bot.w.entryTaken, true);
   const snapshot = bot.snapshot();
-  assert.ok(snapshot.stats.realizedPnl > 0);
-  assert.ok(Math.abs(snapshot.account.totalPnl
-    - (snapshot.stats.realizedPnl + snapshot.account.unrealizedPnl)) < 1e-8);
+  assert.ok(Math.abs(snapshot.account.totalPnl - snapshot.stats.realizedPnl) < 1e-8);
   assert.ok(Math.abs(snapshot.account.equity
     - (cfg.DEMO_CAPITAL + snapshot.account.totalPnl)) < 1e-8);
 });
@@ -373,11 +375,12 @@ test('snapshot exposes the feed and strategy settings', () => {
   assert.equal(snapshot.strategy.thresholdMinSamples, 120);
   assert.equal(snapshot.strategy.thresholdWindowMs, 20 * 60 * 1000);
   assert.equal(snapshot.strategy.maxBuySlippagePercent, 50);
+  assert.equal(snapshot.strategy.minBuyEntryPrice, 0.15);
   assert.equal(snapshot.strategy.maxBuyEntryPrice, 0.45);
-  assert.equal(snapshot.strategy.maxSellEntryPrice, 0.40);
   assert.equal(snapshot.strategy.clobWinSettlementPrice, 0.99);
   assert.equal(snapshot.strategy.clobLossSettlementPrice, 0.01);
   assert.equal(snapshot.window.status, 'watching_signal');
+  assert.equal(snapshot.window.entryTaken, false);
 });
 
 test('default bot constructs the configured Coinbase feed at 500 ms', () => {

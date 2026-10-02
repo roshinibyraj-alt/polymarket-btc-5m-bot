@@ -31,7 +31,7 @@ class Bot {
     this._clobTried = new Map();
     this._warned = new Set();
     this.stats = {
-      wins: 0, losses: 0, signalEntries: 0, signalReversals: 0,
+      wins: 0, losses: 0, signalEntries: 0,
       estimatedFees: 0, realizedPnl: 0,
     };
     this.counts = { UP: 0, DOWN: 0 };
@@ -409,8 +409,9 @@ class Bot {
           + ' threshold; target side is ' + side + '.',
       });
     }
-    if (w.position && w.position.side === side) {
-      w.status = 'position_open';
+    if (w.entryTaken || (w.position && w.position.openShares > EPSILON)) {
+      w.status = w.position && w.position.openShares > EPSILON
+        ? 'position_open' : 'trade_taken';
       return;
     }
     if (this._signalBusy) {
@@ -420,11 +421,8 @@ class Bot {
     this._signalBusy = true;
     w.tradeInFlight = true;
     try {
-      if (w.position && w.position.openShares > EPSILON) {
-        const closed = await this._sellPosition(w, w.position, 'SIGNAL_REVERSAL');
-        if (!closed) return;
-      }
       if (this.w !== w || w.closed || Date.now() >= closeTs * 1000
+        || w.entryTaken || (w.position && w.position.openShares > EPSILON)
         || !w.activeSignal || w.activeSignal.side !== side) return;
       await this._buyPosition(w, side, move);
     } catch (error) {
@@ -442,14 +440,15 @@ class Bot {
 
   async _attemptActiveSignal(w) {
     if (this.strategyBlocked || !w || this.w !== w || !w.window || w.closed || w.closing
-      || w.position || !w.activeSignal || this._signalBusy) return false;
+      || w.entryTaken || w.position || !w.activeSignal || this._signalBusy) return false;
     const signal = w.activeSignal;
     const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
     if (Date.now() >= closeTs * 1000) return false;
     const currentQuote = this.prices && this.prices.slug === w.slug
       ? (signal.side === 'UP' ? this.prices.up : this.prices.down) : null;
     const ask = currentQuote && currentQuote.ask != null ? Number(currentQuote.ask) : NaN;
-    if (!Number.isFinite(ask) || ask >= cfg.MAX_BUY_ENTRY_PRICE_USD) {
+    if (!Number.isFinite(ask) || ask < cfg.MIN_BUY_ENTRY_PRICE_USD
+      || ask > cfg.MAX_BUY_ENTRY_PRICE_USD) {
       w.status = 'waiting_for_entry_price';
       return false;
     }
@@ -474,6 +473,7 @@ class Bot {
   }
 
   async _buyPosition(w, side, move) {
+    if (w.entryTaken || w.position || !w.activeSignal || w.activeSignal.side !== side) return false;
     const tokenId = side === 'UP' ? w.window.tokenUp : w.window.tokenDown;
     const book = await this.trader.getOrderBook(tokenId);
     const asks = sortedLevels(book && book.asks, 'asc');
@@ -487,15 +487,16 @@ class Bot {
       });
       return false;
     }
-    if (bestAsk >= cfg.MAX_BUY_ENTRY_PRICE_USD) {
+    if (bestAsk < cfg.MIN_BUY_ENTRY_PRICE_USD || bestAsk > cfg.MAX_BUY_ENTRY_PRICE_USD) {
       w.status = 'waiting_for_entry_price';
       if (w.lastPriceWaitSignalSide !== side) {
         w.lastPriceWaitSignalSide = side;
         this._push({
           event: 'SIGNAL_WAITING_FOR_ENTRY_PRICE', slug: w.slug, side,
           ask: round(bestAsk, 4),
-          note: side + ' signal remains active; waiting for its best ask to fall below $'
-            + cfg.MAX_BUY_ENTRY_PRICE_USD.toFixed(2) + ' or for an opposite signal.',
+          note: side + ' signal remains active; waiting for its best ask to enter the $'
+            + cfg.MIN_BUY_ENTRY_PRICE_USD.toFixed(2) + '–$'
+            + cfg.MAX_BUY_ENTRY_PRICE_USD.toFixed(2) + ' range or for an opposite signal.',
         });
       }
       return false;
@@ -516,7 +517,8 @@ class Bot {
       return false;
     }
     const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
-    if (this.w !== w || w.closed || Date.now() >= closeTs * 1000
+    if (this.w !== w || w.closed || w.entryTaken || w.position
+      || Date.now() >= closeTs * 1000
       || !w.activeSignal || w.activeSignal.side !== side) return false;
 
     const order = await this.trader.placeFakMarketOrder(tokenId, 'BUY', spendLimit, {
@@ -556,7 +558,7 @@ class Bot {
     this.cash -= position.cost;
     this.pending.push(position);
     w.position = position;
-    w.signalSide = side;
+    w.entryTaken = true;
     w.status = 'position_open';
     this.stats.signalEntries += 1;
     this.stats.estimatedFees += fee;
@@ -570,83 +572,6 @@ class Bot {
         + ' (maximum ' + cfg.MAX_BUY_SLIPPAGE_PERCENT + '% above the observed ask)'
         + '; estimated taker fee $' + fee.toFixed(5) + '.',
     });
-    return true;
-  }
-
-  async _sellPosition(w, position, reason) {
-    const entryPrice = Number(position.entryPrice ?? position.price);
-    if (Number.isFinite(entryPrice) && entryPrice > cfg.MAX_SELL_ENTRY_PRICE_USD) {
-      w.status = 'position_open';
-      this._push({
-        event: 'SIGNAL_SELL_BLOCKED_HIGH_ENTRY',
-        slug: w.slug,
-        side: position.side,
-        entryPrice: round(entryPrice, 4),
-        note: 'Sell blocked: the position entry price $' + entryPrice.toFixed(4)
-          + ' is above the $' + cfg.MAX_SELL_ENTRY_PRICE_USD.toFixed(2)
-          + ' limit. Holding the position; the opposite side will not be opened.',
-      });
-      return false;
-    }
-    const book = await this.trader.getOrderBook(position.tokenId);
-    const bids = sortedLevels(book && book.bids, 'desc');
-    const bestBid = bids.length ? bids[0].price : null;
-    if (bestBid == null || bestBid <= 0) {
-      this._push({ event: 'SIGNAL_SELL_NO_BOOK', slug: w.slug, side: position.side, note: 'No executable bid to close the current position.' });
-      return false;
-    }
-    position.lastClobMark = bestBid;
-    this._recordEquity();
-    const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
-    if (this.w !== w || w.closed || Date.now() >= closeTs * 1000) return false;
-    const requestedShares = position.openShares;
-    const order = await this.trader.placeFakMarketOrder(
-      position.tokenId, 'SELL', requestedShares, { priceLimit: bestBid },
-    );
-    const filledShares = positive(order && order.raw && order.raw.makingAmount);
-    const filledProceeds = positive(order && order.raw && order.raw.takingAmount);
-    if (filledShares == null || filledProceeds == null) {
-      this._push({ event: 'SIGNAL_SELL_UNFILLED', slug: w.slug, side: position.side, note: 'No shares sold at the observed best bid; holding the current position.' });
-      return false;
-    }
-    const exitPrice = filledProceeds / filledShares;
-    const actualSold = Math.min(position.openShares, filledShares);
-    const proceeds = filledProceeds * (actualSold / filledShares);
-    const fee = estimateTakerFee(actualSold, exitPrice);
-    const entryBasis = (position.entryNotional + position.entryFee)
-      * (actualSold / position.shares);
-    const realizedPnl = proceeds - fee - entryBasis;
-    position.openShares = Math.max(0, position.openShares - actualSold);
-    position.exitProceeds += proceeds;
-    position.exitFees += fee;
-    position.realizedPnl = (position.realizedPnl || 0) + realizedPnl;
-    this.stats.realizedPnl += realizedPnl;
-    this.stats.estimatedFees += fee;
-    this.cash += proceeds - fee;
-    position.lastExitPrice = exitPrice;
-    position.status = position.openShares <= EPSILON ? 'closed' : 'partial_exit';
-    this._push({
-      event: 'SIGNAL_SELL_FILLED', slug: w.slug, side: position.side,
-      shares: round(actualSold, 4), price: round(exitPrice, 4), fee: round(fee, 5),
-      note: 'Demo marketable SELL closed ' + round(actualSold, 4) + ' ' + position.side
-        + ' shares at average $' + exitPrice.toFixed(4)
-        + '; estimated taker fee $' + fee.toFixed(5) + '.',
-    });
-    if (position.openShares > EPSILON) {
-      this._recordEquity();
-      this._push({
-        event: 'SIGNAL_SELL_PARTIAL', slug: w.slug, side: position.side,
-        shares: round(position.openShares, 4),
-        note: 'Some shares remain; the opposite position will not be opened until this side is fully sold.',
-      });
-      return false;
-    }
-
-    position.openShares = 0;
-    this._finalizePosition(position, 'CLOSED', reason);
-    w.position = null;
-    w.signalSide = null;
-    this.stats.signalReversals += 1;
     return true;
   }
 
@@ -756,8 +681,8 @@ class Bot {
       ? this.w : null;
     if (window) {
       window.position = null;
-      window.signalSide = null;
-      window.status = window.closed ? 'window_closed' : 'watching_signal';
+        window.status = window.closed ? 'window_closed'
+          : window.entryTaken ? 'trade_settled' : 'watching_signal';
     }
     this._push({
       event: 'CLOB_THRESHOLD_SETTLEMENT',
@@ -878,6 +803,7 @@ class Bot {
         openShares: w.position ? w.position.openShares : 0,
         lastSignal: w.lastSignal || null,
         activeSignalSide: w.activeSignal ? w.activeSignal.side : null,
+        entryTaken: !!w.entryTaken,
       } : null,
       ccxt: { ...this.ccxt, status: ccxtStatus, ageMs: ccxtAgeMs },
       prices: px && w && px.slug === w.slug ? px : null,
@@ -885,6 +811,7 @@ class Bot {
       strategy: {
         baseShares: cfg.BASE_SHARES,
         maxBuySlippagePercent: cfg.MAX_BUY_SLIPPAGE_PERCENT,
+        minBuyEntryPrice: cfg.MIN_BUY_ENTRY_PRICE_USD,
         maxBuyEntryPrice: cfg.MAX_BUY_ENTRY_PRICE_USD,
         thresholdUsd: this.ccxt.thresholdUsd,
         thresholdReady: this.ccxt.thresholdReady,
@@ -893,7 +820,6 @@ class Bot {
         thresholdPercentile: cfg.BTC_MOVE_THRESHOLD_PERCENTILE,
         thresholdWindowMs: cfg.BTC_MOVE_THRESHOLD_WINDOW_MS,
         thresholdFloorUsd: cfg.BTC_MOVE_THRESHOLD_FLOOR_USD,
-        maxSellEntryPrice: cfg.MAX_SELL_ENTRY_PRICE_USD,
         clobWinSettlementPrice: cfg.CLOB_WIN_SETTLEMENT_PRICE,
         clobLossSettlementPrice: cfg.CLOB_LOSS_SETTLEMENT_PRICE,
         lookbackMs: cfg.SIGNAL_LOOKBACK_MS,
@@ -924,7 +850,7 @@ class Bot {
 function makeWindowState(slug, openTs) {
   return {
     slug, openTs, status: 'waiting_for_market', window: null,
-    closed: false, closing: false, position: null, signalSide: null,
+    closed: false, closing: false, position: null, entryTaken: false,
     lastSignal: null, activeSignal: null, lastLoggedSignalSide: null, tradeInFlight: false,
   };
 }
