@@ -3,6 +3,7 @@
 module.exports = {
   DEMO_CAPITAL: 10000,
   BASE_SHARES: 500,
+  MAX_BUY_SLIPPAGE_PERCENT: 5,
   LOOP_MS: 500,
   CCXT_EXCHANGE: process.env.CCXT_EXCHANGE || 'coinbase',
   CCXT_SYMBOL: process.env.CCXT_SYMBOL || '',

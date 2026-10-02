@@ -423,25 +423,30 @@ class Bot {
       return false;
     }
     const targetShares = cfg.BASE_SHARES;
-    const spendLimit = targetShares * bestAsk;
-    const estimatedFee = estimateTakerFee(targetShares, bestAsk);
+    const priceLimit = Math.min(0.99, bestAsk * (1 + cfg.MAX_BUY_SLIPPAGE_PERCENT / 100));
+    const spendLimit = targetShares * priceLimit;
+    const estimatedFee = estimateTakerFee(targetShares, 0.5);
     if (this.cash == null || this.cash + EPSILON < spendLimit + estimatedFee) {
       this._push({
         event: 'SIGNAL_BUY_NO_CASH', slug: w.slug, side,
-        note: 'Demo cash is insufficient for the configured ' + targetShares + '-share ' + side + ' entry.',
+        note: 'Demo cash is insufficient for the configured ' + targetShares + '-share ' + side
+          + ' entry at the maximum slippage price.',
       });
       return false;
     }
     const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
     if (this.w !== w || w.closed || Date.now() >= closeTs * 1000) return false;
 
-    const order = await this.trader.placeFakMarketOrder(tokenId, 'BUY', spendLimit, { priceLimit: bestAsk });
+    const order = await this.trader.placeFakMarketOrder(tokenId, 'BUY', spendLimit, {
+      priceLimit, targetShares,
+    });
     const shares = positive(order && order.raw && order.raw.takingAmount);
     const notional = positive(order && order.raw && order.raw.makingAmount);
     if (shares == null || notional == null) {
       this._push({
         event: 'SIGNAL_BUY_UNFILLED', slug: w.slug, side,
-        note: 'No shares filled at or below the observed best ask; no position opened.',
+        note: 'No shares filled within the configured ' + cfg.MAX_BUY_SLIPPAGE_PERCENT
+          + '% slippage cap; no position opened.',
       });
       return false;
     }
@@ -480,6 +485,7 @@ class Bot {
       fee: round(fee, 5), changeUsd: round(move.changeUsd, 2),
       note: 'Demo marketable BUY filled ' + round(shares, 4) + ' ' + side
         + ' shares at average $' + averagePrice.toFixed(4)
+        + ' (maximum ' + cfg.MAX_BUY_SLIPPAGE_PERCENT + '% above the observed ask)'
         + '; estimated taker fee $' + fee.toFixed(5) + '.',
     });
     return true;
@@ -795,6 +801,7 @@ class Bot {
       priceSeries: this.priceSeries,
       strategy: {
         baseShares: cfg.BASE_SHARES,
+        maxBuySlippagePercent: cfg.MAX_BUY_SLIPPAGE_PERCENT,
         thresholdUsd: this.ccxt.thresholdUsd,
         thresholdReady: this.ccxt.thresholdReady,
         thresholdSampleCount: this.ccxt.thresholdSampleCount,

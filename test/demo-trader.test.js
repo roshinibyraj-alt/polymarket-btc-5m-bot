@@ -73,6 +73,27 @@ test('demo marketable BUY respects the observed maximum price and visible depth'
   } finally { global.fetch = originalFetch; }
 });
 
+test('demo marketable BUY sweeps depth to the price cap and targets shares at that cap', async () => {
+  const originalFetch = global.fetch;
+  const book = {
+    bids: [{ price: '0.48', size: '20' }],
+    asks: [
+      { price: '0.50', size: '4' },
+      { price: '0.52', size: '496' },
+      { price: '0.53', size: '1000' },
+    ],
+  };
+  global.fetch = async () => ({ ok: true, json: async () => book });
+  try {
+    const trader = new DemoTrader();
+    const order = await trader.placeFakMarketOrder('token', 'BUY', 500 * 0.525, { priceLimit: 0.525 });
+    assert.equal(order.status, 'matched');
+    assert.equal(Number(order.raw.takingAmount), 500);
+    assert.equal(Number(order.raw.makingAmount), 259.92);
+    assert.equal(order.avgPrice, 259.92 / 500);
+  } finally { global.fetch = originalFetch; }
+});
+
 test('demo marketable SELL respects the observed minimum price and visible depth', async () => {
   const originalFetch = global.fetch;
   const book = {

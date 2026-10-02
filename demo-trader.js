@@ -38,13 +38,23 @@ class DemoTrader {
       .sort(buying ? (a, b) => a.price - b.price : (a, b) => b.price - a.price);
     let shares = 0;
     let notional = 0;
+    // Market BUY amount is USDC. With a price limit, amount / limit represents
+    // the target share quantity, matching the CLOB marketable-limit order.
     let remaining = Math.max(0, Number(amount) || 0);
+    if (buying && hasPriceLimit) remaining /= priceLimit;
     for (const level of levels) {
       if (buying) {
-        const spend = Math.min(remaining, level.price * level.size);
-        shares += spend / level.price;
-        notional += spend;
-        remaining -= spend;
+        if (hasPriceLimit) {
+          const take = Math.min(remaining, level.size);
+          shares += take;
+          notional += take * level.price;
+          remaining -= take;
+        } else {
+          const spend = Math.min(remaining, level.price * level.size);
+          shares += spend / level.price;
+          notional += spend;
+          remaining -= spend;
+        }
       } else {
         const take = Math.min(remaining, level.size);
         shares += take;

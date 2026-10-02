@@ -130,12 +130,23 @@ class PolymarketTrader {
   }
 
   // Polymarket market BUY amount is USDC; market SELL amount is shares.
-  async placeFakMarketOrder(tokenId, side, amount) {
-    const sideValue = String(side).toUpperCase() === 'BUY' ? Side.BUY : Side.SELL;
-    const options = await this._marketOptions(tokenId);
+  async placeFakMarketOrder(tokenId, side, amount, orderOptions = {}) {
+    const buying = String(side).toUpperCase() === 'BUY';
+    const sideValue = buying ? Side.BUY : Side.SELL;
+    const marketOptions = await this._marketOptions(tokenId);
+    const requestedPrice = Number(orderOptions && orderOptions.priceLimit);
+    const hasPriceLimit = Number.isFinite(requestedPrice) && requestedPrice > 0;
+    const price = hasPriceLimit ? roundMarketPriceDown(requestedPrice, marketOptions.tickSize) : undefined;
+    const targetShares = Number(orderOptions && orderOptions.targetShares);
+    const marketAmount = buying && hasPriceLimit && Number.isFinite(targetShares) && targetShares > 0
+      ? targetShares * price
+      : Number(amount);
     const response = await this._clob.createAndPostMarketOrder(
-      { tokenID: tokenId, amount: Number(amount), side: sideValue, orderType: OrderType.FAK },
-      options,
+      {
+        tokenID: tokenId, amount: marketAmount, side: sideValue, orderType: OrderType.FAK,
+        ...(hasPriceLimit ? { price } : {}),
+      },
+      marketOptions,
       OrderType.FAK,
     );
     if (response && response.success === false) throw new Error(response.errorMsg || response.error || 'FAK market order rejected');
@@ -154,6 +165,15 @@ class PolymarketTrader {
   async getOpenOrders() { return this._clob.getOpenOrders(); }
   async cancelOrder(id) { return this._clob.cancelOrder(id); }
   async cancelMarketOrders(tokenId) { return this._clob.cancelMarketOrders({ asset_id: tokenId }); }
+}
+
+function roundMarketPriceDown(price, tickSize) {
+  const priceDecimals = {
+    '0.1': 1, '0.01': 2, '0.005': 3, '0.0025': 4, '0.001': 3, '0.0001': 4,
+  };
+  const decimals = priceDecimals[String(tickSize)] ?? 2;
+  const scale = 10 ** decimals;
+  return Math.floor(Number(price) * scale) / scale;
 }
 
 module.exports = PolymarketTrader;
