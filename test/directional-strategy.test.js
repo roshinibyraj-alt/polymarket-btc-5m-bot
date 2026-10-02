@@ -63,7 +63,7 @@ test('the configured execution cadence and rule match the requested timing', () 
   assert.equal(cfg.CCXT_POLL_MS, 500);
   assert.equal(cfg.LOOP_MS, 500);
   assert.equal(cfg.SIGNAL_LOOKBACK_MS, 1000);
-  assert.equal(cfg.BTC_MOVE_THRESHOLD_WINDOW_MS, 20 * 60 * 1000);
+  assert.equal(cfg.BTC_MOVE_THRESHOLD_WINDOW_MS, 5 * 60 * 1000);
   assert.equal(cfg.BTC_MOVE_THRESHOLD_PERCENTILE, 99);
   assert.equal(cfg.BTC_MOVE_THRESHOLD_FLOOR_USD, 1);
   assert.equal(cfg.BTC_MOVE_THRESHOLD_MIN_SAMPLES, 120);

@@ -45,7 +45,7 @@ function computeOneSecondMove(samples, options = {}) {
 
 function adaptiveMoveThreshold(history, options = {}) {
   const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
-  const windowMs = Math.max(1, Number(options.windowMs) || 20 * 60 * 1000);
+  const windowMs = Math.max(1, Number(options.windowMs) || 5 * 60 * 1000);
   const percentile = Math.min(100, Math.max(0, Number(options.percentile) || 99));
   const floorUsd = Math.max(0, Number(options.floorUsd) || 0);
   const minSamples = Math.max(1, Math.floor(Number(options.minSamples) || 120));

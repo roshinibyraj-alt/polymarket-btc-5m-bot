@@ -493,8 +493,8 @@ class Bot {
     if (!w.activeSignal || w.activeSignal.side !== side) {
       return false;
     }
-    if (bestAsk >= 0.50) {
-      w.status = 'waiting_for_price_limit';
+    if (bestAsk < cfg.MIN_SIGNAL_ENTRY_PRICE || bestAsk > cfg.MAX_SIGNAL_ENTRY_PRICE) {
+      w.status = 'waiting_for_price_band';
       return false;
     }
     const targetShares = cfg.BASE_SHARES;
@@ -814,6 +814,7 @@ class Bot {
         baseShares: cfg.BASE_SHARES,
         entryDelayAfterWindowStartSeconds: cfg.ENTRY_DELAY_AFTER_WINDOW_START_SECONDS,
         maxBuySlippagePercent: cfg.MAX_BUY_SLIPPAGE_PERCENT,
+        minSignalEntryPrice: cfg.MIN_SIGNAL_ENTRY_PRICE,
         maxSignalEntryPrice: cfg.MAX_SIGNAL_ENTRY_PRICE,
         thresholdUsd: this.ccxt.thresholdUsd,
         thresholdReady: this.ccxt.thresholdReady,
