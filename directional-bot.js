@@ -265,7 +265,7 @@ class Bot {
     if (w.position && w.position.side === side && w.position.openShares > EPSILON) {
       const mark = next.bid == null ? next.mid : next.bid;
       if (mark != null && Number.isFinite(Number(mark))) w.position.lastClobMark = Number(mark);
-      if (!this._settlePositionAtClobPrice(w.position, next.mid)) this._recordEquity();
+      if (!this._settlePositionAtClobPrice(w.position, next.mid, next.bid)) this._recordEquity();
     }
     if (up.ask != null && down.ask != null) {
       if (this._seriesSlug !== slug) { this._seriesSlug = slug; this.priceSeries = []; }
@@ -611,7 +611,8 @@ class Bot {
           const mark = currentQuote.bid == null ? currentQuote.mid : currentQuote.bid;
           if (mark != null && Number.isFinite(Number(mark))) position.lastClobMark = Number(mark);
         }
-        if (currentQuote && this._settlePositionAtClobPrice(position, currentQuote.mid)) continue;
+        if (currentQuote
+          && this._settlePositionAtClobPrice(position, currentQuote.mid, currentQuote.bid)) continue;
       }
       if (now < closeTime) continue;
       if (this.w && this.w.openTs === position.openTs && !this.w.closed) {
@@ -626,7 +627,7 @@ class Bot {
           const heldQuote = quote(await this.trader.getOrderBook(position.tokenId));
           const mark = heldQuote.bid == null ? heldQuote.mid : heldQuote.bid;
           if (mark != null && Number.isFinite(Number(mark))) position.lastClobMark = Number(mark);
-          if (this._settlePositionAtClobPrice(position, heldQuote.mid)) continue;
+          if (this._settlePositionAtClobPrice(position, heldQuote.mid, heldQuote.bid)) continue;
           this._recordEquity();
         } catch (error) {
           this._warnOnce('clob-settlement-' + position.slug, {
@@ -658,15 +659,18 @@ class Bot {
     }
   }
 
-  _settlePositionAtClobPrice(position, midpoint) {
-    if (!position || position.settled || midpoint == null || midpoint === ''
-      || !Number.isFinite(Number(midpoint)) || position.openShares <= EPSILON) return false;
-    const price = Number(midpoint);
-    if (price < 0 || price > 1) return false;
-    const won = price >= cfg.CLOB_WIN_SETTLEMENT_PRICE;
-    const lost = price <= cfg.CLOB_LOSS_SETTLEMENT_PRICE;
+  _settlePositionAtClobPrice(position, midpoint, bestBid) {
+    if (!position || position.settled || position.openShares <= EPSILON) return false;
+    const mid = midpoint == null || midpoint === '' ? null : Number(midpoint);
+    const bid = bestBid == null || bestBid === '' ? null : Number(bestBid);
+    const validMid = Number.isFinite(mid) && mid >= 0 && mid <= 1 ? mid : null;
+    const validBid = Number.isFinite(bid) && bid >= 0 && bid <= 1 ? bid : null;
+    const won = validMid != null && validMid >= cfg.CLOB_WIN_SETTLEMENT_PRICE;
+    const lost = validBid != null && validBid <= cfg.CLOB_LOSS_SETTLEMENT_PRICE;
     if (!won && !lost) return false;
 
+    const settlementPrice = won ? validMid : validBid;
+    const settlementBasis = won ? 'MIDPOINT' : 'BEST_BID';
     const remainingShares = position.openShares;
     const payout = won ? remainingShares : 0;
     const winner = won ? position.side : (position.side === 'UP' ? 'DOWN' : 'UP');
@@ -674,7 +678,8 @@ class Bot {
     position.exitProceeds += payout;
     position.openShares = 0;
     position.resolutionPayout = payout;
-    position.clobThresholdPrice = price;
+    position.clobThresholdPrice = settlementPrice;
+    position.clobSettlementBasis = settlementBasis;
     this._clobTried.delete(position);
     this._resolveTried.delete(position.openTs);
     const window = this.w && this.w.openTs === position.openTs && this.w.position === position
@@ -688,10 +693,12 @@ class Bot {
       event: 'CLOB_THRESHOLD_SETTLEMENT',
       slug: position.slug,
       side: position.side,
-      price: round(price, 4),
+      price: round(settlementPrice, 4),
+      settlementBasis,
       shares: round(remainingShares, 4),
       payout: round(payout, 2),
-      note: 'Held-side CLOB midpoint reached $' + price.toFixed(4)
+      note: 'Held-side CLOB ' + (won ? 'midpoint' : 'best bid') + ' reached $'
+        + settlementPrice.toFixed(4)
         + '; demo settlement counts ' + round(remainingShares, 4) + ' remaining shares at $'
         + (won ? '1.00' : '0.00') + ' each.',
     });

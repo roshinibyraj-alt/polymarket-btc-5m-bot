@@ -229,7 +229,7 @@ test('held-side CLOB midpoint at $0.99 settles remaining shares as a $1 win', as
   assert.ok(bot.log.some((item) => item.event === 'CLOB_THRESHOLD_SETTLEMENT'));
 });
 
-test('held-side CLOB midpoint at $0.01 settles remaining shares as a $0 loss', async () => {
+test('held-side best bid at $0.01 settles remaining shares as a $0 loss', async () => {
   const { bot, trader } = makeBot();
   const start = Date.now();
   await bot._onBtcSample({ price: 80000, receivedAt: start });
@@ -238,16 +238,32 @@ test('held-side CLOB midpoint at $0.01 settles remaining shares as a $0 loss', a
   const cashAfterEntry = bot.cash;
 
   bot._onQuote(bot.w.slug, 'up', { bid: 0.01, ask: 0.03 });
-  assert.equal(bot.pending.length, 1);
-  bot._onQuote(bot.w.slug, 'up', { bid: 0.001, ask: 0.019 });
-
   assert.equal(bot.pending.length, 0);
   assert.equal(bot.trades[0].outcome, 'LOSS');
   assert.equal(bot.trades[0].reason, 'CLOB_THRESHOLD');
   assert.equal(bot.trades[0].winner, 'DOWN');
   assert.equal(bot.trades[0].exitProceeds, 0);
+  const settlement = bot.log.find((item) => item.event === 'CLOB_THRESHOLD_SETTLEMENT');
+  assert.equal(settlement.settlementBasis, 'BEST_BID');
+  assert.equal(settlement.price, 0.01);
   assert.equal(bot.cash, cashAfterEntry);
   assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [['up', 'BUY']]);
+});
+
+test('a best bid below $0.01 settles the loss even when midpoint remains above $0.01', async () => {
+  const { bot } = makeBot();
+  const start = Date.now();
+  await bot._onBtcSample({ price: 80000, receivedAt: start });
+  await bot._onBtcSample({ price: 80004, receivedAt: start + 500 });
+  await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
+
+  bot._onQuote(bot.w.slug, 'up', { bid: 0.005, ask: 0.03 });
+
+  assert.equal(bot.pending.length, 0);
+  assert.equal(bot.trades[0].outcome, 'LOSS');
+  assert.equal(bot.trades[0].reason, 'CLOB_THRESHOLD');
+  assert.ok(bot.log.find((item) => item.event === 'CLOB_THRESHOLD_SETTLEMENT')
+    .note.includes('best bid reached $0.0050'));
 });
 
 test('after window close, CLOB threshold can settle before official resolution returns', async () => {
