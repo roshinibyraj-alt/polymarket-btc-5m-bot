@@ -26,11 +26,15 @@ class DemoTrader {
   }
 
   async placeFakMarketOrder(tokenId, side, amount, options = {}) {
-    const book = await this.getOrderBook(tokenId);
+    const book = options && options.orderBook ? options.orderBook : await this.getOrderBook(tokenId);
     if (!book) return { id: null, status: 'unmatched', isFilled: false, avgPrice: 0, raw: {} };
     const buying = String(side).toUpperCase() === 'BUY';
     const priceLimit = Number(options && options.priceLimit);
     const hasPriceLimit = Number.isFinite(priceLimit) && priceLimit > 0;
+    const optionTargetShares = Number(options && options.targetShares);
+    const requestedShares = buying && hasPriceLimit
+      ? Math.max(0, optionTargetShares > 0 ? optionTargetShares : (Number(amount) || 0) / priceLimit)
+      : null;
     const levels = (buying ? (book.asks || []) : (book.bids || []))
       .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
       .filter((level) => level.price > 0 && level.size > 0
@@ -38,10 +42,10 @@ class DemoTrader {
       .sort(buying ? (a, b) => a.price - b.price : (a, b) => b.price - a.price);
     let shares = 0;
     let notional = 0;
-    // Market BUY amount is USDC. With a price limit, amount / limit represents
-    // the target share quantity, matching the CLOB marketable-limit order.
+    let simulatedLiquidityShares = 0;
+    // For a capped demo BUY, amount is USDC and the requested quantity is explicit.
     let remaining = Math.max(0, Number(amount) || 0);
-    if (buying && hasPriceLimit) remaining /= priceLimit;
+    if (buying && hasPriceLimit) remaining = requestedShares;
     for (const level of levels) {
       if (buying) {
         if (hasPriceLimit) {
@@ -63,14 +67,30 @@ class DemoTrader {
       }
       if (remaining <= 1e-9) break;
     }
+    if (buying && hasPriceLimit && remaining > 1e-9) {
+      // Demo-only modeled liquidity completes the target at the configured cap.
+      simulatedLiquidityShares = remaining;
+      shares += remaining;
+      notional += remaining * priceLimit;
+      remaining = 0;
+    }
     this._n += 1;
     const id = 'demo-' + this._n;
+    const isFilled = buying && hasPriceLimit
+      ? requestedShares > 0 && shares + 1e-9 >= requestedShares
+      : shares > 0;
     const raw = buying
-      ? { status: shares > 0 ? 'matched' : 'unmatched', makingAmount: String(notional), takingAmount: String(shares) }
+      ? {
+        status: isFilled ? 'matched' : (shares > 0 ? 'matched' : 'unmatched'),
+        makingAmount: String(notional), takingAmount: String(shares),
+        ...(hasPriceLimit ? {
+          requestedShares: String(requestedShares),
+          simulatedLiquidityShares: String(simulatedLiquidityShares),
+        } : {}),
+      }
       : { status: shares > 0 ? 'matched' : 'unmatched', makingAmount: String(shares), takingAmount: String(notional) };
-    return { id, status: raw.status, isFilled: shares > 0, avgPrice: shares > 0 ? notional / shares : 0, raw };
+    return { id, status: raw.status, isFilled, avgPrice: shares > 0 ? notional / shares : 0, raw };
   }
-
   async placeGtcOrder(tokenId, side, price, size) {
     const cachedQuote = this.quotes.get(tokenId);
     const book = cachedQuote ? null : await this.getOrderBook(tokenId);

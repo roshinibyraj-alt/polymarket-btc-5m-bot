@@ -492,15 +492,21 @@ class Bot {
       || !entryDelayElapsed(w)) return false;
 
     const order = await this.trader.placeFakMarketOrder(tokenId, 'BUY', spendLimit, {
-      priceLimit, targetShares,
+      priceLimit, targetShares, orderBook: book,
     });
-    const shares = positive(order && order.raw && order.raw.takingAmount);
-    const notional = positive(order && order.raw && order.raw.makingAmount);
-    if (shares == null || notional == null) {
+    let shares = positive(order && order.raw && order.raw.takingAmount) || 0;
+    let notional = positive(order && order.raw && order.raw.makingAmount) || 0;
+    let simulatedLiquidityShares = positive(order && order.raw && order.raw.simulatedLiquidityShares) || 0;
+    if (shares + EPSILON < targetShares) {
+      const missingShares = targetShares - shares;
+      shares += missingShares;
+      notional += missingShares * priceLimit;
+      simulatedLiquidityShares += missingShares;
+    }
+    if (shares <= 0 || notional <= 0) {
       this._push({
         event: 'PRICE_BUY_UNFILLED', slug: w.slug, side,
-        note: 'No shares filled within the configured ' + cfg.MAX_BUY_SLIPPAGE_PERCENT
-          + '% slippage cap; no position opened.',
+        note: 'The demo simulator could not create a valid full-share fill at the configured price cap.',
       });
       return false;
     }
@@ -519,6 +525,7 @@ class Bot {
       side, tokenId, shares, openShares: shares,
       price: averagePrice, entryPrice: averagePrice, entryNotional: notional,
       entryFee: fee, exitFees: 0, cost: notional + fee,
+      simulatedLiquidityShares,
       exitProceeds: 0, status: 'position_open', firedAt: Date.now(),
       lastClobMark: bids.length ? bids[0].price : averagePrice,
       realizedPnl: 0,
@@ -535,11 +542,15 @@ class Bot {
     this._recordEquity();
     this._push({
       event: 'PRICE_BUY_FILLED', slug: w.slug, side,
-      shares: round(shares, 4), price: round(averagePrice, 4),
+      shares: round(shares, 4), targetShares, simulatedLiquidityShares: round(simulatedLiquidityShares, 4),
+      price: round(averagePrice, 4),
       fee: round(fee, 5), changeUsd: move && Number.isFinite(Number(move.changeUsd)) ? round(move.changeUsd, 2) : null,
-      note: 'Demo marketable BUY filled ' + round(shares, 4) + ' ' + side
+      note: 'Demo marketable BUY filled ' + round(shares, 4) + ' of ' + targetShares + ' target ' + side
         + ' shares at average $' + averagePrice.toFixed(4)
-        + ' (maximum ' + cfg.MAX_BUY_SLIPPAGE_PERCENT + '% above the observed ask)'
+        + (simulatedLiquidityShares > EPSILON
+          ? '; ' + round(simulatedLiquidityShares, 4) + ' shares used modeled liquidity at the price limit to complete the fill.'
+          : '; all target shares swept from visible asks.')
+        + ' Maximum price is the observed ask plus ' + cfg.MAX_BUY_SLIPPAGE_PERCENT + '% (capped by the strategy price limit)'
         + '; estimated taker fee $' + fee.toFixed(5) + '.',
     });
     return true;

@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const cfg = require('../config');
 const Bot = require('../directional-bot');
+const DemoTrader = require('../demo-trader');
 const { makeWindowState } = require('../directional-bot');
 
 class FakeDemoTrader {
@@ -101,7 +102,7 @@ test('an opposite signal does not sell or open a second position in the same win
 
   assert.equal(bot.pending.length, 1);
   assert.equal(bot.pending[0].side, 'UP');
-  assert.equal(bot.pending[0].shares, 100);
+  assert.equal(bot.pending[0].shares, 500);
   assert.equal(bot.ccxt.thresholdUsd, 2);
   assert.equal(bot.ccxt.thresholdReady, true);
   assert.equal(trader.calls.length, 1);
@@ -115,7 +116,9 @@ test('an opposite signal does not sell or open a second position in the same win
   assert.equal(bot.pending[0].side, 'UP');
   assert.equal(bot.trades.length, 0);
   assert.equal(bot.w.position.side, 'UP');
-  assert.equal(bot.w.position.openShares, 100);
+  assert.equal(bot.w.position.openShares, 500);
+  assert.equal(bot.w.position.simulatedLiquidityShares, 400);
+  assert.equal(bot.log.find((entry) => entry.event === 'PRICE_BUY_FILLED').simulatedLiquidityShares, 400);
   assert.equal(bot.w.activeSignal.side, 'DOWN');
   assert.equal(bot.w.entryTaken, true);
 });
@@ -442,6 +445,22 @@ test('losses add 200 shares to the next entry and one win resets to 500', async 
   bot._finalizePosition(winningPosition, 'WIN', 'TEST');
   assert.equal(bot.snapshot().strategy.lossStreak, 0);
   assert.equal(bot.snapshot().strategy.nextEntryShares, 500);
+});
+
+test('demo BUY sweeps visible asks and models missing depth so every target share fills', async () => {
+  const trader = new DemoTrader();
+  const order = await trader.placeFakMarketOrder('up', 'BUY', 150, {
+    priceLimit: 0.30, targetShares: 500,
+    orderBook: { asks: [{ price: 0.20, size: 4 }, { price: 0.46, size: 1000 }], bids: [] },
+  });
+
+  assert.equal(order.status, 'matched');
+  assert.equal(order.isFilled, true);
+  assert.equal(order.raw.takingAmount, '500');
+  assert.ok(Math.abs(Number(order.raw.makingAmount) - 149.6) < 1e-8);
+  assert.equal(order.raw.requestedShares, '500');
+  assert.equal(order.raw.simulatedLiquidityShares, '496');
+  assert.ok(order.avgPrice <= 0.30);
 });
 
 test('default bot constructs the configured Coinbase feed at 500 ms', () => {
