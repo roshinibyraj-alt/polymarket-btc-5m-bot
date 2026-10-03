@@ -3,68 +3,95 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const cfg = require('../config');
-const { computeOneSecondMove, adaptiveMoveThreshold, sideForMove } = require('../directional-strategy');
+const { previousCloseSample, computeTenSecondProjection } = require('../directional-strategy');
 
-test('computes a move from the closest sample to one second earlier', () => {
-  const move = computeOneSecondMove([
-    { price: 80000, receivedAt: 1000 },
-    { price: 80004, receivedAt: 1500 },
-    { price: 80011, receivedAt: 2000 },
-  ], { lookbackMs: 1000, toleranceMs: 250 });
-  assert.deepEqual(move, {
-    fromPrice: 80000, toPrice: 80011, changeUsd: 11, lookbackMs: 1000, receivedAt: 2000,
+function syntheticSamples(openMs, baseline, initialMove, futureRate, throughMs = 170_000, stepMs = 500) {
+  const samples = [{ price: baseline, sampledAt: openMs - 500 }];
+  for (let elapsed = 0; elapsed <= throughMs; elapsed += stepMs) {
+    const price = elapsed < 150_000
+      ? baseline + initialMove * elapsed / 150_000
+      : baseline + initialMove + futureRate * (elapsed - 150_000) / 10_000;
+    samples.push({ price, sampledAt: openMs + elapsed });
+  }
+  return samples;
+}
+
+function project(samples, openMs, baseline = 85000, nowMs = openMs + 170_000) {
+  return computeTenSecondProjection(samples, {
+    baselinePrice: baseline,
+    windowOpenMs: openMs,
+    windowCloseMs: openMs + 300_000,
+    nowMs,
+    blockMs: cfg.STRATEGY_BLOCK_MS,
+    initialBlocks: cfg.STRATEGY_INITIAL_BLOCKS,
+    minSamplesPerBlock: cfg.STRATEGY_MIN_SAMPLES_PER_BLOCK,
+    maxSampleGapMs: cfg.STRATEGY_MAX_SAMPLE_GAP_MS,
   });
+}
+
+test('captures the freshest BTC sample at or before the previous candle close', () => {
+  assert.deepEqual(previousCloseSample([
+    { price: 84998, sampledAt: 9500 },
+    { price: 84999, sampledAt: 9900 },
+    { price: 85001, sampledAt: 10000 },
+  ], 10000, 500), { price: 85001, sampledAt: 10000, ageMs: 0 });
+  assert.equal(previousCloseSample([{ price: 84900, sampledAt: 1000 }], 10000, 500), null);
 });
 
-test('does not signal when no sample falls within the one-second tolerance', () => {
-  assert.equal(computeOneSecondMove([
-    { price: 80000, receivedAt: 1000 },
-    { price: 80020, receivedAt: 1600 },
-  ], { lookbackMs: 1000, toleranceMs: 250 }), null);
+test('uses 15 initial 10-second blocks and projects DOWN from a declining rolling 20-second trend', () => {
+  const openMs = 100_000;
+  const result = project(syntheticSamples(openMs, 85000, 10, -1), openMs);
+  assert.equal(result.phase, 'projection_ready');
+  assert.ok(Math.abs(result.initialDriftUsdPer10s - (10 / 15)) < 0.01);
+  assert.ok(Math.abs(result.recentRateUsdPer10s - (-1)) < 0.02);
+  assert.equal(result.side, 'DOWN');
+  assert.ok(result.projectedClose < 85000);
+  assert.equal(result.remainingSeconds, 130);
 });
 
-test('uses inclusive positive and negative threshold boundaries', () => {
-  assert.equal(sideForMove(10, 10), 'UP');
-  assert.equal(sideForMove(9.99, 10), null);
-  assert.equal(sideForMove(-10, 10), 'DOWN');
-  assert.equal(sideForMove(-9.99, 10), null);
+test('uses the exact opposite projection for UP', () => {
+  const openMs = 100_000;
+  const result = project(syntheticSamples(openMs, 85000, -10, 1), openMs);
+  assert.equal(result.side, 'UP');
+  assert.ok(result.projectedClose > 85000);
 });
 
-test('adaptive threshold uses the rolling percentile and a configurable floor', () => {
-  const history = Array.from({ length: 100 }, (_, index) => ({
-    at: 1000 + index,
-    absMoveUsd: index + 1,
-  }));
-  const estimate = adaptiveMoveThreshold(history, {
-    now: 2000, windowMs: 2000, percentile: 99, floorUsd: 1, minSamples: 100,
+test('waits until two complete future blocks are available', () => {
+  const openMs = 100_000;
+  const samples = syntheticSamples(openMs, 85000, 10, -1, 169_500);
+  const result = project(samples, openMs, 85000, openMs + 169_500);
+  assert.equal(result.phase, 'waiting_for_20_second_trend');
+  assert.equal(result.side, null);
+});
+
+test('does not choose a side when the projected close is exactly the baseline', () => {
+  const openMs = 100_000;
+  const result = project(syntheticSamples(openMs, 85000, 0, 0), openMs);
+  assert.equal(result.phase, 'projected_at_baseline');
+  assert.equal(result.projectedClose, 85000);
+  assert.equal(result.side, null);
+});
+
+test('skips projection when any initial 10-second block has insufficient samples', () => {
+  const openMs = 100_000;
+  const samples = syntheticSamples(openMs, 85000, 10, -1).filter((sample) => {
+    const elapsed = sample.sampledAt - openMs;
+    return elapsed < 50_000 || elapsed >= 60_000;
   });
-  assert.equal(estimate.ready, true);
-  assert.equal(estimate.sampleCount, 100);
-  assert.equal(estimate.percentileThresholdUsd, 99);
-  assert.equal(estimate.thresholdUsd, 99);
+  const result = project(samples, openMs);
+  assert.equal(result.phase, 'insufficient_initial_block_data');
+  assert.equal(result.side, null);
 });
 
-test('adaptive threshold waits for minimum samples and ignores expired moves', () => {
-  const history = Array.from({ length: 119 }, (_, index) => ({
-    at: index < 20 ? 100 : 9000 + index,
-    absMoveUsd: index + 1,
-  }));
-  const estimate = adaptiveMoveThreshold(history, {
-    now: 10000, windowMs: 2000, percentile: 99, floorUsd: 1, minSamples: 120,
-  });
-  assert.equal(estimate.ready, false);
-  assert.equal(estimate.thresholdUsd, null);
-  assert.equal(estimate.sampleCount, 99);
-  assert.equal(estimate.minSamples, 120);
-});
-
-test('the configured execution cadence and rule match the requested timing', () => {
+test('strategy configuration matches 150 seconds of baseline and 20 seconds of rolling trend', () => {
   assert.equal(cfg.CCXT_EXCHANGE, 'coinbase');
   assert.equal(cfg.CCXT_POLL_MS, 500);
   assert.equal(cfg.LOOP_MS, 500);
-  assert.equal(cfg.SIGNAL_LOOKBACK_MS, 1000);
-  assert.equal(cfg.BTC_MOVE_THRESHOLD_WINDOW_MS, 5 * 60 * 1000);
-  assert.equal(cfg.BTC_MOVE_THRESHOLD_PERCENTILE, 99);
-  assert.equal(cfg.BTC_MOVE_THRESHOLD_FLOOR_USD, 1);
-  assert.equal(cfg.BTC_MOVE_THRESHOLD_MIN_SAMPLES, 120);
+  assert.equal(cfg.STRATEGY_BLOCK_MS, 10_000);
+  assert.equal(cfg.STRATEGY_INITIAL_BLOCKS, 15);
+  assert.equal(cfg.BTC_PROJECTION_WARMUP_SECONDS, 150);
+  assert.equal(cfg.BTC_PROJECTION_TREND_SECONDS, 20);
+  assert.equal(cfg.MAX_ENTRY_PRICE, 0.45);
+  assert.equal(cfg.BASE_SHARES, 500);
+  assert.equal(cfg.SHARES_INCREMENT_AFTER_LOSS, 200);
 });

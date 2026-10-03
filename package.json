@@ -2,7 +2,7 @@
   "name": "polymarket-btc-5m-momentum-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only BTC 5-minute UP/DOWN momentum flip strategy triggered by a CCXT spot feed.",
+  "description": "Demo-only BTC 5-minute UP/DOWN projection strategy using 10-second blocks from a CCXT spot feed.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

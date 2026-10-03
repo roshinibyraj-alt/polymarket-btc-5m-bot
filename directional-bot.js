@@ -6,7 +6,7 @@ const {
 } = require('./polymarket-market');
 const startMarketFeed = require('./clob-feed');
 const CcxtPriceFeed = require('./ccxt-feed');
-const { computeOneSecondMove, adaptiveMoveThreshold, sideForMove } = require('./directional-strategy');
+const { previousCloseSample, computeTenSecondProjection } = require('./directional-strategy');
 const { estimateTakerFee } = require('./strategy');
 
 const EPSILON = 1e-8;
@@ -67,15 +67,8 @@ class Bot {
       symbol: this.ccxtFeed.symbol || cfg.CCXT_SYMBOL || 'BTC/USD',
       pollMs: this.ccxtFeed.pollMs || cfg.CCXT_POLL_MS,
       requestedPollMs: cfg.CCXT_POLL_MS,
-      thresholdUsd: null,
-      thresholdReady: false,
-      thresholdSampleCount: 0,
-      thresholdMinSamples: cfg.BTC_MOVE_THRESHOLD_MIN_SAMPLES,
-      thresholdPercentile: cfg.BTC_MOVE_THRESHOLD_PERCENTILE,
-      thresholdWindowMs: cfg.BTC_MOVE_THRESHOLD_WINDOW_MS,
-      thresholdFloorUsd: cfg.BTC_MOVE_THRESHOLD_FLOOR_USD,
-      percentileThresholdUsd: null,
-      lookbackMs: cfg.SIGNAL_LOOKBACK_MS,
+      baselinePrice: null, initialDriftUsdPer10s: null, recentRateUsdPer10s: null,
+      projectedClose: null, projectedDeltaUsd: null, projectionPhase: 'waiting_for_baseline',
       price: null, bid: null, ask: null, change1s: null, lookbackObservedMs: null,
       receivedAt: null, status: 'stopped', error: null, candidateSide: null, lastSignal: null,
     };
@@ -151,16 +144,13 @@ class Bot {
     if (!this.w || this.w.slug !== slug) {
       if (this.w) await this._closeWindow(this.w);
       this.w = makeWindowState(slug, openTs);
-      if (this.activeSignal) {
-        this.w.activeSignal = this.activeSignal;
-        this.w.lastSignal = {
-          side: this.activeSignal.side,
-          changeUsd: this.activeSignal.changeUsd,
-          thresholdUsd: this.activeSignal.thresholdUsd,
-          lookbackMs: this.activeSignal.lookbackMs,
-          ts: this.activeSignal.ts,
-        };
-      }
+      this.activeSignal = null;
+      this.ccxt = {
+        ...this.ccxt, candidateSide: null, lastSignal: null, baselinePrice: null,
+        initialDriftUsdPer10s: null, recentRateUsdPer10s: null, projectedClose: null,
+        projectedDeltaUsd: null, projectionPhase: 'waiting_for_baseline',
+      };
+      this._captureWindowBaseline(this.w);
     }
 
     const w = this.w;
@@ -169,10 +159,10 @@ class Bot {
       if (result.window) {
         this.error = null;
         w.window = result.window;
-        w.status = 'waiting_for_price_entry';
+        w.status = w.baselinePrice == null ? 'waiting_for_baseline' : 'building_initial_averages';
         this._push({
           event: 'WINDOW_READY', slug: w.slug,
-          note: 'BTC 5-minute market active; building the rolling adaptive BTC-move threshold.',
+          note: 'BTC 5-minute market active; capturing the previous candle close and building 10-second averages.',
         });
         await this._ensureMarketFeed(w);
       } else {
@@ -278,8 +268,8 @@ class Bot {
         this._lastSeriesAt = now;
       }
     }
-    if (!w.position && !w.entryTaken) {
-      return this._attemptPriceEntry(w, side);
+    if (!w.position && !w.entryTaken && w.activeSignal && w.activeSignal.side === side) {
+      return this._attemptPriceEntry(w, side, w.activeSignal);
     }
     return null;
   }
@@ -313,31 +303,46 @@ class Bot {
     this._warned.delete('ccxt-delayed-sample');
     const previousSample = this._btcSamples.length ? this._btcSamples[this._btcSamples.length - 1] : null;
     const normalized = {
-      price, receivedAt,
-      sampledAt,
-      bid: positive(sample.bid),
-      ask: positive(sample.ask),
+      price, receivedAt, sampledAt,
+      bid: positive(sample.bid), ask: positive(sample.ask),
     };
     this._btcSamples.push(normalized);
-    this._btcSamples = this._btcSamples.filter((item) => receivedAt - item.receivedAt <= 5000);
-    this._btcMoveHistory = this._btcMoveHistory.filter((item) =>
-      item.at <= sampledAt && sampledAt - item.at <= cfg.BTC_MOVE_THRESHOLD_WINDOW_MS);
-    const move = computeOneSecondMove(this._btcSamples, {
-      lookbackMs: cfg.SIGNAL_LOOKBACK_MS,
-      toleranceMs: cfg.SIGNAL_LOOKBACK_TOLERANCE_MS,
-    });
-    const threshold = adaptiveMoveThreshold(this._btcMoveHistory, {
-      now: sampledAt,
-      windowMs: cfg.BTC_MOVE_THRESHOLD_WINDOW_MS,
-      percentile: cfg.BTC_MOVE_THRESHOLD_PERCENTILE,
-      floorUsd: cfg.BTC_MOVE_THRESHOLD_FLOOR_USD,
-      minSamples: cfg.BTC_MOVE_THRESHOLD_MIN_SAMPLES,
-    });
-    const side = move && threshold.ready
-      ? sideForMove(move.changeUsd, threshold.thresholdUsd) : null;
-    if (move) {
-      this._btcMoveHistory.push({ at: sampledAt, absMoveUsd: Math.abs(move.changeUsd) });
+    this._btcSamples = this._btcSamples.filter((item) =>
+      receivedAt - item.receivedAt <= cfg.BTC_SAMPLE_RETENTION_MS);
+    const currentWindow = this.w;
+    if (currentWindow && !currentWindow.baselinePrice) {
+      this._captureWindowBaseline(currentWindow);
+      if (!currentWindow.baselinePrice) {
+        currentWindow.status = 'waiting_for_baseline';
+        const baselineWaitMs = Math.max(cfg.STRATEGY_BASELINE_MAX_AGE_MS, this.ccxt.pollMs * 2);
+        if (!currentWindow.baselineUnavailable && sampledAt >= currentWindow.openTs * 1000 + baselineWaitMs) {
+          currentWindow.baselineUnavailable = true;
+          this._push({
+            event: 'BTC_BASELINE_MISSING', slug: currentWindow.slug,
+            note: 'No fresh BTC sample was captured at the previous candle close; skipping this window rather than inventing a baseline.',
+          });
+        }
+      }
     }
+    let projection = null;
+    if (currentWindow && currentWindow.window && !currentWindow.closed && !currentWindow.closing) {
+      const closeTs = Number(currentWindow.window.closeTs) || currentWindow.openTs + WINDOW_SECONDS;
+      if (currentWindow.baselinePrice != null) {
+        projection = computeTenSecondProjection(this._btcSamples, {
+          baselinePrice: currentWindow.baselinePrice,
+          windowOpenMs: currentWindow.openTs * 1000,
+          windowCloseMs: closeTs * 1000,
+          nowMs: sampledAt,
+          blockMs: cfg.STRATEGY_BLOCK_MS,
+          initialBlocks: cfg.STRATEGY_INITIAL_BLOCKS,
+          minSamplesPerBlock: cfg.STRATEGY_MIN_SAMPLES_PER_BLOCK,
+          maxSampleGapMs: Math.max(cfg.STRATEGY_MAX_SAMPLE_GAP_MS, this.ccxt.pollMs * 2),
+        });
+        currentWindow.projection = projection;
+        currentWindow.status = projection.phase;
+      }
+    }
+    const lastInterval = previousSample ? sampledAt - previousSample.sampledAt : null;
     this.ccxt = {
       ...this.ccxt,
       exchange: sample.exchange || this.ccxt.exchange,
@@ -346,96 +351,118 @@ class Bot {
       bid: normalized.bid,
       ask: normalized.ask,
       receivedAt,
-      lastPollIntervalMs: previousSample ? sampledAt - previousSample.sampledAt : null,
+      lastPollIntervalMs: lastInterval,
       exchangeTimestamp: sample.exchangeTimestamp == null || sample.exchangeTimestamp === ''
         ? null : (Number.isFinite(Number(sample.exchangeTimestamp)) ? Number(sample.exchangeTimestamp) : null),
-      change1s: move ? move.changeUsd : null,
-      lookbackObservedMs: move ? move.lookbackMs : null,
-      thresholdUsd: threshold.thresholdUsd,
-      thresholdReady: threshold.ready,
-      thresholdSampleCount: threshold.sampleCount,
-      thresholdMinSamples: threshold.minSamples,
-      thresholdPercentile: threshold.percentile,
-      thresholdWindowMs: threshold.windowMs,
-      thresholdFloorUsd: threshold.floorUsd,
-      percentileThresholdUsd: threshold.percentileThresholdUsd,
-      candidateSide: side,
+      change1s: null,
+      lookbackObservedMs: null,
+      baselinePrice: currentWindow && currentWindow.baselinePrice != null
+        ? currentWindow.baselinePrice : null,
+      initialDriftUsdPer10s: projection ? projection.initialDriftUsdPer10s : null,
+      recentRateUsdPer10s: projection ? projection.recentRateUsdPer10s : null,
+      projectedClose: projection ? projection.projectedClose : null,
+      projectedDeltaUsd: projection ? projection.projectedDeltaUsd : null,
+      projectionPhase: projection ? projection.phase
+        : currentWindow && !currentWindow.baselinePrice ? 'waiting_for_baseline' : 'waiting_for_market',
+      candidateSide: projection ? projection.side : null,
       status: 'live',
       error: null,
     };
-    if (!move || !threshold.ready || !side) return;
-    const signalMove = { ...move, thresholdUsd: threshold.thresholdUsd };
-    this.ccxt.lastSignal = {
-      side, changeUsd: move.changeUsd, thresholdUsd: threshold.thresholdUsd,
-      lookbackMs: move.lookbackMs, ts: receivedAt,
-    };
-    await this._handleSignal(side, signalMove);
+    if (projection) await this._handleProjection(projection);
   }
 
-  async _handleSignal(side, move) {
-    const now = Number(move.receivedAt) || Date.now();
-    const signal = {
-      side,
-      move: { ...move },
-      changeUsd: move.changeUsd,
-      thresholdUsd: move.thresholdUsd,
-      lookbackMs: move.lookbackMs,
-      ts: now,
+  _captureWindowBaseline(w) {
+    if (!w || w.baselinePrice != null) return w && w.baselinePrice != null;
+    const maxAgeMs = Math.max(cfg.STRATEGY_BASELINE_MAX_AGE_MS, (Number(this.ccxt.pollMs) || cfg.CCXT_POLL_MS) * 2);
+    const close = previousCloseSample(this._btcSamples, w.openTs * 1000, maxAgeMs);
+    if (!close) return false;
+    w.baselinePrice = close.price;
+    w.baselineAt = close.sampledAt;
+    w.baselineAgeMs = close.ageMs;
+    w.status = 'building_initial_averages';
+    this.ccxt = { ...this.ccxt, baselinePrice: close.price, projectionPhase: 'building_initial_averages' };
+    this._push({
+      event: 'BTC_BASELINE_CAPTURED', slug: w.slug,
+      price: round(close.price, 2), ageMs: Math.round(close.ageMs),
+      note: 'Previous 5-minute candle close captured at $' + close.price.toFixed(2) + '; building 15 ten-second BTC averages.',
+    });
+    return true;
+  }
+
+  async _handleProjection(projection) {
+    const w = this.w;
+    if (!w || !w.window || w.closed || w.closing) return;
+    const signal = projection && projection.side ? {
+      side: projection.side,
+      changeUsd: projection.projectedDeltaUsd,
+      baselinePrice: projection.baselinePrice,
+      projectedClose: projection.projectedClose,
+      initialDriftUsdPer10s: projection.initialDriftUsdPer10s,
+      recentRateUsdPer10s: projection.recentRateUsdPer10s,
+      remainingSeconds: projection.remainingSeconds,
+      ts: projection.observedAt,
+      projection,
+    } : null;
+    const previousSide = w.activeSignal && w.activeSignal.side;
+    w.projection = projection;
+    w.activeSignal = signal;
+    w.lastSignal = signal || {
+      side: null,
+      baselinePrice: projection.baselinePrice,
+      projectedClose: projection.projectedClose,
+      changeUsd: projection.projectedDeltaUsd,
+      initialDriftUsdPer10s: projection.initialDriftUsdPer10s,
+      recentRateUsdPer10s: projection.recentRateUsdPer10s,
+      remainingSeconds: projection.remainingSeconds,
+      phase: projection.phase,
+      ts: projection.observedAt,
     };
     this.activeSignal = signal;
-    const w = this.w;
-    if (w) {
-      w.activeSignal = signal;
-      w.lastSignal = {
-        side, changeUsd: move.changeUsd, thresholdUsd: move.thresholdUsd,
-        lookbackMs: move.lookbackMs, ts: now,
-      };
-    }
-    if (this.strategyBlocked || !w || !w.window || w.closed || w.closing) return;
-    const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
-    if (now >= closeTs * 1000) {
-      await this._closeWindow(w);
+    if (!signal) {
+      if (!w.entryTaken && !w.position) w.status = projection.phase;
       return;
     }
-
-    if (w.lastLoggedSignalSide !== side) {
-      w.lastLoggedSignalSide = side;
+    w.status = w.position && w.position.openShares > EPSILON ? 'position_open'
+      : w.entryTaken ? 'trade_taken' : 'projection_ready';
+    if (previousSide !== signal.side || w.lastLoggedTrendToMs !== projection.trendToMs) {
+      w.lastLoggedTrendToMs = projection.trendToMs;
+      this.ccxt.lastSignal = {
+        side: signal.side,
+        changeUsd: signal.changeUsd,
+        baselinePrice: signal.baselinePrice,
+        projectedClose: signal.projectedClose,
+        initialDriftUsdPer10s: signal.initialDriftUsdPer10s,
+        recentRateUsdPer10s: signal.recentRateUsdPer10s,
+        ts: signal.ts,
+      };
       this._push({
-        event: 'BTC_MOVE_SIGNAL', slug: w.slug, side,
-        changeUsd: round(move.changeUsd, 2), thresholdUsd: round(move.thresholdUsd, 2),
-        lookbackMs: move.lookbackMs,
-        note: 'CCXT BTC moved ' + signedUsd(move.changeUsd) + ' over '
-          + move.lookbackMs + ' ms against an adaptive $' + Number(move.thresholdUsd).toFixed(2)
-          + ' threshold; informational BTC direction is ' + side + '; entries are price-only.',
+        event: 'BTC_CLOSE_PROJECTION', slug: w.slug, side: signal.side,
+        baselinePrice: round(signal.baselinePrice, 2), projectedClose: round(signal.projectedClose, 2),
+        projectedDeltaUsd: round(signal.changeUsd, 2),
+        initialDriftUsdPer10s: round(signal.initialDriftUsdPer10s, 3),
+        recentRateUsdPer10s: round(signal.recentRateUsdPer10s, 3),
+        remainingSeconds: round(signal.remainingSeconds, 1),
+        note: 'Rolling 20-second BTC trend projects a close ' + signedUsd(signal.changeUsd)
+          + ' from the previous candle close; forecast side is ' + signal.side + '.',
       });
     }
-    if (!entryDelayElapsed(w)) {
-      w.status = 'waiting_for_window_delay';
-      return;
-    }
-    if (w.entryTaken || (w.position && w.position.openShares > EPSILON)) {
-      w.status = w.position && w.position.openShares > EPSILON
-        ? 'position_open' : 'trade_taken';
-      return;
-    }
-    return this._attemptAnyPriceEntry(w);
+    if (this.strategyBlocked || w.entryTaken || (w.position && w.position.openShares > EPSILON)) return;
+    return this._attemptPriceEntry(w, signal.side, signal);
   }
 
-  async _attemptPriceEntry(w, side) {
+  async _attemptPriceEntry(w, side, signal = w && w.activeSignal) {
     if (this.strategyBlocked || !w || this.w !== w || !w.window || w.closed || w.closing
-      || w.entryTaken || w.position || this._signalBusy) return false;
+      || w.entryTaken || w.position || this._signalBusy
+      || !signal || signal.side !== side || !signal.projection
+      || signal.projection.phase !== 'projection_ready') return false;
     const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
     if (Date.now() >= closeTs * 1000) return false;
-    if (!entryDelayElapsed(w)) {
-      w.status = 'waiting_for_window_delay';
-      return false;
-    }
     this._signalBusy = true;
     w.tradeInFlight = true;
     try {
-      return await this._buyPosition(w, side, null);
+      return await this._buyPosition(w, side, signal);
     } catch (error) {
-      this._push({ event: 'PRICE_ENTRY_ERROR', slug: w.slug, side, note: error.message });
+      this._push({ event: 'PROJECTION_ENTRY_ERROR', slug: w.slug, side, note: error.message });
       return false;
     } finally {
       w.tradeInFlight = false;
@@ -443,20 +470,8 @@ class Bot {
     }
   }
 
-  async _attemptAnyPriceEntry(w) {
-    if (this.strategyBlocked || !w || this.w !== w || !w.window || w.closed || w.closing
-      || w.entryTaken || w.position || this._signalBusy) return false;
-    if (await this._attemptPriceEntry(w, 'UP')) return true;
-    if (w.entryTaken || w.position) return true;
-    return this._attemptPriceEntry(w, 'DOWN');
-  }
-
   async _buyPosition(w, side, move) {
-    if (w.entryTaken || w.position) return false;
-    if (!entryDelayElapsed(w)) {
-      w.status = 'waiting_for_window_delay';
-      return false;
-    }
+    if (w.entryTaken || w.position || !move || move.side !== side) return false;
     const tokenId = side === 'UP' ? w.window.tokenUp : w.window.tokenDown;
     const book = await this.trader.getOrderBook(tokenId);
     const asks = sortedLevels(book && book.asks, 'asc');
@@ -466,12 +481,12 @@ class Bot {
       w.status = 'waiting_for_order_book';
       this._push({
         event: 'PRICE_BUY_NO_BOOK', slug: w.slug, side,
-        note: 'No executable ask for ' + side + '; waiting for an in-band best ask.',
+        note: 'No executable ask for the projected ' + side + ' side; waiting for an order book.',
       });
       return false;
     }
-    if (bestAsk < cfg.MIN_ENTRY_PRICE || bestAsk > cfg.MAX_ENTRY_PRICE) {
-      w.status = 'waiting_for_price_band';
+    if (bestAsk > cfg.MAX_ENTRY_PRICE) {
+      w.status = 'waiting_for_price_cap';
       return false;
     }
     const targetShares = cfg.BASE_SHARES + this.lossStreak * cfg.SHARES_INCREMENT_AFTER_LOSS;
@@ -488,8 +503,8 @@ class Bot {
     }
     const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
     if (this.w !== w || w.closed || w.entryTaken || w.position
-      || Date.now() >= closeTs * 1000
-      || !entryDelayElapsed(w)) return false;
+      || !w.activeSignal || w.activeSignal.side !== side || w.activeSignal.projection.phase !== 'projection_ready'
+      || Date.now() >= closeTs * 1000) return false;
 
     const order = await this.trader.placeFakMarketOrder(tokenId, 'BUY', spendLimit, {
       priceLimit, targetShares, orderBook: book,
@@ -529,7 +544,11 @@ class Bot {
       exitProceeds: 0, status: 'position_open', firedAt: Date.now(),
       lastClobMark: bids.length ? bids[0].price : averagePrice,
       realizedPnl: 0,
-      signalChangeUsd: move ? move.changeUsd : null, signalLookbackMs: move ? move.lookbackMs : null,
+      signalChangeUsd: move.changeUsd,
+      signalBaselinePrice: move.baselinePrice,
+      signalProjectedClose: move.projectedClose,
+      signalInitialDriftUsdPer10s: move.initialDriftUsdPer10s,
+      signalRecentRateUsdPer10s: move.recentRateUsdPer10s,
       settled: false, settlementTimedOut: false,
     };
     this.cash -= position.cost;
@@ -545,12 +564,15 @@ class Bot {
       shares: round(shares, 4), targetShares, simulatedLiquidityShares: round(simulatedLiquidityShares, 4),
       price: round(averagePrice, 4),
       fee: round(fee, 5), changeUsd: move && Number.isFinite(Number(move.changeUsd)) ? round(move.changeUsd, 2) : null,
+      projectedClose: round(move.projectedClose, 2),
       note: 'Demo marketable BUY filled ' + round(shares, 4) + ' of ' + targetShares + ' target ' + side
         + ' shares at average $' + averagePrice.toFixed(4)
+        + ' after the rolling 20-second BTC trend projected a close $' + move.projectedClose.toFixed(2)
+        + ' versus the previous candle close $' + move.baselinePrice.toFixed(2) + '.'
         + (simulatedLiquidityShares > EPSILON
-          ? '; ' + round(simulatedLiquidityShares, 4) + ' shares used modeled liquidity at the price limit to complete the fill.'
-          : '; all target shares swept from visible asks.')
-        + ' Maximum price is the observed ask plus ' + cfg.MAX_BUY_SLIPPAGE_PERCENT + '% (capped by the strategy price limit)'
+          ? ' ' + round(simulatedLiquidityShares, 4) + ' shares used modeled liquidity at the price limit.'
+          : ' All target shares swept from visible asks.')
+        + ' Maximum entry price is $' + cfg.MAX_ENTRY_PRICE.toFixed(2)
         + '; estimated taker fee $' + fee.toFixed(5) + '.',
     });
     return true;
@@ -668,7 +690,7 @@ class Bot {
     if (window) {
       window.position = null;
         window.status = window.closed ? 'window_closed'
-          : window.entryTaken ? 'trade_settled' : 'waiting_for_price_entry';
+          : window.entryTaken ? 'trade_settled' : 'waiting_for_baseline';
     }
     this._push({
       event: 'CLOB_THRESHOLD_SETTLEMENT',
@@ -792,7 +814,9 @@ class Bot {
         slug: w.slug, status: w.status, openTs: w.openTs,
         closeTs: Number(w.window && w.window.closeTs) || w.openTs + WINDOW_SECONDS,
         elapsedSeconds: elapsed, closed: w.closed,
-        entryDelayRemainingSeconds: Math.max(0, cfg.ENTRY_DELAY_AFTER_WINDOW_START_SECONDS - elapsed),
+        baselinePrice: w.baselinePrice,
+        baselineAgeMs: w.baselineAgeMs,
+        projection: w.projection || null,
         positionSide: w.position && w.position.openShares > EPSILON ? w.position.side : null,
         openShares: w.position ? w.position.openShares : 0,
         lastSignal: w.lastSignal || null,
@@ -807,20 +831,17 @@ class Bot {
         sharesIncrementAfterLoss: cfg.SHARES_INCREMENT_AFTER_LOSS,
         lossStreak: this.lossStreak,
         nextEntryShares: cfg.BASE_SHARES + this.lossStreak * cfg.SHARES_INCREMENT_AFTER_LOSS,
-        entryDelayAfterWindowStartSeconds: cfg.ENTRY_DELAY_AFTER_WINDOW_START_SECONDS,
+        blockMs: cfg.STRATEGY_BLOCK_MS,
+        initialBlocks: cfg.STRATEGY_INITIAL_BLOCKS,
+        initialWindowSeconds: cfg.BTC_PROJECTION_WARMUP_SECONDS,
+        rollingTrendSeconds: cfg.BTC_PROJECTION_TREND_SECONDS,
+        firstPossibleEntrySeconds: cfg.BTC_PROJECTION_WARMUP_SECONDS + cfg.BTC_PROJECTION_TREND_SECONDS,
         maxBuySlippagePercent: cfg.MAX_BUY_SLIPPAGE_PERCENT,
-        minEntryPrice: cfg.MIN_ENTRY_PRICE,
         maxEntryPrice: cfg.MAX_ENTRY_PRICE,
-        thresholdUsd: this.ccxt.thresholdUsd,
-        thresholdReady: this.ccxt.thresholdReady,
-        thresholdSampleCount: this.ccxt.thresholdSampleCount,
-        thresholdMinSamples: cfg.BTC_MOVE_THRESHOLD_MIN_SAMPLES,
-        thresholdPercentile: cfg.BTC_MOVE_THRESHOLD_PERCENTILE,
-        thresholdWindowMs: cfg.BTC_MOVE_THRESHOLD_WINDOW_MS,
-        thresholdFloorUsd: cfg.BTC_MOVE_THRESHOLD_FLOOR_USD,
+        baselineMaxAgeMs: cfg.STRATEGY_BASELINE_MAX_AGE_MS,
+        minSamplesPerBlock: cfg.STRATEGY_MIN_SAMPLES_PER_BLOCK,
         clobWinSettlementPrice: cfg.CLOB_WIN_SETTLEMENT_PRICE,
         clobLossSettlementPrice: cfg.CLOB_LOSS_SETTLEMENT_PRICE,
-        lookbackMs: cfg.SIGNAL_LOOKBACK_MS,
         pollMs: this.ccxt.pollMs,
         exchange: this.ccxt.exchange,
         symbol: this.ccxt.symbol,
@@ -831,11 +852,10 @@ class Bot {
         demoCapital: cfg.DEMO_CAPITAL,
         baseShares: cfg.BASE_SHARES,
         windowSec: WINDOW_SECONDS,
-        signalLookbackMs: cfg.SIGNAL_LOOKBACK_MS,
-        btcMoveThresholdWindowMs: cfg.BTC_MOVE_THRESHOLD_WINDOW_MS,
-        btcMoveThresholdPercentile: cfg.BTC_MOVE_THRESHOLD_PERCENTILE,
-        btcMoveThresholdFloorUsd: cfg.BTC_MOVE_THRESHOLD_FLOOR_USD,
-        btcMoveThresholdMinSamples: cfg.BTC_MOVE_THRESHOLD_MIN_SAMPLES,
+        btcBlockMs: cfg.STRATEGY_BLOCK_MS,
+        btcInitialBlocks: cfg.STRATEGY_INITIAL_BLOCKS,
+        btcProjectionWarmupSeconds: cfg.BTC_PROJECTION_WARMUP_SECONDS,
+        btcProjectionTrendSeconds: cfg.BTC_PROJECTION_TREND_SECONDS,
         ccxtPollMs: this.ccxt.pollMs,
         ccxtExchange: this.ccxt.exchange,
         ccxtSymbol: this.ccxt.symbol,
@@ -847,19 +867,14 @@ class Bot {
 
 function makeWindowState(slug, openTs) {
   return {
-    slug, openTs, status: 'waiting_for_market', window: null,
+    slug, openTs, status: 'waiting_for_baseline', window: null,
     closed: false, closing: false, position: null, entryTaken: false,
-    lastSignal: null, activeSignal: null, lastLoggedSignalSide: null, tradeInFlight: false,
+    baselinePrice: null, baselineAt: null, baselineAgeMs: null, baselineUnavailable: false, projection: null,
+    lastSignal: null, activeSignal: null, lastLoggedTrendToMs: null, tradeInFlight: false,
   };
 }
 
 function emptyQuote() { return { bid: null, ask: null, mid: null }; }
-
-function entryDelayElapsed(window) {
-  const openTs = Number(window && window.openTs);
-  return Number.isFinite(openTs)
-    && Date.now() >= (openTs + cfg.ENTRY_DELAY_AFTER_WINDOW_START_SECONDS) * 1000;
-}
 
 function sortedLevels(levels, order) {
   return (levels || [])
