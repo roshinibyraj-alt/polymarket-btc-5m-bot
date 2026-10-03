@@ -5,18 +5,26 @@ const assert = require('node:assert/strict');
 const cfg = require('../config');
 const { previousCloseSample, computeTenSecondProjection } = require('../directional-strategy');
 
-function syntheticSamples(openMs, baseline, initialMove, futureRate, throughMs = 170_000, stepMs = 500) {
+function syntheticSamples(
+  openMs, baseline, initialMove, futureRate,
+  throughMs = (cfg.BTC_PROJECTION_WARMUP_SECONDS + cfg.BTC_PROJECTION_TREND_SECONDS) * 1000,
+  stepMs = 500,
+) {
   const samples = [{ price: baseline, sampledAt: openMs - 500 }];
+  const warmupMs = cfg.BTC_PROJECTION_WARMUP_SECONDS * 1000;
   for (let elapsed = 0; elapsed <= throughMs; elapsed += stepMs) {
-    const price = elapsed < 150_000
-      ? baseline + initialMove * elapsed / 150_000
-      : baseline + initialMove + futureRate * (elapsed - 150_000) / 10_000;
+    const price = elapsed < warmupMs
+      ? baseline + initialMove * elapsed / warmupMs
+      : baseline + initialMove + futureRate * (elapsed - warmupMs) / cfg.STRATEGY_BLOCK_MS;
     samples.push({ price, sampledAt: openMs + elapsed });
   }
   return samples;
 }
 
-function project(samples, openMs, baseline = 85000, nowMs = openMs + 170_000) {
+function project(
+  samples, openMs, baseline = 85000,
+  nowMs = openMs + (cfg.BTC_PROJECTION_WARMUP_SECONDS + cfg.BTC_PROJECTION_TREND_SECONDS) * 1000,
+) {
   return computeTenSecondProjection(samples, {
     baselinePrice: baseline,
     windowOpenMs: openMs,
@@ -38,15 +46,15 @@ test('captures the freshest BTC sample at or before the previous candle close', 
   assert.equal(previousCloseSample([{ price: 84900, sampledAt: 1000 }], 10000, 500), null);
 });
 
-test('uses 15 initial 10-second blocks and projects DOWN from a declining rolling 20-second trend', () => {
+test('uses 12 initial 10-second blocks and projects DOWN from a declining rolling 20-second trend', () => {
   const openMs = 100_000;
   const result = project(syntheticSamples(openMs, 85000, 10, -1), openMs);
   assert.equal(result.phase, 'projection_ready');
-  assert.ok(Math.abs(result.initialDriftUsdPer10s - (10 / 15)) < 0.01);
+  assert.ok(Math.abs(result.initialDriftUsdPer10s - (10 / 12)) < 0.01);
   assert.ok(Math.abs(result.recentRateUsdPer10s - (-1)) < 0.02);
   assert.equal(result.side, 'DOWN');
   assert.ok(result.projectedClose < 85000);
-  assert.equal(result.remainingSeconds, 130);
+  assert.equal(result.remainingSeconds, 160);
 });
 
 test('uses the exact opposite projection for UP', () => {
@@ -58,8 +66,9 @@ test('uses the exact opposite projection for UP', () => {
 
 test('waits until two complete future blocks are available', () => {
   const openMs = 100_000;
-  const samples = syntheticSamples(openMs, 85000, 10, -1, 169_500);
-  const result = project(samples, openMs, 85000, openMs + 169_500);
+  const signalAtMs = (cfg.BTC_PROJECTION_WARMUP_SECONDS + cfg.BTC_PROJECTION_TREND_SECONDS) * 1000;
+  const samples = syntheticSamples(openMs, 85000, 10, -1, signalAtMs - 500);
+  const result = project(samples, openMs, 85000, openMs + signalAtMs - 500);
   assert.equal(result.phase, 'waiting_for_20_second_trend');
   assert.equal(result.side, null);
 });
@@ -83,13 +92,13 @@ test('skips projection when any initial 10-second block has insufficient samples
   assert.equal(result.side, null);
 });
 
-test('strategy configuration matches 150 seconds of baseline, 20-second trend, and fixed share size', () => {
+test('strategy configuration matches 120 seconds of baseline, 20-second trend, and fixed share size', () => {
   assert.equal(cfg.CCXT_EXCHANGE, 'coinbase');
   assert.equal(cfg.CCXT_POLL_MS, 500);
   assert.equal(cfg.LOOP_MS, 500);
   assert.equal(cfg.STRATEGY_BLOCK_MS, 10_000);
-  assert.equal(cfg.STRATEGY_INITIAL_BLOCKS, 15);
-  assert.equal(cfg.BTC_PROJECTION_WARMUP_SECONDS, 150);
+  assert.equal(cfg.STRATEGY_INITIAL_BLOCKS, 12);
+  assert.equal(cfg.BTC_PROJECTION_WARMUP_SECONDS, 120);
   assert.equal(cfg.BTC_PROJECTION_TREND_SECONDS, 20);
   assert.equal(cfg.BASE_SHARES, 500);
   assert.equal('MIN_ENTRY_PRICE' in cfg, false);

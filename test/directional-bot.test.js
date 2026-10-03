@@ -128,13 +128,17 @@ async function enterWithProjection(bot, side = 'UP') {
   return bot._attemptPriceEntry(bot.w, side, projectionSignal(bot, side));
 }
 
-async function feedSyntheticTrend(bot, initialMoveUsd, futureRateUsdPer10s, throughSeconds = 170) {
+async function feedSyntheticTrend(
+  bot, initialMoveUsd, futureRateUsdPer10s,
+  throughSeconds = cfg.BTC_PROJECTION_WARMUP_SECONDS + cfg.BTC_PROJECTION_TREND_SECONDS,
+) {
   const openMs = bot.w.openTs * 1000;
   const baselinePrice = 85000;
+  const warmupMs = cfg.BTC_PROJECTION_WARMUP_SECONDS * 1000;
   const send = async (elapsedMs) => {
-    const price = elapsedMs < 150_000
-      ? baselinePrice + initialMoveUsd * elapsedMs / 150_000
-      : baselinePrice + initialMoveUsd + futureRateUsdPer10s * (elapsedMs - 150_000) / 10_000;
+    const price = elapsedMs < warmupMs
+      ? baselinePrice + initialMoveUsd * elapsedMs / warmupMs
+      : baselinePrice + initialMoveUsd + futureRateUsdPer10s * (elapsedMs - warmupMs) / cfg.STRATEGY_BLOCK_MS;
     const sampledAt = openMs + elapsedMs;
     await bot._onBtcSample({ price, sampledAt, receivedAt: sampledAt, exchange: 'kraken', symbol: 'BTC/USD' });
   };
@@ -142,11 +146,11 @@ async function feedSyntheticTrend(bot, initialMoveUsd, futureRateUsdPer10s, thro
   for (let elapsedMs = 0; elapsedMs <= throughSeconds * 1000; elapsedMs += 500) await send(elapsedMs);
 }
 
-test('prior close and 150-second average feed a DOWN projection when the future trend crosses below baseline', async () => {
+test('prior close and 120-second warm-up feed a DOWN projection when the future trend crosses below baseline', async () => {
   const { bot, trader } = makeBot();
   await feedSyntheticTrend(bot, 10, -1, 170);
   assert.equal(bot.w.baselinePrice, 85000);
-  assert.ok(Math.abs(bot.w.projection.initialDriftUsdPer10s - (10 / 15)) < 0.01);
+  assert.ok(Math.abs(bot.w.projection.initialDriftUsdPer10s - (10 / 12)) < 0.01);
   assert.ok(bot.w.projection.recentRateUsdPer10s < 0);
   assert.ok(bot.w.projection.projectedClose < bot.w.baselinePrice);
   assert.equal(bot.w.position.side, 'DOWN');
@@ -223,12 +227,13 @@ test('later opposite forecasts do not sell the position or submit another BUY', 
 
 test('no entry occurs before two complete future ten-second blocks', async () => {
   const { bot, trader } = makeBot();
-  await feedSyntheticTrend(bot, 10, -1, 169.5);
+  await feedSyntheticTrend(bot, 10, -1, 139.5);
   assert.equal(bot.w.position, null);
   assert.equal(trader.calls.length, 0);
-  const at170 = bot.w.openTs * 1000 + 170_000;
+  const earliestSignalSeconds = cfg.BTC_PROJECTION_WARMUP_SECONDS + cfg.BTC_PROJECTION_TREND_SECONDS;
+  const at140 = bot.w.openTs * 1000 + earliestSignalSeconds * 1000;
   await bot._onBtcSample({
-    price: 85008, sampledAt: at170, receivedAt: at170,
+    price: 85008, sampledAt: at140, receivedAt: at140,
     exchange: 'kraken', symbol: 'BTC/USD',
   });
   assert.equal(bot.w.position.side, 'DOWN');
@@ -413,10 +418,10 @@ test('snapshot exposes rolling projection settings and fixed 500-share sizing wi
   assert.equal(snapshot.mode, 'DEMO');
   assert.equal(snapshot.strategy.pollMs, 500);
   assert.equal(snapshot.strategy.blockMs, 10_000);
-  assert.equal(snapshot.strategy.initialBlocks, 15);
-  assert.equal(snapshot.strategy.initialWindowSeconds, 150);
+  assert.equal(snapshot.strategy.initialBlocks, 12);
+  assert.equal(snapshot.strategy.initialWindowSeconds, 120);
   assert.equal(snapshot.strategy.rollingTrendSeconds, 20);
-  assert.equal(snapshot.strategy.firstPossibleEntrySeconds, 170);
+  assert.equal(snapshot.strategy.firstPossibleEntrySeconds, 140);
   assert.equal(snapshot.strategy.fixedOrderShares, 500);
   assert.equal(snapshot.strategy.nextEntryShares, 500);
   assert.equal('minEntryPrice' in snapshot.strategy, false);

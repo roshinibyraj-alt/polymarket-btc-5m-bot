@@ -1,7 +1,7 @@
 'use strict';
 
 const DEFAULT_BLOCK_MS = 10_000;
-const DEFAULT_INITIAL_BLOCKS = 15;
+const DEFAULT_INITIAL_BLOCKS = 12;
 
 function sampleTime(sample) {
   const value = Number(sample && (sample.sampledAt ?? sample.receivedAt ?? sample.ts ?? sample.timestamp));
