@@ -6,7 +6,7 @@ const {
 } = require('./polymarket-market');
 const startMarketFeed = require('./clob-feed');
 const CcxtPriceFeed = require('./ccxt-feed');
-const { previousCloseSample, computeTenSecondProjection } = require('./directional-strategy');
+const { candleColor, matchMinutePattern } = require('./directional-strategy');
 const { estimateTakerFee } = require('./strategy');
 
 const EPSILON = 1e-8;
@@ -56,7 +56,6 @@ class Bot {
     this._lastMarketEventAt = 0;
     this._lastRestFetchAt = 0;
     this._btcSamples = [];
-    this._btcMoveHistory = [];
     this.activeSignal = null;
     this._signalBusy = false;
     this._running = false;
@@ -66,9 +65,8 @@ class Bot {
       symbol: this.ccxtFeed.symbol || cfg.CCXT_SYMBOL || 'BTC/USD',
       pollMs: this.ccxtFeed.pollMs || cfg.CCXT_POLL_MS,
       requestedPollMs: cfg.CCXT_POLL_MS,
-      baselinePrice: null, initialDriftUsdPer10s: null, recentRateUsdPer10s: null,
-      projectedClose: null, projectedDeltaUsd: null, projectionPhase: 'waiting_for_baseline',
-      price: null, bid: null, ask: null, change1s: null, lookbackObservedMs: null,
+      candleSequence: '', lastCandleColor: null, patternAction: 'WAIT',
+      price: null, bid: null, ask: null,
       receivedAt: null, status: 'stopped', error: null, candidateSide: null, lastSignal: null,
     };
   }
@@ -145,11 +143,9 @@ class Bot {
       this.w = makeWindowState(slug, openTs);
       this.activeSignal = null;
       this.ccxt = {
-        ...this.ccxt, candidateSide: null, lastSignal: null, baselinePrice: null,
-        initialDriftUsdPer10s: null, recentRateUsdPer10s: null, projectedClose: null,
-        projectedDeltaUsd: null, projectionPhase: 'waiting_for_baseline',
+        ...this.ccxt, candidateSide: null, lastSignal: null,
+        candleSequence: '', lastCandleColor: null, patternAction: 'WAIT',
       };
-      this._captureWindowBaseline(this.w);
     }
 
     const w = this.w;
@@ -158,10 +154,10 @@ class Bot {
       if (result.window) {
         this.error = null;
         w.window = result.window;
-        w.status = w.baselinePrice == null ? 'waiting_for_baseline' : 'building_initial_averages';
+        w.status = 'waiting_for_first_candle';
         this._push({
           event: 'WINDOW_READY', slug: w.slug,
-          note: 'BTC 5-minute market active; capturing the previous candle close and building 10-second averages.',
+          note: 'BTC 5-minute market active; collecting completed one-minute candles for the entry and exit patterns.',
         });
         await this._ensureMarketFeed(w);
       } else {
@@ -171,6 +167,7 @@ class Bot {
     }
 
     if (!w.window) return;
+    await this._finalizeDueMinutes(w, now);
     const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
     if (now >= closeTs * 1000) await this._closeWindow(w);
   }
@@ -254,7 +251,7 @@ class Bot {
     if (w.position && w.position.side === side && w.position.openShares > EPSILON) {
       const mark = next.bid == null ? next.mid : next.bid;
       if (mark != null && Number.isFinite(Number(mark))) w.position.lastClobMark = Number(mark);
-      if (!this._settlePositionAtClobPrice(w.position, next.mid, next.bid)) this._recordEquity();
+      this._recordEquity();
     }
     if (up.ask != null && down.ask != null) {
       if (this._seriesSlug !== slug) { this._seriesSlug = slug; this.priceSeries = []; }
@@ -273,9 +270,13 @@ class Bot {
         this._lastSeriesAt = now;
       }
     }
-    if (w.activeSignal && w.activeSignal.side === side
-      && (!w.position || w.position.side !== side)) {
-      return this._attemptPriceEntry(w, side, w.activeSignal);
+    if (w.activeSignal && w.activeSignal.side === side) {
+      if (w.activeSignal.action === 'BUY' && !w.position) {
+        return this._attemptPatternEntry(w, w.activeSignal);
+      }
+      if (w.activeSignal.action === 'SELL' && w.position && w.position.side === side) {
+        return this._attemptPatternExit(w, w.activeSignal);
+      }
     }
     return null;
   }
@@ -316,37 +317,8 @@ class Bot {
     this._btcSamples = this._btcSamples.filter((item) =>
       receivedAt - item.receivedAt <= cfg.BTC_SAMPLE_RETENTION_MS);
     const currentWindow = this.w;
-    if (currentWindow && !currentWindow.baselinePrice) {
-      this._captureWindowBaseline(currentWindow);
-      if (!currentWindow.baselinePrice) {
-        currentWindow.status = 'waiting_for_baseline';
-        const baselineWaitMs = Math.max(cfg.STRATEGY_BASELINE_MAX_AGE_MS, this.ccxt.pollMs * 2);
-        if (!currentWindow.baselineUnavailable && sampledAt >= currentWindow.openTs * 1000 + baselineWaitMs) {
-          currentWindow.baselineUnavailable = true;
-          this._push({
-            event: 'BTC_BASELINE_MISSING', slug: currentWindow.slug,
-            note: 'No fresh BTC sample was captured at the previous candle close; skipping this window rather than inventing a baseline.',
-          });
-        }
-      }
-    }
-    let projection = null;
     if (currentWindow && currentWindow.window && !currentWindow.closed && !currentWindow.closing) {
-      const closeTs = Number(currentWindow.window.closeTs) || currentWindow.openTs + WINDOW_SECONDS;
-      if (currentWindow.baselinePrice != null) {
-        projection = computeTenSecondProjection(this._btcSamples, {
-          baselinePrice: currentWindow.baselinePrice,
-          windowOpenMs: currentWindow.openTs * 1000,
-          windowCloseMs: closeTs * 1000,
-          nowMs: sampledAt,
-          blockMs: cfg.STRATEGY_BLOCK_MS,
-          initialBlocks: cfg.STRATEGY_INITIAL_BLOCKS,
-          minSamplesPerBlock: cfg.STRATEGY_MIN_SAMPLES_PER_BLOCK,
-          maxSampleGapMs: Math.max(cfg.STRATEGY_MAX_SAMPLE_GAP_MS, this.ccxt.pollMs * 2),
-        });
-        currentWindow.projection = projection;
-        currentWindow.status = projection.phase;
-      }
+      await this._addMinuteSample(currentWindow, sampledAt, price);
     }
     const lastInterval = previousSample ? sampledAt - previousSample.sampledAt : null;
     this.ccxt = {
@@ -360,107 +332,186 @@ class Bot {
       lastPollIntervalMs: lastInterval,
       exchangeTimestamp: sample.exchangeTimestamp == null || sample.exchangeTimestamp === ''
         ? null : (Number.isFinite(Number(sample.exchangeTimestamp)) ? Number(sample.exchangeTimestamp) : null),
-      change1s: null,
-      lookbackObservedMs: null,
-      baselinePrice: currentWindow && currentWindow.baselinePrice != null
-        ? currentWindow.baselinePrice : null,
-      initialDriftUsdPer10s: projection ? projection.initialDriftUsdPer10s : null,
-      recentRateUsdPer10s: projection ? projection.recentRateUsdPer10s : null,
-      projectedClose: projection ? projection.projectedClose : null,
-      projectedDeltaUsd: projection ? projection.projectedDeltaUsd : null,
-      projectionPhase: projection ? projection.phase
-        : currentWindow && !currentWindow.baselinePrice ? 'waiting_for_baseline' : 'waiting_for_market',
-      candidateSide: projection ? projection.side : null,
+      candleSequence: currentWindow && currentWindow.candleSequence || '',
+      lastCandleColor: currentWindow && currentWindow.lastCandle
+        ? currentWindow.lastCandle.color : null,
+      patternAction: currentWindow && currentWindow.lastSignal
+        ? currentWindow.lastSignal.action : 'WAIT',
+      candidateSide: currentWindow && currentWindow.activeSignal
+        ? currentWindow.activeSignal.side : null,
       status: 'live',
       error: null,
     };
-    if (projection) await this._handleProjection(projection);
   }
 
-  _captureWindowBaseline(w) {
-    if (!w || w.baselinePrice != null) return w && w.baselinePrice != null;
-    const maxAgeMs = Math.max(cfg.STRATEGY_BASELINE_MAX_AGE_MS, (Number(this.ccxt.pollMs) || cfg.CCXT_POLL_MS) * 2);
-    const close = previousCloseSample(this._btcSamples, w.openTs * 1000, maxAgeMs);
-    if (!close) return false;
-    w.baselinePrice = close.price;
-    w.baselineAt = close.sampledAt;
-    w.baselineAgeMs = close.ageMs;
-    w.status = 'building_initial_averages';
-    this.ccxt = { ...this.ccxt, baselinePrice: close.price, projectionPhase: 'building_initial_averages' };
-    this._push({
-      event: 'BTC_BASELINE_CAPTURED', slug: w.slug,
-      price: round(close.price, 2), ageMs: Math.round(close.ageMs),
-      note: 'Previous 5-minute candle close captured at $' + close.price.toFixed(2) + '; building 15 ten-second BTC averages.',
-    });
+  async _addMinuteSample(w, sampledAt, price) {
+    const openMs = w.openTs * 1000;
+    const closeMs = (Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS) * 1000;
+    const minuteMs = cfg.STRATEGY_MINUTE_MS;
+    if (sampledAt < openMs || sampledAt >= closeMs) return false;
+
+    await this._finalizeDueMinutes(w, sampledAt);
+    const index = Math.floor((sampledAt - openMs) / minuteMs);
+    const minuteCount = Math.ceil((closeMs - openMs) / minuteMs);
+    if (index < 0 || index >= minuteCount || index < w.nextMinuteIndex) return false;
+
+    while (w.nextMinuteIndex < index) {
+      const missingIndex = w.nextMinuteIndex++;
+      await this._completeMinuteCandle(w, {
+        index: missingIndex,
+        startMs: openMs + missingIndex * minuteMs,
+        endMs: openMs + (missingIndex + 1) * minuteMs,
+        open: null, high: null, low: null, close: null,
+        sampleCount: 0, color: 'N',
+      });
+    }
+
+    const current = w.currentMinuteCandle;
+    if (!current) {
+      w.currentMinuteCandle = {
+        index,
+        startMs: openMs + index * minuteMs,
+        endMs: openMs + (index + 1) * minuteMs,
+        open: price, high: price, low: price, close: price,
+        sampleCount: 1, lastSampledAt: sampledAt,
+      };
+      return true;
+    }
+    if (current.index !== index) return false;
+    current.high = Math.max(current.high, price);
+    current.low = Math.min(current.low, price);
+    current.close = price;
+    current.sampleCount += 1;
+    current.lastSampledAt = sampledAt;
     return true;
   }
 
-  async _handleProjection(projection) {
-    const w = this.w;
-    if (!w || !w.window || w.closed || w.closing) return;
-    const signal = projection && projection.side ? {
-      side: projection.side,
-      changeUsd: projection.projectedDeltaUsd,
-      baselinePrice: projection.baselinePrice,
-      projectedClose: projection.projectedClose,
-      initialDriftUsdPer10s: projection.initialDriftUsdPer10s,
-      recentRateUsdPer10s: projection.recentRateUsdPer10s,
-      remainingSeconds: projection.remainingSeconds,
-      ts: projection.observedAt,
-      projection,
-    } : null;
-    const previousSide = w.activeSignal && w.activeSignal.side;
-    w.projection = projection;
-    w.activeSignal = signal;
-    w.lastSignal = signal || {
-      side: null,
-      baselinePrice: projection.baselinePrice,
-      projectedClose: projection.projectedClose,
-      changeUsd: projection.projectedDeltaUsd,
-      initialDriftUsdPer10s: projection.initialDriftUsdPer10s,
-      recentRateUsdPer10s: projection.recentRateUsdPer10s,
-      remainingSeconds: projection.remainingSeconds,
-      phase: projection.phase,
-      ts: projection.observedAt,
-    };
-    this.activeSignal = signal;
-    if (!signal) {
-      if (!w.position) w.status = projection.phase;
-      return;
+  async _finalizeDueMinutes(w, nowMs) {
+    while (w && w.currentMinuteCandle && w.currentMinuteCandle.endMs <= nowMs) {
+      const current = w.currentMinuteCandle;
+      w.currentMinuteCandle = null;
+      w.nextMinuteIndex = current.index + 1;
+      const color = current.sampleCount >= cfg.STRATEGY_MIN_CANDLE_SAMPLES
+        ? candleColor(current.open, current.close) : 'N';
+      await this._completeMinuteCandle(w, { ...current, color });
     }
-    w.status = w.position && w.position.openShares > EPSILON
-      ? 'position_open'
-      : w.entryCount > 0 ? 'trade_taken' : 'projection_ready';
-    if (previousSide !== signal.side || w.lastLoggedTrendToMs !== projection.trendToMs) {
-      w.lastLoggedTrendToMs = projection.trendToMs;
-      this.ccxt.lastSignal = {
-        side: signal.side,
-        changeUsd: signal.changeUsd,
-        baselinePrice: signal.baselinePrice,
-        projectedClose: signal.projectedClose,
-        initialDriftUsdPer10s: signal.initialDriftUsdPer10s,
-        recentRateUsdPer10s: signal.recentRateUsdPer10s,
-        ts: signal.ts,
-      };
-      this._push({
-        event: 'BTC_CLOSE_PROJECTION', slug: w.slug, side: signal.side,
-        baselinePrice: round(signal.baselinePrice, 2), projectedClose: round(signal.projectedClose, 2),
-        projectedDeltaUsd: round(signal.changeUsd, 2),
-        initialDriftUsdPer10s: round(signal.initialDriftUsdPer10s, 3),
-        recentRateUsdPer10s: round(signal.recentRateUsdPer10s, 3),
-        remainingSeconds: round(signal.remainingSeconds, 1),
-        note: 'Rolling 20-second BTC trend projects a close ' + signedUsd(signal.changeUsd)
-          + ' from the previous candle close; forecast side is ' + signal.side + '.',
+    if (!w || !w.window || w.currentMinuteCandle || w.closed) return;
+    const openMs = w.openTs * 1000;
+    const closeMs = (Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS) * 1000;
+    const minuteMs = cfg.STRATEGY_MINUTE_MS;
+    const minuteCount = Math.ceil((closeMs - openMs) / minuteMs);
+    const dueIndex = Math.min(minuteCount, Math.max(0, Math.floor((Math.min(nowMs, closeMs) - openMs) / minuteMs)));
+    while (w.nextMinuteIndex < dueIndex) {
+      const missingIndex = w.nextMinuteIndex++;
+      await this._completeMinuteCandle(w, {
+        index: missingIndex,
+        startMs: openMs + missingIndex * minuteMs,
+        endMs: openMs + (missingIndex + 1) * minuteMs,
+        open: null, high: null, low: null, close: null,
+        sampleCount: 0, color: 'N',
       });
     }
-    if (this.strategyBlocked) return;
-    return this._attemptPriceEntry(w, signal.side, signal);
   }
 
-  async _attemptPriceEntry(w, side, signal = w && w.activeSignal) {
+  async _completeMinuteCandle(w, candle) {
+    if (!w || !w.window || w.closed) return;
+    const completed = {
+      ...candle,
+      open: candle.open != null && Number.isFinite(Number(candle.open)) ? Number(candle.open) : null,
+      high: candle.high != null && Number.isFinite(Number(candle.high)) ? Number(candle.high) : null,
+      low: candle.low != null && Number.isFinite(Number(candle.low)) ? Number(candle.low) : null,
+      close: candle.close != null && Number.isFinite(Number(candle.close)) ? Number(candle.close) : null,
+    };
+    w.minuteCandles.push(completed);
+    w.candleSequence = w.minuteCandles.map((item) => item.color).join('');
+    w.lastCandle = completed;
+    const match = matchMinutePattern(w.candleSequence);
+    const signal = {
+      ...match,
+      ts: completed.endMs,
+      minuteIndex: completed.index,
+      candleColor: completed.color,
+    };
+    w.lastSignal = signal;
+    this.ccxt = {
+      ...this.ccxt,
+      candleSequence: w.candleSequence,
+      lastCandleColor: completed.color,
+      patternAction: match.action,
+      candidateSide: match.side,
+      lastSignal: signal,
+    };
+    this._push({
+      event: 'BTC_1M_CANDLE',
+      slug: w.slug,
+      minute: completed.index + 1,
+      color: completed.color,
+      open: completed.open == null ? null : round(completed.open, 2),
+      close: completed.close == null ? null : round(completed.close, 2),
+      sequence: w.candleSequence,
+      note: completed.color === 'N'
+        ? 'One-minute candle ' + (completed.index + 1) + ' was neutral or lacked enough BTC samples; no pattern is formed.'
+        : 'One-minute candle ' + (completed.index + 1) + ' closed ' + completed.color
+          + ' (' + round(completed.open, 2) + ' → ' + round(completed.close, 2)
+          + '); sequence is ' + w.candleSequence + '.',
+    });
+
+    if (w.activeSignal && w.activeSignal.action === 'SELL'
+      && w.position && w.position.openShares > EPSILON) {
+      w.status = 'exit_pending';
+      return;
+    }
+    if (match.action === 'WAIT') {
+      w.activeSignal = null;
+      this.activeSignal = null;
+      w.status = w.position && w.position.openShares > EPSILON
+        ? 'position_open' : w.entryCount > 0 ? 'trade_taken' : 'waiting_for_pattern';
+      return;
+    }
+    if (match.action === 'BUY') {
+      if (w.entryCount > 0 || (w.position && w.position.openShares > EPSILON)) {
+        w.activeSignal = null;
+        this.activeSignal = null;
+        w.status = w.position && w.position.openShares > EPSILON ? 'position_open' : 'trade_taken';
+        return;
+      }
+      w.activeSignal = signal;
+      this.activeSignal = signal;
+      w.status = 'pattern_ready';
+      this._push({
+        event: 'CANDLE_PATTERN_BUY_SIGNAL', slug: w.slug,
+        side: signal.side, pattern: signal.pattern, sequence: signal.sequence,
+        note: 'Completed one-minute pattern ' + signal.pattern + ' signals BUY ' + signal.side + '.',
+      });
+      if (!this.strategyBlocked) return this._attemptPatternEntry(w, signal);
+      return;
+    }
+    if (!w.position || w.position.openShares <= EPSILON || w.position.side !== signal.side) {
+      w.activeSignal = null;
+      this.activeSignal = null;
+      w.status = w.entryCount > 0 ? 'trade_taken' : 'waiting_for_pattern';
+      this._push({
+        event: 'CANDLE_PATTERN_EXIT_NO_POSITION', slug: w.slug,
+        side: signal.side, pattern: signal.pattern,
+        note: 'Pattern ' + signal.pattern + ' signals SELL ' + signal.side
+          + ', but there is no matching open position.',
+      });
+      return;
+    }
+    w.activeSignal = signal;
+    this.activeSignal = signal;
+    w.status = 'pattern_exit_signal';
+    this._push({
+      event: 'CANDLE_PATTERN_SELL_SIGNAL', slug: w.slug,
+      side: signal.side, pattern: signal.pattern, sequence: signal.sequence,
+      note: 'Completed one-minute pattern ' + signal.pattern + ' signals SELL ' + signal.side + '.',
+    });
+    if (!this.strategyBlocked) return this._attemptPatternExit(w, signal);
+  }
+
+  async _attemptPatternEntry(w, signal = w && w.activeSignal) {
     if (this.strategyBlocked || !w || this.w !== w || !w.window || w.closed || w.closing
-      || !signal || signal.side !== side || !signal.projection
-      || signal.projection.phase !== 'projection_ready') return false;
+      || !signal || signal.action !== 'BUY' || !signal.side) return false;
     const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
     if (Date.now() >= closeTs * 1000) return false;
     if (w.entryCount > 0) {
@@ -468,19 +519,17 @@ class Bot {
       return false;
     }
     if (w.position && w.position.openShares > EPSILON) return false;
-    if (w.lastSettledSide === side) return false;
     if (this._signalBusy) return false;
     this._signalBusy = true;
     w.tradeInFlight = true;
     try {
       const currentSignal = w.activeSignal || signal;
       if (this.w !== w || w.closed || w.closing || !w.window) return false;
-      if (!currentSignal || currentSignal.projection.phase !== 'projection_ready') return false;
+      if (!currentSignal || currentSignal.action !== 'BUY' || currentSignal.pattern !== signal.pattern) return false;
       if (w.entryCount > 0 || (w.position && w.position.openShares > EPSILON)) return false;
-      if (w.lastSettledSide === currentSignal.side) return false;
-      return await this._buyPosition(w, currentSignal.side, currentSignal);
+      return await this._buyPosition(w, currentSignal);
     } catch (error) {
-      this._push({ event: 'REVERSAL_ERROR', slug: w.slug, side, note: error.message });
+      this._push({ event: 'CANDLE_BUY_ERROR', slug: w.slug, side: signal.side, note: error.message });
       return false;
     } finally {
       w.tradeInFlight = false;
@@ -488,25 +537,35 @@ class Bot {
     }
   }
 
-  async _buyPosition(w, side, move) {
+  async _attemptPatternExit(w, signal = w && w.activeSignal) {
+    if (this.strategyBlocked || !w || this.w !== w || !w.window || w.closed || w.closing
+      || !signal || signal.action !== 'SELL' || !w.position
+      || w.position.side !== signal.side || w.position.openShares <= EPSILON) return false;
+    const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
+    if (Date.now() >= closeTs * 1000) return false;
+    if (this._signalBusy) return false;
+    this._signalBusy = true;
+    w.tradeInFlight = true;
+    try {
+      const currentSignal = w.activeSignal || signal;
+      if (this.w !== w || w.closed || w.closing || !w.window
+        || !w.position || w.position.side !== currentSignal.side
+        || currentSignal.action !== 'SELL' || currentSignal.pattern !== signal.pattern) return false;
+      return await this._sellPosition(w, currentSignal);
+    } catch (error) {
+      this._push({ event: 'CANDLE_SELL_ERROR', slug: w.slug, side: signal.side, note: error.message });
+      return false;
+    } finally {
+      w.tradeInFlight = false;
+      this._signalBusy = false;
+    }
+  }
+
+  async _buyPosition(w, signal) {
+    const side = signal && signal.side;
     if (this.strategyBlocked || this.w !== w || !w.window || w.closed || w.closing
       || w.entryCount > 0 || (w.position && w.position.openShares > EPSILON)
-      || !move || move.side !== side || w.lastSettledSide === side) return false;
-    const warmupDrift = Number(move.initialDriftUsdPer10s);
-    const allowedFirstSide = Number.isFinite(warmupDrift) && Math.abs(warmupDrift) > EPSILON
-      ? (warmupDrift > 0 ? 'DOWN' : 'UP') : null;
-    if (allowedFirstSide !== side) {
-      w.status = allowedFirstSide ? 'warmup_filter_blocked' : 'warmup_neutral';
-      this._warnOnce('warmup-entry-filter-' + w.slug, {
-        event: 'WARMUP_ENTRY_FILTERED', slug: w.slug, side,
-        initialDriftUsdPer10s: Number.isFinite(warmupDrift) ? round(warmupDrift, 4) : null,
-        allowedSide: allowedFirstSide,
-        note: allowedFirstSide
-          ? 'Warm-up drift permits only an initial ' + allowedFirstSide + ' entry; ignored ' + side + '.'
-          : 'Warm-up drift is neutral or unavailable; no initial side is eligible this window.',
-      });
-      return false;
-    }
+      || !signal || signal.action !== 'BUY' || !side) return false;
     const tokenId = side === 'UP' ? w.window.tokenUp : w.window.tokenDown;
     const book = await this.trader.getOrderBook(tokenId);
     const asks = sortedLevels(book && book.asks, 'asc');
@@ -515,8 +574,9 @@ class Bot {
     if (bestAsk == null) {
       w.status = 'waiting_for_order_book';
       this._push({
-        event: 'PRICE_BUY_NO_BOOK', slug: w.slug, side,
-        note: 'No executable ask for the projected ' + side + ' side; waiting for an order book.',
+        event: 'CANDLE_PATTERN_BUY_NO_BOOK', slug: w.slug, side,
+        pattern: signal.pattern,
+        note: 'No executable ask for the pattern-selected ' + side + ' side; waiting for an order book.',
       });
       return false;
     }
@@ -529,14 +589,16 @@ class Bot {
     const estimatedFee = estimateTakerFee(targetShares, estimatedNotional / targetShares);
     if (this.cash == null || this.cash + EPSILON < estimatedNotional + estimatedFee) {
       this._push({
-        event: 'PRICE_BUY_NO_CASH', slug: w.slug, side,
+        event: 'CANDLE_PATTERN_BUY_NO_CASH', slug: w.slug, side,
+        pattern: signal.pattern,
         note: 'Demo cash is insufficient for the fixed ' + targetShares + '-share ' + side + ' entry.',
       });
       return false;
     }
     const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
     if (this.w !== w || w.closed || w.closing || (w.position && w.position.openShares > EPSILON)
-      || !w.activeSignal || w.activeSignal.side !== side || w.activeSignal.projection.phase !== 'projection_ready'
+      || w.entryCount > 0 || !w.activeSignal || w.activeSignal.action !== 'BUY'
+      || w.activeSignal.pattern !== signal.pattern || w.activeSignal.side !== side
       || Date.now() >= closeTs * 1000) return false;
 
     const order = await this.trader.placeFakMarketOrder(tokenId, 'BUY', targetShares, {
@@ -547,7 +609,8 @@ class Bot {
     const simulatedLiquidityShares = positive(order && order.raw && order.raw.simulatedLiquidityShares) || 0;
     if (shares + EPSILON < targetShares || notional <= 0) {
       this._push({
-        event: 'PRICE_BUY_UNFILLED', slug: w.slug, side,
+        event: 'CANDLE_PATTERN_BUY_UNFILLED', slug: w.slug, side,
+        pattern: signal.pattern,
         note: 'The demo simulator did not fill all 500 shares; no partial position was recorded.',
       });
       return false;
@@ -556,7 +619,8 @@ class Bot {
     const fee = estimateTakerFee(shares, averagePrice);
     if (notional + fee > this.cash + EPSILON) {
       this._push({
-        event: 'PRICE_BUY_REJECTED', slug: w.slug, side,
+        event: 'CANDLE_PATTERN_BUY_REJECTED', slug: w.slug, side,
+        pattern: signal.pattern,
         note: 'Estimated fill plus taker fee exceeded demo cash; position was not recorded.',
       });
       return false;
@@ -571,11 +635,10 @@ class Bot {
       exitProceeds: 0, status: 'position_open', firedAt: Date.now(),
       lastClobMark: bids.length ? bids[0].price : averagePrice,
       realizedPnl: 0,
-      signalChangeUsd: move.changeUsd,
-      signalBaselinePrice: move.baselinePrice,
-      signalProjectedClose: move.projectedClose,
-      signalInitialDriftUsdPer10s: move.initialDriftUsdPer10s,
-      signalRecentRateUsdPer10s: move.recentRateUsdPer10s,
+      entryPattern: signal.pattern,
+      entrySequence: signal.sequence,
+      entryMinuteIndex: signal.minuteIndex,
+      exitPattern: null,
       settled: false, settlementTimedOut: false,
     };
     this.cash -= position.cost;
@@ -583,26 +646,91 @@ class Bot {
     w.position = position;
     w.entryTaken = true;
     w.entryCount += 1;
-    w.lastSettledSide = null;
     w.status = 'position_open';
     this.stats.signalEntries += 1;
     this.stats.estimatedFees += fee;
     this._recordEquity();
     this._push({
-      event: 'PRICE_BUY_FILLED', slug: w.slug, side,
+      event: 'CANDLE_PATTERN_BUY_FILLED', slug: w.slug, side, pattern: signal.pattern,
       shares: round(shares, 4), targetShares, simulatedLiquidityShares: round(simulatedLiquidityShares, 4),
       price: round(averagePrice, 4),
-      fee: round(fee, 5), changeUsd: move && Number.isFinite(Number(move.changeUsd)) ? round(move.changeUsd, 2) : null,
-      projectedClose: round(move.projectedClose, 2),
+      fee: round(fee, 5),
       note: 'Demo marketable BUY filled a fixed ' + targetShares + ' ' + side
         + ' shares at average $' + averagePrice.toFixed(4)
-        + ' after the rolling 20-second BTC trend projected a close $' + move.projectedClose.toFixed(2)
-        + ' versus the previous candle close $' + move.baselinePrice.toFixed(2) + '.'
+        + ' on the completed one-minute pattern ' + signal.pattern + '.'
         + (simulatedLiquidityShares > EPSILON
           ? ' ' + round(simulatedLiquidityShares, 4) + ' shares used modeled demo liquidity.'
           : ' All target shares swept from visible asks.')
-        + ' There is no strategy-level ask-price filter; estimated taker fee $' + fee.toFixed(5) + '.',
+        + ' Estimated taker fee $' + fee.toFixed(5) + '.',
     });
+    return true;
+  }
+
+  async _sellPosition(w, signal) {
+    const position = w.position;
+    if (!position || position.openShares <= EPSILON || position.side !== signal.side) return false;
+    const tokenId = position.tokenId;
+    const book = await this.trader.getOrderBook(tokenId);
+    const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
+    if (this.w !== w || w.closed || w.closing || !w.position
+      || w.position !== position || w.activeSignal !== signal
+      || Date.now() >= closeTs * 1000) return false;
+    const bids = sortedLevels(book && book.bids, 'desc');
+    if (!bids.length) {
+      w.status = 'waiting_for_exit_book';
+      this._warnOnce('pattern-exit-no-book-' + w.slug + '-' + signal.pattern, {
+        event: 'CANDLE_PATTERN_SELL_NO_BOOK', slug: w.slug,
+        side: signal.side, pattern: signal.pattern,
+        note: 'Pattern ' + signal.pattern + ' signals SELL ' + signal.side
+          + ', but no executable bid is available; waiting for the book.',
+      });
+      return false;
+    }
+    const targetShares = position.openShares;
+    const order = await this.trader.placeFakMarketOrder(tokenId, 'SELL', targetShares, {
+      targetShares, orderBook: book,
+    });
+    const soldShares = Math.min(targetShares, positive(order && order.raw && order.raw.makingAmount) || 0);
+    const proceeds = positive(order && order.raw && order.raw.takingAmount) || 0;
+    if (soldShares <= EPSILON || proceeds <= 0) {
+      w.status = 'waiting_for_exit_book';
+      this._push({
+        event: 'CANDLE_PATTERN_SELL_UNFILLED', slug: w.slug,
+        side: signal.side, pattern: signal.pattern,
+        note: 'Pattern ' + signal.pattern + ' signaled an exit, but the demo sell did not fill.',
+      });
+      return false;
+    }
+    const averagePrice = proceeds / soldShares;
+    const fee = estimateTakerFee(soldShares, averagePrice);
+    this.cash += proceeds - fee;
+    position.exitProceeds += proceeds;
+    position.exitFees += fee;
+    position.openShares = Math.max(0, position.openShares - soldShares);
+    position.exitPattern = signal.pattern;
+    position.lastClobMark = bids[0].price;
+    this.stats.estimatedFees += fee;
+    this._push({
+      event: 'CANDLE_PATTERN_SELL_FILLED', slug: w.slug,
+      side: signal.side, pattern: signal.pattern,
+      shares: round(soldShares, 4), price: round(averagePrice, 4), fee: round(fee, 5),
+      note: 'Demo marketable SELL closed ' + round(soldShares, 4) + ' ' + signal.side
+        + ' shares at average $' + averagePrice.toFixed(4)
+        + ' on the completed one-minute pattern ' + signal.pattern + '.',
+    });
+    if (position.openShares <= EPSILON) {
+      position.openShares = 0;
+      position.status = 'closed';
+      w.position = null;
+      w.activeSignal = null;
+      this.activeSignal = null;
+      w.status = 'trade_taken';
+      this._finalizePosition(position, 'CLOSED', 'CANDLE_PATTERN_EXIT');
+    } else {
+      position.status = 'position_open';
+      w.status = 'exit_pending';
+      this._recordEquity();
+    }
     return true;
   }
 
@@ -642,8 +770,7 @@ class Bot {
           const mark = currentQuote.bid == null ? currentQuote.mid : currentQuote.bid;
           if (mark != null && Number.isFinite(Number(mark))) position.lastClobMark = Number(mark);
         }
-        if (currentQuote
-          && this._settlePositionAtClobPrice(position, currentQuote.mid, currentQuote.bid)) continue;
+        this._recordEquity();
       }
       if (now < closeTime) continue;
       if (this.w && this.w.openTs === position.openTs && !this.w.closed) {
@@ -717,9 +844,7 @@ class Bot {
       ? this.w : null;
     if (window) {
       window.position = null;
-      window.lastSettledSide = position.side;
-      window.status = window.closed ? 'window_closed'
-        : window.activeSignal ? 'projection_ready' : 'waiting_for_baseline';
+      window.status = window.closed ? 'window_closed' : 'trade_taken';
     }
     this._push({
       event: 'CLOB_THRESHOLD_SETTLEMENT',
@@ -760,6 +885,8 @@ class Bot {
       slug: position.slug, openTs: position.openTs, side: position.side,
       shares: position.shares, entryPrice: round(position.entryPrice, 4),
       exitPrice: position.shares > 0 ? round(position.exitProceeds / position.shares, 4) : null,
+      entryPattern: position.entryPattern || null,
+      exitPattern: position.exitPattern || null,
       entryNotional: round(position.entryNotional, 4),
       exitProceeds: round(position.exitProceeds, 4),
       fee: round(position.entryFee + position.exitFees, 4),
@@ -838,14 +965,14 @@ class Bot {
         slug: w.slug, status: w.status, openTs: w.openTs,
         closeTs: Number(w.window && w.window.closeTs) || w.openTs + WINDOW_SECONDS,
         elapsedSeconds: elapsed, closed: w.closed,
-        baselinePrice: w.baselinePrice,
-        baselineAgeMs: w.baselineAgeMs,
-        projection: w.projection || null,
+        candleSequence: w.candleSequence,
+        minuteCandles: w.minuteCandles,
+        lastCandle: w.lastCandle,
         positionSide: w.position && w.position.openShares > EPSILON ? w.position.side : null,
         openShares: w.position ? w.position.openShares : 0,
         entryCount: w.entryCount,
-        reversalCount: w.reversalCount,
         lastSignal: w.lastSignal || null,
+        activeSignal: w.activeSignal || null,
         activeSignalSide: w.activeSignal ? w.activeSignal.side : null,
         entryTaken: w.entryCount > 0,
       } : null,
@@ -856,13 +983,9 @@ class Bot {
         baseShares: cfg.BASE_SHARES,
         fixedOrderShares: cfg.BASE_SHARES,
         nextEntryShares: cfg.BASE_SHARES,
-        blockMs: cfg.STRATEGY_BLOCK_MS,
-        initialBlocks: cfg.STRATEGY_INITIAL_BLOCKS,
-        initialWindowSeconds: cfg.BTC_PROJECTION_WARMUP_SECONDS,
-        rollingTrendSeconds: cfg.BTC_PROJECTION_TREND_SECONDS,
-        firstPossibleEntrySeconds: cfg.BTC_PROJECTION_WARMUP_SECONDS + cfg.BTC_PROJECTION_TREND_SECONDS,
-        baselineMaxAgeMs: cfg.STRATEGY_BASELINE_MAX_AGE_MS,
-        minSamplesPerBlock: cfg.STRATEGY_MIN_SAMPLES_PER_BLOCK,
+        minuteMs: cfg.STRATEGY_MINUTE_MS,
+        minSamplesPerCandle: cfg.STRATEGY_MIN_CANDLE_SAMPLES,
+        maxEntriesPerWindow: 1,
         clobWinSettlementPrice: cfg.CLOB_WIN_SETTLEMENT_PRICE,
         clobLossSettlementPrice: cfg.CLOB_LOSS_SETTLEMENT_PRICE,
         pollMs: this.ccxt.pollMs,
@@ -876,10 +999,7 @@ class Bot {
         demoCapital: cfg.DEMO_CAPITAL,
         baseShares: cfg.BASE_SHARES,
         windowSec: WINDOW_SECONDS,
-        btcBlockMs: cfg.STRATEGY_BLOCK_MS,
-        btcInitialBlocks: cfg.STRATEGY_INITIAL_BLOCKS,
-        btcProjectionWarmupSeconds: cfg.BTC_PROJECTION_WARMUP_SECONDS,
-        btcProjectionTrendSeconds: cfg.BTC_PROJECTION_TREND_SECONDS,
+        btcCandleMs: cfg.STRATEGY_MINUTE_MS,
         ccxtPollMs: this.ccxt.pollMs,
         ccxtExchange: this.ccxt.exchange,
         ccxtSymbol: this.ccxt.symbol,
@@ -891,11 +1011,11 @@ class Bot {
 
 function makeWindowState(slug, openTs) {
   return {
-    slug, openTs, status: 'waiting_for_baseline', window: null,
+    slug, openTs, status: 'waiting_for_market', window: null,
     closed: false, closing: false, position: null, entryTaken: false,
-    entryCount: 0, reversalCount: 0, lastSettledSide: null,
-    baselinePrice: null, baselineAt: null, baselineAgeMs: null, baselineUnavailable: false, projection: null,
-    lastSignal: null, activeSignal: null, lastLoggedTrendToMs: null, tradeInFlight: false,
+    entryCount: 0, minuteCandles: [], nextMinuteIndex: 0, currentMinuteCandle: null,
+    candleSequence: '', lastCandle: null, lastSignal: null, activeSignal: null,
+    tradeInFlight: false,
   };
 }
 

@@ -1,8 +1,8 @@
 {
-  "name": "polymarket-btc-5m-momentum-bot",
+  "name": "polymarket-btc-5m-candle-pattern-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only BTC 5-minute UP/DOWN projection strategy using 10-second blocks from a CCXT spot feed.",
+  "description": "Demo-only BTC five-minute candle-pattern strategy using one-minute candles from a CCXT spot feed.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -12,10 +12,10 @@
     "node": ">=18"
   },
   "dependencies": {
-    "viem": "^2.21.0",
-    "@polymarket/clob-client-v2": "1.1.0",
     "@polymarket/builder-relayer-client": "latest",
+    "@polymarket/clob-client-v2": "1.1.0",
     "ccxt": "^4.5.85",
-    "ws": "^8.18.0"
+    "viem": "^2.21.0",
+    "ws": "^8.22.0"
   }
 }

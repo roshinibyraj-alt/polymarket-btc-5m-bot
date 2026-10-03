@@ -1,17 +1,26 @@
-# Polymarket BTC 5-minute projection strategy
+# Polymarket BTC five-minute candle-pattern strategy
 
-The demo bot reads a public CCXT BTC spot feed and the two Polymarket outcome books. At each five-minute window open it captures the most recent BTC sample at or immediately before the prior candle close. If no suitably fresh baseline sample is available, it skips that window rather than inventing one.
+The demo-only bot reads BTC spot from a public CCXT feed and the UP/DOWN Polymarket order books. Within each five-minute market window, it builds timestamp-aligned one-minute BTC candles from the feed. A candle is green when its close is above its open, red when its close is below its open, and neutral when it is a doji or has too few samples. The sequence resets at the start of each five-minute window.
 
-For the first 120 seconds, the bot requires 12 complete 10-second BTC blocks and measures the net drift from the prior close to the end of that warm-up. This drift is an initial-entry filter, not the directional forecast: positive drift permits only a first DOWN entry, while negative drift permits only a first UP entry. Neutral or unavailable drift permits no initial entry. After 120 seconds, each pair of adjacent future 10-second blocks provides a rolling 20-second trend. The bot applies that latest per-block change to the current BTC price for the seconds remaining until the five-minute window closes. A projected close above the previous candle close selects UP; a projected close below selects DOWN. If the projection is exactly at the baseline, it waits for the next block update. The earliest forecast can form after 140 seconds.
+## Trading rules
 
-The bot can open at most one position per five-minute window. It buys the eligible forecasted side at any valid contract price in the 0–1 range, subject to available demo cash and simulated fills; there is no strategy-level ask band or slippage cap. Every BUY targets exactly 500 shares, regardless of previous wins or losses. Once the entry fills, later forecast flips do not trigger a sale, reversal, or second entry; the position is held for settlement or resolution. If the warm-up filter never agrees with a valid forecast, the window can pass without a trade.
+| Completed candle sequence | Action |
+| --- | --- |
+| `RG` or `RRG` | Buy UP |
+| `GR` or `GGR` | Buy DOWN |
+| `RGR` or `RRGR` | Sell an existing UP position |
+| `GRG` or `GGRG` | Sell an existing DOWN position |
 
-The dashboard charts BTC spot against its trailing 10-second average and compares UP/DOWN asks with their trailing 10-second averages. It also shows the live forecast, average entry, position marks, cash, equity, and realized/unrealized P&L. When visible book depth runs short, DemoTrader models the remainder at the worst visible price; that liquidity is synthetic, not actual market depth.
+`RR` by itself does not open a position. A sell closes only the matching open side; it does not open the opposite side. The bot does not reverse or re-enter after an exit. It allows at most one filled entry per window, with each entry targeting exactly 500 shares. There is no strategy-level contract-price band; available demo cash and simulated fills still apply.
 
-Coinbase BTC/USD is the default feed. Set CCXT_EXCHANGE and, if needed, CCXT_SYMBOL to select another CCXT market; the feed honors an exchange's higher minimum interval if required. Binance returned a location restriction from this runtime, so Binance connectivity is not assumed. Feed staleness and missing baselines are reported on the dashboard.
+Entries and exits use demo marketable FAK orders against the visible outcome book. If a sell only partially fills, the remainder stays open and the exit signal is retried while the window is active. Remaining shares at the five-minute close wait for settlement or resolution. After close, a held-side CLOB midpoint at or above $0.99 or best bid at or below $0.01 may be counted as a demo threshold settlement; otherwise the bot checks Polymarket's official resolution. Threshold settlement is not used as an in-window substitute for the candle-pattern exit.
 
-Estimated crypto taker fees are included in demo cash and P&L. A held-side CLOB midpoint at or above $0.99 is counted as a $1 payout per remaining share; a best bid at or below $0.01 is counted as $0.00. This is a demo threshold heuristic, not official resolution. Other shares still open at the five-minute close wait for official Polymarket resolution. Account equity is cash plus the marked value of all open shares; total P&L is equity minus starting capital.
+## Dashboard and operation
 
-This strategy is strictly demo-only. LIVE_TRADING=true is refused before wallet authentication, and the active bot uses only DemoTrader. The $10,000 paper balance and trade history reset when the process restarts. Simulated fills, estimated fees, and P&L are behavior checks—not evidence of live execution or profitability.
+The dashboard shows BTC spot and its trailing 10-second average, the completed candle sequence and latest pattern action, UP/DOWN asks and their trailing averages, positions, marks, cash, equity, and realized/unrealized P&L. The BTC averaging line is informational; it is not part of the strategy signal.
 
-Run `npm test` from this directory to verify the BTC block projection, warm-up entry filter, one-trade-per-window limit, book execution, settlement, and live guard. For local startup and dashboard checks, follow DEMO_RUNBOOK.md.
+Coinbase BTC/USD is the default feed. Set `CCXT_EXCHANGE` and, if needed, `CCXT_SYMBOL` to select another CCXT market; the feed honors an exchange's higher minimum interval if required. Feed staleness and missing candle data are reported on the dashboard. Estimated crypto taker fees are included in demo cash and P&L. When visible depth runs short, DemoTrader may model the remainder at the worst visible price; that liquidity is synthetic.
+
+The strategy is strictly demo-only. `LIVE_TRADING=true` is refused before wallet authentication, and the active bot uses only DemoTrader. The $10,000 paper balance and trade history reset when the process restarts. Simulated fills, fees, and P&L are behavior checks—not evidence of live execution or profitability.
+
+Run `npm test` to verify candle classification, exact entry/exit patterns, timestamped candle aggregation, order handling, settlement, and the live guard. For startup and dashboard checks, follow [DEMO_RUNBOOK.md](DEMO_RUNBOOK.md).

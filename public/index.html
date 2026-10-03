@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#090d16">
-<title>BTC Forecast · Demo Trader</title>
+<title>BTC Candle Patterns · Demo Trader</title>
 <style>
 :root{color-scheme:dark;--bg:#090d16;--panel:#101725;--panel2:#141d2c;--line:#233047;--text:#f0f4fc;--muted:#8d9bb2;--dim:#64728a;--mint:#54e0b2;--red:#ff718d;--blue:#78b7ff;--violet:#ad8cff;--amber:#ffc66e;--shadow:0 18px 48px rgba(0,0,0,.22);}
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 7% -18%,rgba(58,91,160,.22),transparent 42%),radial-gradient(ellipse at 92% 7%,rgba(94,56,154,.13),transparent 35%),var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-variant-numeric:tabular-nums}main{width:min(1440px,100%);margin:auto;padding:26px 26px 48px}.topbar{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:22px}.brand{display:flex;align-items:center;gap:13px}.mark{width:44px;height:44px;border-radius:14px;display:grid;place-items:center;font-size:21px;font-weight:900;color:#dffcf3;background:linear-gradient(145deg,#1d4d4a,#19283b 62%,#322752);border:1px solid #31515f;box-shadow:inset 0 1px rgba(255,255,255,.08)}.brandname{font-size:19px;line-height:1.2;font-weight:800;letter-spacing:-.45px}.subtitle{font-size:12px;color:var(--muted);margin-top:4px}.topright{display:flex;align-items:center;gap:12px}.live-state{display:inline-flex;align-items:center;gap:8px;border:1px solid #245744;background:#10271f;color:var(--mint);border-radius:999px;padding:7px 11px;font-size:10px;font-weight:850;letter-spacing:.12em}.pulse{width:7px;height:7px;border-radius:50%;background:var(--mint);box-shadow:0 0 12px var(--mint)}.updated{font-size:11px;color:var(--muted)}.panel,.metric{background:linear-gradient(155deg,rgba(19,28,44,.97),rgba(14,21,33,.98));border:1px solid var(--line);border-radius:17px;box-shadow:var(--shadow)}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:13px}.metric{padding:16px 18px;position:relative;overflow:hidden}.metric:after{content:"";position:absolute;inset:auto -25px -44px auto;width:110px;height:100px;border-radius:50%;background:var(--glow,rgba(120,183,255,.08));filter:blur(7px)}.metric-label,.eyebrow{font-size:10px;color:var(--muted);font-weight:750;text-transform:uppercase;letter-spacing:.12em}.metric-value{font-size:25px;font-weight:800;letter-spacing:-.6px;margin-top:8px;position:relative;z-index:1}.metric-note{font-size:11px;color:var(--muted);margin-top:3px;position:relative;z-index:1}.mint-glow{--glow:rgba(84,224,178,.14)}.blue-glow{--glow:rgba(120,183,255,.15)}.violet-glow{--glow:rgba(173,140,255,.14)}.amber-glow{--glow:rgba(255,198,110,.12)}.charts{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(350px,.85fr);gap:13px;margin-bottom:13px}.panel{padding:18px}.panel-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:12px}.panel-title{font-size:15px;font-weight:760;letter-spacing:-.2px;margin-top:3px}.panel-meta{text-align:right;color:var(--muted);font-size:11px}.chart-box{height:262px;position:relative}.chart-box.short{height:262px}.chart-box canvas{width:100%;height:100%;display:block}.legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:8px;color:var(--muted);font-size:10px}.legend span{display:inline-flex;align-items:center;gap:6px}.swatch{height:2px;width:17px;border-radius:4px;background:var(--color)}.forecast-chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}.chip{border:1px solid var(--line);background:rgba(255,255,255,.025);border-radius:9px;padding:6px 9px;color:#cbd5e5;font-size:10px}.chip b{color:var(--text);font-weight:750}.chip.up{border-color:#245843;color:var(--mint)}.chip.down{border-color:#663047;color:var(--red)}.lower{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(330px,.75fr);gap:13px;margin-bottom:13px}.window-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px}.market-name{font-size:16px;font-weight:760;letter-spacing:-.2px;overflow-wrap:anywhere}.status{display:inline-flex;align-items:center;white-space:nowrap;border:1px solid #34425a;background:#1b2638;border-radius:999px;padding:6px 9px;color:#cad4e4;font-size:10px;font-weight:750;text-transform:uppercase;letter-spacing:.07em}.status.good{color:var(--mint);border-color:#245843;background:#10271f}.status.warn{color:var(--amber);border-color:#594725;background:#2a2315}.status.bad{color:var(--red);border-color:#673344;background:#2a1820}.progress{height:6px;background:#222d40;border-radius:8px;overflow:hidden;margin:15px 0 7px}.progress i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--violet),var(--blue),var(--mint));border-radius:8px;transition:width .25s}.progress-labels{display:flex;justify-content:space-between;color:var(--muted);font-size:10px;margin-bottom:14px}.forecast-box{border:1px solid #293751;background:linear-gradient(105deg,rgba(120,183,255,.07),rgba(173,140,255,.07));padding:13px 14px;border-radius:12px;margin:12px 0 14px}.forecast-line{display:flex;align-items:center;justify-content:space-between;gap:12px}.forecast-side{font-size:20px;font-weight:820;letter-spacing:-.5px}.forecast-side.up{color:var(--mint)}.forecast-side.down{color:var(--red)}.forecast-desc{font-size:11px;color:var(--muted);margin-top:6px}.quote-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}.quote-card{border:1px solid var(--line);border-radius:12px;padding:12px 13px;background:rgba(255,255,255,.018)}.quote-top{display:flex;align-items:center;justify-content:space-between;gap:8px}.quote-side{display:inline-flex;align-items:center;gap:7px;font-weight:800;font-size:12px;letter-spacing:.05em}.dot{height:8px;width:8px;border-radius:50%;background:var(--mint);box-shadow:0 0 11px rgba(84,224,178,.5)}.dot.down{background:var(--red);box-shadow:0 0 11px rgba(255,113,141,.42)}.quote-price{font-size:22px;font-weight:820;letter-spacing:-.6px;margin-top:10px}.quote-details{display:flex;justify-content:space-between;gap:8px;color:var(--muted);font-size:10px;margin-top:5px}.position-card{border-top:1px solid var(--line);margin-top:14px;padding-top:13px}.section-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.section-row b{font-size:12px}.section-row span{font-size:10px;color:var(--muted)}.position-values{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}.mini-stat{border-radius:10px;background:rgba(255,255,255,.025);padding:9px}.mini-stat span{display:block;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.08em}.mini-stat b{display:block;font-size:12px;margin-top:4px}.account-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.account-cell{border-bottom:1px solid rgba(35,48,71,.7);padding:9px 2px}.account-cell span{display:block;color:var(--muted);font-size:10px}.account-cell b{display:block;margin-top:3px;font-size:13px}.account-note{font-size:10px;color:var(--muted);margin-top:12px;line-height:1.55}.table-panel{margin-bottom:13px}.table-wrap{width:100%;overflow:auto}table{width:100%;border-collapse:collapse;white-space:nowrap}th{text-align:left;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.1em;padding:9px 10px;border-bottom:1px solid var(--line)}td{padding:10px;border-bottom:1px solid rgba(35,48,71,.62);font-size:11px}tbody tr:last-child td{border-bottom:0}.empty{padding:17px 10px;text-align:center;color:var(--muted);font-size:11px}.positive{color:var(--mint)!important}.negative{color:var(--red)!important}.muted{color:var(--muted)}.event-list{display:grid;gap:6px;max-height:270px;overflow:auto}.event{display:grid;grid-template-columns:70px 155px minmax(0,1fr);gap:10px;align-items:start;border-radius:8px;padding:8px 9px;background:rgba(255,255,255,.022);font-size:10px}.event-time,.event-type{color:var(--muted)}.event-type{font-weight:780;color:#c1cee1}.event-note{color:#b8c4d8}.bottom-note{display:flex;justify-content:space-between;gap:12px;margin-top:12px;color:var(--dim);font-size:10px}.error{display:none;margin-bottom:13px;padding:10px 13px;border:1px solid #673344;border-radius:10px;background:#2a1820;color:#ffb3c1;font-size:11px}.error.show{display:block}
@@ -14,7 +14,7 @@
 <body>
 <main>
   <header class="topbar">
-    <div class="brand"><div class="mark">↗</div><div><div class="brandname">BTC Forecast Trader</div><div class="subtitle">5-minute Polymarket windows · fixed 500 shares · paper execution</div></div></div>
+    <div class="brand"><div class="mark">↗</div><div><div class="brandname">BTC Candle Pattern Trader</div><div class="subtitle">5-minute Polymarket windows · fixed 500 shares · paper execution</div></div></div>
     <div class="topright"><span class="live-state"><i class="pulse"></i> DEMO ONLY</span><span class="updated" id="updated">Connecting…</span></div>
   </header>
   <div id="error" class="error"></div>
@@ -28,8 +28,8 @@
     <article class="panel">
       <div class="panel-head"><div><div class="eyebrow">BTC spot · live window</div><div class="panel-title">Spot price and trailing 10-second average</div></div><div class="panel-meta" id="btcNow">Spot —</div></div>
       <div class="chart-box"><canvas id="btcChart" aria-label="BTC spot and trailing average chart"></canvas></div>
-      <div class="legend"><span><i class="swatch" style="--color:#78b7ff"></i>BTC spot</span><span><i class="swatch" style="--color:#54e0b2"></i>10-second average</span><span><i class="swatch" style="--color:#ffc66e"></i>Prior close</span><span><i class="swatch" style="--color:#ad8cff"></i>Projected close</span></div>
-      <div class="forecast-chips"><span class="chip" id="baselineChip">Prior close <b>—</b></span><span class="chip" id="projectionChip">Projected close <b>—</b></span><span class="chip" id="btcChangeChip">Trend / 10s <b>—</b></span></div>
+      <div class="legend"><span><i class="swatch" style="--color:#78b7ff"></i>BTC spot</span><span><i class="swatch" style="--color:#54e0b2"></i>10-second average</span></div>
+      <div class="forecast-chips"><span class="chip" id="sequenceChip">Sequence —</span><span class="chip" id="lastCandleChip">Last candle —</span><span class="chip" id="patternActionChip">Pattern WAIT</span></div>
     </article>
     <article class="panel">
       <div class="panel-head"><div><div class="eyebrow">Polymarket probability</div><div class="panel-title">UP / DOWN asks and 10-second averages</div></div><div class="panel-meta" id="marketSlug">Waiting for market</div></div>
@@ -40,33 +40,33 @@
   <section class="lower">
     <article class="panel">
       <div class="window-head"><div><div class="eyebrow">Current five-minute window</div><div class="market-name" id="marketName">Waiting for active market</div></div><div style="text-align:right"><span id="windowStatus" class="status">Starting</span><div id="timeLeft" class="panel-meta" style="margin-top:7px">— remaining</div></div></div>
-      <div class="progress"><i id="progress"></i></div><div class="progress-labels"><span id="elapsed">00:00 elapsed</span><span id="phase">Waiting for baseline</span><span>05:00</span></div>
-      <div class="forecast-box"><div class="forecast-line"><div><div class="eyebrow">Latest BTC close forecast</div><div id="forecastSide" class="forecast-side">—</div></div><span id="forecastStatus" class="status warn">Collecting data</span></div><div id="forecastDescription" class="forecast-desc">Waiting for a valid BTC baseline and trend.</div></div>
+      <div class="progress"><i id="progress"></i></div><div class="progress-labels"><span id="elapsed">00:00 elapsed</span><span id="phase">0 / 5 one-minute candles closed</span><span>05:00</span></div>
+      <div class="forecast-box"><div class="forecast-line"><div><div class="eyebrow">Completed candle pattern</div><div id="forecastSide" class="forecast-side">No pattern match</div></div><span id="forecastStatus" class="status warn">Waiting for pattern</span></div><div id="forecastDescription" class="forecast-desc">Waiting for completed one-minute candles.</div></div>
       <div class="quote-grid">
         <div class="quote-card"><div class="quote-top"><span class="quote-side"><i class="dot"></i>UP</span><span id="upState" class="status">Watching</span></div><div class="quote-price" id="upAsk">—</div><div class="quote-details"><span>Bid <b id="upBid">—</b></span><span>10s avg <b id="upAvg">—</b></span></div></div>
         <div class="quote-card"><div class="quote-top"><span class="quote-side"><i class="dot down"></i>DOWN</span><span id="downState" class="status">Watching</span></div><div class="quote-price" id="downAsk">—</div><div class="quote-details"><span>Bid <b id="downBid">—</b></span><span>10s avg <b id="downAvg">—</b></span></div></div>
       </div>
-      <div class="position-card"><div class="section-row"><b>Current position</b><span id="windowTradeCount">0 trades · one max this window</span></div><div class="position-values"><div class="mini-stat"><span>Forecast side</span><b id="positionSide">None</b></div><div class="mini-stat"><span>Shares open</span><b id="positionShares">0</b></div><div class="mini-stat"><span>Average entry</span><b id="positionEntry">—</b></div><div class="mini-stat"><span>Current mark</span><b id="positionMark">—</b></div></div></div>
+      <div class="position-card"><div class="section-row"><b>Current position</b><span id="windowTradeCount">0 / 1 entries · fixed 500 shares</span></div><div class="position-values"><div class="mini-stat"><span>Position side</span><b id="positionSide">None</b></div><div class="mini-stat"><span>Shares open</span><b id="positionShares">0</b></div><div class="mini-stat"><span>Average entry</span><b id="positionEntry">—</b></div><div class="mini-stat"><span>Current mark</span><b id="positionMark">—</b></div></div></div>
     </article>
     <article class="panel">
-      <div class="panel-head"><div><div class="eyebrow">Live calculations</div><div class="panel-title">Forecast and account detail</div></div><span id="feedStatus" class="status warn">Connecting</span></div>
+      <div class="panel-head"><div><div class="eyebrow">Live calculations</div><div class="panel-title">Candles and account detail</div></div><span id="feedStatus" class="status warn">Connecting</span></div>
       <div class="account-grid">
         <div class="account-cell"><span>BTC spot</span><b id="spotValue">—</b></div>
-        <div class="account-cell"><span>Previous candle close</span><b id="priorClose">—</b></div>
-        <div class="account-cell"><span>Initial drift / 10s</span><b id="initialDrift">—</b></div>
-        <div class="account-cell"><span>Rolling trend / 10s</span><b id="rollingTrend">—</b></div>
-        <div class="account-cell"><span>Projected close</span><b id="projectedClose">—</b></div>
-        <div class="account-cell"><span>Forecast delta</span><b id="projectedDelta">—</b></div>
+        <div class="account-cell"><span>Candle sequence</span><b id="candleSequence">—</b></div>
+        <div class="account-cell"><span>Last candle</span><b id="lastCandleColor">—</b></div>
+        <div class="account-cell"><span>Pattern action</span><b id="patternAction">WAIT</b></div>
+        <div class="account-cell"><span>Matched pattern</span><b id="matchedPattern">—</b></div>
+        <div class="account-cell"><span>Signal side</span><b id="signalSide">—</b></div>
         <div class="account-cell"><span>Fixed order size</span><b id="fixedShares">500 shares</b></div>
         <div class="account-cell"><span>Demo fees so far</span><b id="fees">—</b></div>
       </div>
-      <div class="account-note" id="methodNote">Captures a BTC baseline, requires 12 initial 10-second blocks, then projects the close from the rolling 20-second trend. Positive warm-up drift permits only an initial DOWN entry; negative drift permits only UP. There is one 500-share trade maximum per window; later signal flips do not sell or re-enter. Simulated fills and marks are not live execution.</div>
+      <div class="account-note" id="methodNote">Completed one-minute BTC candles drive the entry and exit patterns. Every candle sequence resets at the start of each five-minute window. Demo-only simulated fills and marks are not live execution.</div>
     </article>
   </section>
   <section class="panel table-panel">
     <div class="panel-head"><div><div class="eyebrow">Open exposure</div><div class="panel-title">Positions and marks</div></div><div class="panel-meta" id="openCount">0 open positions</div></div>
     <div class="table-wrap" id="openPositions"></div>
-    <div class="bottom-note"><span>Every forecast entry targets exactly 500 shares; cash availability and simulated execution can prevent a fill.</span><span>Modeled demo liquidity is synthetic, not displayed CLOB depth.</span></div>
+    <div class="bottom-note"><span>Each pattern entry targets exactly 500 shares; cash availability and simulated execution can prevent a fill.</span><span>Modeled demo liquidity is synthetic, not displayed CLOB depth.</span></div>
   </section>
   <section class="panel table-panel">
     <div class="panel-head"><div><div class="eyebrow">Closed positions</div><div class="panel-title">Trade history</div></div><div class="panel-meta" id="tradeCount">0 trades</div></div>
@@ -98,11 +98,9 @@ function drawChart(canvas,series,definitions,options={}){
   const ctx=canvas.getContext('2d');ctx.setTransform(ratio,0,0,ratio,0,0);
   const width=rect.width,height=rect.height;ctx.clearRect(0,0,width,height);
   const left=58,right=options.rightPadding||18,top=16,bottom=27,plotW=width-left-right,plotH=height-top-bottom;
-  const refs=(options.references||[]).filter(item=>valid(item.value));
   if(!series||!series.length){ctx.fillStyle='#8290a6';ctx.font='12px system-ui';ctx.textAlign='center';ctx.fillText(options.empty||'Waiting for live samples…',width/2,height/2);return}
   const values=[];
   definitions.forEach(def=>series.forEach(point=>{if(valid(point[def.key]))values.push(Number(point[def.key]))}));
-  refs.forEach(ref=>values.push(Number(ref.value)));
   if(options.min!==undefined)values.push(options.min);if(options.max!==undefined)values.push(options.max);
   let min=Math.min(...values),max=Math.max(...values);if(!Number.isFinite(min)||!Number.isFinite(max)){return}
   if(max-min<1e-8){const pad=Math.abs(max)*.0004||.01;min-=pad;max+=pad}
@@ -113,7 +111,6 @@ function drawChart(canvas,series,definitions,options={}){
   for(let i=0;i<4;i++){const yy=top+plotH*i/3;const val=max-(max-min)*i/3;ctx.strokeStyle='rgba(143,160,184,.12)';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(left,yy);ctx.lineTo(width-right,yy);ctx.stroke();ctx.fillStyle='#75839a';ctx.fillText(options.formatY?options.formatY(val):val.toFixed(2),left-8,yy)}
   ctx.textAlign='center';ctx.textBaseline='top';
   for(let i=0;i<4;i++){const xx=left+plotW*i/3;ctx.fillStyle='#718098';const t=t0+(t1-t0)*i/3;ctx.fillText(options.formatX?options.formatX(t):Math.round(t)+'s',xx,height-bottom+8)}
-  refs.forEach(ref=>{const yy=y(ref.value);ctx.save();ctx.setLineDash([4,4]);ctx.strokeStyle=ref.color;ctx.globalAlpha=.8;ctx.beginPath();ctx.moveTo(left,yy);ctx.lineTo(width-right,yy);ctx.stroke();ctx.restore();if(ref.label){ctx.fillStyle=ref.color;ctx.textAlign='right';ctx.textBaseline='bottom';ctx.fillText(ref.label,width-right-2,yy-3)}});
   definitions.forEach(def=>{
     const pts=series.filter(point=>valid(point[def.key]));if(!pts.length)return;
     ctx.beginPath();pts.forEach((point,index)=>{const xx=x(point.t),yy=y(point[def.key]);if(index===0)ctx.moveTo(xx,yy);else ctx.lineTo(xx,yy)});
@@ -122,42 +119,45 @@ function drawChart(canvas,series,definitions,options={}){
   });
 }
 function drawAll(state){
-  const w=state.window||{},projection=w.projection||{},signal=w.lastSignal||{},cx=state.ccxt||{};
-  const baseline=valid(signal.baselinePrice)?signal.baselinePrice:cx.baselinePrice;
-  const projected=valid(signal.projectedClose)?signal.projectedClose:projection.projectedClose;
-  const refs=[];if(valid(baseline))refs.push({value:Number(baseline),color:'#ffc66e',label:'BASE'});if(valid(projected))refs.push({value:Number(projected),color:'#ad8cff',label:'PROJ'});
-  drawChart($('btcChart'),state.btcSeries||[],[{key:'price',color:'#78b7ff',width:1.7},{key:'avg10s',color:'#54e0b2',width:2.2}],{references:refs,formatY:v=>'$'+(v/1000).toFixed(3)+'k',formatX:v=>v<0?Math.round(v)+'s':clock(v),empty:'Waiting for BTC price samples…'});
+  drawChart($('btcChart'),state.btcSeries||[],[{key:'price',color:'#78b7ff',width:1.7},{key:'avg10s',color:'#54e0b2',width:2.2}],{formatY:v=>'$'+(v/1000).toFixed(3)+'k',formatX:v=>v<0?Math.round(v)+'s':clock(v),empty:'Waiting for BTC price samples…'});
   drawChart($('oddsChart'),state.priceSeries||[],[{key:'up',color:'#54e0b2',width:1.5},{key:'avgUp',color:'#a98bff',width:2},{key:'down',color:'#ff718d',width:1.5},{key:'avgDown',color:'#ffbd77',width:2}],{min:0,max:1,formatY:v=>Math.round(v*100)+'¢',formatX:v=>v<0?Math.round(v)+'s':clock(v),empty:'Waiting for Polymarket asks…'});
 }
 function render(s){
-  const cfg=s.cfg||{},st=s.strategy||{},w=s.window||{},cx=s.ccxt||{},account=s.account||{},stats=s.stats||{},signal=w.lastSignal||{},projection=w.projection||{};
+  const cfg=s.cfg||{},st=s.strategy||{},w=s.window||{},cx=s.ccxt||{},account=s.account||{},stats=s.stats||{},signal=w.lastSignal||{},last=w.lastCandle||{};
+  const sequence=w.candleSequence||'',pattern=signal.pattern||null,action=signal.action||cx.patternAction||'WAIT',side=signal.side||null;
   setText('updated','Updated '+time(s.now));setText('equity',money(account.equity));setText('cash',money(account.cash));setText('totalPnl',money(account.totalPnl));setText('openPnl',money(account.unrealizedPnl));
   setText('capitalNote','Starting paper capital '+money(account.capital));setText('equityNote','Peak drawdown '+money(account.maxDrawdown));setText('pnlNote','Realized '+money(stats.realizedPnl)+' · '+(stats.wins||0)+'W / '+(stats.losses||0)+'L');setText('openNote','Open positions marked at current bid where available');
   tone($('totalPnl'),account.totalPnl);tone($('openPnl'),account.unrealizedPnl);
   const err=$('error');if(s.error||s.executionHalt){err.textContent=s.executionHalt?'Demo-only strategy is blocked in live mode; no orders were sent.':s.error;err.className='error show'}else err.className='error';
-  const elapsed=Number(w.elapsedSeconds)||0,left=Math.max(0,300-elapsed),forecastReady=!!signal.side,positionSide=w.positionSide||null,tradeTaken=Number(w.entryCount||0)>0;
+  const elapsed=Number(w.elapsedSeconds)||0,left=Math.max(0,300-elapsed),positionSide=w.positionSide||null,closed=(w.minuteCandles||[]).length;
   setText('marketName',w.slug||'Waiting for active market');setText('marketSlug',w.slug||'No active window');setText('windowStatus',String(w.status||'starting').replace(/_/g,' '));
-  $('windowStatus').className='status '+(positionSide?'good':w.closed?'':'warn');setText('timeLeft',clock(left)+' remaining');setText('elapsed',clock(elapsed)+' elapsed');$('progress').style.width=Math.min(100,Math.max(0,elapsed/300*100))+'%';
-  const phase=projection.phase||cx.projectionPhase||'waiting_for_baseline';setText('phase',String(phase).replace(/_/g,' '));
-  const forecastSide=$('forecastSide');forecastSide.textContent=forecastReady?signal.side:'No active signal';forecastSide.className='forecast-side'+(forecastReady?' '+signal.side.toLowerCase():'');
-  const sideWord=forecastReady?'Forecast '+signal.side:'Collecting data';status($('forecastStatus'),positionSide?'Position '+positionSide:forecastReady?'Projected '+signal.side:phase.replace(/_/g,' '),positionSide?'good':forecastReady?'good':'warn');
-  const warmupDrift=Number(signal.initialDriftUsdPer10s),eligibleFirstSide=valid(signal.initialDriftUsdPer10s)&&Math.abs(warmupDrift)>1e-8?(warmupDrift>0?'DOWN':'UP'):null;
-  const entryRule=tradeTaken?' One trade already used; later signals are ignored.':eligibleFirstSide?' Warm-up filter permits only an initial '+eligibleFirstSide+' entry.':' Warm-up drift is neutral or unavailable; no initial entry is allowed.';
-  const description=forecastReady?'Rolling 20-second BTC trend '+signed(signal.recentRateUsdPer10s)+'/10s projects '+btcMoney(signal.projectedClose)+' against the prior close '+btcMoney(signal.baselinePrice)+'.'+entryRule:'Building the BTC baseline and rolling trend; no valid close-crossing signal yet.';
-  setText('forecastDescription',description);setText('windowTradeCount',(w.entryCount||0)+' trades · one max this window');
-  const prices=s.prices||{};const up=prices.up||{},down=prices.down||{},last=(s.priceSeries||[]).slice(-1)[0]||{};
-  setText('upAsk',contract(up.ask));setText('upBid',contract(up.bid));setText('upAvg',contract(last.avgUp));setText('downAsk',contract(down.ask));setText('downBid',contract(down.bid));setText('downAvg',contract(last.avgDown));
+  $('windowStatus').className='status '+(positionSide||pattern?'good':w.closed?'':'warn');setText('timeLeft',clock(left)+' remaining');setText('elapsed',clock(elapsed)+' elapsed');$('progress').style.width=Math.min(100,Math.max(0,elapsed/300*100))+'%';
+  setText('phase',closed+' / 5 one-minute candles closed');
+  setText('forecastSide',pattern?action+' '+side+' · '+pattern:'No pattern match');
+  $('forecastSide').className='forecast-side'+(side?' '+side.toLowerCase():'');
+  status($('forecastStatus'),positionSide?'Position '+positionSide:pattern?action+' '+side:'Waiting for pattern',positionSide?'good':pattern?'good':'warn');
+  setText('forecastDescription',pattern
+    ? 'Completed one-minute pattern '+pattern+' signals '+action+' '+side+'. Entries are limited to one 500-share order per window; exits only close the matching side.'
+    : 'Waiting for completed one-minute candles. RG/RRG buys UP; GR/GGR buys DOWN. Exit patterns close only the matching open side.');
+  setText('windowTradeCount',(w.entryCount||0)+' / 1 entries · fixed 500 shares');
+  const prices=s.prices||{};const up=prices.up||{},down=prices.down||{},lastPrice=(s.priceSeries||[]).slice(-1)[0]||{};
+  setText('upAsk',contract(up.ask));setText('upBid',contract(up.bid));setText('upAvg',contract(lastPrice.avgUp));setText('downAsk',contract(down.ask));setText('downBid',contract(down.bid));setText('downAvg',contract(lastPrice.avgDown));
   status($('upState'),positionSide==='UP'?'OPEN':w.closed?'CLOSED':'WATCHING',positionSide==='UP'?'good':'');status($('downState'),positionSide==='DOWN'?'OPEN':w.closed?'CLOSED':'WATCHING',positionSide==='DOWN'?'good':'');
   const pending=s.pending||[],active=pending.find(p=>p.slug===w.slug)||null;setText('positionSide',active?active.side:'None');setText('positionShares',active?quantity(active.openShares):'0');setText('positionEntry',active?contract(active.entryPrice):'—');setText('positionMark',active?contract(active.mark):'—');
-  setText('spotValue',btcMoney(cx.price));setText('priorClose',btcMoney(valid(signal.baselinePrice)?signal.baselinePrice:cx.baselinePrice));setText('initialDrift',signed(signal.initialDriftUsdPer10s));setText('rollingTrend',signed(signal.recentRateUsdPer10s));setText('projectedClose',btcMoney(signal.projectedClose));setText('projectedDelta',signed(signal.changeUsd));setText('fixedShares',quantity(st.fixedOrderShares||st.baseShares||500)+' shares');setText('fees',money(stats.estimatedFees));
-  setText('btcNow','Spot '+btcMoney(cx.price));setText('baselineChip','Prior close '+(valid(cx.baselinePrice)?btcMoney(cx.baselinePrice):'—'));setText('projectionChip','Projected close '+(valid(signal.projectedClose)?btcMoney(signal.projectedClose):'—'));setText('btcChangeChip','Trend / 10s '+signed(signal.recentRateUsdPer10s));
+  setText('spotValue',btcMoney(cx.price));setText('candleSequence',sequence||'—');setText('lastCandleColor',last.color||'—');setText('patternAction',action);setText('matchedPattern',pattern||'—');setText('signalSide',side||'—');setText('fixedShares',quantity(st.fixedOrderShares||st.baseShares||500)+' shares');setText('fees',money(stats.estimatedFees));
+  setText('btcNow','Spot '+btcMoney(cx.price));setText('sequenceChip','Sequence '+(sequence||'—'));setText('lastCandleChip','Last candle '+(last.color||'—'));setText('patternActionChip','Pattern '+(pattern?action+' '+side:'WAIT'));
   const feed=String(cx.status||'connecting').toUpperCase();status($('feedStatus'),feed,feed==='LIVE'?'good':feed==='ERROR'?'bad':'warn');setText('feedDescription',(cx.exchange||cfg.ccxtExchange||'CCXT')+' · '+(cx.symbol||cfg.ccxtSymbol||'BTC/USD')+' · public spot feed');
+  document.title='BTC Candle Patterns · Demo Trader';const brand=document.querySelector('.brandname');if(brand)brand.textContent='BTC Candle Pattern Trader';
+  const eyebrow=document.querySelector('.forecast-box .eyebrow');if(eyebrow)eyebrow.textContent='Completed candle pattern';
+  const legend=document.querySelector('.charts article:first-child .legend');if(legend){const items=legend.querySelectorAll('span');if(items[2])items[2].style.display='none';if(items[3])items[3].style.display='none'}
+  const method=$('methodNote');if(method)method.textContent='Completed one-minute BTC candles are read from the start of each five-minute window. RG/RRG buys UP; GR/GGR buys DOWN; RGR/RRGR sells an open UP position; GRG/GGRG sells an open DOWN position. Dojis are neutral. A sell never opens the opposite side, and the bot does not re-enter after its one 500-share entry. Demo-only simulated fills and marks are not live execution.';
+  const exposureNote=document.querySelector('#openPositions + .bottom-note span');if(exposureNote)exposureNote.textContent='Each entry targets exactly 500 shares; only one entry is allowed per five-minute window.';
   setText('openCount',pending.length+' open position'+(pending.length===1?'':'s'));
   if(!pending.length){$('openPositions').innerHTML='<div class="empty">No open positions</div>'}else{
     $('openPositions').innerHTML='<table><thead><tr><th>Window</th><th>Side</th><th>Shares open</th><th>Average entry</th><th>Mark</th><th>Position value</th><th>Status</th><th>Unrealized P&amp;L</th></tr></thead><tbody>'+pending.map(p=>'<tr><td>'+esc(p.slug)+'</td><td>'+esc(p.side)+'</td><td>'+quantity(p.openShares)+'</td><td>'+contract(p.entryPrice)+'</td><td>'+contract(p.mark)+'</td><td>'+money(Number(p.mark||0)*Number(p.openShares||0))+'</td><td>'+esc(String(p.status||'open').replace(/_/g,' '))+'</td><td class="'+(Number(p.unrealized)>=0?'positive':'negative')+'">'+money(p.unrealized)+'</td></tr>').join('')+'</tbody></table>';
   }
   const trades=s.trades||[];setText('tradeCount',trades.length+' shown');
-  if(!trades.length){$('trades').innerHTML='<div class="empty">No completed or reversed positions yet</div>'}else{
+  if(!trades.length){$('trades').innerHTML='<div class="empty">No closed positions yet</div>'}else{
     $('trades').innerHTML='<table><thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Entry avg.</th><th>Exit avg.</th><th>Fees</th><th>Close reason</th><th>Result</th><th>Net P&amp;L</th></tr></thead><tbody>'+trades.map(t=>'<tr><td>'+esc(t.slug)+'</td><td>'+esc(t.side)+'</td><td>'+quantity(t.shares)+'</td><td>'+contract(t.entryPrice)+'</td><td>'+contract(t.exitPrice)+'</td><td>'+money(t.fee)+'</td><td>'+esc(String(t.reason||'').replace(/_/g,' '))+'</td><td>'+esc(t.outcome)+'</td><td class="'+(Number(t.pnl)>=0?'positive':'negative')+'">'+money(t.pnl)+'</td></tr>').join('')+'</tbody></table>';
   }
   const logs=s.log||[];setText('uptime','Uptime '+clock(s.uptimeSec||0));if(!logs.length){$('events').innerHTML='<div class="empty">Waiting for bot events</div>'}else{$('events').innerHTML=logs.slice(0,35).map(item=>'<div class="event"><span class="event-time">'+esc(time(item.ts))+'</span><span class="event-type">'+esc(item.event||'EVENT')+'</span><span class="event-note">'+esc(item.note||'')+'</span></div>').join('')}
