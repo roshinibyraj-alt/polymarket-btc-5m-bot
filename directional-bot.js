@@ -35,6 +35,7 @@ class Bot {
       estimatedFees: 0, realizedPnl: 0,
     };
     this.counts = { UP: 0, DOWN: 0 };
+    this.lossStreak = 0;
     this.walletBalance = null;
     this.error = this.strategyBlocked
       ? 'This strategy is demo-only; order submission is disabled outside DemoTrader.' : null;
@@ -59,7 +60,6 @@ class Bot {
     this._btcMoveHistory = [];
     this.activeSignal = null;
     this._signalBusy = false;
-    this._queuedSignal = null;
     this._running = false;
     this._ccxtStop = null;
     this.ccxt = {
@@ -169,7 +169,7 @@ class Bot {
       if (result.window) {
         this.error = null;
         w.window = result.window;
-        w.status = 'watching_signal';
+        w.status = 'waiting_for_price_entry';
         this._push({
           event: 'WINDOW_READY', slug: w.slug,
           note: 'BTC 5-minute market active; building the rolling adaptive BTC-move threshold.',
@@ -278,8 +278,8 @@ class Bot {
         this._lastSeriesAt = now;
       }
     }
-    if (!w.position && w.activeSignal && w.activeSignal.side === side) {
-      return this._attemptActiveSignal(w);
+    if (!w.position && !w.entryTaken) {
+      return this._attemptPriceEntry(w, side);
     }
     return null;
   }
@@ -406,7 +406,7 @@ class Bot {
         lookbackMs: move.lookbackMs,
         note: 'CCXT BTC moved ' + signedUsd(move.changeUsd) + ' over '
           + move.lookbackMs + ' ms against an adaptive $' + Number(move.thresholdUsd).toFixed(2)
-          + ' threshold; target side is ' + side + '.',
+          + ' threshold; informational BTC direction is ' + side + '; entries are price-only.',
       });
     }
     if (!entryDelayElapsed(w)) {
@@ -418,34 +418,12 @@ class Bot {
         ? 'position_open' : 'trade_taken';
       return;
     }
-    if (this._signalBusy) {
-      this._queuedSignal = { side, move, window: w };
-      return;
-    }
-    this._signalBusy = true;
-    w.tradeInFlight = true;
-    try {
-      if (this.w !== w || w.closed || Date.now() >= closeTs * 1000
-        || w.entryTaken || (w.position && w.position.openShares > EPSILON)
-        || !w.activeSignal || w.activeSignal.side !== side) return;
-      await this._buyPosition(w, side, move);
-    } catch (error) {
-      this._push({ event: 'SIGNAL_TRADE_ERROR', slug: w.slug, side, note: error.message });
-    } finally {
-      w.tradeInFlight = false;
-      this._signalBusy = false;
-      const queued = this._queuedSignal;
-      this._queuedSignal = null;
-      if (queued && this.w === queued.window) {
-        await this._handleSignal(queued.side, queued.move);
-      }
-    }
+    return this._attemptAnyPriceEntry(w);
   }
 
-  async _attemptActiveSignal(w) {
+  async _attemptPriceEntry(w, side) {
     if (this.strategyBlocked || !w || this.w !== w || !w.window || w.closed || w.closing
-      || w.entryTaken || w.position || !w.activeSignal || this._signalBusy) return false;
-    const signal = w.activeSignal;
+      || w.entryTaken || w.position || this._signalBusy) return false;
     const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
     if (Date.now() >= closeTs * 1000) return false;
     if (!entryDelayElapsed(w)) {
@@ -455,24 +433,26 @@ class Bot {
     this._signalBusy = true;
     w.tradeInFlight = true;
     try {
-      if (w.activeSignal !== signal || w.position) return false;
-      return await this._buyPosition(w, signal.side, signal.move);
+      return await this._buyPosition(w, side, null);
     } catch (error) {
-      this._push({ event: 'SIGNAL_TRADE_ERROR', slug: w.slug, side: signal.side, note: error.message });
+      this._push({ event: 'PRICE_ENTRY_ERROR', slug: w.slug, side, note: error.message });
       return false;
     } finally {
       w.tradeInFlight = false;
       this._signalBusy = false;
-      const queued = this._queuedSignal;
-      this._queuedSignal = null;
-      if (queued && this.w === queued.window) {
-        await this._handleSignal(queued.side, queued.move);
-      }
     }
   }
 
+  async _attemptAnyPriceEntry(w) {
+    if (this.strategyBlocked || !w || this.w !== w || !w.window || w.closed || w.closing
+      || w.entryTaken || w.position || this._signalBusy) return false;
+    if (await this._attemptPriceEntry(w, 'UP')) return true;
+    if (w.entryTaken || w.position) return true;
+    return this._attemptPriceEntry(w, 'DOWN');
+  }
+
   async _buyPosition(w, side, move) {
-    if (w.entryTaken || w.position || !w.activeSignal || w.activeSignal.side !== side) return false;
+    if (w.entryTaken || w.position) return false;
     if (!entryDelayElapsed(w)) {
       w.status = 'waiting_for_window_delay';
       return false;
@@ -485,25 +465,22 @@ class Bot {
     if (bestAsk == null) {
       w.status = 'waiting_for_order_book';
       this._push({
-        event: 'SIGNAL_BUY_NO_BOOK', slug: w.slug, side,
-        note: 'No executable ask for ' + side + '; the signal remains active until an opposite signal.',
+        event: 'PRICE_BUY_NO_BOOK', slug: w.slug, side,
+        note: 'No executable ask for ' + side + '; waiting for an in-band best ask.',
       });
       return false;
     }
-    if (!w.activeSignal || w.activeSignal.side !== side) {
-      return false;
-    }
-    if (bestAsk < cfg.MIN_SIGNAL_ENTRY_PRICE || bestAsk > cfg.MAX_SIGNAL_ENTRY_PRICE) {
+    if (bestAsk < cfg.MIN_ENTRY_PRICE || bestAsk > cfg.MAX_ENTRY_PRICE) {
       w.status = 'waiting_for_price_band';
       return false;
     }
-    const targetShares = cfg.BASE_SHARES;
-    const priceLimit = Math.min(cfg.MAX_SIGNAL_ENTRY_PRICE, bestAsk * (1 + cfg.MAX_BUY_SLIPPAGE_PERCENT / 100));
+    const targetShares = cfg.BASE_SHARES + this.lossStreak * cfg.SHARES_INCREMENT_AFTER_LOSS;
+    const priceLimit = Math.min(cfg.MAX_ENTRY_PRICE, bestAsk * (1 + cfg.MAX_BUY_SLIPPAGE_PERCENT / 100));
     const spendLimit = targetShares * priceLimit;
     const estimatedFee = estimateTakerFee(targetShares, 0.5);
     if (this.cash == null || this.cash + EPSILON < spendLimit + estimatedFee) {
       this._push({
-        event: 'SIGNAL_BUY_NO_CASH', slug: w.slug, side,
+        event: 'PRICE_BUY_NO_CASH', slug: w.slug, side,
         note: 'Demo cash is insufficient for the configured ' + targetShares + '-share ' + side
           + ' entry at the maximum slippage price.',
       });
@@ -512,8 +489,7 @@ class Bot {
     const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
     if (this.w !== w || w.closed || w.entryTaken || w.position
       || Date.now() >= closeTs * 1000
-      || !entryDelayElapsed(w)
-      || !w.activeSignal || w.activeSignal.side !== side) return false;
+      || !entryDelayElapsed(w)) return false;
 
     const order = await this.trader.placeFakMarketOrder(tokenId, 'BUY', spendLimit, {
       priceLimit, targetShares,
@@ -522,7 +498,7 @@ class Bot {
     const notional = positive(order && order.raw && order.raw.makingAmount);
     if (shares == null || notional == null) {
       this._push({
-        event: 'SIGNAL_BUY_UNFILLED', slug: w.slug, side,
+        event: 'PRICE_BUY_UNFILLED', slug: w.slug, side,
         note: 'No shares filled within the configured ' + cfg.MAX_BUY_SLIPPAGE_PERCENT
           + '% slippage cap; no position opened.',
       });
@@ -532,7 +508,7 @@ class Bot {
     const fee = estimateTakerFee(shares, averagePrice);
     if (notional + fee > this.cash + EPSILON) {
       this._push({
-        event: 'SIGNAL_BUY_REJECTED', slug: w.slug, side,
+        event: 'PRICE_BUY_REJECTED', slug: w.slug, side,
         note: 'Estimated fill plus taker fee exceeded demo cash; position was not recorded.',
       });
       return false;
@@ -546,7 +522,7 @@ class Bot {
       exitProceeds: 0, status: 'position_open', firedAt: Date.now(),
       lastClobMark: bids.length ? bids[0].price : averagePrice,
       realizedPnl: 0,
-      signalChangeUsd: move.changeUsd, signalLookbackMs: move.lookbackMs,
+      signalChangeUsd: move ? move.changeUsd : null, signalLookbackMs: move ? move.lookbackMs : null,
       settled: false, settlementTimedOut: false,
     };
     this.cash -= position.cost;
@@ -558,9 +534,9 @@ class Bot {
     this.stats.estimatedFees += fee;
     this._recordEquity();
     this._push({
-      event: 'SIGNAL_BUY_FILLED', slug: w.slug, side,
+      event: 'PRICE_BUY_FILLED', slug: w.slug, side,
       shares: round(shares, 4), price: round(averagePrice, 4),
-      fee: round(fee, 5), changeUsd: round(move.changeUsd, 2),
+      fee: round(fee, 5), changeUsd: move && Number.isFinite(Number(move.changeUsd)) ? round(move.changeUsd, 2) : null,
       note: 'Demo marketable BUY filled ' + round(shares, 4) + ' ' + side
         + ' shares at average $' + averagePrice.toFixed(4)
         + ' (maximum ' + cfg.MAX_BUY_SLIPPAGE_PERCENT + '% above the observed ask)'
@@ -681,7 +657,7 @@ class Bot {
     if (window) {
       window.position = null;
         window.status = window.closed ? 'window_closed'
-          : window.entryTaken ? 'trade_settled' : 'watching_signal';
+          : window.entryTaken ? 'trade_settled' : 'waiting_for_price_entry';
     }
     this._push({
       event: 'CLOB_THRESHOLD_SETTLEMENT',
@@ -716,8 +692,13 @@ class Bot {
     const pnl = position.exitProceeds - totalCost;
     this.stats.realizedPnl += pnl - (position.realizedPnl || 0);
     position.realizedPnl = pnl;
-    if (outcome === 'WIN') this.stats.wins += 1;
-    else if (outcome === 'LOSS') this.stats.losses += 1;
+    if (outcome === 'WIN') {
+      this.stats.wins += 1;
+      this.lossStreak = 0;
+    } else if (outcome === 'LOSS') {
+      this.stats.losses += 1;
+      this.lossStreak += 1;
+    }
     const trade = {
       slug: position.slug, openTs: position.openTs, side: position.side,
       shares: position.shares, entryPrice: round(position.entryPrice, 4),
@@ -731,7 +712,7 @@ class Bot {
     if (this.trades.length > 200) this.trades.shift();
     this.pending = this.pending.filter((item) => item !== position);
     this._push({
-      event: outcome === 'CLOSED' ? 'SIGNAL_POSITION_CLOSED' : (outcome === 'WIN' ? 'SETTLED_WIN' : 'SETTLED_LOSS'),
+      event: outcome === 'CLOSED' ? 'PRICE_POSITION_CLOSED' : (outcome === 'WIN' ? 'SETTLED_WIN' : 'SETTLED_LOSS'),
       slug: position.slug, side: position.side, pnl: round(pnl, 2),
       note: reason + ' · ' + outcome + ' · demo P&L ' + (pnl >= 0 ? '+' : '') + '$' + round(pnl, 2) + '.',
     });
@@ -812,10 +793,13 @@ class Bot {
       priceSeries: this.priceSeries,
       strategy: {
         baseShares: cfg.BASE_SHARES,
+        sharesIncrementAfterLoss: cfg.SHARES_INCREMENT_AFTER_LOSS,
+        lossStreak: this.lossStreak,
+        nextEntryShares: cfg.BASE_SHARES + this.lossStreak * cfg.SHARES_INCREMENT_AFTER_LOSS,
         entryDelayAfterWindowStartSeconds: cfg.ENTRY_DELAY_AFTER_WINDOW_START_SECONDS,
         maxBuySlippagePercent: cfg.MAX_BUY_SLIPPAGE_PERCENT,
-        minSignalEntryPrice: cfg.MIN_SIGNAL_ENTRY_PRICE,
-        maxSignalEntryPrice: cfg.MAX_SIGNAL_ENTRY_PRICE,
+        minEntryPrice: cfg.MIN_ENTRY_PRICE,
+        maxEntryPrice: cfg.MAX_ENTRY_PRICE,
         thresholdUsd: this.ccxt.thresholdUsd,
         thresholdReady: this.ccxt.thresholdReady,
         thresholdSampleCount: this.ccxt.thresholdSampleCount,

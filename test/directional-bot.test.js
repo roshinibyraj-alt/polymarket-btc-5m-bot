@@ -12,12 +12,12 @@ class FakeDemoTrader {
     this.calls = [];
     this.books = {
       up: {
-        bids: [{ price: 0.49, size: 1000 }],
-        asks: [{ price: 0.50, size: 1000 }],
+        bids: [{ price: 0.29, size: 1000 }],
+        asks: [{ price: 0.30, size: 1000 }],
       },
       down: {
-        bids: [{ price: 0.49, size: 1000 }],
-        asks: [{ price: 0.50, size: 1000 }],
+        bids: [{ price: 0.29, size: 1000 }],
+        asks: [{ price: 0.30, size: 1000 }],
       },
     };
   }
@@ -86,7 +86,7 @@ function makeBot(options = {}) {
   const openTs = Math.floor(Date.now() / 1000) - cfg.ENTRY_DELAY_AFTER_WINDOW_START_SECONDS - 1;
   bot.w = makeWindowState('btc-updown-5m-' + openTs, openTs);
   bot.w.window = { tokenUp: 'up', tokenDown: 'down', closeTs: openTs + 300 };
-  bot.w.status = 'watching_signal';
+  bot.w.status = 'waiting_for_price_entry';
   return { bot, trader };
 }
 
@@ -120,10 +120,10 @@ test('an opposite signal does not sell or open a second position in the same win
   assert.equal(bot.w.entryTaken, true);
 });
 
-test('a qualifying signal waits 60 seconds from window open before buying', async () => {
+test('price entry waits 180 seconds from window open', async () => {
   const { bot, trader } = makeBot();
   const nowSeconds = Math.floor(Date.now() / 1000);
-  bot.w.openTs = nowSeconds - 59;
+  bot.w.openTs = nowSeconds - 179;
   bot.w.window.closeTs = bot.w.openTs + 300;
   const start = Date.now();
   await bot._onBtcSample({ price: 80000, receivedAt: start });
@@ -134,97 +134,83 @@ test('a qualifying signal waits 60 seconds from window open before buying', asyn
   assert.equal(bot.w.activeSignal.side, 'UP');
   assert.equal(bot.w.status, 'waiting_for_window_delay');
 
-  await bot._onQuote(bot.w.slug, 'up', { bid: 0.49, ask: 0.50 });
+  await bot._onQuote(bot.w.slug, 'up', { bid: 0.29, ask: 0.30 });
   assert.equal(trader.calls.length, 0);
 
-  bot.w.openTs = Math.floor(Date.now() / 1000) - 60;
+  bot.w.openTs = Math.floor(Date.now() / 1000) - 180;
   bot.w.window.closeTs = bot.w.openTs + 300;
-  await bot._onQuote(bot.w.slug, 'up', { bid: 0.49, ask: 0.50 });
+  await bot._onQuote(bot.w.slug, 'up', { bid: 0.29, ask: 0.30 });
   assert.equal(trader.calls.length, 1);
   assert.equal(bot.w.position.side, 'UP');
 });
 
-test('a BUY respects the slippage cap and the $0.45–$0.55 entry band', async () => {
+test('a BUY respects the slippage cap inside the $0.20-$0.45 band', async () => {
   const { bot, trader } = makeBot();
   trader.books.up.asks = [
-    { price: 0.45, size: 4 },
-    { price: 0.55, size: 496 },
-    { price: 0.56, size: 1000 },
+    { price: 0.20, size: 4 },
+    { price: 0.30, size: 496 },
+    { price: 0.46, size: 1000 },
   ];
-  const start = Date.now();
-  await bot._onBtcSample({ price: 80000, receivedAt: start });
-  await bot._onBtcSample({ price: 80004, receivedAt: start + 500 });
-  await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
+  await bot._onQuote(bot.w.slug, 'up', { bid: 0.19, ask: 0.20 });
 
   assert.equal(trader.calls.length, 1);
-  assert.equal(trader.calls[0].priceLimit, 0.55);
-  assert.equal(trader.calls[0].amount, 500 * 0.55);
+  assert.equal(trader.calls[0].priceLimit, 0.30);
+  assert.equal(trader.calls[0].amount, 500 * 0.30);
   assert.equal(bot.w.position.shares, 500);
-  assert.ok(bot.w.position.entryPrice >= 0.45);
-  assert.ok(bot.w.position.entryPrice <= 0.55);
-  assert.ok(Math.abs(bot.w.position.entryNotional - 274.6) < 1e-8);
+  assert.ok(bot.w.position.entryPrice >= 0.20);
+  assert.ok(bot.w.position.entryPrice <= 0.30);
+  assert.ok(Math.abs(bot.w.position.entryNotional - 149.6) < 1e-8);
 });
 
-test('a signaled side waits until its best ask enters the $0.45–$0.55 band', async () => {
+test('price-only entry waits until either side has a best ask in the $0.20-$0.45 band', async () => {
   const { bot, trader } = makeBot();
-  trader.books.up.asks = [{ price: 0.56, size: 1000 }];
-  const start = Date.now();
-  await bot._onBtcSample({ price: 80000, receivedAt: start });
-  await bot._onBtcSample({ price: 80004, receivedAt: start + 500 });
-  await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
-
+  trader.books.up.asks = [{ price: 0.46, size: 1000 }];
+  trader.books.down.asks = [{ price: 0.50, size: 1000 }];
+  await bot._onQuote(bot.w.slug, 'up', { bid: 0.45, ask: 0.46 });
+  await bot._onQuote(bot.w.slug, 'down', { bid: 0.49, ask: 0.50 });
   assert.equal(trader.calls.length, 0);
   assert.equal(bot.w.status, 'waiting_for_price_band');
-  assert.equal(bot.w.activeSignal.side, 'UP');
+  assert.equal(bot.w.position, null);
 
-  trader.books.up.asks = [{ price: 0.44, size: 1000 }];
-  await bot._onQuote(bot.w.slug, 'up', { bid: 0.43, ask: 0.44 });
+  trader.books.up.asks = [{ price: 0.19, size: 1000 }];
+  await bot._onQuote(bot.w.slug, 'up', { bid: 0.18, ask: 0.19 });
   assert.equal(trader.calls.length, 0);
 
-  trader.books.up.asks = [{ price: 0.55, size: 1000 }];
-  await bot._onQuote(bot.w.slug, 'up', { bid: 0.54, ask: 0.55 });
+  trader.books.up.asks = [{ price: 0.45, size: 1000 }];
+  await bot._onQuote(bot.w.slug, 'up', { bid: 0.44, ask: 0.45 });
   assert.equal(trader.calls.length, 1);
   assert.equal(trader.calls[0].tokenId, 'up');
-  assert.equal(trader.calls[0].priceLimit, 0.55);
+  assert.equal(trader.calls[0].priceLimit, 0.45);
   assert.equal(bot.w.position.side, 'UP');
-  assert.equal(bot.w.position.entryPrice, 0.55);
+  assert.equal(bot.w.position.entryPrice, 0.45);
 });
 
-test('an ask below $0.45 is outside the entry band', async () => {
+test('a best ask below $0.20 is outside the entry band', async () => {
   const { bot, trader } = makeBot();
-  trader.books.up.asks = [{ price: 0.44, size: 1000 }];
-  const start = Date.now();
-  await bot._onBtcSample({ price: 80000, receivedAt: start });
-  await bot._onBtcSample({ price: 80004, receivedAt: start + 500 });
-  await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
+  trader.books.up.asks = [{ price: 0.19, size: 1000 }];
+  trader.books.down.asks = [{ price: 0.50, size: 1000 }];
+  await bot._onQuote(bot.w.slug, 'up', { bid: 0.18, ask: 0.19 });
   assert.equal(trader.calls.length, 0);
   assert.equal(bot.w.status, 'waiting_for_price_band');
-  assert.equal(bot.w.activeSignal.side, 'UP');
   assert.equal(bot.w.position, null);
 });
 
-test('an opposite signal replaces a latched signal during the 60-second delay', async () => {
+test('price-only entry can choose DOWN after the 180-second delay without a BTC signal', async () => {
   const { bot, trader } = makeBot();
-  bot.w.openTs = Math.floor(Date.now() / 1000) - 59;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  bot.w.openTs = nowSeconds - 179;
   bot.w.window.closeTs = bot.w.openTs + 300;
-  trader.books.up.asks[0].price = 0.45;
-  trader.books.down.asks[0].price = 0.50;
-  const start = Date.now();
-  await bot._onBtcSample({ price: 80000, receivedAt: start });
-  await bot._onBtcSample({ price: 80004, receivedAt: start + 500 });
-  await bot._onBtcSample({ price: 80010, receivedAt: start + 1000 });
-  assert.equal(bot.w.activeSignal.side, 'UP');
+  trader.books.up.asks = [{ price: 0.50, size: 1000 }];
+  trader.books.down.asks = [{ price: 0.30, size: 1000 }];
 
-  await bot._onBtcSample({ price: 79990, receivedAt: start + 1500 });
-  assert.equal(bot.w.activeSignal.side, 'DOWN');
+  await bot._onQuote(bot.w.slug, 'down', { bid: 0.29, ask: 0.30 });
   assert.equal(trader.calls.length, 0);
+  assert.equal(bot.w.status, 'waiting_for_window_delay');
+  assert.equal(bot.w.activeSignal, null);
 
-  bot.w.openTs = Math.floor(Date.now() / 1000) - 60;
+  bot.w.openTs = nowSeconds - 180;
   bot.w.window.closeTs = bot.w.openTs + 300;
-  await bot._onQuote(bot.w.slug, 'up', { bid: 0.44, ask: 0.45 });
-  assert.equal(trader.calls.length, 0);
-
-  await bot._onQuote(bot.w.slug, 'down', { bid: 0.49, ask: 0.50 });
+  await bot._onQuote(bot.w.slug, 'down', { bid: 0.29, ask: 0.30 });
   assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [['down', 'BUY']]);
   assert.equal(bot.w.position.side, 'DOWN');
 });
@@ -313,7 +299,7 @@ test('after window close, CLOB threshold can settle before official resolution r
 
 test('a settled position cannot be re-entered in the same window', async () => {
   const trader = new FakeDemoTrader();
-  trader.books.up.asks[0].price = 0.50;
+  trader.books.up.asks[0].price = 0.30;
   const { bot } = makeBot({ trader });
   const start = Date.now();
   await bot._onBtcSample({ price: 80000, receivedAt: start });
@@ -373,7 +359,7 @@ test('a delayed CCXT response is discarded and cannot trigger an order', async (
   assert.equal(trader.calls.length, 0);
 });
 
-test('signal orders remain disabled during adaptive-threshold warm-up', async () => {
+test('price-only entry does not require BTC threshold warm-up', async () => {
   const { bot, trader } = makeBot({ seedHistory: false });
   const start = Date.now();
   await bot._onBtcSample({ price: 80000, receivedAt: start });
@@ -382,9 +368,13 @@ test('signal orders remain disabled during adaptive-threshold warm-up', async ()
   assert.equal(bot.ccxt.thresholdReady, false);
   assert.equal(bot.ccxt.thresholdUsd, null);
   assert.equal(trader.calls.length, 0);
+
+  await bot._onQuote(bot.w.slug, 'down', { bid: 0.29, ask: 0.30 });
+  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [['down', 'BUY']]);
+  assert.equal(bot.w.position.side, 'DOWN');
 });
 
-test('the live-mode guard blocks signal orders and does not start the CCXT feed', async () => {
+test('the live-mode guard blocks price entries and does not start the CCXT feed', async () => {
   const trader = new FakeDemoTrader();
   let starts = 0;
   const feed = { exchangeId: 'kraken', symbol: 'BTC/USD', start() { starts += 1; return () => {}; } };
@@ -415,15 +405,43 @@ test('snapshot exposes the feed and strategy settings', () => {
   assert.equal(snapshot.strategy.thresholdMinSamples, 120);
   assert.equal(snapshot.strategy.thresholdWindowMs, 5 * 60 * 1000);
   assert.equal(snapshot.strategy.maxBuySlippagePercent, 50);
-  assert.equal(snapshot.strategy.entryDelayAfterWindowStartSeconds, 60);
-  assert.equal(snapshot.strategy.minSignalEntryPrice, 0.45);
-  assert.equal(snapshot.strategy.maxSignalEntryPrice, 0.55);
+  assert.equal(snapshot.strategy.entryDelayAfterWindowStartSeconds, 180);
+  assert.equal(snapshot.strategy.minEntryPrice, 0.20);
+  assert.equal(snapshot.strategy.maxEntryPrice, 0.45);
+  assert.equal(snapshot.strategy.sharesIncrementAfterLoss, 200);
+  assert.equal(snapshot.strategy.lossStreak, 0);
+  assert.equal(snapshot.strategy.nextEntryShares, 500);
   assert.equal('minBuyEntryPrice' in snapshot.strategy, false);
   assert.equal('maxBuyEntryPrice' in snapshot.strategy, false);
   assert.equal(snapshot.strategy.clobWinSettlementPrice, 0.99);
   assert.equal(snapshot.strategy.clobLossSettlementPrice, 0.01);
-  assert.equal(snapshot.window.status, 'watching_signal');
+  assert.equal(snapshot.window.status, 'waiting_for_price_entry');
   assert.equal(snapshot.window.entryTaken, false);
+});
+
+test('losses add 200 shares to the next entry and one win resets to 500', async () => {
+  const { bot, trader } = makeBot();
+  const recordLoss = (openTs) => bot._finalizePosition({
+    settled: false, slug: 'loss-' + openTs, openTs, side: 'UP',
+    shares: 500, openShares: 0, entryPrice: 0.30, entryNotional: 150,
+    entryFee: 0, exitFees: 0, exitProceeds: 0, realizedPnl: 0,
+  }, 'LOSS', 'TEST');
+
+  recordLoss(1);
+  assert.equal(bot.snapshot().strategy.nextEntryShares, 700);
+  recordLoss(2);
+  assert.equal(bot.snapshot().strategy.nextEntryShares, 900);
+
+  await bot._onQuote(bot.w.slug, 'down', { bid: 0.29, ask: 0.30 });
+  assert.equal(bot.w.position.shares, 900);
+  assert.equal(trader.calls[0].amount, 900 * 0.45);
+
+  const winningPosition = bot.w.position;
+  winningPosition.openShares = 0;
+  winningPosition.exitProceeds = winningPosition.entryNotional + winningPosition.entryFee + 10;
+  bot._finalizePosition(winningPosition, 'WIN', 'TEST');
+  assert.equal(bot.snapshot().strategy.lossStreak, 0);
+  assert.equal(bot.snapshot().strategy.nextEntryShares, 500);
 });
 
 test('default bot constructs the configured Coinbase feed at 500 ms', () => {
