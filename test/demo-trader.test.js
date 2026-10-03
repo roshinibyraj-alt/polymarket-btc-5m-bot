@@ -57,7 +57,7 @@ test('demo can cancel a resting entry or take-profit order without changing a fi
   } finally { global.fetch = originalFetch; }
 });
 
-test('demo marketable BUY respects the observed maximum price and visible depth', async () => {
+test('demo marketable BUY respects the price cap and models remaining target liquidity', async () => {
   const originalFetch = global.fetch;
   const book = {
     bids: [{ price: '0.48', size: '20' }],
@@ -68,8 +68,11 @@ test('demo marketable BUY respects the observed maximum price and visible depth'
     const trader = new DemoTrader();
     const order = await trader.placeFakMarketOrder('token', 'BUY', 5, { priceLimit: 0.50 });
     assert.equal(order.status, 'matched');
-    assert.equal(Number(order.raw.takingAmount), 4);
-    assert.equal(Number(order.raw.makingAmount), 2);
+    assert.equal(Number(order.raw.takingAmount), 10);
+    assert.equal(Number(order.raw.makingAmount), 5);
+    assert.equal(Number(order.raw.requestedShares), 10);
+    assert.equal(Number(order.raw.simulatedLiquidityShares), 6);
+    assert.equal(order.avgPrice, 0.50);
   } finally { global.fetch = originalFetch; }
 });
 
