@@ -93,12 +93,15 @@ function makeBot(options = {}) {
   return { bot, trader };
 }
 
-function projectionSignal(bot, side = 'UP') {
+function projectionSignal(bot, side = 'UP', initialDriftUsdPer10s) {
+  const initialDrift = initialDriftUsdPer10s ?? bot.w.initialDriftUsdPer10s
+    ?? (side === 'DOWN' ? 0.667 : -0.667);
+  bot.w.initialDriftUsdPer10s = initialDrift;
   const baselinePrice = 85000;
   const projectedClose = baselinePrice + (side === 'UP' ? 10 : -10);
   const projection = {
     phase: 'projection_ready', baselinePrice,
-    initialDriftUsdPer10s: 0.667,
+    initialDriftUsdPer10s: initialDrift,
     recentRateUsdPer10s: side === 'UP' ? 1 : -1,
     projectedClose, projectedDeltaUsd: projectedClose - baselinePrice,
     remainingSeconds: 130, observedAt: Date.now(), trendToMs: Date.now(),
@@ -121,6 +124,7 @@ function projectionSignal(bot, side = 'UP') {
 }
 
 async function enterWithProjection(bot, side = 'UP') {
+  bot.w.initialDriftUsdPer10s = side === 'DOWN' ? 0.667 : -0.667;
   return bot._attemptPriceEntry(bot.w, side, projectionSignal(bot, side));
 }
 
@@ -157,50 +161,63 @@ test('the opposite rolling projection buys UP when it forecasts above the previo
   assert.equal(trader.calls[0].tokenId, 'up');
 });
 
-test('opposite forecasts sell the open side and allow repeated reversals at exactly 500 shares', async () => {
+test('warm-up drift permits only its contrarian side for the initial entry', async () => {
+  for (const scenario of [
+    { warmupMove: 10, futureRate: 1, signal: 'UP' },
+    { warmupMove: -10, futureRate: -1, signal: 'DOWN' },
+  ]) {
+    const { bot, trader } = makeBot();
+    await feedSyntheticTrend(bot, scenario.warmupMove, scenario.futureRate, 170);
+    assert.equal(bot.w.projection.side, scenario.signal);
+    assert.equal(bot.w.position, null);
+    assert.equal(bot.w.entryCount, 0);
+    assert.equal(bot.w.status, 'warmup_filter_blocked');
+    assert.equal(trader.calls.length, 0);
+  }
+});
+
+test('neutral warm-up drift does not permit an initial entry', async () => {
+  const { bot, trader } = makeBot();
+  const signal = projectionSignal(bot, 'UP', 0);
+  await bot._attemptPriceEntry(bot.w, signal.side, signal);
+  assert.equal(bot.w.position, null);
+  assert.equal(bot.w.entryCount, 0);
+  assert.equal(bot.w.status, 'warmup_neutral');
+  assert.equal(trader.calls.length, 0);
+});
+
+test('opposite forecasts do not reverse or create a second trade in the same window', async () => {
   const { bot, trader } = makeBot();
   await enterWithProjection(bot, 'UP');
   assert.equal(bot.w.position.shares, 500);
 
   await bot._handleProjection(projectionSignal(bot, 'DOWN').projection);
-  assert.equal(bot.w.position.side, 'DOWN');
+  assert.equal(bot.w.position.side, 'UP');
   assert.equal(bot.w.position.shares, 500);
-  assert.equal(bot.w.entryCount, 2);
-  assert.equal(bot.w.reversalCount, 1);
-  assert.equal(bot.trades[0].reason, 'FORECAST_REVERSAL');
+  assert.equal(bot.w.entryCount, 1);
+  assert.equal(bot.w.reversalCount, 0);
 
   await bot._handleProjection(projectionSignal(bot, 'UP').projection);
   assert.equal(bot.w.position.side, 'UP');
   assert.equal(bot.w.position.shares, 500);
-  assert.equal(bot.w.entryCount, 3);
-  assert.equal(bot.w.reversalCount, 2);
   assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side, call.targetShares]), [
-    ['up', 'BUY', 500],
-    ['up', 'SELL', 500],
-    ['down', 'BUY', 500],
-    ['down', 'SELL', 500],
     ['up', 'BUY', 500],
   ]);
 });
 
-test('a partial reversal exit keeps the old position open and delays the opposite BUY', async () => {
+test('later opposite forecasts do not sell the position or submit another BUY', async () => {
   const { bot, trader } = makeBot();
   await enterWithProjection(bot, 'UP');
-  trader.books.up.bids = [{ price: 0.29, size: 100 }];
+  trader.books.up.bids = [];
 
   await bot._handleProjection(projectionSignal(bot, 'DOWN').projection);
   assert.equal(bot.w.position.side, 'UP');
-  assert.equal(bot.w.position.openShares, 400);
-  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [
-    ['up', 'BUY'], ['up', 'SELL'],
-  ]);
-
-  trader.books.up.bids = [{ price: 0.28, size: 1000 }];
+  assert.equal(bot.w.position.openShares, 500);
   await bot._onQuote(bot.w.slug, 'down', { bid: 0.29, ask: 0.30 });
-  assert.equal(bot.w.position.side, 'DOWN');
+  assert.equal(bot.w.position.side, 'UP');
   assert.equal(bot.w.position.shares, 500);
   assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [
-    ['up', 'BUY'], ['up', 'SELL'], ['up', 'SELL'], ['down', 'BUY'],
+    ['up', 'BUY'],
   ]);
 });
 
@@ -319,7 +336,7 @@ test('after window close, CLOB threshold can settle before official resolution r
   assert.equal(bot._resolveTried.has(position.openTs), false);
 });
 
-test('an opposite forecast can open a new fixed-size position after settlement in the same window', async () => {
+test('an opposite forecast cannot re-enter after the window trade has settled', async () => {
   const trader = new FakeDemoTrader();
   const { bot } = makeBot({ trader });
   await enterWithProjection(bot, 'UP');
@@ -332,10 +349,11 @@ test('an opposite forecast can open a new fixed-size position after settlement i
   await bot._handleProjection(projectionSignal(bot, 'DOWN').projection);
   await bot._onQuote(bot.w.slug, 'down', { bid: 0.29, ask: 0.30 });
   assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [
-    ['up', 'BUY'], ['down', 'BUY'],
+    ['up', 'BUY'],
   ]);
-  assert.equal(bot.w.position.side, 'DOWN');
-  assert.equal(bot.w.position.shares, 500);
+  assert.equal(bot.w.position, null);
+  assert.equal(bot.w.entryCount, 1);
+  assert.equal(bot.w.reversalCount, 0);
   assert.equal(bot.w.entryTaken, true);
   const snapshot = bot.snapshot();
   assert.ok(Math.abs(snapshot.account.totalPnl

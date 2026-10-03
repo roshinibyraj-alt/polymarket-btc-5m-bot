@@ -46,7 +46,7 @@
         <div class="quote-card"><div class="quote-top"><span class="quote-side"><i class="dot"></i>UP</span><span id="upState" class="status">Watching</span></div><div class="quote-price" id="upAsk">—</div><div class="quote-details"><span>Bid <b id="upBid">—</b></span><span>10s avg <b id="upAvg">—</b></span></div></div>
         <div class="quote-card"><div class="quote-top"><span class="quote-side"><i class="dot down"></i>DOWN</span><span id="downState" class="status">Watching</span></div><div class="quote-price" id="downAsk">—</div><div class="quote-details"><span>Bid <b id="downBid">—</b></span><span>10s avg <b id="downAvg">—</b></span></div></div>
       </div>
-      <div class="position-card"><div class="section-row"><b>Current position</b><span id="entryReversalCount">0 entries · 0 reversals this window</span></div><div class="position-values"><div class="mini-stat"><span>Forecast side</span><b id="positionSide">None</b></div><div class="mini-stat"><span>Shares open</span><b id="positionShares">0</b></div><div class="mini-stat"><span>Average entry</span><b id="positionEntry">—</b></div><div class="mini-stat"><span>Current mark</span><b id="positionMark">—</b></div></div></div>
+      <div class="position-card"><div class="section-row"><b>Current position</b><span id="windowTradeCount">0 trades · one max this window</span></div><div class="position-values"><div class="mini-stat"><span>Forecast side</span><b id="positionSide">None</b></div><div class="mini-stat"><span>Shares open</span><b id="positionShares">0</b></div><div class="mini-stat"><span>Average entry</span><b id="positionEntry">—</b></div><div class="mini-stat"><span>Current mark</span><b id="positionMark">—</b></div></div></div>
     </article>
     <article class="panel">
       <div class="panel-head"><div><div class="eyebrow">Live calculations</div><div class="panel-title">Forecast and account detail</div></div><span id="feedStatus" class="status warn">Connecting</span></div>
@@ -60,7 +60,7 @@
         <div class="account-cell"><span>Fixed order size</span><b id="fixedShares">500 shares</b></div>
         <div class="account-cell"><span>Demo fees so far</span><b id="fees">—</b></div>
       </div>
-      <div class="account-note" id="methodNote">Captures a BTC baseline, averages the first 15 ten-second blocks, then projects the five-minute close from the rolling 20-second trend. Forecast flips close the open position before a new fixed 500-share entry. Simulated fills and marks are not live execution.</div>
+      <div class="account-note" id="methodNote">Captures a BTC baseline, requires 15 initial 10-second blocks, then projects the close from the rolling 20-second trend. Positive warm-up drift permits only an initial DOWN entry; negative drift permits only UP. There is one 500-share trade maximum per window; later signal flips do not sell or re-enter. Simulated fills and marks are not live execution.</div>
     </article>
   </section>
   <section class="panel table-panel">
@@ -69,7 +69,7 @@
     <div class="bottom-note"><span>Every forecast entry targets exactly 500 shares; cash availability and simulated execution can prevent a fill.</span><span>Modeled demo liquidity is synthetic, not displayed CLOB depth.</span></div>
   </section>
   <section class="panel table-panel">
-    <div class="panel-head"><div><div class="eyebrow">Closed and reversed positions</div><div class="panel-title">Trade history</div></div><div class="panel-meta" id="tradeCount">0 trades</div></div>
+    <div class="panel-head"><div><div class="eyebrow">Closed positions</div><div class="panel-title">Trade history</div></div><div class="panel-meta" id="tradeCount">0 trades</div></div>
     <div class="table-wrap" id="trades"></div>
   </section>
   <section class="panel">
@@ -135,14 +135,16 @@ function render(s){
   setText('capitalNote','Starting paper capital '+money(account.capital));setText('equityNote','Peak drawdown '+money(account.maxDrawdown));setText('pnlNote','Realized '+money(stats.realizedPnl)+' · '+(stats.wins||0)+'W / '+(stats.losses||0)+'L');setText('openNote','Open positions marked at current bid where available');
   tone($('totalPnl'),account.totalPnl);tone($('openPnl'),account.unrealizedPnl);
   const err=$('error');if(s.error||s.executionHalt){err.textContent=s.executionHalt?'Demo-only strategy is blocked in live mode; no orders were sent.':s.error;err.className='error show'}else err.className='error';
-  const elapsed=Number(w.elapsedSeconds)||0,left=Math.max(0,300-elapsed),forecastReady=!!signal.side,positionSide=w.positionSide||null;
+  const elapsed=Number(w.elapsedSeconds)||0,left=Math.max(0,300-elapsed),forecastReady=!!signal.side,positionSide=w.positionSide||null,tradeTaken=Number(w.entryCount||0)>0;
   setText('marketName',w.slug||'Waiting for active market');setText('marketSlug',w.slug||'No active window');setText('windowStatus',String(w.status||'starting').replace(/_/g,' '));
   $('windowStatus').className='status '+(positionSide?'good':w.closed?'':'warn');setText('timeLeft',clock(left)+' remaining');setText('elapsed',clock(elapsed)+' elapsed');$('progress').style.width=Math.min(100,Math.max(0,elapsed/300*100))+'%';
   const phase=projection.phase||cx.projectionPhase||'waiting_for_baseline';setText('phase',String(phase).replace(/_/g,' '));
   const forecastSide=$('forecastSide');forecastSide.textContent=forecastReady?signal.side:'No active signal';forecastSide.className='forecast-side'+(forecastReady?' '+signal.side.toLowerCase():'');
   const sideWord=forecastReady?'Forecast '+signal.side:'Collecting data';status($('forecastStatus'),positionSide?'Position '+positionSide:forecastReady?'Projected '+signal.side:phase.replace(/_/g,' '),positionSide?'good':forecastReady?'good':'warn');
-  const description=forecastReady?'Rolling 20-second BTC trend '+signed(signal.recentRateUsdPer10s)+'/10s projects '+btcMoney(signal.projectedClose)+' against the prior close '+btcMoney(signal.baselinePrice)+'.':'Building the BTC baseline and rolling trend; no valid close-crossing signal yet.';
-  setText('forecastDescription',description);setText('entryReversalCount',(w.entryCount||0)+' entries · '+(w.reversalCount||0)+' reversals this window');
+  const warmupDrift=Number(signal.initialDriftUsdPer10s),eligibleFirstSide=valid(signal.initialDriftUsdPer10s)&&Math.abs(warmupDrift)>1e-8?(warmupDrift>0?'DOWN':'UP'):null;
+  const entryRule=tradeTaken?' One trade already used; later signals are ignored.':eligibleFirstSide?' Warm-up filter permits only an initial '+eligibleFirstSide+' entry.':' Warm-up drift is neutral or unavailable; no initial entry is allowed.';
+  const description=forecastReady?'Rolling 20-second BTC trend '+signed(signal.recentRateUsdPer10s)+'/10s projects '+btcMoney(signal.projectedClose)+' against the prior close '+btcMoney(signal.baselinePrice)+'.'+entryRule:'Building the BTC baseline and rolling trend; no valid close-crossing signal yet.';
+  setText('forecastDescription',description);setText('windowTradeCount',(w.entryCount||0)+' trades · one max this window');
   const prices=s.prices||{};const up=prices.up||{},down=prices.down||{},last=(s.priceSeries||[]).slice(-1)[0]||{};
   setText('upAsk',contract(up.ask));setText('upBid',contract(up.bid));setText('upAvg',contract(last.avgUp));setText('downAsk',contract(down.ask));setText('downBid',contract(down.bid));setText('downAvg',contract(last.avgDown));
   status($('upState'),positionSide==='UP'?'OPEN':w.closed?'CLOSED':'WATCHING',positionSide==='UP'?'good':'');status($('downState'),positionSide==='DOWN'?'OPEN':w.closed?'CLOSED':'WATCHING',positionSide==='DOWN'?'good':'');

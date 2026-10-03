@@ -429,8 +429,8 @@ class Bot {
       return;
     }
     w.status = w.position && w.position.openShares > EPSILON
-      ? (w.position.side === signal.side ? 'position_open' : 'reversing_position')
-      : 'projection_ready';
+      ? 'position_open'
+      : w.entryCount > 0 ? 'trade_taken' : 'projection_ready';
     if (previousSide !== signal.side || w.lastLoggedTrendToMs !== projection.trendToMs) {
       w.lastLoggedTrendToMs = projection.trendToMs;
       this.ccxt.lastSignal = {
@@ -463,21 +463,20 @@ class Bot {
       || signal.projection.phase !== 'projection_ready') return false;
     const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
     if (Date.now() >= closeTs * 1000) return false;
-    if (w.position && w.position.openShares > EPSILON && w.position.side === side) return false;
+    if (w.entryCount > 0) {
+      w.status = w.position && w.position.openShares > EPSILON ? 'position_open' : 'trade_taken';
+      return false;
+    }
+    if (w.position && w.position.openShares > EPSILON) return false;
+    if (w.lastSettledSide === side) return false;
     if (this._signalBusy) return false;
     this._signalBusy = true;
     w.tradeInFlight = true;
     try {
-      let currentSignal = w.activeSignal || signal;
-      if (w.position && w.position.openShares > EPSILON) {
-        if (!currentSignal || currentSignal.side === w.position.side) return false;
-        const closed = await this._sellPositionForReversal(w, w.position, currentSignal.side);
-        if (!closed) return false;
-      }
+      const currentSignal = w.activeSignal || signal;
       if (this.w !== w || w.closed || w.closing || !w.window) return false;
-      currentSignal = w.activeSignal || currentSignal;
       if (!currentSignal || currentSignal.projection.phase !== 'projection_ready') return false;
-      if (w.position && w.position.openShares > EPSILON) return false;
+      if (w.entryCount > 0 || (w.position && w.position.openShares > EPSILON)) return false;
       if (w.lastSettledSide === currentSignal.side) return false;
       return await this._buyPosition(w, currentSignal.side, currentSignal);
     } catch (error) {
@@ -489,86 +488,25 @@ class Bot {
     }
   }
 
-  async _sellPositionForReversal(w, position, nextSide) {
-    if (!position || position.openShares <= EPSILON) return true;
-    const book = await this.trader.getOrderBook(position.tokenId);
-    const bids = sortedLevels(book && book.bids, 'desc');
-    const latestSignal = w.activeSignal;
-    if (!latestSignal || latestSignal.projection.phase !== 'projection_ready'
-      || latestSignal.side === position.side) return false;
-    nextSide = latestSignal.side;
-    if (!bids.length) {
-      w.status = 'waiting_for_exit_order_book';
-      this._warnOnce('reversal-book-' + position.slug + '-' + position.side, {
-        event: 'REVERSAL_WAITING_FOR_BOOK', slug: position.slug, side: position.side,
-        note: 'Forecast flipped to ' + nextSide + ', but no executable bid is available to close '
-          + position.side + '; waiting before opening the new side.',
-      });
-      return false;
-    }
-    if (w.position !== position || position.settled || position.openShares <= EPSILON) return true;
-    const requestedShares = position.openShares;
-    const order = await this.trader.placeFakMarketOrder(position.tokenId, 'SELL', requestedShares, {
-      targetShares: requestedShares, orderBook: book,
-    });
-    if (w.position !== position || position.settled) return false;
-    const soldShares = Math.min(requestedShares,
-      positive(order && order.raw && order.raw.makingAmount) || 0);
-    const proceeds = positive(order && order.raw && order.raw.takingAmount) || 0;
-    if (soldShares <= EPSILON || proceeds <= 0) {
-      w.status = 'waiting_for_exit_order_book';
-      this._push({
-        event: 'PRICE_SELL_UNFILLED', slug: position.slug, side: position.side,
-        note: 'The simulated reversal sell did not fill; the current position remains open.',
-      });
-      return false;
-    }
-    const averageExit = proceeds / soldShares;
-    const fee = estimateTakerFee(soldShares, averageExit);
-    const previouslyRealized = position.realizedPnl || 0;
-    position.exitProceeds += proceeds;
-    position.exitFees += fee;
-    position.openShares = Math.max(0, position.openShares - soldShares);
-    position.lastClobMark = averageExit;
-    this.cash += proceeds - fee;
-    this.stats.estimatedFees += fee;
-    const soldTotal = position.shares - position.openShares;
-    const soldCost = (position.entryNotional + position.entryFee)
-      * (position.shares > 0 ? soldTotal / position.shares : 0);
-    position.realizedPnl = position.exitProceeds - position.exitFees - soldCost;
-    this.stats.realizedPnl += position.realizedPnl - previouslyRealized;
-    this._recordEquity();
-    this._push({
-      event: position.openShares <= EPSILON ? 'PRICE_SELL_FILLED' : 'PRICE_SELL_PARTIAL',
-      slug: position.slug, side: position.side,
-      shares: round(soldShares, 4), price: round(averageExit, 4), fee: round(fee, 5),
-      simulatedLiquidityShares: round(
-        positive(order && order.raw && order.raw.simulatedLiquidityShares) || 0, 4),
-      note: 'Forecast reversal sold ' + round(soldShares, 4) + ' ' + position.side
-        + ' shares at an average $' + averageExit.toFixed(4) + '.',
-    });
-    if (position.openShares > EPSILON) {
-      position.status = 'partially_exited';
-      w.status = 'waiting_for_exit_liquidity';
-      return false;
-    }
-    const latestSide = w.activeSignal && w.activeSignal.side || nextSide;
-    w.position = null;
-    w.reversalCount += 1;
-    this._finalizePosition(position, 'CLOSED', 'FORECAST_REVERSAL');
-    this._push({
-      event: 'FORECAST_REVERSAL', slug: w.slug, side: latestSide,
-      fromSide: position.side, toSide: latestSide,
-      note: 'Forecast reversed from ' + position.side + ' to ' + latestSide
-        + '; the old position was sold and the latest forecast will be entered at 500 shares.',
-    });
-    return true;
-  }
-
   async _buyPosition(w, side, move) {
     if (this.strategyBlocked || this.w !== w || !w.window || w.closed || w.closing
-      || (w.position && w.position.openShares > EPSILON)
+      || w.entryCount > 0 || (w.position && w.position.openShares > EPSILON)
       || !move || move.side !== side || w.lastSettledSide === side) return false;
+    const warmupDrift = Number(move.initialDriftUsdPer10s);
+    const allowedFirstSide = Number.isFinite(warmupDrift) && Math.abs(warmupDrift) > EPSILON
+      ? (warmupDrift > 0 ? 'DOWN' : 'UP') : null;
+    if (allowedFirstSide !== side) {
+      w.status = allowedFirstSide ? 'warmup_filter_blocked' : 'warmup_neutral';
+      this._warnOnce('warmup-entry-filter-' + w.slug, {
+        event: 'WARMUP_ENTRY_FILTERED', slug: w.slug, side,
+        initialDriftUsdPer10s: Number.isFinite(warmupDrift) ? round(warmupDrift, 4) : null,
+        allowedSide: allowedFirstSide,
+        note: allowedFirstSide
+          ? 'Warm-up drift permits only an initial ' + allowedFirstSide + ' entry; ignored ' + side + '.'
+          : 'Warm-up drift is neutral or unavailable; no initial side is eligible this window.',
+      });
+      return false;
+    }
     const tokenId = side === 'UP' ? w.window.tokenUp : w.window.tokenDown;
     const book = await this.trader.getOrderBook(tokenId);
     const asks = sortedLevels(book && book.asks, 'asc');
