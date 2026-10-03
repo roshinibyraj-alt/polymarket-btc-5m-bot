@@ -82,7 +82,7 @@ function render(s){
   const projectionPhase=projection?projection.phase:(cx.projectionPhase||'waiting_for_baseline');
   $('gateLabel').textContent=w&&w.closed?'WINDOW CLOSED · CLOB THRESHOLD THEN OFFICIAL RESULT':String(projectionPhase).replace(/_/g,' ').toUpperCase()+' · '+(cfg.ccxtPollMs||500)+' ms polling';
   $('entryDelayTag').textContent=Number(st.initialWindowSeconds||150)+'s BASELINE + '+Number(st.rollingTrendSeconds||20)+'s TREND';
-  $('buySlippageTag').textContent='BUY SLIPPAGE ≤ '+Number(st.maxBuySlippagePercent||0)+'% VS ASK';
+  $('buySlippageTag').textContent='ENTRY $'+Number(st.minEntryPrice||0.20).toFixed(2)+'–$'+Number(st.maxEntryPrice||0.45).toFixed(2)+' · SLIPPAGE ≤ '+Number(st.maxBuySlippagePercent||0)+'%';
   $('tradeLimitTag').textContent='ONE TRADE PER WINDOW';
   $('clobSettleTag').textContent='MID ≥'+usd(st.clobWinSettlementPrice)+'→$1 / BID ≤'+usd(st.clobLossSettlementPrice)+'→$0';
   const signal=w&&w.lastSignal;
@@ -100,6 +100,7 @@ function render(s){
     :projectionPhase==='waiting_for_baseline'?'No BTC sample close to the window open is available, so this window cannot be traded safely.'
     :elapsed<initialSeconds?'Building 15 ten-second block averages ('+completedBlocks+' complete). The initial BTC drift is '+(validNum(projection&&projection.initialDriftUsdPer10s)?signedMove(projection.initialDriftUsdPer10s)+'/10s':'not ready')+'.'
     :projectionPhase==='waiting_for_20_second_trend'?'The first 150 seconds are measured; waiting for two complete future 10-second blocks to form the rolling 20-second trend.'
+    :w&&w.status==='waiting_for_price_floor'?'Forecast is '+(signal&&signal.side||'ready')+', but its Polymarket best ask is below the $'+Number(st.minEntryPrice||0.20).toFixed(2)+' minimum.'
     :w&&w.status==='waiting_for_price_cap'?'Forecast is '+(signal&&signal.side||'ready')+', but its Polymarket best ask is above the $'+Number(st.maxEntryPrice||0.45).toFixed(2)+' maximum.'
     :forecastReady?forecastText+' One entry per window; next size '+qty(nextEntryShares)+' shares.'
     :forecastText+' Each new pair updates the close projection.';

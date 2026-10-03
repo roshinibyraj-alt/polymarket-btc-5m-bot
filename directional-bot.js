@@ -485,6 +485,10 @@ class Bot {
       });
       return false;
     }
+    if (bestAsk < cfg.MIN_ENTRY_PRICE) {
+      w.status = 'waiting_for_price_floor';
+      return false;
+    }
     if (bestAsk > cfg.MAX_ENTRY_PRICE) {
       w.status = 'waiting_for_price_cap';
       return false;
@@ -572,7 +576,8 @@ class Bot {
         + (simulatedLiquidityShares > EPSILON
           ? ' ' + round(simulatedLiquidityShares, 4) + ' shares used modeled liquidity at the price limit.'
           : ' All target shares swept from visible asks.')
-        + ' Maximum entry price is $' + cfg.MAX_ENTRY_PRICE.toFixed(2)
+        + ' Entry ask must be between $' + cfg.MIN_ENTRY_PRICE.toFixed(2)
+        + ' and $' + cfg.MAX_ENTRY_PRICE.toFixed(2)
         + '; estimated taker fee $' + fee.toFixed(5) + '.',
     });
     return true;
@@ -837,6 +842,7 @@ class Bot {
         rollingTrendSeconds: cfg.BTC_PROJECTION_TREND_SECONDS,
         firstPossibleEntrySeconds: cfg.BTC_PROJECTION_WARMUP_SECONDS + cfg.BTC_PROJECTION_TREND_SECONDS,
         maxBuySlippagePercent: cfg.MAX_BUY_SLIPPAGE_PERCENT,
+        minEntryPrice: cfg.MIN_ENTRY_PRICE,
         maxEntryPrice: cfg.MAX_ENTRY_PRICE,
         baselineMaxAgeMs: cfg.STRATEGY_BASELINE_MAX_AGE_MS,
         minSamplesPerBlock: cfg.STRATEGY_MIN_SAMPLES_PER_BLOCK,

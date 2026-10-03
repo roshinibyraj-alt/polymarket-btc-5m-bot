@@ -91,6 +91,7 @@ test('strategy configuration matches 150 seconds of baseline and 20 seconds of r
   assert.equal(cfg.STRATEGY_INITIAL_BLOCKS, 15);
   assert.equal(cfg.BTC_PROJECTION_WARMUP_SECONDS, 150);
   assert.equal(cfg.BTC_PROJECTION_TREND_SECONDS, 20);
+  assert.equal(cfg.MIN_ENTRY_PRICE, 0.20);
   assert.equal(cfg.MAX_ENTRY_PRICE, 0.45);
   assert.equal(cfg.BASE_SHARES, 500);
   assert.equal(cfg.SHARES_INCREMENT_AFTER_LOSS, 200);

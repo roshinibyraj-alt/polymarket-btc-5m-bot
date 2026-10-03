@@ -185,13 +185,19 @@ test('only the projected side can buy, and the $0.45 ask cap remains in force', 
   assert.equal(bot.w.position.entryPrice, 0.45);
 });
 
-test('the new strategy does not impose the old $0.20 minimum ask', async () => {
+test('the entry band rejects $0.05 and accepts an ask at the $0.20 floor', async () => {
   const { bot, trader } = makeBot();
-  trader.books.up.asks = [{ price: 0.19, size: 1000 }];
+  trader.books.up.asks = [{ price: 0.05, size: 1000 }];
   await enterWithProjection(bot, 'UP');
+  assert.equal(trader.calls.length, 0);
+  assert.equal(bot.w.position, null);
+  assert.equal(bot.w.status, 'waiting_for_price_floor');
+
+  trader.books.up.asks = [{ price: 0.20, size: 1000 }];
+  await bot._onQuote(bot.w.slug, 'up', { bid: 0.19, ask: 0.20 });
   assert.equal(trader.calls.length, 1);
   assert.equal(bot.w.position.side, 'UP');
-  assert.equal(bot.w.position.entryPrice, 0.19);
+  assert.equal(bot.w.position.entryPrice, 0.20);
 });
 
 test('missing previous-close data skips a window instead of inventing a baseline', async () => {
@@ -343,6 +349,7 @@ test('snapshot exposes rolling projection settings and preserved loss sizing', (
   assert.equal(snapshot.strategy.rollingTrendSeconds, 20);
   assert.equal(snapshot.strategy.firstPossibleEntrySeconds, 170);
   assert.equal(snapshot.strategy.maxBuySlippagePercent, 50);
+  assert.equal(snapshot.strategy.minEntryPrice, 0.20);
   assert.equal(snapshot.strategy.maxEntryPrice, 0.45);
   assert.equal(snapshot.strategy.sharesIncrementAfterLoss, 200);
   assert.equal(snapshot.strategy.lossStreak, 0);
