@@ -26,18 +26,24 @@ class FakeDemoTrader {
   async getOrderBook(tokenId) { return this.books[tokenId]; }
 
   async placeFakMarketOrder(tokenId, side, amount, options = {}) {
-    this.calls.push({ tokenId, side, amount, priceLimit: options.priceLimit });
+    this.calls.push({
+      tokenId, side, amount, priceLimit: options.priceLimit,
+      targetShares: options.targetShares,
+    });
     const buying = side === 'BUY';
+    const targetShares = Number(options.targetShares);
+    const requestedShares = targetShares > 0 ? targetShares
+      : buying && Number(options.priceLimit) > 0 ? Number(amount) / Number(options.priceLimit) : null;
+    const byShares = Number.isFinite(requestedShares) && requestedShares > 0;
     const levels = (buying ? this.books[tokenId].asks : this.books[tokenId].bids)
       .filter((level) => !options.priceLimit
         || (buying ? level.price <= options.priceLimit : level.price >= options.priceLimit));
     let shares = 0;
     let notional = 0;
-    let remaining = Number(amount);
-    if (buying && Number(options.priceLimit) > 0) remaining /= Number(options.priceLimit);
+    let remaining = byShares ? requestedShares : Number(amount);
     for (const level of levels) {
       if (buying) {
-        if (Number(options.priceLimit) > 0) {
+        if (byShares) {
           const take = Math.min(remaining, level.size);
           shares += take;
           notional += take * level.price;
@@ -62,7 +68,10 @@ class FakeDemoTrader {
       isFilled: shares > 0,
       avgPrice: shares > 0 ? notional / shares : 0,
       raw: buying
-        ? { makingAmount: String(notional), takingAmount: String(shares) }
+        ? {
+          makingAmount: String(notional), takingAmount: String(shares),
+          ...(byShares ? { requestedShares: String(requestedShares) } : {}),
+        }
         : { makingAmount: String(shares), takingAmount: String(notional) },
     };
   }
@@ -148,6 +157,53 @@ test('the opposite rolling projection buys UP when it forecasts above the previo
   assert.equal(trader.calls[0].tokenId, 'up');
 });
 
+test('opposite forecasts sell the open side and allow repeated reversals at exactly 500 shares', async () => {
+  const { bot, trader } = makeBot();
+  await enterWithProjection(bot, 'UP');
+  assert.equal(bot.w.position.shares, 500);
+
+  await bot._handleProjection(projectionSignal(bot, 'DOWN').projection);
+  assert.equal(bot.w.position.side, 'DOWN');
+  assert.equal(bot.w.position.shares, 500);
+  assert.equal(bot.w.entryCount, 2);
+  assert.equal(bot.w.reversalCount, 1);
+  assert.equal(bot.trades[0].reason, 'FORECAST_REVERSAL');
+
+  await bot._handleProjection(projectionSignal(bot, 'UP').projection);
+  assert.equal(bot.w.position.side, 'UP');
+  assert.equal(bot.w.position.shares, 500);
+  assert.equal(bot.w.entryCount, 3);
+  assert.equal(bot.w.reversalCount, 2);
+  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side, call.targetShares]), [
+    ['up', 'BUY', 500],
+    ['up', 'SELL', 500],
+    ['down', 'BUY', 500],
+    ['down', 'SELL', 500],
+    ['up', 'BUY', 500],
+  ]);
+});
+
+test('a partial reversal exit keeps the old position open and delays the opposite BUY', async () => {
+  const { bot, trader } = makeBot();
+  await enterWithProjection(bot, 'UP');
+  trader.books.up.bids = [{ price: 0.29, size: 100 }];
+
+  await bot._handleProjection(projectionSignal(bot, 'DOWN').projection);
+  assert.equal(bot.w.position.side, 'UP');
+  assert.equal(bot.w.position.openShares, 400);
+  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [
+    ['up', 'BUY'], ['up', 'SELL'],
+  ]);
+
+  trader.books.up.bids = [{ price: 0.28, size: 1000 }];
+  await bot._onQuote(bot.w.slug, 'down', { bid: 0.29, ask: 0.30 });
+  assert.equal(bot.w.position.side, 'DOWN');
+  assert.equal(bot.w.position.shares, 500);
+  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [
+    ['up', 'BUY'], ['up', 'SELL'], ['up', 'SELL'], ['down', 'BUY'],
+  ]);
+});
+
 test('no entry occurs before two complete future ten-second blocks', async () => {
   const { bot, trader } = makeBot();
   await feedSyntheticTrend(bot, 10, -1, 169.5);
@@ -170,34 +226,24 @@ test('a Polymarket quote alone cannot enter without a BTC close projection', asy
   assert.equal(bot.w.position, null);
 });
 
-test('only the projected side can buy, and the $0.45 ask cap remains in force', async () => {
+test('only the projected side can buy, with no strategy-level ask-price cap', async () => {
   const { bot, trader } = makeBot();
-  trader.books.down.asks[0].price = 0.46;
+  trader.books.down.asks[0].price = 0.80;
   await enterWithProjection(bot, 'DOWN');
-  assert.equal(trader.calls.length, 0);
-  assert.equal(bot.w.status, 'waiting_for_price_cap');
-  trader.books.down.asks[0].price = 0.45;
-  await bot._onQuote(bot.w.slug, 'up', { bid: 0.29, ask: 0.30 });
-  assert.equal(trader.calls.length, 0);
-  await bot._onQuote(bot.w.slug, 'down', { bid: 0.44, ask: 0.45 });
   assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [['down', 'BUY']]);
   assert.equal(bot.w.position.side, 'DOWN');
-  assert.equal(bot.w.position.entryPrice, 0.45);
+  assert.equal(bot.w.position.entryPrice, 0.80);
+  assert.equal(trader.calls[0].targetShares, 500);
 });
 
-test('the entry band rejects $0.05 and accepts an ask at the $0.20 floor', async () => {
+test('a valid low ask below the former price floor still receives a fixed 500-share order', async () => {
   const { bot, trader } = makeBot();
   trader.books.up.asks = [{ price: 0.05, size: 1000 }];
   await enterWithProjection(bot, 'UP');
-  assert.equal(trader.calls.length, 0);
-  assert.equal(bot.w.position, null);
-  assert.equal(bot.w.status, 'waiting_for_price_floor');
-
-  trader.books.up.asks = [{ price: 0.20, size: 1000 }];
-  await bot._onQuote(bot.w.slug, 'up', { bid: 0.19, ask: 0.20 });
   assert.equal(trader.calls.length, 1);
   assert.equal(bot.w.position.side, 'UP');
-  assert.equal(bot.w.position.entryPrice, 0.20);
+  assert.equal(bot.w.position.entryPrice, 0.05);
+  assert.equal(bot.w.position.shares, 500);
 });
 
 test('missing previous-close data skips a window instead of inventing a baseline', async () => {
@@ -273,7 +319,7 @@ test('after window close, CLOB threshold can settle before official resolution r
   assert.equal(bot._resolveTried.has(position.openTs), false);
 });
 
-test('a settled position cannot be re-entered in the same window', async () => {
+test('an opposite forecast can open a new fixed-size position after settlement in the same window', async () => {
   const trader = new FakeDemoTrader();
   const { bot } = makeBot({ trader });
   await enterWithProjection(bot, 'UP');
@@ -285,10 +331,15 @@ test('a settled position cannot be re-entered in the same window', async () => {
   assert.equal(bot.trades.length, 1);
   await bot._handleProjection(projectionSignal(bot, 'DOWN').projection);
   await bot._onQuote(bot.w.slug, 'down', { bid: 0.29, ask: 0.30 });
-  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [['up', 'BUY']]);
+  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [
+    ['up', 'BUY'], ['down', 'BUY'],
+  ]);
+  assert.equal(bot.w.position.side, 'DOWN');
+  assert.equal(bot.w.position.shares, 500);
   assert.equal(bot.w.entryTaken, true);
   const snapshot = bot.snapshot();
-  assert.ok(Math.abs(snapshot.account.totalPnl - snapshot.stats.realizedPnl) < 1e-8);
+  assert.ok(Math.abs(snapshot.account.totalPnl
+    - (snapshot.stats.realizedPnl + snapshot.account.unrealizedPnl)) < 1e-8);
   assert.ok(Math.abs(snapshot.account.equity - (cfg.DEMO_CAPITAL + snapshot.account.totalPnl)) < 1e-8);
 });
 
@@ -338,7 +389,7 @@ test('the live-mode guard blocks projected entries and does not start the CCXT f
   assert.equal(trader.calls.length, 0);
 });
 
-test('snapshot exposes rolling projection settings and preserved loss sizing', () => {
+test('snapshot exposes rolling projection settings and fixed 500-share sizing without a price band', () => {
   const { bot } = makeBot();
   const snapshot = bot.snapshot();
   assert.equal(snapshot.mode, 'DEMO');
@@ -348,19 +399,17 @@ test('snapshot exposes rolling projection settings and preserved loss sizing', (
   assert.equal(snapshot.strategy.initialWindowSeconds, 150);
   assert.equal(snapshot.strategy.rollingTrendSeconds, 20);
   assert.equal(snapshot.strategy.firstPossibleEntrySeconds, 170);
-  assert.equal(snapshot.strategy.maxBuySlippagePercent, 50);
-  assert.equal(snapshot.strategy.minEntryPrice, 0.20);
-  assert.equal(snapshot.strategy.maxEntryPrice, 0.45);
-  assert.equal(snapshot.strategy.sharesIncrementAfterLoss, 200);
-  assert.equal(snapshot.strategy.lossStreak, 0);
+  assert.equal(snapshot.strategy.fixedOrderShares, 500);
   assert.equal(snapshot.strategy.nextEntryShares, 500);
+  assert.equal('minEntryPrice' in snapshot.strategy, false);
+  assert.equal('maxEntryPrice' in snapshot.strategy, false);
   assert.equal(snapshot.strategy.clobWinSettlementPrice, 0.99);
   assert.equal(snapshot.strategy.clobLossSettlementPrice, 0.01);
   assert.equal(snapshot.window.status, 'waiting_for_baseline');
   assert.equal(snapshot.window.entryTaken, false);
 });
 
-test('losses add 200 shares to the next entry and one win resets to 500', async () => {
+test('wins and losses do not change the fixed 500-share next order size', async () => {
   const { bot, trader } = makeBot();
   const recordLoss = (openTs) => bot._finalizePosition({
     settled: false, slug: 'loss-' + openTs, openTs, side: 'UP',
@@ -368,49 +417,48 @@ test('losses add 200 shares to the next entry and one win resets to 500', async 
     entryFee: 0, exitFees: 0, exitProceeds: 0, realizedPnl: 0,
   }, 'LOSS', 'TEST');
   recordLoss(1);
-  assert.equal(bot.snapshot().strategy.nextEntryShares, 700);
   recordLoss(2);
-  assert.equal(bot.snapshot().strategy.nextEntryShares, 900);
   await enterWithProjection(bot, 'DOWN');
-  assert.equal(bot.w.position.shares, 900);
-  assert.ok(Math.abs(trader.calls[0].amount - (900 * 0.45)) < 1e-8);
+  assert.equal(bot.w.position.shares, 500);
+  assert.equal(trader.calls[0].amount, 500);
+  assert.equal(trader.calls[0].targetShares, 500);
   const winningPosition = bot.w.position;
   winningPosition.openShares = 0;
   winningPosition.exitProceeds = winningPosition.entryNotional + winningPosition.entryFee + 10;
   bot._finalizePosition(winningPosition, 'WIN', 'TEST');
-  assert.equal(bot.snapshot().strategy.lossStreak, 0);
   assert.equal(bot.snapshot().strategy.nextEntryShares, 500);
 });
 
-test('a thin demo book still records the full target shares at the capped order price', async () => {
+test('the fixed 500-share entry can sweep visible asks above the former price cap', async () => {
   const { bot, trader } = makeBot();
   trader.books.up.asks = [
     { price: 0.20, size: 4 },
-    { price: 0.30, size: 496 },
-    { price: 0.46, size: 1000 },
+    { price: 0.80, size: 496 },
+    { price: 0.95, size: 1000 },
   ];
   await enterWithProjection(bot, 'UP');
   assert.equal(trader.calls.length, 1);
-  assert.ok(Math.abs(trader.calls[0].priceLimit - 0.30) < 1e-8);
-  assert.ok(Math.abs(trader.calls[0].amount - (500 * 0.30)) < 1e-8);
+  assert.equal(trader.calls[0].priceLimit, undefined);
+  assert.equal(trader.calls[0].amount, 500);
+  assert.equal(trader.calls[0].targetShares, 500);
   assert.equal(bot.w.position.shares, 500);
-  assert.ok(Math.abs(bot.w.position.entryPrice - 0.2992) < 1e-8);
+  assert.ok(Math.abs(bot.w.position.entryPrice - 0.7952) < 1e-8);
 });
 
-test('demo BUY sweeps visible asks and models missing depth so every target share fills', async () => {
+test('demo BUY models missing depth at the worst visible ask without a strategy price limit', async () => {
   const trader = new DemoTrader();
-  const order = await trader.placeFakMarketOrder('up', 'BUY', 150, {
-    priceLimit: 0.30, targetShares: 500,
-    orderBook: { asks: [{ price: 0.20, size: 4 }, { price: 0.46, size: 1000 }], bids: [] },
+  const order = await trader.placeFakMarketOrder('up', 'BUY', 500, {
+    targetShares: 500,
+    orderBook: { asks: [{ price: 0.20, size: 4 }, { price: 0.80, size: 10 }], bids: [] },
   });
 
   assert.equal(order.status, 'matched');
   assert.equal(order.isFilled, true);
   assert.equal(order.raw.takingAmount, '500');
-  assert.ok(Math.abs(Number(order.raw.makingAmount) - 149.6) < 1e-8);
+  assert.ok(Math.abs(Number(order.raw.makingAmount) - 397.6) < 1e-8);
   assert.equal(order.raw.requestedShares, '500');
-  assert.equal(order.raw.simulatedLiquidityShares, '496');
-  assert.ok(order.avgPrice <= 0.30);
+  assert.equal(order.raw.simulatedLiquidityShares, '486');
+  assert.ok(Math.abs(order.avgPrice - 0.7952) < 1e-8);
 });
 
 test('default bot constructs the configured Coinbase feed at 500 ms', () => {

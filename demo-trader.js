@@ -32,23 +32,27 @@ class DemoTrader {
     const priceLimit = Number(options && options.priceLimit);
     const hasPriceLimit = Number.isFinite(priceLimit) && priceLimit > 0;
     const optionTargetShares = Number(options && options.targetShares);
-    const requestedShares = buying && hasPriceLimit
-      ? Math.max(0, optionTargetShares > 0 ? optionTargetShares : (Number(amount) || 0) / priceLimit)
-      : null;
+    const requestedShares = buying
+      ? (optionTargetShares > 0 ? optionTargetShares
+        : hasPriceLimit ? Math.max(0, (Number(amount) || 0) / priceLimit) : null)
+      : optionTargetShares > 0 ? optionTargetShares : null;
+    const targetSharesMode = Number.isFinite(requestedShares) && requestedShares > 0;
+    const modelRemainder = targetSharesMode && (buying || optionTargetShares > 0);
     const levels = (buying ? (book.asks || []) : (book.bids || []))
       .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
       .filter((level) => level.price > 0 && level.size > 0
+        && level.price <= 1
         && (!hasPriceLimit || (buying ? level.price <= priceLimit : level.price >= priceLimit)))
       .sort(buying ? (a, b) => a.price - b.price : (a, b) => b.price - a.price);
     let shares = 0;
     let notional = 0;
     let simulatedLiquidityShares = 0;
-    // For a capped demo BUY, amount is USDC and the requested quantity is explicit.
+    // Target-sized orders fill shares; untargeted BUYs consume the supplied cash amount.
     let remaining = Math.max(0, Number(amount) || 0);
-    if (buying && hasPriceLimit) remaining = requestedShares;
+    if (targetSharesMode) remaining = requestedShares;
     for (const level of levels) {
       if (buying) {
-        if (hasPriceLimit) {
+        if (targetSharesMode) {
           const take = Math.min(remaining, level.size);
           shares += take;
           notional += take * level.price;
@@ -67,28 +71,36 @@ class DemoTrader {
       }
       if (remaining <= 1e-9) break;
     }
-    if (buying && hasPriceLimit && remaining > 1e-9) {
-      // Demo-only modeled liquidity completes the target at the configured cap.
+    if (modelRemainder && remaining > 1e-9 && levels.length) {
+      // Demo-only modeled liquidity completes the fixed target at the worst visible level.
+      const modeledPrice = hasPriceLimit ? priceLimit : levels[levels.length - 1].price;
       simulatedLiquidityShares = remaining;
       shares += remaining;
-      notional += remaining * priceLimit;
+      notional += remaining * modeledPrice;
       remaining = 0;
     }
     this._n += 1;
     const id = 'demo-' + this._n;
-    const isFilled = buying && hasPriceLimit
+    const isFilled = targetSharesMode && modelRemainder
       ? requestedShares > 0 && shares + 1e-9 >= requestedShares
       : shares > 0;
     const raw = buying
       ? {
         status: isFilled ? 'matched' : (shares > 0 ? 'matched' : 'unmatched'),
         makingAmount: String(notional), takingAmount: String(shares),
-        ...(hasPriceLimit ? {
+        ...(targetSharesMode ? {
           requestedShares: String(requestedShares),
           simulatedLiquidityShares: String(simulatedLiquidityShares),
         } : {}),
       }
-      : { status: shares > 0 ? 'matched' : 'unmatched', makingAmount: String(shares), takingAmount: String(notional) };
+      : {
+        status: shares > 0 ? 'matched' : 'unmatched',
+        makingAmount: String(shares), takingAmount: String(notional),
+        ...(targetSharesMode ? {
+          requestedShares: String(requestedShares),
+          simulatedLiquidityShares: String(simulatedLiquidityShares),
+        } : {}),
+      };
     return { id, status: raw.status, isFilled, avgPrice: shares > 0 ? notional / shares : 0, raw };
   }
   async placeGtcOrder(tokenId, side, price, size) {

@@ -83,7 +83,7 @@ test('skips projection when any initial 10-second block has insufficient samples
   assert.equal(result.side, null);
 });
 
-test('strategy configuration matches 150 seconds of baseline and 20 seconds of rolling trend', () => {
+test('strategy configuration matches 150 seconds of baseline, 20-second trend, and fixed share size', () => {
   assert.equal(cfg.CCXT_EXCHANGE, 'coinbase');
   assert.equal(cfg.CCXT_POLL_MS, 500);
   assert.equal(cfg.LOOP_MS, 500);
@@ -91,8 +91,7 @@ test('strategy configuration matches 150 seconds of baseline and 20 seconds of r
   assert.equal(cfg.STRATEGY_INITIAL_BLOCKS, 15);
   assert.equal(cfg.BTC_PROJECTION_WARMUP_SECONDS, 150);
   assert.equal(cfg.BTC_PROJECTION_TREND_SECONDS, 20);
-  assert.equal(cfg.MIN_ENTRY_PRICE, 0.20);
-  assert.equal(cfg.MAX_ENTRY_PRICE, 0.45);
   assert.equal(cfg.BASE_SHARES, 500);
-  assert.equal(cfg.SHARES_INCREMENT_AFTER_LOSS, 200);
+  assert.equal('MIN_ENTRY_PRICE' in cfg, false);
+  assert.equal('MAX_ENTRY_PRICE' in cfg, false);
 });
