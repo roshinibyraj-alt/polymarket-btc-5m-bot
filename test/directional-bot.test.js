@@ -90,6 +90,11 @@ async function feedCandles(bot, colors) {
   }
 }
 
+function feedClobPair(bot, observedAt, upPrice, downPrice) {
+  bot._onQuote(bot.w.slug, 'up', { bid: upPrice, ask: upPrice }, observedAt);
+  bot._onQuote(bot.w.slug, 'down', { bid: downPrice, ask: downPrice }, observedAt);
+}
+
 test('completed RG candles buy UP once for exactly 500 shares', async () => {
   const { bot, trader } = makeBot();
   await feedCandles(bot, ['R', 'G']);
@@ -265,6 +270,80 @@ test('held-side best bid at $0.01 settles the loss after window close', async ()
   assert.equal(bot.cash, cashAfterEntry);
 });
 
+test('paired final-window CLOB prices settle at $1/$0 after holding the threshold for two seconds', async (t) => {
+  const scenarios = [
+    { name: 'UP wins and held UP shares pay $1 each', up: 0.98, down: 0.02, outcome: 'WIN', winner: 'UP', payout: 500 },
+    { name: 'DOWN wins and held UP shares pay $0 each', up: 0.02, down: 0.98, outcome: 'LOSS', winner: 'DOWN', payout: 0 },
+  ];
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const { bot, trader } = makeBot();
+      await feedCandles(bot, ['R', 'G']);
+      const position = bot.w.position;
+      const closeMs = (Math.floor(Date.now() / 1000) + 10) * 1000;
+      position.closeTs = closeMs / 1000;
+      bot.w.window.closeTs = position.closeTs;
+
+      feedClobPair(bot, closeMs - cfg.CLOB_FINAL_CONFIRMATION_MS, scenario.up, scenario.down);
+      feedClobPair(bot, closeMs - 500, scenario.up, scenario.down);
+      await bot._closeWindow(bot.w);
+      await bot._settleClosedPositions(closeMs + 100);
+
+      assert.equal(bot.pending.length, 0);
+      assert.equal(bot.trades[0].outcome, scenario.outcome);
+      assert.equal(bot.trades[0].winner, scenario.winner);
+      assert.equal(bot.trades[0].reason, 'CLOB_FINAL_2S');
+      assert.equal(bot.trades[0].exitProceeds, scenario.payout);
+      assert.deepEqual(trader.calls.map((call) => call.side), ['BUY']);
+    });
+  }
+});
+
+test('final-window CLOB prices must remain decisive for the full two seconds', async () => {
+  const { bot, trader } = makeBot();
+  await feedCandles(bot, ['R', 'G']);
+  const position = bot.w.position;
+  const closeMs = (Math.floor(Date.now() / 1000) + 10) * 1000;
+  position.closeTs = closeMs / 1000;
+  bot.w.window.closeTs = position.closeTs;
+
+  feedClobPair(bot, closeMs - cfg.CLOB_FINAL_CONFIRMATION_MS, 0.98, 0.02);
+  bot._onQuote(bot.w.slug, 'up', { bid: 0.96, ask: 0.98 }, closeMs - 1500);
+  feedClobPair(bot, closeMs - 500, 0.98, 0.02);
+  await bot._closeWindow(bot.w);
+  const settleAt = closeMs + 100;
+  bot._clobTried.set(position, settleAt);
+  bot._resolveTried.set(position.openTs, settleAt);
+  await bot._settleClosedPositions(settleAt);
+
+  assert.equal(bot.pending.length, 1);
+  assert.equal(position.openShares, 500);
+  assert.equal(bot.trades.length, 0);
+  assert.deepEqual(trader.calls.map((call) => call.side), ['BUY']);
+});
+
+test('stale paired prices cannot settle at expiry', async () => {
+  const { bot, trader } = makeBot();
+  await feedCandles(bot, ['R', 'G']);
+  const position = bot.w.position;
+  const closeMs = (Math.floor(Date.now() / 1000) + 10) * 1000;
+  position.closeTs = closeMs / 1000;
+  bot.w.window.closeTs = position.closeTs;
+
+  feedClobPair(bot, closeMs - 5000, 0.98, 0.02);
+  feedClobPair(bot, closeMs - 4000, 0.98, 0.02);
+  await bot._closeWindow(bot.w);
+  const settleAt = closeMs + 100;
+  bot._clobTried.set(position, settleAt);
+  bot._resolveTried.set(position.openTs, settleAt);
+  await bot._settleClosedPositions(settleAt);
+
+  assert.equal(bot.pending.length, 1);
+  assert.equal(position.openShares, 500);
+  assert.equal(bot.trades.length, 0);
+  assert.deepEqual(trader.calls.map((call) => call.side), ['BUY']);
+});
+
 test('open-position accounting reconciles to equity and total P&L', async () => {
   const { bot } = makeBot();
   await feedCandles(bot, ['R', 'G']);
@@ -331,6 +410,9 @@ test('snapshot exposes candle strategy settings, sequence, and fixed sizing', ()
   assert.equal(snapshot.strategy.nextEntryShares, 500);
   assert.equal(snapshot.strategy.clobWinSettlementPrice, 0.99);
   assert.equal(snapshot.strategy.clobLossSettlementPrice, 0.01);
+  assert.equal(snapshot.strategy.clobFinalWinPrice, 0.98);
+  assert.equal(snapshot.strategy.clobFinalLossPrice, 0.02);
+  assert.equal(snapshot.strategy.clobFinalConfirmationMs, 2000);
   assert.equal(snapshot.window.candleSequence, '');
   assert.equal(snapshot.window.entryTaken, false);
   assert.equal('projection' in snapshot.window, false);

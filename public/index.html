@@ -60,7 +60,7 @@
         <div class="account-cell"><span>Fixed order size</span><b id="fixedShares">500 shares</b></div>
         <div class="account-cell"><span>Demo fees so far</span><b id="fees">—</b></div>
       </div>
-      <div class="account-note" id="methodNote">Completed one-minute BTC candles drive entries only. Open positions are held until settlement after the five-minute window closes. Demo-only simulated fills and marks are not live execution.</div>
+      <div class="account-note" id="methodNote">Completed one-minute BTC candles drive entries only. At expiry, decisive paired CLOB prices in the final two seconds can settle positions at $1 or $0 per share; otherwise the bot awaits post-close CLOB thresholds or official resolution. Demo-only simulated fills and marks are not live execution.</div>
     </article>
   </section>
   <section class="panel table-panel">
@@ -150,7 +150,7 @@ function render(s){
   document.title='BTC Candle Patterns · Demo Trader';const brand=document.querySelector('.brandname');if(brand)brand.textContent='BTC Candle Pattern Trader';
   const eyebrow=document.querySelector('.forecast-box .eyebrow');if(eyebrow)eyebrow.textContent='Completed candle pattern';
   const legend=document.querySelector('.charts article:first-child .legend');if(legend){const items=legend.querySelectorAll('span');if(items[2])items[2].style.display='none';if(items[3])items[3].style.display='none'}
-  const method=$('methodNote');if(method)method.textContent='Completed one-minute BTC candles are read from the start of each five-minute window. RG/RRG buys UP; GR/GGR buys DOWN. Dojis are neutral. No candle pattern submits a sell; remaining shares are held until post-close CLOB threshold settlement or official resolution. Demo-only simulated fills and marks are not live execution.';
+  const method=$('methodNote');if(method)method.textContent='Completed one-minute BTC candles are read from the start of each five-minute window. RG/RRG buys UP; GR/GGR buys DOWN. Dojis are neutral. No candle pattern submits a sell. At expiry, paired UP/DOWN CLOB midpoints held at $0.98/$0.02 through the final two seconds can settle at $1/$0 per share; otherwise post-close CLOB thresholds or official resolution apply. Demo-only simulated fills and marks are not live execution.';
   const exposureNote=document.querySelector('#openPositions + .bottom-note span');if(exposureNote)exposureNote.textContent='Each entry targets exactly 500 shares; only one entry is allowed per five-minute window.';
   setText('openCount',pending.length+' open position'+(pending.length===1?'':'s'));
   if(!pending.length){$('openPositions').innerHTML='<div class="empty">No open positions</div>'}else{

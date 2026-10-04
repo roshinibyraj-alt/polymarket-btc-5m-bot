@@ -29,6 +29,7 @@ class Bot {
     this.outcomes = new Map();
     this._resolveTried = new Map();
     this._clobTried = new Map();
+    this._clobExpiryCandidates = new Map();
     this._warned = new Set();
     this.stats = {
       wins: 0, losses: 0, signalEntries: 0,
@@ -178,8 +179,14 @@ class Bot {
       if (w && w.window) {
         if (this._marketFeedSlug !== w.slug) await this._ensureMarketFeed(w);
         const now = Date.now();
-        if (now - this._lastMarketEventAt >= cfg.PRICE_STALE_MS
-          && now - this._lastRestFetchAt >= cfg.PRICE_FEED_FALLBACK_MS) {
+        const closeMs = (Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS) * 1000;
+        const timeToClose = closeMs - now;
+        const finalWindowPoll = w.position && w.position.openShares > EPSILON
+          && timeToClose > 0 && timeToClose <= cfg.CLOB_FINAL_CONFIRMATION_MS
+          && now - this._lastRestFetchAt >= cfg.CLOB_FINAL_POLL_MS;
+        const staleFeedPoll = now - this._lastMarketEventAt >= cfg.PRICE_STALE_MS
+          && now - this._lastRestFetchAt >= cfg.PRICE_FEED_FALLBACK_MS;
+        if (finalWindowPoll || staleFeedPoll) {
           await this._seedQuotes(w);
         }
       }
@@ -229,25 +236,30 @@ class Bot {
     }
   }
 
-  _onQuote(slug, tokenId, update) {
+  _onQuote(slug, tokenId, update, observedAt = Date.now()) {
     const w = this.w;
     if (!w || w.slug !== slug || !w.window || w.closed) return;
     const side = tokenId === w.window.tokenUp ? 'UP'
       : tokenId === w.window.tokenDown ? 'DOWN' : null;
     if (!side) return;
     const previous = this._quotesByToken.get(tokenId) || emptyQuote();
+    const now = Number(observedAt);
+    const hasBid = !!update && Object.prototype.hasOwnProperty.call(update, 'bid');
+    const hasAsk = !!update && Object.prototype.hasOwnProperty.call(update, 'ask');
     const next = {
-      bid: update && Object.prototype.hasOwnProperty.call(update, 'bid') ? update.bid : previous.bid,
-      ask: update && Object.prototype.hasOwnProperty.call(update, 'ask') ? update.ask : previous.ask,
+      bid: hasBid ? update.bid : previous.bid,
+      ask: hasAsk ? update.ask : previous.ask,
+      bidAt: hasBid ? now : previous.bidAt,
+      askAt: hasAsk ? now : previous.askAt,
     };
     next.mid = next.bid == null || next.ask == null ? null : (next.bid + next.ask) / 2;
     this._quotesByToken.set(tokenId, next);
     if (typeof this.trader.updateQuote === 'function') this.trader.updateQuote(tokenId, next);
     const up = this._quotesByToken.get(w.window.tokenUp) || emptyQuote();
     const down = this._quotesByToken.get(w.window.tokenDown) || emptyQuote();
-    const now = Date.now();
     this.prices = { slug, ts: now, up: { ...up }, down: { ...down } };
     this._lastMarketEventAt = now;
+    this._updateClobExpiryCandidate(w, now);
     if (w.position && w.position.side === side && w.position.openShares > EPSILON) {
       const mark = next.bid == null ? next.mid : next.bid;
       if (mark != null && Number.isFinite(Number(mark))) w.position.lastClobMark = Number(mark);
@@ -276,6 +288,33 @@ class Bot {
       }
     }
     return null;
+  }
+
+  _updateClobExpiryCandidate(w, now) {
+    const position = w && w.position;
+    if (!w || !w.window || !position || position.settled || position.openShares <= EPSILON) return;
+    const closeMs = Number(position.closeTs) * 1000;
+    if (!Number.isFinite(closeMs) || now > closeMs) return;
+
+    const up = this._quotesByToken.get(w.window.tokenUp) || emptyQuote();
+    const down = this._quotesByToken.get(w.window.tokenDown) || emptyQuote();
+    if (!isFreshCLOBQuote(up, now) || !isFreshCLOBQuote(down, now)) {
+      this._clobExpiryCandidates.delete(position);
+      return;
+    }
+    const winner = clobFinalWindowWinner(up, down);
+    if (!winner) {
+      this._clobExpiryCandidates.delete(position);
+      return;
+    }
+
+    const existing = this._clobExpiryCandidates.get(position);
+    const candidate = existing && existing.side === winner
+      ? existing : { side: winner, since: now, lastAt: now };
+    candidate.lastAt = now;
+    candidate.up = { ...up };
+    candidate.down = { ...down };
+    this._clobExpiryCandidates.set(position, candidate);
   }
 
   _onCcxtError(error) {
@@ -594,6 +633,7 @@ class Bot {
     w.entryTaken = true;
     w.entryCount += 1;
     w.status = 'position_open';
+    this._updateClobExpiryCandidate(w, Date.now());
     this.stats.signalEntries += 1;
     this.stats.estimatedFees += fee;
     this._recordEquity();
@@ -657,6 +697,7 @@ class Bot {
         await this._closeWindow(this.w);
       }
       let winner = this.outcomes.get(position.openTs)?.winner;
+      if (!winner && this._settlePositionAtFinalClobPrice(position, closeTime)) continue;
       const lastClobCheck = this._clobTried.get(position) || 0;
       if (!winner && now - lastClobCheck >= cfg.RESOLUTION_RETRY_MS) {
         this._clobTried.set(position, now);
@@ -694,6 +735,63 @@ class Bot {
       this._resolveTried.delete(position.openTs);
       this._clobTried.delete(position);
     }
+  }
+
+  _settlePositionAtFinalClobPrice(position, closeTime) {
+    if (!position || position.settled || position.openShares <= EPSILON) return false;
+    const candidate = this._clobExpiryCandidates.get(position);
+    if (!candidate) return false;
+    const quotesFreshAtClose = [candidate.up, candidate.down].every((item) =>
+      [item.bidAt, item.askAt].every((ts) => Number.isFinite(Number(ts))
+        && Number(ts) <= closeTime && Number(ts) >= closeTime - cfg.PRICE_STALE_MS));
+    if (candidate.since > closeTime - cfg.CLOB_FINAL_CONFIRMATION_MS
+      || candidate.lastAt > closeTime || !quotesFreshAtClose) {
+      this._clobExpiryCandidates.delete(position);
+      return false;
+    }
+    const winner = clobFinalWindowWinner(candidate.up, candidate.down);
+    if (!winner || winner !== candidate.side) {
+      this._clobExpiryCandidates.delete(position);
+      return false;
+    }
+
+    const upPrice = validCLOBPrice(candidate.up.mid);
+    const downPrice = validCLOBPrice(candidate.down.mid);
+    const winningPrice = winner === 'UP' ? upPrice : downPrice;
+    const remainingShares = position.openShares;
+    const payout = winner === position.side ? remainingShares : 0;
+    if (this.cash != null) this.cash += payout;
+    position.exitProceeds += payout;
+    position.openShares = 0;
+    position.resolutionPayout = payout;
+    position.clobThresholdPrice = winningPrice;
+    position.clobSettlementBasis = 'FINAL_2S';
+    this._clobExpiryCandidates.delete(position);
+    this._clobTried.delete(position);
+    this._resolveTried.delete(position.openTs);
+    const window = this.w && this.w.openTs === position.openTs && this.w.position === position
+      ? this.w : null;
+    if (window) {
+      window.position = null;
+      window.status = window.closed ? 'window_closed' : 'trade_taken';
+    }
+    this._push({
+      event: 'CLOB_FINAL_WINDOW_SETTLEMENT',
+      slug: position.slug,
+      side: position.side,
+      winner,
+      upPrice: round(upPrice, 4),
+      downPrice: round(downPrice, 4),
+      shares: round(remainingShares, 4),
+      payout: round(payout, 2),
+      note: 'Paired UP/DOWN CLOB midpoints met the $'
+        + cfg.CLOB_FINAL_WIN_PRICE.toFixed(2) + '/$'
+        + cfg.CLOB_FINAL_LOSS_PRICE.toFixed(2)
+        + ' rule through the final ' + (cfg.CLOB_FINAL_CONFIRMATION_MS / 1000)
+        + ' seconds; ' + winner + ' is counted at $1.00 per share and the opposite side at $0.00.',
+    });
+    this._finalizePosition(position, winner === position.side ? 'WIN' : 'LOSS', 'CLOB_FINAL_2S', winner);
+    return true;
   }
 
   _settlePositionAtClobPrice(position, midpoint, bestBid) {
@@ -738,6 +836,7 @@ class Bot {
         + '; demo settlement counts ' + round(remainingShares, 4) + ' remaining shares at $'
         + (won ? '1.00' : '0.00') + ' each.',
     });
+    this._clobExpiryCandidates.delete(position);
     this._finalizePosition(position, won ? 'WIN' : 'LOSS', 'CLOB_THRESHOLD', winner);
     return true;
   }
@@ -752,6 +851,7 @@ class Bot {
 
   _finalizePosition(position, outcome, reason, winner = null) {
     if (position.settled) return;
+    this._clobExpiryCandidates.delete(position);
     position.settled = true;
     position.status = 'closed';
     const totalCost = position.entryNotional + position.entryFee + position.exitFees;
@@ -866,6 +966,9 @@ class Bot {
         maxEntriesPerWindow: 1,
         clobWinSettlementPrice: cfg.CLOB_WIN_SETTLEMENT_PRICE,
         clobLossSettlementPrice: cfg.CLOB_LOSS_SETTLEMENT_PRICE,
+        clobFinalWinPrice: cfg.CLOB_FINAL_WIN_PRICE,
+        clobFinalLossPrice: cfg.CLOB_FINAL_LOSS_PRICE,
+        clobFinalConfirmationMs: cfg.CLOB_FINAL_CONFIRMATION_MS,
         pollMs: this.ccxt.pollMs,
         exchange: this.ccxt.exchange,
         symbol: this.ccxt.symbol,
@@ -897,7 +1000,30 @@ function makeWindowState(slug, openTs) {
   };
 }
 
-function emptyQuote() { return { bid: null, ask: null, mid: null }; }
+function emptyQuote() {
+  return { bid: null, ask: null, mid: null, bidAt: null, askAt: null };
+}
+
+function validCLOBPrice(value) {
+  if (value == null || value === '') return null;
+  const price = Number(value);
+  return Number.isFinite(price) && price >= 0 && price <= 1 ? price : null;
+}
+
+function isFreshCLOBQuote(value, now) {
+  return !!value && validCLOBPrice(value.mid) != null
+    && [value.bidAt, value.askAt].every((ts) => Number.isFinite(Number(ts))
+      && now - Number(ts) >= 0 && now - Number(ts) <= cfg.PRICE_STALE_MS);
+}
+
+function clobFinalWindowWinner(up, down) {
+  const upPrice = validCLOBPrice(up && up.mid);
+  const downPrice = validCLOBPrice(down && down.mid);
+  if (upPrice == null || downPrice == null) return null;
+  if (upPrice >= cfg.CLOB_FINAL_WIN_PRICE && downPrice <= cfg.CLOB_FINAL_LOSS_PRICE) return 'UP';
+  if (downPrice >= cfg.CLOB_FINAL_WIN_PRICE && upPrice <= cfg.CLOB_FINAL_LOSS_PRICE) return 'DOWN';
+  return null;
+}
 
 function sortedLevels(levels, order) {
   return (levels || [])
