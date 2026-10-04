@@ -60,7 +60,7 @@
         <div class="account-cell"><span>Fixed order size</span><b id="fixedShares">500 shares</b></div>
         <div class="account-cell"><span>Demo fees so far</span><b id="fees">—</b></div>
       </div>
-      <div class="account-note" id="methodNote">Completed one-minute BTC candles drive the entry and exit patterns. Every candle sequence resets at the start of each five-minute window. Demo-only simulated fills and marks are not live execution.</div>
+      <div class="account-note" id="methodNote">Completed one-minute BTC candles drive entries only. Open positions are held until settlement after the five-minute window closes. Demo-only simulated fills and marks are not live execution.</div>
     </article>
   </section>
   <section class="panel table-panel">
@@ -137,8 +137,8 @@ function render(s){
   $('forecastSide').className='forecast-side'+(side?' '+side.toLowerCase():'');
   status($('forecastStatus'),positionSide?'Position '+positionSide:pattern?action+' '+side:'Waiting for pattern',positionSide?'good':pattern?'good':'warn');
   setText('forecastDescription',pattern
-    ? 'Completed one-minute pattern '+pattern+' signals '+action+' '+side+'. Entries are limited to one 500-share order per window; exits only close the matching side.'
-    : 'Waiting for completed one-minute candles. RG/RRG buys UP; GR/GGR buys DOWN. Exit patterns close only the matching open side.');
+    ? 'Completed one-minute pattern '+pattern+' signals '+action+' '+side+'. Entries are limited to one 500-share order per window; there are no pattern-based sell orders.'
+    : 'Waiting for completed one-minute candles. RG/RRG buys UP; GR/GGR buys DOWN. No candle pattern triggers a sell.');
   setText('windowTradeCount',(w.entryCount||0)+' / 1 entries · fixed 500 shares');
   const prices=s.prices||{};const up=prices.up||{},down=prices.down||{},lastPrice=(s.priceSeries||[]).slice(-1)[0]||{};
   setText('upAsk',contract(up.ask));setText('upBid',contract(up.bid));setText('upAvg',contract(lastPrice.avgUp));setText('downAsk',contract(down.ask));setText('downBid',contract(down.bid));setText('downAvg',contract(lastPrice.avgDown));
@@ -150,7 +150,7 @@ function render(s){
   document.title='BTC Candle Patterns · Demo Trader';const brand=document.querySelector('.brandname');if(brand)brand.textContent='BTC Candle Pattern Trader';
   const eyebrow=document.querySelector('.forecast-box .eyebrow');if(eyebrow)eyebrow.textContent='Completed candle pattern';
   const legend=document.querySelector('.charts article:first-child .legend');if(legend){const items=legend.querySelectorAll('span');if(items[2])items[2].style.display='none';if(items[3])items[3].style.display='none'}
-  const method=$('methodNote');if(method)method.textContent='Completed one-minute BTC candles are read from the start of each five-minute window. RG/RRG buys UP; GR/GGR buys DOWN; RGR/RRGR sells an open UP position; GRG/GGRG sells an open DOWN position. Dojis are neutral. A sell never opens the opposite side, and the bot does not re-enter after its one 500-share entry. Demo-only simulated fills and marks are not live execution.';
+  const method=$('methodNote');if(method)method.textContent='Completed one-minute BTC candles are read from the start of each five-minute window. RG/RRG buys UP; GR/GGR buys DOWN. Dojis are neutral. No candle pattern submits a sell; remaining shares are held until post-close CLOB threshold settlement or official resolution. Demo-only simulated fills and marks are not live execution.';
   const exposureNote=document.querySelector('#openPositions + .bottom-note span');if(exposureNote)exposureNote.textContent='Each entry targets exactly 500 shares; only one entry is allowed per five-minute window.';
   setText('openCount',pending.length+' open position'+(pending.length===1?'':'s'));
   if(!pending.length){$('openPositions').innerHTML='<div class="empty">No open positions</div>'}else{

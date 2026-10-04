@@ -4,16 +4,14 @@ The demo-only bot reads BTC spot from a public CCXT feed and the UP/DOWN Polymar
 
 ## Trading rules
 
-| Completed candle sequence | Action |
+| Completed entry sequence | Action |
 | --- | --- |
 | `RG` or `RRG` | Buy UP |
 | `GR` or `GGR` | Buy DOWN |
-| `RGR` or `RRGR` | Sell an existing UP position |
-| `GRG` or `GGRG` | Sell an existing DOWN position |
 
-`RR` by itself does not open a position. A sell closes only the matching open side; it does not open the opposite side. The bot does not reverse or re-enter after an exit. It allows at most one filled entry per window, with each entry targeting exactly 500 shares. There is no strategy-level contract-price band; available demo cash and simulated fills still apply.
+`RR` by itself does not open a position. Only the four listed sequences can enter. The bot never sells in response to a candle pattern; an open position remains held through the window until post-close settlement or official resolution. It allows at most one filled entry per window, with each entry targeting exactly 500 shares. There is no strategy-level contract-price band; available demo cash and simulated fills still apply.
 
-Entries and exits use demo marketable FAK orders against the visible outcome book. If a sell only partially fills, the remainder stays open and the exit signal is retried while the window is active. Remaining shares at the five-minute close wait for settlement or resolution. After close, a held-side CLOB midpoint at or above $0.99 or best bid at or below $0.01 may be counted as a demo threshold settlement; otherwise the bot checks Polymarket's official resolution. Threshold settlement is not used as an in-window substitute for the candle-pattern exit.
+Entries use demo marketable FAK orders against the visible outcome book. During the active window, CLOB prices only mark open positions; they do not trigger sells or settlement. After close, a held-side CLOB midpoint at or above $0.99 or best bid at or below $0.01 may be counted as a demo threshold settlement; otherwise the bot checks Polymarket's official resolution.
 
 ## Dashboard and operation
 
@@ -23,4 +21,4 @@ Coinbase BTC/USD is the default feed. Set `CCXT_EXCHANGE` and, if needed, `CCXT_
 
 The strategy is strictly demo-only. `LIVE_TRADING=true` is refused before wallet authentication, and the active bot uses only DemoTrader. The $10,000 paper balance and trade history reset when the process restarts. Simulated fills, fees, and P&L are behavior checks—not evidence of live execution or profitability.
 
-Run `npm test` to verify candle classification, exact entry/exit patterns, timestamped candle aggregation, order handling, settlement, and the live guard. For startup and dashboard checks, follow [DEMO_RUNBOOK.md](DEMO_RUNBOOK.md).
+Run `npm test` to verify candle classification, exact entry patterns, hold-through-window behavior, timestamped candle aggregation, settlement, and the live guard. For startup and dashboard checks, follow [DEMO_RUNBOOK.md](DEMO_RUNBOOK.md).

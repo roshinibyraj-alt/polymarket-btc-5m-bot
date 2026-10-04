@@ -157,7 +157,7 @@ class Bot {
         w.status = 'waiting_for_first_candle';
         this._push({
           event: 'WINDOW_READY', slug: w.slug,
-          note: 'BTC 5-minute market active; collecting completed one-minute candles for the entry and exit patterns.',
+          note: 'BTC 5-minute market active; collecting completed one-minute candles for entry patterns.',
         });
         await this._ensureMarketFeed(w);
       } else {
@@ -273,9 +273,6 @@ class Bot {
     if (w.activeSignal && w.activeSignal.side === side) {
       if (w.activeSignal.action === 'BUY' && !w.position) {
         return this._attemptPatternEntry(w, w.activeSignal);
-      }
-      if (w.activeSignal.action === 'SELL' && w.position && w.position.side === side) {
-        return this._attemptPatternExit(w, w.activeSignal);
       }
     }
     return null;
@@ -456,11 +453,6 @@ class Bot {
           + '); sequence is ' + w.candleSequence + '.',
     });
 
-    if (w.activeSignal && w.activeSignal.action === 'SELL'
-      && w.position && w.position.openShares > EPSILON) {
-      w.status = 'exit_pending';
-      return;
-    }
     if (match.action === 'WAIT') {
       w.activeSignal = null;
       this.activeSignal = null;
@@ -486,27 +478,7 @@ class Bot {
       if (!this.strategyBlocked) return this._attemptPatternEntry(w, signal);
       return;
     }
-    if (!w.position || w.position.openShares <= EPSILON || w.position.side !== signal.side) {
-      w.activeSignal = null;
-      this.activeSignal = null;
-      w.status = w.entryCount > 0 ? 'trade_taken' : 'waiting_for_pattern';
-      this._push({
-        event: 'CANDLE_PATTERN_EXIT_NO_POSITION', slug: w.slug,
-        side: signal.side, pattern: signal.pattern,
-        note: 'Pattern ' + signal.pattern + ' signals SELL ' + signal.side
-          + ', but there is no matching open position.',
-      });
-      return;
-    }
-    w.activeSignal = signal;
-    this.activeSignal = signal;
-    w.status = 'pattern_exit_signal';
-    this._push({
-      event: 'CANDLE_PATTERN_SELL_SIGNAL', slug: w.slug,
-      side: signal.side, pattern: signal.pattern, sequence: signal.sequence,
-      note: 'Completed one-minute pattern ' + signal.pattern + ' signals SELL ' + signal.side + '.',
-    });
-    if (!this.strategyBlocked) return this._attemptPatternExit(w, signal);
+    return;
   }
 
   async _attemptPatternEntry(w, signal = w && w.activeSignal) {
@@ -530,30 +502,6 @@ class Bot {
       return await this._buyPosition(w, currentSignal);
     } catch (error) {
       this._push({ event: 'CANDLE_BUY_ERROR', slug: w.slug, side: signal.side, note: error.message });
-      return false;
-    } finally {
-      w.tradeInFlight = false;
-      this._signalBusy = false;
-    }
-  }
-
-  async _attemptPatternExit(w, signal = w && w.activeSignal) {
-    if (this.strategyBlocked || !w || this.w !== w || !w.window || w.closed || w.closing
-      || !signal || signal.action !== 'SELL' || !w.position
-      || w.position.side !== signal.side || w.position.openShares <= EPSILON) return false;
-    const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
-    if (Date.now() >= closeTs * 1000) return false;
-    if (this._signalBusy) return false;
-    this._signalBusy = true;
-    w.tradeInFlight = true;
-    try {
-      const currentSignal = w.activeSignal || signal;
-      if (this.w !== w || w.closed || w.closing || !w.window
-        || !w.position || w.position.side !== currentSignal.side
-        || currentSignal.action !== 'SELL' || currentSignal.pattern !== signal.pattern) return false;
-      return await this._sellPosition(w, currentSignal);
-    } catch (error) {
-      this._push({ event: 'CANDLE_SELL_ERROR', slug: w.slug, side: signal.side, note: error.message });
       return false;
     } finally {
       w.tradeInFlight = false;
@@ -638,7 +586,6 @@ class Bot {
       entryPattern: signal.pattern,
       entrySequence: signal.sequence,
       entryMinuteIndex: signal.minuteIndex,
-      exitPattern: null,
       settled: false, settlementTimedOut: false,
     };
     this.cash -= position.cost;
@@ -663,74 +610,6 @@ class Bot {
           : ' All target shares swept from visible asks.')
         + ' Estimated taker fee $' + fee.toFixed(5) + '.',
     });
-    return true;
-  }
-
-  async _sellPosition(w, signal) {
-    const position = w.position;
-    if (!position || position.openShares <= EPSILON || position.side !== signal.side) return false;
-    const tokenId = position.tokenId;
-    const book = await this.trader.getOrderBook(tokenId);
-    const closeTs = Number(w.window.closeTs) || w.openTs + WINDOW_SECONDS;
-    if (this.w !== w || w.closed || w.closing || !w.position
-      || w.position !== position || w.activeSignal !== signal
-      || Date.now() >= closeTs * 1000) return false;
-    const bids = sortedLevels(book && book.bids, 'desc');
-    if (!bids.length) {
-      w.status = 'waiting_for_exit_book';
-      this._warnOnce('pattern-exit-no-book-' + w.slug + '-' + signal.pattern, {
-        event: 'CANDLE_PATTERN_SELL_NO_BOOK', slug: w.slug,
-        side: signal.side, pattern: signal.pattern,
-        note: 'Pattern ' + signal.pattern + ' signals SELL ' + signal.side
-          + ', but no executable bid is available; waiting for the book.',
-      });
-      return false;
-    }
-    const targetShares = position.openShares;
-    const order = await this.trader.placeFakMarketOrder(tokenId, 'SELL', targetShares, {
-      targetShares, orderBook: book,
-    });
-    const soldShares = Math.min(targetShares, positive(order && order.raw && order.raw.makingAmount) || 0);
-    const proceeds = positive(order && order.raw && order.raw.takingAmount) || 0;
-    if (soldShares <= EPSILON || proceeds <= 0) {
-      w.status = 'waiting_for_exit_book';
-      this._push({
-        event: 'CANDLE_PATTERN_SELL_UNFILLED', slug: w.slug,
-        side: signal.side, pattern: signal.pattern,
-        note: 'Pattern ' + signal.pattern + ' signaled an exit, but the demo sell did not fill.',
-      });
-      return false;
-    }
-    const averagePrice = proceeds / soldShares;
-    const fee = estimateTakerFee(soldShares, averagePrice);
-    this.cash += proceeds - fee;
-    position.exitProceeds += proceeds;
-    position.exitFees += fee;
-    position.openShares = Math.max(0, position.openShares - soldShares);
-    position.exitPattern = signal.pattern;
-    position.lastClobMark = bids[0].price;
-    this.stats.estimatedFees += fee;
-    this._push({
-      event: 'CANDLE_PATTERN_SELL_FILLED', slug: w.slug,
-      side: signal.side, pattern: signal.pattern,
-      shares: round(soldShares, 4), price: round(averagePrice, 4), fee: round(fee, 5),
-      note: 'Demo marketable SELL closed ' + round(soldShares, 4) + ' ' + signal.side
-        + ' shares at average $' + averagePrice.toFixed(4)
-        + ' on the completed one-minute pattern ' + signal.pattern + '.',
-    });
-    if (position.openShares <= EPSILON) {
-      position.openShares = 0;
-      position.status = 'closed';
-      w.position = null;
-      w.activeSignal = null;
-      this.activeSignal = null;
-      w.status = 'trade_taken';
-      this._finalizePosition(position, 'CLOSED', 'CANDLE_PATTERN_EXIT');
-    } else {
-      position.status = 'position_open';
-      w.status = 'exit_pending';
-      this._recordEquity();
-    }
     return true;
   }
 
@@ -886,7 +765,6 @@ class Bot {
       shares: position.shares, entryPrice: round(position.entryPrice, 4),
       exitPrice: position.shares > 0 ? round(position.exitProceeds / position.shares, 4) : null,
       entryPattern: position.entryPattern || null,
-      exitPattern: position.exitPattern || null,
       entryNotional: round(position.entryNotional, 4),
       exitProceeds: round(position.exitProceeds, 4),
       fee: round(position.entryFee + position.exitFees, 4),

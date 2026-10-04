@@ -25,11 +25,12 @@ test('RR alone and unrelated sequences never trigger an entry', () => {
   assert.equal(matchMinutePattern('RNG').action, 'WAIT');
 });
 
-test('exit patterns only signal SELL for their matching side', () => {
-  assert.deepEqual(matchMinutePattern('RGR'), { action: 'SELL', side: 'UP', pattern: 'RGR', sequence: 'RGR' });
-  assert.deepEqual(matchMinutePattern('RRGR'), { action: 'SELL', side: 'UP', pattern: 'RRGR', sequence: 'RRGR' });
-  assert.deepEqual(matchMinutePattern('GRG'), { action: 'SELL', side: 'DOWN', pattern: 'GRG', sequence: 'GRG' });
-  assert.deepEqual(matchMinutePattern('GGRG'), { action: 'SELL', side: 'DOWN', pattern: 'GGRG', sequence: 'GGRG' });
+test('exit-shaped sequences are not sell signals or entry patterns', () => {
+  for (const sequence of ['RGR', 'RRGR', 'GRG', 'GGRG']) {
+    assert.deepEqual(matchMinutePattern(sequence), {
+      action: 'WAIT', side: null, pattern: null, sequence,
+    });
+  }
 });
 
 test('strategy config is aligned to one-minute BTC candles and fixed sizing', () => {

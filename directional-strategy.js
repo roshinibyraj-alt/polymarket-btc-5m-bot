@@ -7,13 +7,6 @@ const ENTRY_PATTERNS = Object.freeze({
   GGR: 'DOWN',
 });
 
-const EXIT_PATTERNS = Object.freeze({
-  RGR: 'UP',
-  RRGR: 'UP',
-  GRG: 'DOWN',
-  GGRG: 'DOWN',
-});
-
 function candleColor(open, close) {
   if (open == null || open === '' || close == null || close === '') return 'N';
   const openPrice = Number(open);
@@ -29,10 +22,7 @@ function matchMinutePattern(colors) {
   if (Object.prototype.hasOwnProperty.call(ENTRY_PATTERNS, sequence)) {
     return { action: 'BUY', side: ENTRY_PATTERNS[sequence], pattern: sequence, sequence };
   }
-  if (Object.prototype.hasOwnProperty.call(EXIT_PATTERNS, sequence)) {
-    return { action: 'SELL', side: EXIT_PATTERNS[sequence], pattern: sequence, sequence };
-  }
   return { action: 'WAIT', side: null, pattern: null, sequence };
 }
 
-module.exports = { candleColor, matchMinutePattern, ENTRY_PATTERNS, EXIT_PATTERNS };
+module.exports = { candleColor, matchMinutePattern, ENTRY_PATTERNS };

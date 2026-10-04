@@ -130,64 +130,32 @@ test('GR buys DOWN and GGR also buys DOWN', async (t) => {
   }
 });
 
-test('RGR exits an open UP position with a SELL and never reverses or re-enters', async () => {
-  const { bot, trader } = makeBot();
-  await feedCandles(bot, ['R', 'G']);
-  assert.equal(bot.w.position.side, 'UP');
-
-  await feedCandle(bot, 2, 'R', 85000);
-  assert.equal(bot.w.candleSequence, 'RGR');
-  assert.equal(bot.w.position, null);
-  assert.equal(bot.pending.length, 0);
-  assert.equal(bot.trades[0].outcome, 'CLOSED');
-  assert.equal(bot.trades[0].reason, 'CANDLE_PATTERN_EXIT');
-  assert.equal(bot.trades[0].entryPattern, 'RG');
-  assert.equal(bot.trades[0].exitPattern, 'RGR');
-
-  await feedCandle(bot, 3, 'G', 84999);
-  assert.equal(bot.w.entryCount, 1);
-  assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [
-    ['up', 'BUY'], ['up', 'SELL'],
-  ]);
-});
-
-test('a partial pattern SELL leaves the remainder open and retries on the next quote', async () => {
-  const { bot, trader } = makeBot();
-  await feedCandles(bot, ['R', 'G']);
-  trader.books.up.bids = [{ price: 0.29, size: 250 }];
-  await feedCandle(bot, 2, 'R', 85000);
-
-  assert.equal(bot.w.position.openShares, 250);
-  assert.equal(bot.w.status, 'exit_pending');
-  assert.equal(bot.w.activeSignal.action, 'SELL');
-  await bot._onQuote(bot.w.slug, 'up', { bid: 0.29, ask: 0.30 });
-  assert.equal(bot.w.position, null);
-  assert.equal(bot.trades[0].exitPattern, 'RGR');
-  assert.deepEqual(trader.calls.map((call) => call.side), ['BUY', 'SELL', 'SELL']);
-});
-
-test('RRGR exits the UP position that was opened by its RRG prefix', async () => {
-  const { bot, trader } = makeBot();
-  await feedCandles(bot, ['R', 'R', 'G']);
-  assert.equal(bot.w.position.side, 'UP');
-  assert.equal(bot.w.position.entryPattern, 'RRG');
-
-  await feedCandle(bot, 3, 'R', 85000);
-  assert.equal(bot.w.candleSequence, 'RRGR');
-  assert.equal(bot.w.position, null);
-  assert.deepEqual(trader.calls.map((call) => call.side), ['BUY', 'SELL']);
-});
-
-test('GRG and GGRG exit only an open DOWN position', async (t) => {
-  for (const colors of [['G', 'R', 'G'], ['G', 'G', 'R', 'G']]) {
-    await t.test(colors.join(''), async () => {
+test('exit-shaped sequences never SELL; the entry position stays open for settlement', async (t) => {
+  const scenarios = [
+    { entry: ['R', 'G'], followup: ['R'], pattern: 'RGR', side: 'UP', tokenId: 'up' },
+    { entry: ['R', 'R', 'G'], followup: ['R'], pattern: 'RRGR', side: 'UP', tokenId: 'up' },
+    { entry: ['G', 'R'], followup: ['G'], pattern: 'GRG', side: 'DOWN', tokenId: 'down' },
+    { entry: ['G', 'G', 'R'], followup: ['G'], pattern: 'GGRG', side: 'DOWN', tokenId: 'down' },
+  ];
+  for (const scenario of scenarios) {
+    await t.test(scenario.pattern, async () => {
       const { bot, trader } = makeBot();
-      await feedCandles(bot, colors);
-      assert.equal(bot.w.position, null);
-      assert.equal(bot.trades[0].side, 'DOWN');
-      assert.equal(bot.trades[0].exitPattern, colors.join(''));
+      await feedCandles(bot, scenario.entry);
+      const position = bot.w.position;
+      assert.equal(position.side, scenario.side);
+
+      for (let i = 0; i < scenario.followup.length; i += 1) {
+        await feedCandle(bot, scenario.entry.length + i, scenario.followup[i]);
+      }
+
+      assert.equal(bot.w.candleSequence, scenario.pattern);
+      assert.equal(bot.w.lastSignal.action, 'WAIT');
+      assert.equal(bot.w.position, position);
+      assert.equal(position.openShares, 500);
+      assert.equal(bot.pending.length, 1);
+      assert.equal(bot.trades.length, 0);
       assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [
-        ['down', 'BUY'], ['down', 'SELL'],
+        [scenario.tokenId, 'BUY'],
       ]);
     });
   }
@@ -217,26 +185,6 @@ test('missing minute data and dojis are neutral and cannot complete a pattern', 
   assert.equal(minuteMs, 60_000);
 });
 
-test('an exit signal for the other side cannot sell a position', async () => {
-  const { bot, trader } = makeBot();
-  bot.w.entryCount = 1;
-  bot.w.position = { side: 'DOWN', openShares: 500 };
-  await bot._completeMinuteCandle(bot.w, {
-    index: 0, startMs: 0, endMs: 60_000, open: 1, high: 2, low: 1, close: 2,
-    sampleCount: 2, color: 'R',
-  });
-  await bot._completeMinuteCandle(bot.w, {
-    index: 1, startMs: 60_000, endMs: 120_000, open: 2, high: 3, low: 2, close: 3,
-    sampleCount: 2, color: 'G',
-  });
-  await bot._completeMinuteCandle(bot.w, {
-    index: 2, startMs: 120_000, endMs: 180_000, open: 3, high: 3, low: 2, close: 2,
-    sampleCount: 2, color: 'R',
-  });
-  assert.equal(bot.w.position.side, 'DOWN');
-  assert.equal(trader.calls.length, 0);
-});
-
 test('a Polymarket quote alone cannot enter without a completed candle pattern', async () => {
   const { bot, trader } = makeBot();
   await bot._onQuote(bot.w.slug, 'up', { bid: 0.29, ask: 0.30 });
@@ -261,7 +209,7 @@ test('pattern entries have no strategy price band and still target fixed shares'
   assert.equal(low.bot.w.position.shares, 500);
 });
 
-test('active-window CLOB marks do not replace the candle-pattern exit', async () => {
+test('active-window CLOB prices only mark a position; they do not settle or sell it', async () => {
   const { bot, trader } = makeBot();
   await feedCandles(bot, ['R', 'G']);
   const position = bot.w.position;
@@ -292,6 +240,7 @@ test('after window close, CLOB threshold settlement remains available', async ()
   assert.equal(bot.trades[0].reason, 'CLOB_THRESHOLD');
   assert.equal(bot.trades[0].winner, 'UP');
   assert.equal(bot.trades[0].exitProceeds, 500);
+  assert.deepEqual(trader.calls.map((call) => call.side), ['BUY']);
   assert.ok(Math.abs(bot.cash - (cfg.DEMO_CAPITAL - cost + 500)) < 1e-8);
 });
 
@@ -312,10 +261,11 @@ test('held-side best bid at $0.01 settles the loss after window close', async ()
   assert.equal(bot.trades[0].reason, 'CLOB_THRESHOLD');
   assert.equal(bot.trades[0].winner, 'DOWN');
   assert.equal(bot.trades[0].exitProceeds, 0);
+  assert.deepEqual(trader.calls.map((call) => call.side), ['BUY']);
   assert.equal(bot.cash, cashAfterEntry);
 });
 
-test('closed trade accounting reconciles to equity and total P&L', async () => {
+test('open-position accounting reconciles to equity and total P&L', async () => {
   const { bot } = makeBot();
   await feedCandles(bot, ['R', 'G']);
   await feedCandle(bot, 2, 'R', 85000);
