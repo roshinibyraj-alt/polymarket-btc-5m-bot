@@ -146,6 +146,49 @@ test('retest setup retries when boundary reference data arrives after an invalid
   assert.ok(bot.w.retestState.atr > 0);
 });
 
+test('signal ask above 0.80 waits for a pullback to 0.65 before buying', async () => {
+  const { bot, trader } = makeBot();
+  const signal = { action: 'BUY', side: 'UP', pattern: 'LOWER_RETEST', sequence: 'RG' };
+  bot.w.activeSignal = signal;
+  trader.books.up.asks = [{ price: 0.81, size: 1000 }];
+  assert.equal(await bot._attemptPatternEntry(bot.w, signal), false);
+  assert.equal(bot.w.position, null);
+  assert.equal(bot.w.status, 'waiting_for_signal_price_pullback');
+
+  trader.books.up.asks = [{ price: 0.66, size: 1000 }];
+  assert.equal(await bot._attemptPatternEntry(bot.w, signal), false);
+  assert.equal(bot.w.position, null);
+  trader.books.up.asks = [{ price: 0.65, size: 1000 }];
+  assert.equal(await bot._attemptPatternEntry(bot.w, signal), true);
+  assert.equal(bot.w.position.entryPrice, 0.65);
+});
+
+test('entries above 0.60 sell when the held-side bid reaches 0.30', async () => {
+  const { bot, trader } = makeBot();
+  const signal = { action: 'BUY', side: 'UP', pattern: 'LOWER_RETEST', sequence: 'RG' };
+  bot.w.activeSignal = signal;
+  trader.books.up.asks = [{ price: 0.65, size: 1000 }];
+  trader.books.up.bids = [{ price: 0.30, size: 1000 }];
+  assert.equal(await bot._attemptPatternEntry(bot.w, signal), true);
+  const position = bot.w.position;
+  assert.equal(await bot._attemptStopLoss(bot.w, position), true);
+  assert.equal(bot.w.position, null);
+  assert.equal(position.openShares, 0);
+  assert.equal(bot.trades.at(-1).reason, 'STOP_LOSS');
+  assert.deepEqual(trader.calls.map((call) => call.side), ['BUY', 'SELL']);
+});
+
+test('entries at or below 0.60 do not use the high-entry stop loss', async () => {
+  const { bot, trader } = makeBot();
+  const signal = { action: 'BUY', side: 'UP', pattern: 'LOWER_RETEST', sequence: 'RG' };
+  bot.w.activeSignal = signal;
+  trader.books.up.asks = [{ price: 0.60, size: 1000 }];
+  trader.books.up.bids = [{ price: 0.30, size: 1000 }];
+  assert.equal(await bot._attemptPatternEntry(bot.w, signal), true);
+  assert.equal(await bot._attemptStopLoss(bot.w, bot.w.position), false);
+  assert.deepEqual(trader.calls.map((call) => call.side), ['BUY']);
+});
+
 test('completed RG candles buy UP once for exactly 500 shares', async () => {
   const { bot, trader } = makeBot();
   await feedCandles(bot, ['R', 'G']);

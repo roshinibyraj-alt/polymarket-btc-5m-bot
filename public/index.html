@@ -140,7 +140,7 @@ function render(s){
   $('forecastSide').className='forecast-side'+(side?' '+side.toLowerCase():'');
   status($('forecastStatus'),positionSide?'Position '+positionSide:signalLabel?action+' '+side:phase,positionSide?'good':signalLabel?'good':'warn');
   setText('forecastDescription',signalLabel
-    ? signalLabel+' confirmed at '+btcMoney(retest.referencePrice||signal.referencePrice)+'. One 500-share '+side+' entry; positions remain held through settlement.'
+    ? signalLabel+' confirmed at '+btcMoney(retest.referencePrice||signal.referencePrice)+'. One 500-share '+side+' entry; ask >$0.80 waits for $0.65, and entries >$0.60 stop at a $0.30 bid.'
     : retest.referencePrice&&retest.atr
       ? 'Reference '+btcMoney(retest.referencePrice)+' · ATR(14) '+btcMoney(retest.atr)+' · threshold '+btcMoney(retest.threshold)+'. Waiting for an excursion and return.'
       : 'Warming up ATR(14) from completed one-minute candles and waiting for a fresh previous-window close.');

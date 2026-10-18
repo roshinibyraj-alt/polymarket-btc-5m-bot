@@ -11,6 +11,10 @@ const { estimateTakerFee } = require('./strategy');
 
 const EPSILON = 1e-8;
 const MAX_LOG = 300;
+const HIGH_ENTRY_STOP_THRESHOLD = 0.60;
+const HIGH_ENTRY_STOP_BID = 0.30;
+const SIGNAL_ASK_PULLBACK_TRIGGER = 0.80;
+const SIGNAL_ASK_PULLBACK_TARGET = 0.65;
 
 class Bot {
   constructor(trader, opts = {}) {
@@ -265,6 +269,10 @@ class Bot {
       const mark = next.bid == null ? next.mid : next.bid;
       if (mark != null && Number.isFinite(Number(mark))) w.position.lastClobMark = Number(mark);
       this._recordEquity();
+      if (next.bid != null && next.bid <= HIGH_ENTRY_STOP_BID
+        && w.position.entryPrice > HIGH_ENTRY_STOP_THRESHOLD) {
+        void this._attemptStopLoss(w, w.position);
+      }
     }
     if (up.ask != null && down.ask != null) {
       if (this._seriesSlug !== slug) { this._seriesSlug = slug; this.priceSeries = []; }
@@ -574,6 +582,26 @@ class Bot {
       });
       return false;
     }
+    if (bestAsk > SIGNAL_ASK_PULLBACK_TRIGGER) {
+      if (!signal.waitingForAskPullback) signal.askPullbackLogged = false;
+      signal.waitingForAskPullback = true;
+    }
+    if (signal.waitingForAskPullback && bestAsk > SIGNAL_ASK_PULLBACK_TARGET) {
+      if (!signal.askPullbackLogged) {
+        this._push({
+          event: 'SIGNAL_PRICE_PULLBACK_WAIT', slug: w.slug, side,
+          price: round(bestAsk, 4),
+          note: 'Signal-side ask exceeded $0.80; waiting for it to fall to $0.65 before entry.',
+        });
+        signal.askPullbackLogged = true;
+      }
+      w.status = 'waiting_for_signal_price_pullback';
+      return false;
+    }
+    if (signal.waitingForAskPullback && bestAsk <= SIGNAL_ASK_PULLBACK_TARGET) {
+      signal.waitingForAskPullback = false;
+      signal.askPullbackLogged = false;
+    }
     const targetShares = cfg.BASE_SHARES;
     const estimatedNotional = estimateBuyNotional(asks, targetShares);
     if (estimatedNotional == null || estimatedNotional <= 0) {
@@ -658,6 +686,56 @@ class Bot {
         + ' Estimated taker fee $' + fee.toFixed(5) + '.',
     });
     return true;
+  }
+
+  async _attemptStopLoss(w, position) {
+    if (this.strategyBlocked || !w || !position || position.stopLossInFlight
+      || position.settled || position.openShares <= EPSILON
+      || position.entryPrice <= HIGH_ENTRY_STOP_THRESHOLD) return false;
+    position.stopLossInFlight = true;
+    try {
+      const book = await this.trader.getOrderBook(position.tokenId);
+      const bids = sortedLevels(book && book.bids, 'desc');
+      if (!bids.length || bids[0].price > HIGH_ENTRY_STOP_BID) return false;
+      const targetShares = position.openShares;
+      const order = await this.trader.placeFakMarketOrder(position.tokenId, 'SELL', targetShares, {
+        targetShares, orderBook: book,
+      });
+      const shares = Math.min(targetShares, positive(order?.raw?.makingAmount) || 0);
+      const proceeds = positive(order?.raw?.takingAmount) || 0;
+      if (shares <= EPSILON || proceeds <= 0) return false;
+      const exitPrice = proceeds / shares;
+      const fee = estimateTakerFee(shares, exitPrice);
+      this.cash += proceeds - fee;
+      position.exitProceeds += proceeds;
+      position.exitFees += fee;
+      position.openShares = Math.max(0, position.openShares - shares);
+      position.stopLossTriggered = true;
+      position.lastClobMark = bids[0].price;
+      this.stats.estimatedFees += fee;
+      this._push({
+        event: 'STOP_LOSS_SELL_FILLED', slug: position.slug, side: position.side,
+        price: round(exitPrice, 4), shares: round(shares, 4), fee: round(fee, 5),
+        note: 'Entry above $0.60; sold ' + round(shares, 4)
+          + ' shares after the held-side best bid reached $0.30 or lower.',
+      });
+      if (position.openShares <= EPSILON) {
+        position.openShares = 0;
+        if (this.w === w && w.position === position) w.position = null;
+        this._finalizePosition(position, 'LOSS', 'STOP_LOSS');
+        if (this.w === w) w.status = 'trade_taken';
+      }
+      this._recordEquity();
+      return true;
+    } catch (error) {
+      this._push({
+        event: 'STOP_LOSS_SELL_ERROR', slug: position.slug, side: position.side,
+        note: 'Stop-loss sell failed; it will retry on the next CLOB quote: ' + error.message,
+      });
+      return false;
+    } finally {
+      position.stopLossInFlight = false;
+    }
   }
 
   async _closeWindow(w) {
