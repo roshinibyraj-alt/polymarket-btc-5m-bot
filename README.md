@@ -1,4 +1,4 @@
-# Polymarket BTC five-minute candle-pattern strategy
+# Polymarket BTC five-minute volatility-retest strategy
 
 The demo-only bot reads BTC spot from a public CCXT feed and the UP/DOWN Polymarket order books. Within each five-minute market window, it builds timestamp-aligned one-minute BTC candles from the feed. A candle is green when its close is above its open, red when its close is below its open, and neutral when it is a doji or has too few samples. The sequence resets at the start of each five-minute window.
 
