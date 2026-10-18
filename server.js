@@ -16,7 +16,10 @@ function startServer(bot, port) {
       return;
     }
     if (pathname === '/' || pathname === '/index.html') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
       res.end(INDEX_HTML);
       return;
     }

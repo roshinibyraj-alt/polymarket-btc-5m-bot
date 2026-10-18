@@ -356,7 +356,7 @@ class Bot {
     const currentWindow = this.w;
     if (currentWindow && currentWindow.window && !currentWindow.closed && !currentWindow.closing) {
       await this._addMinuteSample(currentWindow, sampledAt, price);
-      await this._evaluateRetest(currentWindow, sampledAt, price, previousSample);
+      await this._evaluateRetest(currentWindow, sampledAt, price);
     }
     const lastInterval = previousSample ? sampledAt - previousSample.sampledAt : null;
     this.ccxt = {
@@ -382,12 +382,12 @@ class Bot {
     };
   }
 
-  async _evaluateRetest(w, sampledAt, price, previousSample) {
-    if (!w.retestState) {
+  async _evaluateRetest(w, sampledAt, price) {
+    if (!w.retestState || w.retestState.referencePrice == null || w.retestState.atr == null) {
       const openMs = w.openTs * 1000;
-      const reference = previousSample && previousSample.sampledAt < openMs
-        && openMs - previousSample.sampledAt <= cfg.CCXT_STALE_MS
-        ? previousSample.price : null;
+      const referenceSample = [...this._btcSamples].reverse().find((sample) =>
+        sample.sampledAt < openMs && openMs - sample.sampledAt <= cfg.CCXT_STALE_MS);
+      const reference = referenceSample ? referenceSample.price : null;
       const priorCandles = this._completedMinuteCandles.filter((candle) => candle.endMs <= openMs);
       const atr = calculateAtr(priorCandles, cfg.RETEST_ATR_PERIOD);
       w.retestState = createRetestState(reference, atr, cfg.RETEST_ATR_MULTIPLIER);

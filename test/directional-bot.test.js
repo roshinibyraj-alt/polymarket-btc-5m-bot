@@ -115,6 +115,37 @@ function feedClobPair(bot, observedAt, upPrice, downPrice) {
   bot._onQuote(bot.w.slug, 'down', { bid: downPrice, ask: downPrice }, observedAt);
 }
 
+test('retest setup recovers from a current-window tick racing the opening boundary', async () => {
+  const { bot } = makeBot();
+  const openMs = bot.w.openTs * 1000;
+  bot._btcSamples.push({
+    price: 85002, sampledAt: openMs + 100, receivedAt: openMs + 100,
+  });
+
+  await bot._evaluateRetest(bot.w, openMs + 200, 85000);
+
+  assert.equal(bot.w.retestState.referencePrice, 85000);
+  assert.ok(bot.w.retestState.atr > 0);
+  assert.equal(bot.w.retestState.phase, 'WAITING_FOR_MOVE');
+});
+
+test('retest setup retries when boundary reference data arrives after an invalid initialization', async () => {
+  const { bot } = makeBot();
+  const openMs = bot.w.openTs * 1000;
+  bot._btcSamples = [];
+
+  await bot._evaluateRetest(bot.w, openMs + 100, 85000);
+  assert.equal(bot.w.retestState.referencePrice, null);
+
+  bot._btcSamples.push({
+    price: 85000, sampledAt: openMs - 500, receivedAt: openMs - 500,
+  });
+  await bot._evaluateRetest(bot.w, openMs + 200, 85000);
+
+  assert.equal(bot.w.retestState.referencePrice, 85000);
+  assert.ok(bot.w.retestState.atr > 0);
+});
+
 test('completed RG candles buy UP once for exactly 500 shares', async () => {
   const { bot, trader } = makeBot();
   await feedCandles(bot, ['R', 'G']);
