@@ -6,7 +6,7 @@ const {
 } = require('./polymarket-market');
 const startMarketFeed = require('./clob-feed');
 const CcxtPriceFeed = require('./ccxt-feed');
-const { candleColor, matchMinutePattern } = require('./directional-strategy');
+const { candleColor, calculateAtr, createRetestState, updateRetestState } = require('./directional-strategy');
 const { estimateTakerFee } = require('./strategy');
 
 const EPSILON = 1e-8;
@@ -57,6 +57,7 @@ class Bot {
     this._lastMarketEventAt = 0;
     this._lastRestFetchAt = 0;
     this._btcSamples = [];
+    this._completedMinuteCandles = [];
     this.activeSignal = null;
     this._signalBusy = false;
     this._running = false;
@@ -158,7 +159,7 @@ class Bot {
         w.status = 'waiting_for_first_candle';
         this._push({
           event: 'WINDOW_READY', slug: w.slug,
-          note: 'BTC 5-minute market active; collecting completed one-minute candles for entry patterns.',
+          note: 'BTC 5-minute market active; waiting for the volatility retest setup.',
         });
         await this._ensureMarketFeed(w);
       } else {
@@ -355,6 +356,7 @@ class Bot {
     const currentWindow = this.w;
     if (currentWindow && currentWindow.window && !currentWindow.closed && !currentWindow.closing) {
       await this._addMinuteSample(currentWindow, sampledAt, price);
+      await this._evaluateRetest(currentWindow, sampledAt, price, previousSample);
     }
     const lastInterval = previousSample ? sampledAt - previousSample.sampledAt : null;
     this.ccxt = {
@@ -378,6 +380,47 @@ class Bot {
       status: 'live',
       error: null,
     };
+  }
+
+  async _evaluateRetest(w, sampledAt, price, previousSample) {
+    if (!w.retestState) {
+      const openMs = w.openTs * 1000;
+      const reference = previousSample && previousSample.sampledAt < openMs
+        && openMs - previousSample.sampledAt <= cfg.CCXT_STALE_MS
+        ? previousSample.price : null;
+      const priorCandles = this._completedMinuteCandles.filter((candle) => candle.endMs <= openMs);
+      const atr = calculateAtr(priorCandles, cfg.RETEST_ATR_PERIOD);
+      w.retestState = createRetestState(reference, atr, cfg.RETEST_ATR_MULTIPLIER);
+    }
+    const result = updateRetestState(w.retestState, price);
+    const signal = {
+      ...result,
+      pattern: result.pattern || null,
+      sequence: result.sequence || w.candleSequence,
+      ts: sampledAt,
+      referencePrice: w.retestState.referencePrice,
+      atr: w.retestState.atr,
+      threshold: w.retestState.threshold,
+      phase: w.retestState.phase,
+    };
+    w.lastSignal = signal;
+    w.lastRetestPrice = price;
+    this.ccxt = { ...this.ccxt, patternAction: signal.action, candidateSide: signal.side, lastSignal: signal };
+    if (signal.action !== 'BUY') {
+      w.status = w.position && w.position.openShares > EPSILON ? 'position_open' : 'waiting_for_retest';
+      return;
+    }
+    if (w.entryCount > 0 || (w.position && w.position.openShares > EPSILON)) return;
+    w.activeSignal = signal;
+    this.activeSignal = signal;
+    w.status = 'retest_ready';
+    this._push({
+      event: 'BTC_RETEST_BUY_SIGNAL', slug: w.slug, side: signal.side,
+      referencePrice: signal.referencePrice, atr: signal.atr, threshold: signal.threshold,
+      note: signal.pattern + ' confirmed; buying ' + signal.side + ' after a ' +
+        signal.threshold.toFixed(2) + ' volatility move and return to reference.',
+    });
+    if (!this.strategyBlocked) await this._attemptPatternEntry(w, signal);
   }
 
   async _addMinuteSample(w, sampledAt, price) {
@@ -459,24 +502,14 @@ class Bot {
       close: candle.close != null && Number.isFinite(Number(candle.close)) ? Number(candle.close) : null,
     };
     w.minuteCandles.push(completed);
+    if (completed.sampleCount >= cfg.STRATEGY_MIN_CANDLE_SAMPLES
+      && [completed.high, completed.low, completed.close].every((n) => Number.isFinite(Number(n)))) {
+      this._completedMinuteCandles.push(completed);
+      this._completedMinuteCandles = this._completedMinuteCandles.slice(-(cfg.RETEST_ATR_PERIOD + 1));
+    }
     w.candleSequence = w.minuteCandles.map((item) => item.color).join('');
     w.lastCandle = completed;
-    const match = matchMinutePattern(w.candleSequence);
-    const signal = {
-      ...match,
-      ts: completed.endMs,
-      minuteIndex: completed.index,
-      candleColor: completed.color,
-    };
-    w.lastSignal = signal;
-    this.ccxt = {
-      ...this.ccxt,
-      candleSequence: w.candleSequence,
-      lastCandleColor: completed.color,
-      patternAction: match.action,
-      candidateSide: match.side,
-      lastSignal: signal,
-    };
+    this.ccxt = { ...this.ccxt, candleSequence: w.candleSequence, lastCandleColor: completed.color };
     this._push({
       event: 'BTC_1M_CANDLE',
       slug: w.slug,
@@ -485,39 +518,13 @@ class Bot {
       open: completed.open == null ? null : round(completed.open, 2),
       close: completed.close == null ? null : round(completed.close, 2),
       sequence: w.candleSequence,
-      note: completed.color === 'N'
-        ? 'One-minute candle ' + (completed.index + 1) + ' was neutral or lacked enough BTC samples; no pattern is formed.'
+        note: completed.color === 'N'
+          ? 'One-minute candle ' + (completed.index + 1) + ' was neutral or lacked enough BTC samples.'
         : 'One-minute candle ' + (completed.index + 1) + ' closed ' + completed.color
-          + ' (' + round(completed.open, 2) + ' → ' + round(completed.close, 2)
-          + '); sequence is ' + w.candleSequence + '.',
+            + ' (' + round(completed.open, 2) + ' → ' + round(completed.close, 2) + ').',
     });
 
-    if (match.action === 'WAIT') {
-      w.activeSignal = null;
-      this.activeSignal = null;
-      w.status = w.position && w.position.openShares > EPSILON
-        ? 'position_open' : w.entryCount > 0 ? 'trade_taken' : 'waiting_for_pattern';
-      return;
-    }
-    if (match.action === 'BUY') {
-      if (w.entryCount > 0 || (w.position && w.position.openShares > EPSILON)) {
-        w.activeSignal = null;
-        this.activeSignal = null;
-        w.status = w.position && w.position.openShares > EPSILON ? 'position_open' : 'trade_taken';
-        return;
-      }
-      w.activeSignal = signal;
-      this.activeSignal = signal;
-      w.status = 'pattern_ready';
-      this._push({
-        event: 'CANDLE_PATTERN_BUY_SIGNAL', slug: w.slug,
-        side: signal.side, pattern: signal.pattern, sequence: signal.sequence,
-        note: 'Completed one-minute pattern ' + signal.pattern + ' signals BUY ' + signal.side + '.',
-      });
-      if (!this.strategyBlocked) return this._attemptPatternEntry(w, signal);
-      return;
-    }
-    return;
+    if (w.entryCount > 0) w.status = w.position?.openShares > EPSILON ? 'position_open' : 'trade_taken';
   }
 
   async _attemptPatternEntry(w, signal = w && w.activeSignal) {
@@ -946,6 +953,7 @@ class Bot {
         candleSequence: w.candleSequence,
         minuteCandles: w.minuteCandles,
         lastCandle: w.lastCandle,
+        retestState: w.retestState || null,
         positionSide: w.position && w.position.openShares > EPSILON ? w.position.side : null,
         openShares: w.position ? w.position.openShares : 0,
         entryCount: w.entryCount,
@@ -958,6 +966,9 @@ class Bot {
       prices: px && w && px.slug === w.slug ? px : null,
       priceSeries: this.priceSeries,
       strategy: {
+        signal: '0.5 × ATR(14) excursion from previous 5m close, then return to that close',
+        atrPeriod: cfg.RETEST_ATR_PERIOD,
+        atrMultiplier: cfg.RETEST_ATR_MULTIPLIER,
         baseShares: cfg.BASE_SHARES,
         fixedOrderShares: cfg.BASE_SHARES,
         nextEntryShares: cfg.BASE_SHARES,

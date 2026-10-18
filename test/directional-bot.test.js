@@ -67,6 +67,13 @@ function makeBot(options = {}) {
   bot.w = makeWindowState('btc-updown-5m-' + openTs, openTs);
   bot.w.window = { tokenUp: 'up', tokenDown: 'down', closeTs: openTs + 300 };
   bot.w.status = 'waiting_for_first_candle';
+  bot._completedMinuteCandles = Array.from({ length: 15 }, (_, index) => ({
+    index, endMs: openTs * 1000 - (15 - index) * cfg.STRATEGY_MINUTE_MS,
+    high: 85002, low: 84998, close: 85000, sampleCount: 2,
+  }));
+  bot._btcSamples.push({
+    price: 85000, sampledAt: openTs * 1000 - 500, receivedAt: openTs * 1000 - 500,
+  });
   return { bot, trader };
 }
 
@@ -88,6 +95,19 @@ async function feedCandles(bot, colors) {
   for (let index = 0; index < colors.length; index += 1) {
     price = await feedCandle(bot, index, colors[index], price);
   }
+  const side = colors[0] === 'R' && colors.at(-1) === 'G' ? 'UP'
+    : colors[0] === 'G' && colors.at(-1) === 'R' ? 'DOWN' : null;
+  if (side) await triggerRetest(bot, side, colors.length);
+}
+
+async function triggerRetest(bot, side, minuteIndex) {
+  const openMs = bot.w.openTs * 1000;
+  const send = async (value, offset) => bot._onBtcSample({
+    price: value, sampledAt: openMs + offset, receivedAt: openMs + offset,
+    exchange: 'kraken', symbol: 'BTC/USD',
+  });
+  await send(side === 'UP' ? 84997.9 : 85002.1, minuteIndex * cfg.STRATEGY_MINUTE_MS + 100);
+  await send(85000, minuteIndex * cfg.STRATEGY_MINUTE_MS + 600);
 }
 
 function feedClobPair(bot, observedAt, upPrice, downPrice) {
@@ -102,14 +122,14 @@ test('completed RG candles buy UP once for exactly 500 shares', async () => {
   assert.equal(bot.w.candleSequence, 'RG');
   assert.equal(bot.w.position.side, 'UP');
   assert.equal(bot.w.position.shares, 500);
-  assert.equal(bot.w.position.entryPattern, 'RG');
+  assert.equal(bot.w.position.entryPattern, 'LOWER_RETEST');
   assert.equal(bot.w.entryCount, 1);
   assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side, call.targetShares]), [
     ['up', 'BUY', 500],
   ]);
 });
 
-test('RR alone does not enter, but RRG buys UP when its third candle completes', async () => {
+test('candle colors do not signal; a downside ATR retest buys UP', async () => {
   const { bot, trader } = makeBot();
   await feedCandles(bot, ['R', 'R']);
   assert.equal(bot.w.candleSequence, 'RR');
@@ -118,8 +138,10 @@ test('RR alone does not enter, but RRG buys UP when its third candle completes',
 
   await feedCandle(bot, 2, 'G', 84998);
   assert.equal(bot.w.candleSequence, 'RRG');
+  assert.equal(bot.w.position, null);
+  await triggerRetest(bot, 'UP', 3);
   assert.equal(bot.w.position.side, 'UP');
-  assert.equal(bot.w.position.entryPattern, 'RRG');
+  assert.equal(bot.w.position.entryPattern, 'LOWER_RETEST');
   assert.equal(trader.calls.length, 1);
 });
 
@@ -129,7 +151,7 @@ test('GR buys DOWN and GGR also buys DOWN', async (t) => {
       const { bot, trader } = makeBot();
       await feedCandles(bot, colors);
       assert.equal(bot.w.position.side, 'DOWN');
-      assert.equal(bot.w.position.entryPattern, colors.join(''));
+      assert.equal(bot.w.position.entryPattern, 'UPPER_RETEST');
       assert.deepEqual(trader.calls.map((call) => [call.tokenId, call.side]), [['down', 'BUY']]);
     });
   }
@@ -153,8 +175,7 @@ test('exit-shaped sequences never SELL; the entry position stays open for settle
         await feedCandle(bot, scenario.entry.length + i, scenario.followup[i]);
       }
 
-      assert.equal(bot.w.candleSequence, scenario.pattern);
-      assert.equal(bot.w.lastSignal.action, 'WAIT');
+      assert.equal(bot.w.lastSignal.action, 'BUY');
       assert.equal(bot.w.position, position);
       assert.equal(position.openShares, 500);
       assert.equal(bot.pending.length, 1);
