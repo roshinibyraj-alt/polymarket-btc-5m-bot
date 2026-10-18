@@ -156,7 +156,8 @@ test('signal ask above 0.80 waits for a pullback to 0.65 before buying', async (
   assert.equal(bot.w.status, 'waiting_for_signal_price_pullback');
 
   trader.books.up.asks = [{ price: 0.66, size: 1000 }];
-  assert.equal(await bot._attemptPatternEntry(bot.w, signal), false);
+  bot.w.activeSignal = { ...signal };
+  assert.equal(await bot._attemptPatternEntry(bot.w, bot.w.activeSignal), false);
   assert.equal(bot.w.position, null);
   trader.books.up.asks = [{ price: 0.65, size: 1000 }];
   assert.equal(await bot._attemptPatternEntry(bot.w, signal), true);

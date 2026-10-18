@@ -583,24 +583,24 @@ class Bot {
       return false;
     }
     if (bestAsk > SIGNAL_ASK_PULLBACK_TRIGGER) {
-      if (!signal.waitingForAskPullback) signal.askPullbackLogged = false;
-      signal.waitingForAskPullback = true;
+      if (!w.waitingForAskPullback) w.askPullbackLogged = false;
+      w.waitingForAskPullback = true;
     }
-    if (signal.waitingForAskPullback && bestAsk > SIGNAL_ASK_PULLBACK_TARGET) {
-      if (!signal.askPullbackLogged) {
+    if (w.waitingForAskPullback && bestAsk > SIGNAL_ASK_PULLBACK_TARGET) {
+      if (!w.askPullbackLogged) {
         this._push({
           event: 'SIGNAL_PRICE_PULLBACK_WAIT', slug: w.slug, side,
           price: round(bestAsk, 4),
           note: 'Signal-side ask exceeded $0.80; waiting for it to fall to $0.65 before entry.',
         });
-        signal.askPullbackLogged = true;
+        w.askPullbackLogged = true;
       }
       w.status = 'waiting_for_signal_price_pullback';
       return false;
     }
-    if (signal.waitingForAskPullback && bestAsk <= SIGNAL_ASK_PULLBACK_TARGET) {
-      signal.waitingForAskPullback = false;
-      signal.askPullbackLogged = false;
+    if (w.waitingForAskPullback && bestAsk <= SIGNAL_ASK_PULLBACK_TARGET) {
+      w.waitingForAskPullback = false;
+      w.askPullbackLogged = false;
     }
     const targetShares = cfg.BASE_SHARES;
     const estimatedNotional = estimateBuyNotional(asks, targetShares);
