@@ -15,7 +15,7 @@ The default BTC source is Coinbase BTC/USD; configure another CCXT exchange with
 
 - At each five-minute market open, the bot records the previous BTC close and calculates ATR(14) from the last 14 completed one-minute true ranges before that window. It waits for history and a fresh pre-window price if either is unavailable.
 - A downside move of at least 0.5× ATR followed by a return to the previous close buys UP. An upside move of at least 0.5× ATR followed by a return buys DOWN. The excursion and retest are confirmed from successive live samples.
-- Each window permits at most one filled entry targeting exactly 500 shares. There are no in-window retest-based sell orders; any open position is held until post-close settlement or resolution. Entries have no strategy-level contract-price band; available demo cash and simulated fills still apply.
+- Each window permits at most one filled entry. Sizing starts at 500 shares; each settled loss adds 200 shares to the next target, and each settled win subtracts 200 shares, with a 500-share floor. Unresolved positions do not change the target. There are no in-window retest-based sell orders; any open position is held until post-close settlement or resolution. Entries have no strategy-level contract-price band; available demo cash and simulated fills still apply.
 - CLOB prices during the active window only mark positions. They do not trigger sell orders or settlement. After the window closes, remaining shares may be settled by the configured CLOB thresholds or by Gamma's official outcome.
 - If visible book depth runs short, DemoTrader can model the target remainder at the worst visible price. The modeled portion is synthetic, not actual market liquidity. Estimated taker fees are included in paper P&L.
 - The dashboard shows ATR/retest phase and signal alongside BTC spot, Polymarket asks, open positions, marks, cash, equity, and realized/unrealized P&L. Candle colors, BTC trailing averages, and Polymarket ask averages are informational only.
@@ -24,4 +24,4 @@ The default BTC source is Coinbase BTC/USD; configure another CCXT exchange with
 
 ## Finish and interpret results
 
-Stop the process with Ctrl+C. Demo cash and trade history are in memory and reset when the process restarts. Treat simulated book fills, estimated fees, and P&L as behavior checks—not as evidence of live execution or profitability.
+Stop the process with Ctrl+C. Demo cash, trade history, and the adaptive share-size sequence are in memory and reset when the process restarts. A new demo run starts at 500 shares. Treat simulated book fills, estimated fees, and P&L as behavior checks—not as evidence of live execution or profitability.

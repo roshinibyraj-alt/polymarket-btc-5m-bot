@@ -39,6 +39,7 @@ class Bot {
       wins: 0, losses: 0, signalEntries: 0,
       estimatedFees: 0, realizedPnl: 0,
     };
+    this.nextTargetShares = cfg.BASE_SHARES;
     this.counts = { UP: 0, DOWN: 0 };
     this.walletBalance = null;
     this.error = this.strategyBlocked
@@ -602,7 +603,7 @@ class Bot {
       w.waitingForAskPullback = false;
       w.askPullbackLogged = false;
     }
-    const targetShares = cfg.BASE_SHARES;
+    const targetShares = this.nextTargetShares;
     const estimatedNotional = estimateBuyNotional(asks, targetShares);
     if (estimatedNotional == null || estimatedNotional <= 0) {
       w.status = 'waiting_for_order_book';
@@ -613,7 +614,7 @@ class Bot {
       this._push({
         event: 'CANDLE_PATTERN_BUY_NO_CASH', slug: w.slug, side,
         pattern: signal.pattern,
-        note: 'Demo cash is insufficient for the fixed ' + targetShares + '-share ' + side + ' entry.',
+        note: 'Demo cash is insufficient for the current ' + targetShares + '-share ' + side + ' entry.',
       });
       return false;
     }
@@ -633,7 +634,7 @@ class Bot {
       this._push({
         event: 'CANDLE_PATTERN_BUY_UNFILLED', slug: w.slug, side,
         pattern: signal.pattern,
-        note: 'The demo simulator did not fill all 500 shares; no partial position was recorded.',
+        note: 'The demo simulator did not fill all ' + targetShares + ' shares; no partial position was recorded.',
       });
       return false;
     }
@@ -677,7 +678,7 @@ class Bot {
       shares: round(shares, 4), targetShares, simulatedLiquidityShares: round(simulatedLiquidityShares, 4),
       price: round(averagePrice, 4),
       fee: round(fee, 5),
-      note: 'Demo marketable BUY filled a fixed ' + targetShares + ' ' + side
+      note: 'Demo marketable BUY filled ' + targetShares + ' ' + side
         + ' shares at average $' + averagePrice.toFixed(4)
         + ' on the completed one-minute pattern ' + signal.pattern + '.'
         + (simulatedLiquidityShares > EPSILON
@@ -939,6 +940,14 @@ class Bot {
     this._clobExpiryCandidates.delete(position);
     position.settled = true;
     position.status = 'closed';
+    if (outcome === 'LOSS') {
+      this.nextTargetShares += cfg.SHARE_SIZE_STEP;
+    } else if (outcome === 'WIN') {
+      this.nextTargetShares = Math.max(
+        cfg.BASE_SHARES,
+        this.nextTargetShares - cfg.SHARE_SIZE_STEP,
+      );
+    }
     const totalCost = position.entryNotional + position.entryFee + position.exitFees;
     const pnl = position.exitProceeds - totalCost;
     this.stats.realizedPnl += pnl - (position.realizedPnl || 0);
@@ -954,6 +963,7 @@ class Bot {
       exitProceeds: round(position.exitProceeds, 4),
       fee: round(position.entryFee + position.exitFees, 4),
       outcome, reason, winner, pnl: round(pnl, 2), ts: Date.now(),
+      nextEntryShares: this.nextTargetShares,
     };
     this.trades.push(trade);
     if (this.trades.length > 200) this.trades.shift();
@@ -1048,8 +1058,10 @@ class Bot {
         atrPeriod: cfg.RETEST_ATR_PERIOD,
         atrMultiplier: cfg.RETEST_ATR_MULTIPLIER,
         baseShares: cfg.BASE_SHARES,
-        fixedOrderShares: cfg.BASE_SHARES,
-        nextEntryShares: cfg.BASE_SHARES,
+        minShares: cfg.BASE_SHARES,
+        shareSizeStep: cfg.SHARE_SIZE_STEP,
+        nextEntryShares: this.nextTargetShares,
+        sizingRule: 'Start at 500 shares; add 200 after a loss, subtract 200 after a win, floor 500.',
         minuteMs: cfg.STRATEGY_MINUTE_MS,
         minSamplesPerCandle: cfg.STRATEGY_MIN_CANDLE_SAMPLES,
         maxEntriesPerWindow: 1,
@@ -1068,6 +1080,7 @@ class Bot {
       cfg: {
         demoCapital: cfg.DEMO_CAPITAL,
         baseShares: cfg.BASE_SHARES,
+        shareSizeStep: cfg.SHARE_SIZE_STEP,
         windowSec: WINDOW_SECONDS,
         btcCandleMs: cfg.STRATEGY_MINUTE_MS,
         ccxtPollMs: this.ccxt.pollMs,

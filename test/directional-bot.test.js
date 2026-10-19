@@ -494,7 +494,7 @@ test('live-mode guard blocks pattern entries and does not start the CCXT feed', 
   assert.equal(trader.calls.length, 0);
 });
 
-test('snapshot exposes candle strategy settings, sequence, and fixed sizing', () => {
+test('snapshot exposes candle strategy settings and adaptive share sizing', () => {
   const { bot } = makeBot();
   const snapshot = bot.snapshot();
   assert.equal(snapshot.mode, 'DEMO');
@@ -502,7 +502,8 @@ test('snapshot exposes candle strategy settings, sequence, and fixed sizing', ()
   assert.equal(snapshot.strategy.minuteMs, 60_000);
   assert.equal(snapshot.strategy.minSamplesPerCandle, 2);
   assert.equal(snapshot.strategy.maxEntriesPerWindow, 1);
-  assert.equal(snapshot.strategy.fixedOrderShares, 500);
+  assert.equal(snapshot.strategy.minShares, 500);
+  assert.equal(snapshot.strategy.shareSizeStep, 200);
   assert.equal(snapshot.strategy.nextEntryShares, 500);
   assert.equal(snapshot.strategy.clobWinSettlementPrice, 0.99);
   assert.equal(snapshot.strategy.clobLossSettlementPrice, 0.01);
@@ -514,18 +515,35 @@ test('snapshot exposes candle strategy settings, sequence, and fixed sizing', ()
   assert.equal('projection' in snapshot.window, false);
 });
 
-test('losses do not change fixed 500-share sizing', async () => {
+test('losses increase next sizing by 200, wins step back 200, and floor stays at 500', () => {
   const { bot } = makeBot();
-  const recordLoss = (openTs) => bot._finalizePosition({
-    settled: false, slug: 'loss-' + openTs, openTs, side: 'UP',
+  const settle = (openTs, outcome) => bot._finalizePosition({
+    settled: false, slug: outcome.toLowerCase() + '-' + openTs, openTs, side: 'UP',
+    shares: 500, openShares: 0, entryPrice: 0.30, entryNotional: 150,
+    entryFee: 0, exitFees: 0, exitProceeds: outcome === 'WIN' ? 200 : 0, realizedPnl: 0,
+  }, outcome, 'TEST');
+  settle(1, 'LOSS');
+  assert.equal(bot.snapshot().strategy.nextEntryShares, 700);
+  settle(2, 'LOSS');
+  assert.equal(bot.snapshot().strategy.nextEntryShares, 900);
+  settle(3, 'WIN');
+  assert.equal(bot.snapshot().strategy.nextEntryShares, 700);
+  settle(4, 'WIN');
+  assert.equal(bot.snapshot().strategy.nextEntryShares, 500);
+  settle(5, 'WIN');
+  assert.equal(bot.snapshot().strategy.nextEntryShares, 500);
+});
+
+test('the next entry uses the increased share target after a loss', async () => {
+  const { bot, trader } = makeBot();
+  bot._finalizePosition({
+    settled: false, slug: 'prior-loss', openTs: 1, side: 'UP',
     shares: 500, openShares: 0, entryPrice: 0.30, entryNotional: 150,
     entryFee: 0, exitFees: 0, exitProceeds: 0, realizedPnl: 0,
   }, 'LOSS', 'TEST');
-  recordLoss(1);
-  recordLoss(2);
   await feedCandles(bot, ['R', 'G']);
-  assert.equal(bot.w.position.shares, 500);
-  assert.equal(bot.snapshot().strategy.nextEntryShares, 500);
+  assert.equal(bot.w.position.shares, 700);
+  assert.equal(trader.calls[0].targetShares, 700);
 });
 
 test('demo BUY can model missing depth at the worst visible ask', async () => {
