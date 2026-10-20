@@ -1,8 +1,8 @@
 {
-  "name": "polymarket-btc-5m-candle-pattern-bot",
+  "name": "btc-wick-paper-demo",
   "version": "1.0.0",
   "private": true,
-  "description": "Demo-only BTC five-minute candle-pattern strategy using one-minute candles from a CCXT spot feed.",
+  "description": "Paper-only Polymarket BTC 5-minute two-sided timed-entry strategy.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -11,11 +11,5 @@
   "engines": {
     "node": ">=18"
   },
-  "dependencies": {
-    "@polymarket/builder-relayer-client": "latest",
-    "@polymarket/clob-client-v2": "1.1.0",
-    "ccxt": "^4.5.85",
-    "viem": "^2.21.0",
-    "ws": "^8.22.0"
-  }
+  "dependencies": {}
 }
