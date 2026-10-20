@@ -122,55 +122,57 @@ class WickBot{
     this.windowOrders=[];
     this.log('PAPER_TIMED_ENTRY_STRATEGY_STARTED',{windowStart:start,
       checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,
-      priceAbove:cfg.ENTRY_PRICE_THRESHOLD,baseShares:cfg.BASE_ENTRY_SHARES,
-      sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,cutoffSeconds:cfg.MAX_ENTRY_SECONDS});
+      baseShares:cfg.BASE_ENTRY_SHARES,
+      selectionSchedule:'cheapest ask at 30/60/90 seconds; most expensive ask at 120/150/180/210 seconds',
+      cutoffSeconds:cfg.MAX_ENTRY_SECONDS});
   }
   processTimedEntries(start,now){
     const elapsedMs=now-start,cutoffMs=cfg.MAX_ENTRY_SECONDS*1000;
     const checkpoint=Math.floor(elapsedMs/cfg.ENTRY_CHECK_INTERVAL_MS);
     if(checkpoint<=this.lastEntryCheckpoint)return;
     this.lastEntryCheckpoint=checkpoint;
-    if(elapsedMs>=cutoffMs)return;
-    for(const side of ['UP','DOWN']){
-      const quote=this.liveQuotes[side],ask=Number(quote?.bestAsk);
-      const id=`${this.timeframe}-${start}-${side}-check-${checkpoint}`;
-      const order={id,timeframe:this.timeframe,windowStart:start,side,checkpoint,
-        shares:null,orderType:'MARKET',status:'SKIPPED',createdAt:now};
-      this.windowOrders.unshift(order);
-      this.orders.unshift(order);
-      if(this.orders.length>1000)this.orders.length=1000;
-      if(!quote||quote.status!=='LIVE'||now-(quote.updatedAt||0)>5000||!Number.isFinite(ask)){
-        order.reason='Fresh executable ask unavailable at this check.';
-        continue;
-      }
-      order.ask=ask;
-      if(ask<=cfg.ENTRY_PRICE_THRESHOLD){
-        order.reason=`Ask is not above $${cfg.ENTRY_PRICE_THRESHOLD.toFixed(2)}.`;
-        continue;
-      }
-      const shares=cfg.BASE_ENTRY_SHARES*Math.pow(cfg.ENTRY_SIZE_MULTIPLIER,this.windowFiredEntries);
-      order.shares=shares;
-      const fee=feeFor(this.market,ask,shares),cost=ask*shares,totalCost=cost+fee;
-      if(totalCost>this.cash+1e-9){
-        order.status='REJECTED_INSUFFICIENT_CASH';
-        order.reason='Insufficient paper cash for this entry and its fee.';
-        this.log('PAPER_ENTRY_REJECTED',{id,side,ask,shares,fee,reason:order.reason});
-        continue;
-      }
-      const position={id,timeframe:this.timeframe,windowMs:this.windowMs,windowStart:start,
-        marketId:this.market.id,slug:this.market.slug,title:this.market.title,side,
-        tokenId:this.market.tokens[side],entryKey:id,entryLabel:`Timed buy ${usdPrice(ask)}`,
-        entryType:'CLOB_TIMED_THRESHOLD',orderType:'MARKET',fillModel:'PAPER_AT_BEST_ASK',
-        shares,initialShares:shares,avgEntry:ask,cost,totalCost,fees:fee,
-        makerFeeEquivalent:0,estimatedMakerRebate:0,status:'OPEN',
-        submittedAt:now,openedAt:now,filledAt:now,visibleAskSize:quote.askSize,
-        simulatedShares:Math.max(0,shares-(quote.askSize||0))};
-      order.status='FILLED';order.filledAt=now;order.positionId=id;order.fillPrice=ask;order.fee=fee;
-      this.cash-=totalCost;this.positions.unshift(position);this.windowFiredEntries++;
-      this.log('PAPER_TIMED_ENTRY_FILLED',{id,side,
-        checkpointSeconds:checkpoint*cfg.ENTRY_CHECK_INTERVAL_MS/1000,
-        ask,shares,fee,totalCost,visibleAskSize:quote.askSize});
+    if(elapsedMs>=cutoffMs||checkpoint>7)return;
+    const phase=checkpoint<=3?'CHEAPEST':'MOST_EXPENSIVE';
+    const id=`${this.timeframe}-${start}-${phase.toLowerCase()}-check-${checkpoint}`;
+    const order={id,timeframe:this.timeframe,windowStart:start,side:null,checkpoint,phase,
+      shares:cfg.BASE_ENTRY_SHARES,orderType:'MARKET',status:'SKIPPED',createdAt:now};
+    this.windowOrders.unshift(order);
+    this.orders.unshift(order);
+    if(this.orders.length>1000)this.orders.length=1000;
+    const up=this.liveQuotes.UP,down=this.liveQuotes.DOWN;
+    const quotesFresh=[up,down].every(q=>q?.status==='LIVE'
+      &&Number.isFinite(q.updatedAt)&&now-q.updatedAt<=5000
+      &&q.bestAsk!=null&&Number.isFinite(Number(q.bestAsk)));
+    if(!quotesFresh){
+      order.reason='Fresh executable asks for both sides are required to compare prices.';
+      return;
     }
+    const upAsk=Number(up.bestAsk),downAsk=Number(down.bestAsk);
+    const side=phase==='CHEAPEST'
+      ?(upAsk<=downAsk?'UP':'DOWN')
+      :(upAsk>=downAsk?'UP':'DOWN');
+    const quote=this.liveQuotes[side],ask=Number(quote.bestAsk),shares=cfg.BASE_ENTRY_SHARES;
+    order.side=side;order.ask=ask;
+    const fee=feeFor(this.market,ask,shares),cost=ask*shares,totalCost=cost+fee;
+    if(totalCost>this.cash+1e-9){
+      order.status='REJECTED_INSUFFICIENT_CASH';
+      order.reason='Insufficient paper cash for this entry and its fee.';
+      this.log('PAPER_ENTRY_REJECTED',{id,side,ask,shares,fee,reason:order.reason});
+      return;
+    }
+    const position={id,timeframe:this.timeframe,windowMs:this.windowMs,windowStart:start,
+      marketId:this.market.id,slug:this.market.slug,title:this.market.title,side,
+      tokenId:this.market.tokens[side],entryKey:id,entryLabel:`Timed buy ${usdPrice(ask)}`,
+      entryType:'CLOB_SCHEDULED_SIDE_SELECTION',orderType:'MARKET',fillModel:'PAPER_AT_BEST_ASK',
+      shares,initialShares:shares,avgEntry:ask,cost,totalCost,fees:fee,
+      makerFeeEquivalent:0,estimatedMakerRebate:0,status:'OPEN',
+      submittedAt:now,openedAt:now,filledAt:now,visibleAskSize:quote.askSize,
+      simulatedShares:Math.max(0,shares-(quote.askSize||0))};
+    order.status='FILLED';order.filledAt=now;order.positionId=id;order.fillPrice=ask;order.fee=fee;
+    this.cash-=totalCost;this.positions.unshift(position);this.windowFiredEntries++;
+    this.log('PAPER_TIMED_ENTRY_FILLED',{id,side,phase,
+      checkpointSeconds:checkpoint*cfg.ENTRY_CHECK_INTERVAL_MS/1000,
+      ask,shares,fee,totalCost,visibleAskSize:quote.askSize});
   }
   async refreshLiveQuotes(now){
     if(!this.market)return;
@@ -240,14 +242,16 @@ class WickBot{
     }
     return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
         strategy:{timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
-          entries:{orderType:'MARKET',triggerAskAbove:cfg.ENTRY_PRICE_THRESHOLD,
+          entries:{orderType:'MARKET',
             checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,baseShares:cfg.BASE_ENTRY_SHARES,
-              sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,
+              selectionSchedule:[
+                {fromSeconds:30,toSeconds:90,side:'lowest best ask'},
+                {fromSeconds:120,toSeconds:210,side:'highest best ask'},
+              ],
              maxEntrySeconds:cfg.MAX_ENTRY_SECONDS,
-            sides:['UP','DOWN'],
-              timing:`Check both sides every ${cfg.ENTRY_CHECK_INTERVAL_MS/1000} seconds; only a filled entry advances the doubling sequence, while skips do not; no entry-count cap; stop at ${cfg.MAX_ENTRY_SECONDS} seconds or when paper cash is insufficient`},
+              timing:'At 30/60/90 seconds buy the lower-ask side; at 120/150/180/210 seconds buy the higher-ask side; 500 shares per entry; no price threshold'},
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
-          direction:'CLOB prices only; accumulate UP and DOWN positions independently',
+          direction:'Compare fresh UP and DOWN best asks and select one side per scheduled entry',
            entryFillModel:'Paper market buys fill at the fresh best ask and include the configured taker fee',
            fees:'Maker fills have zero fees; estimated crypto maker rebates are tracked separately',
           execution:'PAPER ONLY'},
@@ -264,7 +268,7 @@ class WickBot{
           marketResolution:'Own-side fresh CLOB quote >= $0.99 settles $1/share, <= $0.01 settles $0/share immediately; otherwise official Gamma result is retried until resolved'},
        positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }
-  start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only BTC 5m CLOB timed-threshold entries on both UP and DOWN sides; no live orders.'});
+   start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only BTC 5m CLOB scheduled side-selection entries; no live orders.'});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};
     void loop();}
   stop(){this.running=false;clearTimeout(this.timer)}

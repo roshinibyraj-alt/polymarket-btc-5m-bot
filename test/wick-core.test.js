@@ -124,51 +124,42 @@ test('single-entry strategy leaves position exits to the existing CLOB rules',()
   assert.match(bot.snapshot().strategy.exit,/bid\/ask\/mid >= \$0\.99/);
 });
 
-test('only fired entries advance martingale sizing; skipped price checks do not',()=>{
-  const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000,now=start+15000;
-  bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};
-  bot.openStrategyWindow(start,start);
-  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.55,askSize:1000,updatedAt:now},
-    DOWN:{status:'LIVE',bestAsk:.65,askSize:1000,updatedAt:now}};
-  bot.processTimedEntries(start,now);
-  bot.processTimedEntries(start,now+100);
-  assert.deepEqual(bot.positions.map(p=>p.side),['DOWN']);
-  assert.equal(bot.positions[0].shares,100);
-  assert.equal(bot.windowFiredEntries,1);
-  assert.equal(bot.windowOrders.find(o=>o.side==='UP').status,'SKIPPED');
-  assert.equal(bot.windowOrders.find(o=>o.side==='UP').shares,null);
-  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.62,askSize:1000,updatedAt:now+15000},
-    DOWN:{status:'LIVE',bestAsk:.54,askSize:1000,updatedAt:now+15000}};
-  bot.processTimedEntries(start,now+15000);
-  assert.equal(bot.positions.find(p=>p.id.endsWith('-UP-check-2')).shares,200);
-  assert.equal(bot.positions.filter(p=>p.side==='DOWN').length,1);
-  assert.equal(bot.windowFiredEntries,2);
-  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.55,askSize:1000,updatedAt:now+30000},
-    DOWN:{status:'LIVE',bestAsk:.63,askSize:1000,updatedAt:now+30000}};
-  bot.processTimedEntries(start,now+30000);
-  assert.equal(bot.positions.find(p=>p.id.endsWith('-DOWN-check-3')).shares,400);
-  assert.equal(bot.windowFiredEntries,3);
-  assert.ok(bot.positions.every(p=>p.orderType==='MARKET'&&p.avgEntry>0.55));
-  assert.ok(bot.positions.every(p=>p.fees>0&&p.estimatedMakerRebate===0));
-});
-test('martingale continues past five successful buys without a count cap',()=>{
+test('scheduled entries choose the cheaper then expensive side at 30-second intervals with flat 500 shares',()=>{
   const Bot=require('../wick-bot'),config=require('../config'),bot=new Bot(),start=1_000_000;
-  bot.cash=1_000_000_000;
   bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};
   bot.openStrategyWindow(start,start);
-  for(let checkpoint=1;checkpoint<=4;checkpoint++){
-    const now=start+checkpoint*15000;
-    bot.liveQuotes={UP:{status:'LIVE',bestAsk:.56,askSize:10000,updatedAt:now},
-      DOWN:{status:'LIVE',bestAsk:.57,askSize:10000,updatedAt:now}};
+  const asks=[
+    [.80,.20], [.10,.90], [.50,.49],
+    [.80,.20], [.10,.90], [.50,.49], [.70,.71],
+  ];
+  for(let checkpoint=1;checkpoint<=asks.length;checkpoint++){
+    const now=start+checkpoint*config.ENTRY_CHECK_INTERVAL_MS,[upAsk,downAsk]=asks[checkpoint-1];
+    bot.liveQuotes={UP:{status:'LIVE',bestAsk:upAsk,askSize:1000,updatedAt:now},
+      DOWN:{status:'LIVE',bestAsk:downAsk,askSize:1000,updatedAt:now}};
     bot.processTimedEntries(start,now);
   }
-  assert.equal(bot.positions.length,8);
-  assert.deepEqual(bot.positions.slice().reverse().map(p=>p.shares),[100,200,400,800,1600,3200,6400,12800]);
-  assert.equal(bot.windowFiredEntries,8);
-  assert.equal(bot.windowOrders.filter(o=>o.status==='FILLED').length,8);
-  assert.equal('MAX_SUCCESSFUL_ENTRIES_PER_WINDOW' in config,false);
-  assert.equal(bot.snapshot().strategy.entries.maxSuccessfulEntries,undefined);
-  assert.match(bot.snapshot().strategy.entries.timing,/no entry-count cap/);
+  assert.equal(config.ENTRY_CHECK_INTERVAL_MS,30_000);
+  assert.equal(config.BASE_ENTRY_SHARES,500);
+  assert.equal('ENTRY_PRICE_THRESHOLD' in config,false);
+  assert.equal('ENTRY_SIZE_MULTIPLIER' in config,false);
+  assert.deepEqual(bot.positions.slice().reverse().map(p=>p.side),
+    ['DOWN','UP','DOWN','UP','DOWN','UP','DOWN']);
+  assert.deepEqual(bot.positions.map(p=>p.shares),Array(7).fill(500));
+  assert.deepEqual(bot.positions.slice().reverse().map(p=>p.avgEntry),
+    [.20,.10,.49,.80,.90,.50,.71]);
+  assert.equal(bot.windowOrders.length,7);
+  assert.equal(bot.windowFiredEntries,7);
+  const nextCheck=start+8*config.ENTRY_CHECK_INTERVAL_MS;
+  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.99,askSize:1000,updatedAt:nextCheck},
+    DOWN:{status:'LIVE',bestAsk:.01,askSize:1000,updatedAt:nextCheck}};
+  bot.processTimedEntries(start,nextCheck);
+  assert.equal(bot.positions.length,7);
+  assert.equal(bot.snapshot().strategy.entries.baseShares,500);
+  assert.equal(bot.snapshot().strategy.entries.triggerAskAbove,undefined);
+  assert.deepEqual(bot.snapshot().strategy.entries.selectionSchedule,[
+    {fromSeconds:30,toSeconds:90,side:'lowest best ask'},
+    {fromSeconds:120,toSeconds:210,side:'highest best ask'},
+  ]);
 });
 test('a best bid below $0.30 does not trigger a forced sale or lock entries',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data'),oldGetBook=md.getBook,oldNow=Date.now;
@@ -210,7 +201,8 @@ test('only the 5m strategy is running',()=>{
   assert.deepEqual(Object.keys(bots.bots),['5m']);
   assert.equal(bots.bots['5m'].windowMs,300000);
   assert.equal(snapshot.account.capital,10000);assert.deepEqual(snapshot.strategy.timeframes,['5m']);
-  assert.equal(snapshot.timeframes['5m'].strategy.entries.checkIntervalSeconds,15);
+  assert.equal(snapshot.timeframes['5m'].strategy.entries.checkIntervalSeconds,30);
+  assert.equal(snapshot.timeframes['5m'].strategy.entries.baseShares,500);
   assert.equal(snapshot.timeframes['5m'].strategy.entries.maxSuccessfulEntries,undefined);
   assert.equal(snapshot.timeframes['5m'].strategy.entries.maxEntrySeconds,270);
   assert.equal(snapshot.account.estimatedMakerRebate,1.23);
@@ -275,7 +267,7 @@ test('a timed entry requires a fresh live CLOB ask',()=>{
     DOWN:{status:'LIVE',bestAsk:.80,askSize:1000,updatedAt:now-6000}};
   bot.processTimedEntries(start,now);
   assert.equal(bot.positions.length,0);
-  assert.equal(bot.windowOrders.length,2);
+  assert.equal(bot.windowOrders.length,1);
   assert.ok(bot.windowOrders.every(o=>o.status==='SKIPPED'));
 });
 
