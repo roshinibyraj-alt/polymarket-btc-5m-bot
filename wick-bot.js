@@ -75,8 +75,7 @@ class WickBot{
     this.positions=[];this.events=[];this.status='starting';
     this.error=null;this.market=null;this.lastMarketAt=0;
     this.lastScanAt=null;this.orders=[];this.windowOrders=[];this.orderWindowStart=null;this.running=false;
-    this.windowFiredEntries=0;this.lastEntrySide=null;
-    this.windowExitTriggered=false;this.windowExitAt=null;
+    this.windowFiredEntries=0;
     this.quoteWindowStart=null;this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
     this.closeQuotes=null;
   }
@@ -120,7 +119,6 @@ class WickBot{
     this.orderWindowStart=start;
     this.lastEntryCheckpoint=0;
     this.windowFiredEntries=0;
-    this.lastEntrySide=null;this.windowExitTriggered=false;this.windowExitAt=null;
     this.windowOrders=[];
     this.log('PAPER_TIMED_ENTRY_STRATEGY_STARTED',{windowStart:start,
       checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,
@@ -128,7 +126,6 @@ class WickBot{
       sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,cutoffSeconds:cfg.MAX_ENTRY_SECONDS});
   }
   processTimedEntries(start,now){
-    if(this.windowExitTriggered&&this.orderWindowStart===start)return;
     const elapsedMs=now-start,cutoffMs=cfg.MAX_ENTRY_SECONDS*1000;
     const checkpoint=Math.floor(elapsedMs/cfg.ENTRY_CHECK_INTERVAL_MS);
     if(checkpoint<=this.lastEntryCheckpoint)return;
@@ -142,10 +139,6 @@ class WickBot{
       this.windowOrders.unshift(order);
       this.orders.unshift(order);
       if(this.orders.length>1000)this.orders.length=1000;
-      if(this.windowFiredEntries>=cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW){
-        order.reason=`Maximum of ${cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW} successful entries reached for this window.`;
-        continue;
-      }
       if(!quote||quote.status!=='LIVE'||now-(quote.updatedAt||0)>5000||!Number.isFinite(ask)){
         order.reason='Fresh executable ask unavailable at this check.';
         continue;
@@ -173,7 +166,7 @@ class WickBot{
         submittedAt:now,openedAt:now,filledAt:now,visibleAskSize:quote.askSize,
         simulatedShares:Math.max(0,shares-(quote.askSize||0))};
       order.status='FILLED';order.filledAt=now;order.positionId=id;order.fillPrice=ask;order.fee=fee;
-      this.cash-=totalCost;this.positions.unshift(position);this.windowFiredEntries++;this.lastEntrySide=side;
+      this.cash-=totalCost;this.positions.unshift(position);this.windowFiredEntries++;
       this.log('PAPER_TIMED_ENTRY_FILLED',{id,side,
         checkpointSeconds:checkpoint*cfg.ENTRY_CHECK_INTERVAL_MS/1000,
         ask,shares,fee,totalCost,visibleAskSize:quote.askSize});
@@ -193,20 +186,6 @@ class WickBot{
           attemptedAt:now,error:result.reason?.message||'Order book unavailable'};
       }
     });
-    if(this.orderWindowStart===this.market.start
-      &&this.windowFiredEntries>=cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW
-      &&this.lastEntrySide&&!this.windowExitTriggered){
-      const triggerQuote=this.liveQuotes[this.lastEntrySide];
-      if(triggerQuote?.status==='LIVE'&&Number.isFinite(triggerQuote.updatedAt)
-        &&now-triggerQuote.updatedAt<=5000&&Number.isFinite(triggerQuote.bestBid)
-        &&triggerQuote.bestBid<cfg.MARTINGALE_EXIT_BID_THRESHOLD){
-        this.windowExitTriggered=true;this.windowExitAt=now;
-        this.log('PAPER_MARTINGALE_EXIT_TRIGGERED',{windowStart:this.market.start,
-          latestSide:this.lastEntrySide,bestBid:triggerQuote.bestBid,
-          threshold:cfg.MARTINGALE_EXIT_BID_THRESHOLD});
-      }
-    }
-    if(this.windowExitTriggered)this.closeWindowPositionsAtBids(now);
     const open=this.positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT');
     for(const p of open){
       if(p.windowStart===this.market.start){
@@ -224,24 +203,6 @@ class WickBot{
       try{const q=quoteFromBook(await md.getBook(p.tokenId),now);p.markBid=q.bestBid;p.markUpdatedAt=now;p.markStatus=q.bestBid!=null?'LIVE':'MISSING'}
       catch(_){p.markStatus=p.markBid!=null?'STALE':'MISSING'}
     }));
-  }
-  closeWindowPositionsAtBids(now){
-    for(const p of this.positions){
-      if(p.windowStart!==this.market?.start||(p.status!=='OPEN'&&p.status!=='PENDING_CLOB_RESULT'))continue;
-      const quote=this.liveQuotes[p.side];
-      if(!quote||quote.status!=='LIVE'||!Number.isFinite(quote.updatedAt)
-        ||now-quote.updatedAt>5000||!Number.isFinite(quote.bestBid))continue;
-      const bid=quote.bestBid,exitFee=feeFor(this.market,bid,p.shares),grossProceeds=bid*p.shares;
-      const netProceeds=grossProceeds-exitFee;
-      p.exitPrice=bid;p.grossExitProceeds=grossProceeds;p.exitFees=exitFee;
-      p.proceeds=netProceeds;p.realizedPnl=netProceeds-p.totalCost;
-      p.status='SETTLED_EXIT';p.settledAt=now;
-      p.settlementBasis='MARTINGALE_EXIT_BEST_BID_BELOW_0_30';
-      this.cash+=netProceeds;
-      this.log('PAPER_MARTINGALE_POSITION_EXITED',{id:p.id,side:p.side,shares:p.shares,
-        exitBid:bid,grossProceeds,exitFee,netProceeds,realizedPnl:p.realizedPnl,
-        triggerSide:this.lastEntrySide,triggerBid:this.liveQuotes[this.lastEntrySide]?.bestBid});
-    }
   }
   async trySettle(p){
     if(Date.now()<p.windowStart+(p.windowMs||this.windowMs))return;if(!['OPEN','PENDING_CLOB_RESULT'].includes(p.status))return;p.lastSettlementAttempt=Date.now();
@@ -281,16 +242,12 @@ class WickBot{
         strategy:{timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
           entries:{orderType:'MARKET',triggerAskAbove:cfg.ENTRY_PRICE_THRESHOLD,
             checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,baseShares:cfg.BASE_ENTRY_SHARES,
-             sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,maxSuccessfulEntries:cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW,
+              sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,
              maxEntrySeconds:cfg.MAX_ENTRY_SECONDS,
             sides:['UP','DOWN'],
-             timing:`Check both sides every ${cfg.ENTRY_CHECK_INTERVAL_MS/1000} seconds; only a filled entry advances the doubling sequence, while skips do not; maximum ${cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW} successful entries per window`},
+              timing:`Check both sides every ${cfg.ENTRY_CHECK_INTERVAL_MS/1000} seconds; only a filled entry advances the doubling sequence, while skips do not; no entry-count cap; stop at ${cfg.MAX_ENTRY_SECONDS} seconds or when paper cash is insufficient`},
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
           direction:'CLOB prices only; accumulate UP and DOWN positions independently',
-          martingaleExit:{enabled:true,afterSuccessfulEntries:cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW,
-            triggerSide:'latest-filled side',triggerPrice:'fresh best bid below threshold',
-            threshold:cfg.MARTINGALE_EXIT_BID_THRESHOLD,closeAllWindowPositions:true,
-            windowLockedAfterTrigger:this.windowExitTriggered},
            entryFillModel:'Paper market buys fill at the fresh best ask and include the configured taker fee',
            fees:'Maker fills have zero fees; estimated crypto maker rebates are tracked separately',
           execution:'PAPER ONLY'},

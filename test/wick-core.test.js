@@ -128,7 +128,7 @@ test('only fired entries advance martingale sizing; skipped price checks do not'
   const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000,now=start+15000;
   bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};
   bot.openStrategyWindow(start,start);
-  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.60,askSize:1000,updatedAt:now},
+  bot.liveQuotes={UP:{status:'LIVE',bestAsk:.55,askSize:1000,updatedAt:now},
     DOWN:{status:'LIVE',bestAsk:.65,askSize:1000,updatedAt:now}};
   bot.processTimedEntries(start,now);
   bot.processTimedEntries(start,now+100);
@@ -138,7 +138,7 @@ test('only fired entries advance martingale sizing; skipped price checks do not'
   assert.equal(bot.windowOrders.find(o=>o.side==='UP').status,'SKIPPED');
   assert.equal(bot.windowOrders.find(o=>o.side==='UP').shares,null);
   bot.liveQuotes={UP:{status:'LIVE',bestAsk:.62,askSize:1000,updatedAt:now+15000},
-    DOWN:{status:'LIVE',bestAsk:.59,askSize:1000,updatedAt:now+15000}};
+    DOWN:{status:'LIVE',bestAsk:.54,askSize:1000,updatedAt:now+15000}};
   bot.processTimedEntries(start,now+15000);
   assert.equal(bot.positions.find(p=>p.id.endsWith('-UP-check-2')).shares,200);
   assert.equal(bot.positions.filter(p=>p.side==='DOWN').length,1);
@@ -148,27 +148,29 @@ test('only fired entries advance martingale sizing; skipped price checks do not'
   bot.processTimedEntries(start,now+30000);
   assert.equal(bot.positions.find(p=>p.id.endsWith('-DOWN-check-3')).shares,400);
   assert.equal(bot.windowFiredEntries,3);
-  assert.ok(bot.positions.every(p=>p.orderType==='MARKET'&&p.avgEntry>0.60));
+  assert.ok(bot.positions.every(p=>p.orderType==='MARKET'&&p.avgEntry>0.55));
   assert.ok(bot.positions.every(p=>p.fees>0&&p.estimatedMakerRebate===0));
 });
-test('martingale allows five successful buys total, including the initial buy',()=>{
-  const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000;
+test('martingale continues past five successful buys without a count cap',()=>{
+  const Bot=require('../wick-bot'),config=require('../config'),bot=new Bot(),start=1_000_000;
+  bot.cash=1_000_000_000;
   bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'u',DOWN:'d'}};
   bot.openStrategyWindow(start,start);
   for(let checkpoint=1;checkpoint<=4;checkpoint++){
     const now=start+checkpoint*15000;
-    bot.liveQuotes={UP:{status:'LIVE',bestAsk:.61,askSize:10000,updatedAt:now},
-      DOWN:{status:'LIVE',bestAsk:.62,askSize:10000,updatedAt:now}};
+    bot.liveQuotes={UP:{status:'LIVE',bestAsk:.56,askSize:10000,updatedAt:now},
+      DOWN:{status:'LIVE',bestAsk:.57,askSize:10000,updatedAt:now}};
     bot.processTimedEntries(start,now);
   }
-  assert.equal(bot.positions.length,5);
-  assert.deepEqual(bot.positions.slice().reverse().map(p=>p.shares),[100,200,400,800,1600]);
-  assert.equal(bot.windowFiredEntries,5);
-  assert.equal(bot.windowOrders.filter(o=>o.status==='FILLED').length,5);
-  assert.ok(bot.windowOrders.some(o=>o.reason==='Maximum of 5 successful entries reached for this window.'));
-  assert.equal(bot.snapshot().strategy.entries.maxSuccessfulEntries,5);
+  assert.equal(bot.positions.length,8);
+  assert.deepEqual(bot.positions.slice().reverse().map(p=>p.shares),[100,200,400,800,1600,3200,6400,12800]);
+  assert.equal(bot.windowFiredEntries,8);
+  assert.equal(bot.windowOrders.filter(o=>o.status==='FILLED').length,8);
+  assert.equal('MAX_SUCCESSFUL_ENTRIES_PER_WINDOW' in config,false);
+  assert.equal(bot.snapshot().strategy.entries.maxSuccessfulEntries,undefined);
+  assert.match(bot.snapshot().strategy.entries.timing,/no entry-count cap/);
 });
-test('after five buys, a fresh latest-side bid below $0.30 sells all window positions and locks entries',async()=>{
+test('a best bid below $0.30 does not trigger a forced sale or lock entries',async()=>{
   const Bot=require('../wick-bot'),md=require('../wick-market-data'),oldGetBook=md.getBook,oldNow=Date.now;
   let now=2_000_000;Date.now=()=>now;
   md.getBook=async token=>token==='up'
@@ -177,39 +179,16 @@ test('after five buys, a fresh latest-side bid below $0.30 sells all window posi
   try{
     const bot=new Bot({timeframe:'5m',windowMs:300000,capital:1000});
     const start=1_800_000;bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'up',DOWN:'down'}};
-    bot.orderWindowStart=start;bot.windowFiredEntries=5;bot.lastEntrySide='DOWN';bot.cash=870;
+    bot.orderWindowStart=start;bot.windowFiredEntries=6;bot.cash=870;
     bot.positions=[
       {id:'up',side:'UP',status:'OPEN',windowStart:start,shares:100,totalCost:60},
       {id:'down',side:'DOWN',status:'OPEN',windowStart:start,shares:100,totalCost:70},
     ];
     await bot.refreshLiveQuotes(now);
-    assert.equal(bot.windowExitTriggered,true);
-    assert.deepEqual(bot.positions.map(p=>p.status),['SETTLED_EXIT','SETTLED_EXIT']);
-    assert.deepEqual(bot.positions.map(p=>p.exitPrice),[.40,.29]);
-    assert.equal(bot.positions[0].grossExitProceeds,40);
-    assert.ok(bot.positions.every(p=>p.exitFees>0&&p.realizedPnl===p.proceeds-p.totalCost));
-    assert.equal(bot.events.filter(e=>e.event==='PAPER_MARTINGALE_POSITION_EXITED').length,2);
-    const positionsBefore=bot.positions.length;
-    bot.processTimedEntries(start,now+15000);
-    assert.equal(bot.positions.length,positionsBefore);
-    assert.equal(bot.snapshot().strategy.martingaleExit.windowLockedAfterTrigger,true);
+    assert.deepEqual(bot.positions.map(p=>p.status),['OPEN','OPEN']);
+    assert.equal(bot.snapshot().strategy.martingaleExit,undefined);
+    assert.equal(bot.events.some(e=>e.event.includes('MARTINGALE_EXIT')),false);
   }finally{md.getBook=oldGetBook;Date.now=oldNow}
-});
-test('martingale exit is inactive before five buys and does not trigger at exactly $0.30',async()=>{
-  const Bot=require('../wick-bot'),md=require('../wick-market-data'),oldGetBook=md.getBook;
-  md.getBook=async token=>({bids:[{price:token==='down'?.30:.25,size:100}],asks:[{price:.31,size:100}]});
-  try{
-    const bot=new Bot(),start=1_800_000,now=2_000_000;
-    bot.market={id:'m',slug:'m',title:'m',start,tokens:{UP:'up',DOWN:'down'}};
-    bot.orderWindowStart=start;bot.windowFiredEntries=4;bot.lastEntrySide='DOWN';
-    bot.positions=[{id:'p',side:'DOWN',status:'OPEN',windowStart:start,shares:100,totalCost:60}];
-    await bot.refreshLiveQuotes(now);
-    assert.equal(bot.windowExitTriggered,false);
-    bot.windowFiredEntries=5;
-    await bot.refreshLiveQuotes(now+1000);
-    assert.equal(bot.windowExitTriggered,false);
-    assert.equal(bot.positions[0].status,'OPEN');
-  }finally{md.getBook=oldGetBook}
 });
 test('the 270-second cutoff still blocks new timed entries',()=>{
   const Bot=require('../wick-bot'),bot=new Bot(),start=1_000_000,now=start+270000;
@@ -232,7 +211,7 @@ test('only the 5m strategy is running',()=>{
   assert.equal(bots.bots['5m'].windowMs,300000);
   assert.equal(snapshot.account.capital,10000);assert.deepEqual(snapshot.strategy.timeframes,['5m']);
   assert.equal(snapshot.timeframes['5m'].strategy.entries.checkIntervalSeconds,15);
-  assert.equal(snapshot.timeframes['5m'].strategy.entries.maxSuccessfulEntries,5);
+  assert.equal(snapshot.timeframes['5m'].strategy.entries.maxSuccessfulEntries,undefined);
   assert.equal(snapshot.timeframes['5m'].strategy.entries.maxEntrySeconds,270);
   assert.equal(snapshot.account.estimatedMakerRebate,1.23);
   assert.equal(snapshot.account.takerFees,0);

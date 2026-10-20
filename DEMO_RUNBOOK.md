@@ -3,8 +3,8 @@
 1. Verify the dashboard shows one 5-minute market, a $10,000 demo bankroll, and live UP/DOWN CLOB quotes.
 2. At window start, the paper model creates seven 100-share buy limits on each side: $0.40 down to $0.10 in $0.05 steps.
 3. A rung fills at its limit when the fresh CLOB ask reaches or crosses that price. UP and DOWN positions are independent; both sides may fill.
-4. Every 15 seconds, check each side's fresh best ask; buy at the ask if it is above $0.60. Start at 100 shares and double only after a successful fill; skipped checks do not advance sizing. Allow at most five successful buys total per window, including the initial buy. Do not open new entries at or after 270 seconds.
-5. After all five successful buys, monitor the latest-filled side's fresh best bid. Below $0.30, paper-sell all open positions for the window at each side's fresh best bid, include taker fees, and lock the window against more entries.
+4. Every 15 seconds, check each side's fresh best ask; buy at the ask if it is above $0.55. Start at 100 shares and double only after a successful fill; skipped checks do not advance sizing. There is no entry-count cap. Do not open new entries at or after 270 seconds or when paper cash is insufficient.
+5. Do not apply a $0.30 forced-sell rule. Existing take-profit, stop-loss, and official settlement rules remain in effect.
 5. Existing TP/SL behavior remains: own-side CLOB quote at $0.99 or higher settles at $1/share; $0.01 or lower settles at $0/share. Otherwise retry the official Gamma result at close.
 6. Timed entries are paper market buys at the current best ask and include configured taker fees. They are not maker fills and earn no maker rebate. The dashboard's rebate figure is only an estimate for eligible maker fills.
 7. Paper trades and account state reset on process restart. No live order placement is present.
