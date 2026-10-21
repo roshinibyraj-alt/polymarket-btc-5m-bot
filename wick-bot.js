@@ -127,7 +127,7 @@ class WickBot{
       baseShares:cfg.BASE_ENTRY_SHARES,
       sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,
       priceBand:{minInclusive:cfg.ENTRY_PRICE_BAND_MIN,maxInclusive:cfg.ENTRY_PRICE_BAND_MAX},
-      selectionSchedule:'buy each side with a best ask in the $0.52-$0.75 band every 20 seconds; multiply each successful entry by 1.3',
+      selectionSchedule:'buy each side with a best ask in the $0.25-$0.52 band every 20 seconds; multiply each successful entry by 1.2',
       cutoffSeconds:cfg.MAX_ENTRY_SECONDS});
   }
   processTimedEntries(start,now){
@@ -254,10 +254,10 @@ class WickBot{
              checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,baseShares:cfg.BASE_ENTRY_SHARES,
              sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,
              priceBand:{minInclusive:cfg.ENTRY_PRICE_BAND_MIN,maxInclusive:cfg.ENTRY_PRICE_BAND_MAX},
-             selectionSchedule:[{fromSeconds:20,toSeconds:260,everySeconds:20,
+              selectionSchedule:[{fromSeconds:20,toSeconds:180,everySeconds:20,
                side:'each side independently within the best-ask band'}],
              maxEntrySeconds:cfg.MAX_ENTRY_SECONDS,
-             timing:'Every 20 seconds from 20 through 260, buy 50 shares initially then multiply each successful entry by 1.3; buy each side whose fresh best ask is within $0.52-$0.75 inclusive; both sides may fire at one check; subject to available paper cash'},
+              timing:'Every 20 seconds from 20 through 180, buy 50 shares initially then multiply each successful entry by 1.2; buy each side whose fresh best ask is within $0.25-$0.52 inclusive; both sides may fire at one check; no new entries at or after 200 seconds; subject to available paper cash'},
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
             direction:'Evaluate UP and DOWN best asks independently; buy every side in the configured price band',
            entryFillModel:'Paper market buys fill at the fresh best ask and include the configured taker fee',
