@@ -4,8 +4,8 @@ Polymarket BTC 5-minute UP/DOWN paper trading only. The bot has a single $10,000
 
 ## Strategy
 
-- At 30, 60, and 90 seconds, paper-buy 500 shares on the side with the lower fresh CLOB best ask. At 120, 150, 180, and 210 seconds, paper-buy 500 shares on the side with the higher fresh best ask.
-- There is no price threshold or martingale sizing. Each scheduled entry is a flat 500 shares, requires fresh asks for both sides, and is subject to available paper cash.
+- At 30, 60, and 90 seconds, paper-buy 500 shares on the side with the lower fresh CLOB best ask only when that ask is below $0.40. At 120, 150, 180, and 210 seconds, paper-buy 500 shares on the side with the higher fresh best ask only when that ask is above $0.60.
+- Each scheduled entry is a flat 500 shares, requires fresh asks for both sides, and is subject to available paper cash. Prices exactly at $0.40 or $0.60 do not qualify.
 - The scheduled entries end after 210 seconds. Existing take-profit, stop-loss, and official settlement rules remain in effect.
 - No new entries at or after 270 seconds into the window. Filled positions remain open for the existing TP/SL or official-result handling.
 - Entries are modeled as taker market buys at the current best ask and use the configured crypto taker fee. They do not earn maker rebates; the rebate dashboard remains for any eligible historical maker fills.
