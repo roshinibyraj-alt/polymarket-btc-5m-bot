@@ -123,7 +123,7 @@ class WickBot{
     this.log('PAPER_TIMED_ENTRY_STRATEGY_STARTED',{windowStart:start,
       checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,
       baseShares:cfg.BASE_ENTRY_SHARES,
-      selectionSchedule:'cheapest ask below $0.40 at 30/60/90 seconds; most expensive ask above $0.60 at 120/150/180/210 seconds',
+      selectionSchedule:'cheapest ask below $0.40 every 15 seconds from 15 to 90; most expensive ask above $0.60 every 15 seconds from 120 to 210',
       cutoffSeconds:cfg.MAX_ENTRY_SECONDS});
   }
   processTimedEntries(start,now){
@@ -131,8 +131,8 @@ class WickBot{
     const checkpoint=Math.floor(elapsedMs/cfg.ENTRY_CHECK_INTERVAL_MS);
     if(checkpoint<=this.lastEntryCheckpoint)return;
     this.lastEntryCheckpoint=checkpoint;
-    if(elapsedMs>=cutoffMs||checkpoint>7)return;
-    const phase=checkpoint<=3?'CHEAPEST':'MOST_EXPENSIVE';
+    if(elapsedMs>=cutoffMs||checkpoint>14||checkpoint===7)return;
+    const phase=checkpoint<=6?'CHEAPEST':'MOST_EXPENSIVE';
     const id=`${this.timeframe}-${start}-${phase.toLowerCase()}-check-${checkpoint}`;
     const order={id,timeframe:this.timeframe,windowStart:start,side:null,checkpoint,phase,
       shares:cfg.BASE_ENTRY_SHARES,orderType:'MARKET',status:'SKIPPED',createdAt:now};
@@ -255,11 +255,11 @@ class WickBot{
           entries:{orderType:'MARKET',
             checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,baseShares:cfg.BASE_ENTRY_SHARES,
               selectionSchedule:[
-                {fromSeconds:30,toSeconds:90,side:'lowest best ask',maxAskExclusive:cfg.CHEAP_ENTRY_MAX_ASK},
-                {fromSeconds:120,toSeconds:210,side:'highest best ask',minAskExclusive:cfg.EXPENSIVE_ENTRY_MIN_ASK},
+                {fromSeconds:15,toSeconds:90,everySeconds:15,side:'lowest best ask',maxAskExclusive:cfg.CHEAP_ENTRY_MAX_ASK},
+                {fromSeconds:120,toSeconds:210,everySeconds:15,side:'highest best ask',minAskExclusive:cfg.EXPENSIVE_ENTRY_MIN_ASK},
               ],
              maxEntrySeconds:cfg.MAX_ENTRY_SECONDS,
-              timing:'At 30/60/90 seconds buy the lower-ask side only below $0.40; at 120/150/180/210 seconds buy the higher-ask side only above $0.60; 500 shares per entry'},
+              timing:'At 15-second intervals from 15 to 90 seconds buy the lower-ask side only below $0.40; from 120 to 210 seconds buy the higher-ask side only above $0.60; 500 shares per entry; no entry at 105 seconds'},
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
           direction:'Compare fresh UP and DOWN best asks and select one side per scheduled entry',
            entryFillModel:'Paper market buys fill at the fresh best ask and include the configured taker fee',
