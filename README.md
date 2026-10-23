@@ -1,17 +1,18 @@
-# BTC 5m CLOB Timed-Entry Paper Bot
+# BTC 15m Confirmation Paper Bot
 
-Polymarket BTC 5-minute UP/DOWN paper trading only. The bot has a single $10,000 demo bankroll and never submits live orders or uses wallet credentials.
+Polymarket BTC 15-minute UP/DOWN paper trading only. The bot has a single $10,000 demo bankroll and never submits live orders or uses wallet credentials.
 
 ## Strategy
 
-- Every 20 seconds from 20 through 180 seconds, check UP and DOWN independently. Paper-buy each side whose fresh best ask is within $0.25-$0.52, inclusive. Both sides may be bought at the same check.
-- The first successful entry in each 5-minute window is 50 shares. Each subsequent successful entry in that window is 1.2× the previous filled entry; out-of-band, stale-quote, and insufficient-cash attempts do not advance the size. Available paper cash remains the limit.
-- No new entries at or after 200 seconds. Existing take-profit, stop-loss, and official settlement rules remain in effect.
-- At 200 seconds into the window, stop opening entries. Filled positions remain open for the existing TP/SL or official-result handling.
-- Entries are modeled as taker market buys at the current best ask and use the configured crypto taker fee. They do not earn maker rebates; the rebate dashboard remains for any eligible historical maker fills.
-- During the window, a fresh own-side CLOB bid, ask, or midpoint at $0.99 or higher immediately settles as a $1/share win; at $0.01 or lower it settles as a $0/share loss. Otherwise, use the official Gamma market result at window close, retrying until resolved.
+- Observe the first 5 minutes of each 15-minute market; require the selected BTC direction to have a net move over at least 60 seconds.
+- Estimate UP/DOWN probability with a transparent normal-distribution proxy using the Chainlink BTC/USD reference price, the market-open price, and up to 60 minutes of minute-bar log-return volatility. Enter only when estimated probability exceeds the effective ask by at least 10 percentage points, the CLOB spread is at most $0.02, and the last-hour BTC range is at least 0.3%.
+- Size at one-quarter Kelly using the proxy, capped at 8% of starting bankroll and available paper cash. Allow one entry per 15-minute market; no martingale.
+- Do not enter during the final 3 minutes so the 3-minute stall exit can operate.
+- Paper-sell at the best bid at or above $0.85, or if the best bid remains between $0.60 and $0.70 for 3 minutes. Otherwise hold to official Gamma resolution.
+- Scheduled-news filtering is not implemented. This is an article-inspired approximation, not the article author’s probability model; the probability proxy is not validated as predictive.
+- Paper market buys and sells use the configured crypto taker fee. No live orders are submitted.
 
-The strategy uses Polymarket market metadata and CLOB quotes only; candle patterns and external BTC feeds do not drive entries. The dashboard shows the 5-minute market, both-side prices, timed entries, positions, equity, fees, and estimated rebates. Paper history resets on process restart.
+The dashboard shows the active 15-minute market, both-side prices, price-feed status, entry-gate explanation, paper positions, equity, and fees. Paper history resets on process restart.
 
 ## Run and verify
 

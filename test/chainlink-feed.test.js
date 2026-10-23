@@ -23,6 +23,9 @@ test('Chainlink RTDS updates are aggregated into minute OHLC bars',()=>{
   assert.deepEqual(feed.getMinuteCandles(),[
     {t:now,o:100,h:104,l:97,c:102,v:0},
   ]);
+  assert.deepEqual(feed.getTicks(),[
+    {ts:now,price:100},{ts:now+1000,price:104},{ts:now+2000,price:97},{ts:now+3000,price:102},
+  ]);
   assert.equal(feed.snapshot().status,'live');
 });
 

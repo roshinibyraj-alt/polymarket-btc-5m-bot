@@ -2,7 +2,7 @@
   "name": "btc-wick-paper-demo",
   "version": "1.0.0",
   "private": true,
-  "description": "Paper-only Polymarket BTC 5-minute two-sided timed-entry strategy.",
+  "description": "Paper-only Polymarket BTC 15-minute confirmation strategy with a rule-based probability proxy.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

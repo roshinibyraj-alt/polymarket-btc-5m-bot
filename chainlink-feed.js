@@ -10,6 +10,7 @@ class ChainlinkFeed{
     this.WebSocketImpl=WebSocketImpl;
     this.now=now;
     this.bars=new Map();
+    this.ticks=[];
     this.socket=null;
     this.started=false;
     this.status='starting';
@@ -96,6 +97,12 @@ class ChainlinkFeed{
     if(timestamp<1e12)timestamp*=1000;
     if(!Number.isFinite(timestamp)||!Number.isFinite(price)||price<=0)return false;
     const minute=Math.floor(timestamp/60000)*60000;
+    const tick={ts:timestamp,price};
+    if(!this.ticks.length||timestamp>=this.ticks.at(-1).ts)this.ticks.push(tick);
+    else{
+      const insertion=this.ticks.findIndex(x=>x.ts>timestamp);
+      this.ticks.splice(insertion<0?this.ticks.length:insertion,0,tick);
+    }
     let bar=this.bars.get(minute);
     if(!bar){
       bar={t:minute,o:price,h:price,l:price,c:price,v:0,firstTs:timestamp,lastTs:timestamp};
@@ -112,6 +119,7 @@ class ChainlinkFeed{
   prune(){
     const cutoff=this.now()-RETAIN_MS;
     for(const t of this.bars.keys())if(t<cutoff)this.bars.delete(t);
+    while(this.ticks.length&&this.ticks[0].ts<cutoff)this.ticks.shift();
   }
 
   getMinuteCandles(){
@@ -127,6 +135,13 @@ class ChainlinkFeed{
     }
     return [...this.bars.values()].sort((a,b)=>a.t-b.t)
       .map(({t,o,h,l,c,v})=>({t,o,h,l,c,v}));
+  }
+
+  getTicks(){
+    this.start();
+    const ageMs=this.lastUpdateAt==null?null:this.now()-this.lastUpdateAt;
+    if(this.lastUpdateAt==null||ageMs>MAX_AGE_MS)throw new Error(this.error||'Chainlink BTC/USD price feed is stale');
+    return this.ticks.slice();
   }
 
   snapshot(){
