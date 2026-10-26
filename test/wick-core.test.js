@@ -38,7 +38,9 @@ test('5m and 15m strategies place the same two 500-share resting limits',()=>{
     bot.processCandleEntries(start,start+1_000);
     assert.equal(bot.candleEvaluation.side,'UP');
     assert.deepEqual(bot.windowOrders.map(o=>[o.limitPrice,o.shares]),[[.30,500],[.20,500]]);
-    assert.ok(bot.windowOrders.every(o=>o.expiresAt===start+cfg.ORDER_CUTOFF_MS));
+    const expectedCutoff=cfg.ORDER_CUTOFF_MS*(windowMs/cfg.WINDOW_MS_5M);
+    assert.ok(bot.windowOrders.every(o=>o.expiresAt===start+expectedCutoff));
+    assert.equal(bot.orderCutoffMs/1000,windowMs===300_000?180:540);
   }
 });
 

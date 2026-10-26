@@ -74,6 +74,7 @@ class WickBot{
   constructor({timeframe='5m',windowMs=cfg.WINDOW_MS_5M,capital=cfg.DEMO_CAPITAL_5M,
     strategyMode='candle-pattern',priceFeed=chainlinkFeed}={}){
     this.timeframe=timeframe;this.windowMs=windowMs;this.capital=capital;this.cash=capital;
+    this.orderCutoffMs=cfg.ORDER_CUTOFF_MS*(windowMs/cfg.WINDOW_MS_5M);
     this.strategyMode=strategyMode;this.priceFeed=priceFeed;
     this.startedAt=Date.now();
     this.positions=[];this.events=[];this.status='starting';
@@ -160,7 +161,7 @@ class WickBot{
     if(!windows.length||windows.at(-1).end!==start){
       this.candleEvaluation={side:null,reason:'Previous market candle is incomplete or unavailable'};return;
     }
-    if(now>=start+cfg.ORDER_CUTOFF_MS){this.candleEvaluation={...signal,reason:'180-second entry cutoff has passed'};return}
+    if(now>=start+this.orderCutoffMs){this.candleEvaluation={...signal,reason:`${this.orderCutoffMs/1000}-second entry cutoff has passed`};return}
     this.candleOrdersPlaced=true;
     const tokenId=this.market.tokens[signal.side];
     this.windowOrders=[];
@@ -168,7 +169,7 @@ class WickBot{
       const price=level.price;
       const order={id:`${this.timeframe}-${start}-${price}`,timeframe:this.timeframe,windowStart:start,
         side:signal.side,tokenId,limitPrice:price,shares:level.shares,status:'LIVE',
-        createdAt:now,expiresAt:start+cfg.ORDER_CUTOFF_MS,pattern:signal.pattern};
+        createdAt:now,expiresAt:start+this.orderCutoffMs,pattern:signal.pattern};
       this.windowOrders.push(order);this.orders.unshift(order);
     }
     this.log('CANDLE_SIGNAL_LIMITS_PLACED',{side:signal.side,pattern:signal.pattern,
@@ -419,7 +420,7 @@ class WickBot{
         signal:'Previous green → UP; previous red → DOWN; doji after 2+ red → UP; doji after 2+ green → DOWN',
         dojiDefinition:'Body ≤10% of candle high-low range',
         orders:{type:'Resting paper limit buys',levels:[{price:.30,shares:500},{price:.20,shares:500}],
-          cutoffSeconds:180},exit:'Hold filled shares to official market resolution',execution:'PAPER ONLY',
+           cutoffSeconds:this.orderCutoffMs/1000},exit:'Hold filled shares to official market resolution',execution:'PAPER ONLY',
         signalState:this.candleEvaluation,priceFeed:this.priceFeed?.snapshot?.()||null};
      return {now,mode:'DEMO ONLY',status:this.status,error:this.error,strategy,
         account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,takerFees,estimatedMakerRebate,

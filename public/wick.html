@@ -27,7 +27,7 @@
   <section class="panel"><h2>Active market windows</h2><div id="windows" class="windows"></div></section>
   <section class="panel"><h2>Paper positions</h2><div id="positions" class="scroll"></div></section>
   <section class="panel"><h2>Recent bot events</h2><div id="events"></div></section>
-  <p class="small">Signals use the previous completed candle: green → UP, red → DOWN; a doji follows two or more consecutive prior red/green candles in the opposite direction. Each signal places 500-share limits at $0.30 and $0.20; unfilled orders cancel at 180 seconds. Paper ledgers reset when the process restarts. No live orders are submitted.</p>
+  <p class="small">Signals use the previous completed candle: green → UP, red → DOWN; a doji follows two or more consecutive prior red/green candles in the opposite direction. Each signal places 500-share limits at $0.30 and $0.20; unfilled orders cancel at 180 seconds on 5m windows and 540 seconds on 15m windows. Paper ledgers reset when the process restarts. No live orders are submitted.</p>
   <div id="error" class="bad"></div>
 </main>
 <script>
