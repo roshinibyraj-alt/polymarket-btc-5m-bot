@@ -1,24 +1,17 @@
-# BTC 15m Confirmation Paper Bot
+# Polymarket BTC candle-pattern paper bot
 
-Polymarket BTC 15-minute UP/DOWN paper trading only. The bot has a single $10,000 demo bankroll and never submits live orders or uses wallet credentials.
+Paper-only BTC UP/DOWN trading on 5-minute and 15-minute Polymarket markets.
 
-## Strategy
+At each window open, evaluate the previous fully closed market candle:
 
-- Observe the first 5 minutes of each 15-minute market; require the selected BTC direction to have a net move over at least 60 seconds.
-- Estimate UP/DOWN probability with a transparent normal-distribution proxy using the Chainlink BTC/USD reference price, the market-open price, and up to 60 minutes of minute-bar log-return volatility. Enter only when estimated probability exceeds the effective ask by at least 10 percentage points, the CLOB spread is at most $0.02, and the last-hour BTC range is at least 0.3%.
-- Size at one-quarter Kelly using the proxy, capped at 8% of starting bankroll and available paper cash. Allow one entry per 15-minute market; no martingale.
-- Do not enter during the final 3 minutes so the 3-minute stall exit can operate.
-- Paper-sell at the best bid at or above $0.85, or if the best bid remains between $0.60 and $0.70 for 3 minutes. Otherwise hold to official Gamma resolution.
-- Scheduled-news filtering is not implemented. This is an article-inspired approximation, not the article author’s probability model; the probability proxy is not validated as predictive.
-- Paper market buys and sells use the configured crypto taker fee. No live orders are submitted.
+- Green selects UP.
+- Red selects DOWN.
+- A doji after at least two consecutive red candles selects UP.
+- A doji after at least two consecutive green candles selects DOWN.
+- An unconfirmed doji does not trade.
 
-The dashboard shows the active 15-minute market, both-side prices, price-feed status, entry-gate explanation, paper positions, equity, and fees. Paper history resets on process restart.
+Doji means the candle body is no more than 10% of its high-low range. A signal places two resting paper limit buys on the selected outcome: 500 shares at $0.30 and 500 at $0.20. Any unfilled orders are canceled 180 seconds after the market window opens. Filled shares are held for official Gamma resolution.
 
-## Run and verify
+Each timeframe has an independent $10,000 in-memory paper ledger. The dashboard shows both timeframe states, orders, positions, and combined account totals. Paper state resets when the process restarts. No live orders or wallet credentials are used.
 
-```sh
-npm test
-npm start
-```
-
-Dashboard: `/` · State: `/api/state` · Health: `/api/healthz`. Railway's existing `node index.js` start command remains valid.
+Run `npm test` and `npm start`. The Railway `node index.js` start command remains valid.

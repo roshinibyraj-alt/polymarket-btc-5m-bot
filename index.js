@@ -13,7 +13,7 @@ async function main() {
   bot.start();
   startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- Polymarket BTC 15m article-inspired confirmation strategy; no live order code is loaded.');
+  console.log('MODE: DEMO -- BTC candle-pattern strategy on 5m and 15m markets; no live order code is loaded.');
 }
 
 main().catch((e) => {

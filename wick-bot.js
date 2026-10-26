@@ -3,7 +3,7 @@
 const cfg=require('./config');
 const md=require('./wick-market-data');
 const {feed:chainlinkFeed}=require('./chainlink-feed');
-const article15m=require('./polymarket-15m-strategy');
+const candleStrategy=require('./candle-strategy');
 
 function levels(xs){return (xs||[]).map(x=>({price:Number(x.price),size:Number(x.size)}))
   .filter(x=>Number.isFinite(x.price)&&x.size>0).sort((a,b)=>a.price-b.price)}
@@ -72,7 +72,7 @@ function clobQuoteWinner(up,down){
 }
 class WickBot{
   constructor({timeframe='5m',windowMs=cfg.WINDOW_MS_5M,capital=cfg.DEMO_CAPITAL_5M,
-    strategyMode='legacy-5m',priceFeed=chainlinkFeed}={}){
+    strategyMode='candle-pattern',priceFeed=chainlinkFeed}={}){
     this.timeframe=timeframe;this.windowMs=windowMs;this.capital=capital;this.cash=capital;
     this.strategyMode=strategyMode;this.priceFeed=priceFeed;
     this.startedAt=Date.now();
@@ -89,6 +89,8 @@ class WickBot{
     this.articleReferencePrice=null;this.articleTicks=[];this.articleCandles=[];
     this.articleEvaluation={ready:false,reason:'Waiting for market data'};
     this.articleEntryFilled=false;
+    this.candleEvaluation={side:null,reason:'Waiting for closed-candle history'};
+    this.candleOrdersPlaced=false;
   }
   log(event,data={}){const e={ts:Date.now(),timeframe:this.timeframe,event,...data};this.events.unshift(e);this.events.length=Math.min(100,this.events.length);console.log('[wick] '+JSON.stringify(e))}
   async tick(){
@@ -109,10 +111,9 @@ class WickBot{
       }
       await this.refreshLiveQuotes(now);
       if(this.orderWindowStart!==start)this.openStrategyWindow(start,now);
-      if(this.strategyMode==='article-15m'){
-        this.updateArticlePriceContext(start);
-        this.processArticleEntries(start,now);
-      }else this.processTimedEntries(start,now);
+      this.updateCandleContext(start);
+      this.processCandleEntries(start,now);
+      this.processCandleOrders(start,now);
       if(now>=start+this.windowMs-3000&&now<start+this.windowMs){
         this.closeQuotes={UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN,ts:now};
         for(const p of this.positions)if(p.windowStart===start&&(p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT'))p.closeQuotes=this.closeQuotes;
@@ -140,21 +141,60 @@ class WickBot{
     this.articleReferencePrice=null;this.articleTicks=[];this.articleCandles=[];
     this.articleEvaluation={ready:false,reason:'Waiting for BTC price history'};
     this.articleEntryFilled=false;
+    this.candleEvaluation={side:null,reason:'Waiting for closed-candle history'};
+    this.candleOrdersPlaced=false;
     this.windowOrders=[];
-    if(this.strategyMode==='article-15m'){
-      this.log('PAPER_ARTICLE_15M_STRATEGY_STARTED',{windowStart:start,observationSeconds:300,
-        directionHoldSeconds:60,minimumProxyEdge:article15m.MIN_EDGE,maximumSpread:article15m.MAX_SPREAD,
-        maximumEntries:1,newsFilter:'NOT_IMPLEMENTED'});
-    }else{
-      this.log('PAPER_TIMED_ENTRY_STRATEGY_STARTED',{windowStart:start,
-        initialEntryDelaySeconds:cfg.INITIAL_ENTRY_DELAY_MS/1000,
-        triggerAskAbove:cfg.ENTRY_PRICE_THRESHOLD,
-        initialEntryMaxAsk:cfg.INITIAL_ENTRY_MAX_PRICE,
-        baseShares:cfg.BASE_ENTRY_SHARES,
-        sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,
-        maxSuccessfulEntries:cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW,
-        selectionSchedule:'after a 30-second delay from window start, one initial 500-share entry fires as soon as a fresh ask is above $0.70 and at most $0.75; as soon as its opposite fresh ask reaches $0.70, buy 1000 shares once only',
-        cutoffSeconds:cfg.MAX_ENTRY_SECONDS});
+    this.log('CANDLE_PATTERN_WINDOW_STARTED',{windowStart:start,timeframe:this.timeframe});
+  }
+  updateCandleContext(){
+    try{this.articleCandles=this.priceFeed.getMinuteCandles()}
+    catch(error){this.candleEvaluation={side:null,reason:error.message}}
+  }
+  processCandleEntries(start,now){
+    if(this.orderWindowStart!==start||this.candleOrdersPlaced)return;
+    const windows=candleStrategy.aggregateCompleteCandles(this.articleCandles,this.windowMs)
+      .filter(c=>c.end<=start);
+    const signal=candleStrategy.signalForPrevious(windows);
+    this.candleEvaluation={...signal,ready:!!signal.previous};
+    if(!signal.side)return;
+    if(!windows.length||windows.at(-1).end!==start){
+      this.candleEvaluation={side:null,reason:'Previous market candle is incomplete or unavailable'};return;
+    }
+    if(now>=start+cfg.ORDER_CUTOFF_MS){this.candleEvaluation={...signal,reason:'180-second entry cutoff has passed'};return}
+    this.candleOrdersPlaced=true;
+    const tokenId=this.market.tokens[signal.side];
+    this.windowOrders=[];
+    for(const level of cfg.RESTING_LIMITS){
+      const price=level.price;
+      const order={id:`${this.timeframe}-${start}-${price}`,timeframe:this.timeframe,windowStart:start,
+        side:signal.side,tokenId,limitPrice:price,shares:level.shares,status:'LIVE',
+        createdAt:now,expiresAt:start+cfg.ORDER_CUTOFF_MS,pattern:signal.pattern};
+      this.windowOrders.push(order);this.orders.unshift(order);
+    }
+    this.log('CANDLE_SIGNAL_LIMITS_PLACED',{side:signal.side,pattern:signal.pattern,
+      previousCandle:signal.previous,orders:this.windowOrders.map(o=>({price:o.limitPrice,shares:o.shares}))});
+  }
+  processCandleOrders(start,now){
+    for(const order of this.windowOrders){
+      if(order.status!=='LIVE')continue;
+      if(now>=order.expiresAt){order.status='EXPIRED';order.closedAt=now;continue}
+      const quote=this.liveQuotes[order.side];
+      const ask=Number(quote?.bestAsk);
+      if(quote?.status!=='LIVE'||!Number.isFinite(quote.updatedAt)||now-quote.updatedAt>5000
+        ||!Number.isFinite(ask)||ask>order.limitPrice)continue;
+      const cost=order.shares*order.limitPrice;
+      if(cost>this.cash){order.status='REJECTED_INSUFFICIENT_CASH';continue}
+      order.status='FILLED';order.filledAt=now;order.fillPrice=order.limitPrice;
+      const position={id:order.id,timeframe:this.timeframe,windowMs:this.windowMs,
+        windowStart:start,marketId:this.market.id,slug:this.market.slug,title:this.market.title,
+        side:order.side,tokenId:order.tokenId,entryKey:order.id,
+        entryLabel:`${order.pattern} · ${order.side} · $${order.limitPrice.toFixed(2)}`,
+        entryType:'CANDLE_PATTERN_LIMIT',orderType:'GTC_LIMIT',fillModel:'PAPER_ASK_TOUCH',
+        shares:order.shares,initialShares:order.shares,avgEntry:order.limitPrice,
+        cost,totalCost:cost,fees:0,status:'OPEN',submittedAt:order.createdAt,
+        openedAt:now,filledAt:now,markBid:this.liveQuotes[order.side]?.bestBid??null};
+      this.cash-=cost;this.positions.unshift(position);
+      this.log('PAPER_LIMIT_FILLED',{id:order.id,side:order.side,price:order.limitPrice,shares:order.shares});
     }
   }
   updateArticlePriceContext(start){
@@ -308,11 +348,7 @@ class WickBot{
       if(p.windowStart===this.market.start){
         const q=this.liveQuotes[p.side];
         p.markBid=q?.bestBid??null;p.markUpdatedAt=q?.updatedAt||now;p.markStatus=q?.bestBid!=null?'LIVE':'MISSING';
-        if(p.status==='OPEN'){
-          if(this.strategyMode==='article-15m')this.processArticleExit(p,q,now);
-          else if(takeProfitHit(q,now))this.finalizePosition(p,true,'TP_HIT_0_99',clobQuoteValue(q));
-          else if(stopLossHit(q,now))this.finalizePosition(p,false,'STOP_LOSS_HIT_0_01',clobQuoteFloor(q));
-        }
+        // Candle strategy holds filled shares to official market resolution.
       }
     }
     const due=open.filter(p=>p.windowStart!==this.market.start&&p.tokenId&&now-(p.lastMarkAttempt||0)>=5000);
@@ -379,36 +415,12 @@ class WickBot{
       }
       const mark=p.markBid==null?null:p.markBid*p.shares;p.markAgeMs=p.markUpdatedAt?Math.max(0,now-p.markUpdatedAt):null;p.markStatus=mark==null?'UNAVAILABLE':p.markAgeMs>15000?'STALE':'LIVE';const freshMark=mark!=null&&p.markAgeMs<=15000;p.markValue=freshMark?mark:null;p.unrealizedPnl=freshMark?mark-p.totalCost:null;if(!freshMark)unpricedOpenPositions++;else{markedValue+=mark;unrealizedPnl+=p.unrealizedPnl}
     }
-     const isArticle=this.strategyMode==='article-15m';
-     const strategy=isArticle?{
-       timeframe:this.timeframe,market:'Polymarket BTC 15-minute UP/DOWN',capital:this.capital,
-       style:'Article-inspired, paper-only approximation',
-       entries:{observationSeconds:300,directionHoldSeconds:60,minimumProxyEdge:article15m.MIN_EDGE,
-         maximumSpread:article15m.MAX_SPREAD,maxSuccessfulEntries:1,lastEntrySeconds:this.windowMs/1000-180,
-         sizing:'¼ Kelly using volatility proxy, capped at 8% of starting bankroll',
-         probabilityProxy:'Normal distribution using recent Chainlink BTC/USD minute log-return volatility and current BTC price versus the market-open reference',
-         newsFilter:'NOT IMPLEMENTED — scheduled news is not checked; this strategy can enter during news events'},
-       exit:'Paper sell at best bid >= $0.85; sell if best bid stays between $0.60 and $0.70 for 3 minutes; otherwise hold to official market resolution',
-       direction:'Require net BTC price movement in the selected direction over a fresh 60-second Chainlink sample',
-       execution:'PAPER ONLY',
-       signal:{...this.articleEvaluation,referencePrice:this.articleReferencePrice,
-         priceFeed:this.priceFeed?.snapshot?.()||null},
-     }:{
-         timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
-           entries:{orderType:'MARKET',triggerAskAbove:cfg.ENTRY_PRICE_THRESHOLD,
-              initialEntryDelaySeconds:cfg.INITIAL_ENTRY_DELAY_MS/1000,
-              initialEntryMaxAsk:cfg.INITIAL_ENTRY_MAX_PRICE,
-             baseShares:cfg.BASE_ENTRY_SHARES,sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,
-             maxSuccessfulEntries:cfg.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW,
-             maxEntrySeconds:cfg.MAX_ENTRY_SECONDS,
-              initialEntry:'After 30 seconds from window start, one initial entry when a fresh ask is above $0.70 and at most $0.75',
-              martingale:'Once per window, immediately after the initial fill when the opposite side has a fresh ask of at least $0.70, buy 1000 shares',
-              timing:'After a 30-second delay from window start, buy 500 shares on the first fresh ask above $0.70 and at most $0.75, at any time. Once filled, immediately buy 1000 shares on the opposite side if its fresh ask is at least $0.70. One martingale maximum per 5-minute window; stop at 270 seconds or when paper cash is insufficient.'},
-          exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
-             direction:'Evaluate UP and DOWN best asks independently; select the lower ask when both qualify for the initial entry',
-           entryFillModel:'Paper market buys fill at the fresh best ask and include the configured taker fee',
-           fees:'Maker fills have zero fees; estimated crypto maker rebates are tracked separately',
-           execution:'PAPER ONLY'};
+      const strategy={timeframe:this.timeframe,market:`Polymarket BTC ${this.timeframe} UP/DOWN`,
+        signal:'Previous green → UP; previous red → DOWN; doji after 2+ red → UP; doji after 2+ green → DOWN',
+        dojiDefinition:'Body ≤10% of candle high-low range',
+        orders:{type:'Resting paper limit buys',levels:[{price:.30,shares:500},{price:.20,shares:500}],
+          cutoffSeconds:180},exit:'Hold filled shares to official market resolution',execution:'PAPER ONLY',
+        signalState:this.candleEvaluation,priceFeed:this.priceFeed?.snapshot?.()||null};
      return {now,mode:'DEMO ONLY',status:this.status,error:this.error,strategy,
         account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,takerFees,estimatedMakerRebate,
          totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,markedValue,unpricedOpenPositions,
@@ -418,13 +430,13 @@ class WickBot{
       window:this.market?{title:this.market.title,slug:this.market.slug,start:this.market.start,end:this.market.end}:null,
       livePrices:{marketSlug:this.market?.slug||null,updatedAt:Math.max(this.liveQuotes.UP.updatedAt||0,this.liveQuotes.DOWN.updatedAt||0)||null,
         UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN},
-         scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,
-           source:isArticle?'Polymarket Gamma/CLOB + Polymarket RTDS Chainlink BTC/USD':'Polymarket market discovery and UP/DOWN CLOB order books only',
-          marketResolution:'Own-side fresh CLOB quote >= $0.99 settles $1/share, <= $0.01 settles $0/share immediately; otherwise official Gamma result is retried until resolved'},
+          scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,
+            source:'Polymarket Gamma/CLOB + Polymarket RTDS Chainlink BTC/USD',
+           marketResolution:'Official Gamma result at window close; retry until resolved'},
        positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }
-     start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,
-       note:this.strategyMode==='article-15m'?'Paper-only article-inspired 15m strategy; probability is a rule-based proxy and news is not checked.':'Paper-only BTC 5m CLOB quote-triggered entries; no live orders.'});
+      start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,
+        note:'Paper-only previous-candle strategy with two resting limit orders; no live orders.'});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};
     void loop();}
   stop(){this.running=false;clearTimeout(this.timer)}

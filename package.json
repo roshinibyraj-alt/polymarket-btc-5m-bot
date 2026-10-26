@@ -1,8 +1,8 @@
 {
-  "name": "btc-wick-paper-demo",
+  "name": "polymarket-btc-candle-pattern-paper-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Paper-only Polymarket BTC 15-minute confirmation strategy with a rule-based probability proxy.",
+  "description": "Paper-only Polymarket BTC 5-minute and 15-minute candle-pattern limit strategy.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
