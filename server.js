@@ -6,7 +6,7 @@ const path = require('node:path');
 
 const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'wick.html'));
 
-function startServer(bot, port) {
+function startServer(bot, port, liveBalanceProvider=null) {
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
     if (pathname === '/api/healthz') {
@@ -20,6 +20,12 @@ function startServer(bot, port) {
       const body = JSON.stringify(bot.snapshot());
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(body);
+      return;
+    }
+    if(pathname==='/api/live-balance'){
+      Promise.resolve(liveBalanceProvider?.snapshot?.()||{status:'disabled',collateral:null,positionValue:null,equity:null,asOf:null})
+        .then(body=>{res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(body))})
+        .catch(()=>{res.writeHead(503,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify({status:'unavailable',collateral:null,positionValue:null,equity:null,asOf:null}))});
       return;
     }
     if (pathname === '/' || pathname === '/index.html') {

@@ -7,6 +7,7 @@ module.exports = {
   WINDOW_MS_5M: 5 * 60 * 1000,
   WINDOW_MS_15M: 15 * 60 * 1000,
   RESTING_LIMITS: [{ price: 0.30, shares: 500 }, { price: 0.20, shares: 500 }],
+  LIVE_SHARES_PER_RUNG: 20,
   ORDER_CUTOFF_MS: 180 * 1000,
   INITIAL_ENTRY_DELAY_MS: 30 * 1000,
   ENTRY_PRICE_THRESHOLD: 0.70,

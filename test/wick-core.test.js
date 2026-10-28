@@ -45,6 +45,26 @@ test('5m and 15m strategies place the same two 500-share resting limits',()=>{
   }
 });
 
+test('live mirror callback receives only the 5m rung signal and does not alter paper sizes',async()=>{
+  const captured=[];
+  for(const timeframe of ['5m','15m']){
+    const windowMs=timeframe==='5m'?300_000:900_000;
+    const bot=new Bot({timeframe,windowMs,capital:10_000,
+      priceFeed:{getMinuteCandles:()=>[],snapshot:()=>({status:'live'})},
+      onLiveEntryOrders:entry=>{captured.push(entry)}});
+    const start=windowMs;
+    bot.market={id:'market',slug:'btc-updown',title:'BTC',tokens:{UP:'up',DOWN:'down'}};
+    bot.orderWindowStart=start;bot.articleCandles=minuteWindow(0,100,105,106,99,windowMs/60_000);
+    bot.processCandleEntries(start,start+1_000);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(bot.windowOrders.map(o=>o.shares),[500,500]);
+  }
+  assert.equal(captured.length,1);
+  assert.equal(captured[0].tokenId,'up');
+  assert.deepEqual(captured[0].orders,[{price:.30,shares:20},{price:.20,shares:20}]);
+  assert.equal(captured[0].cutoffAt,300_000+180_000);
+});
+
 test('paper orders fill on fresh ask touches and expire at 180 seconds',()=>{
   const bot=new Bot({timeframe:'5m',windowMs:300_000,capital:10_000,
     priceFeed:{getMinuteCandles:()=>[],snapshot:()=>({status:'live'})}});

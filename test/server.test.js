@@ -31,3 +31,13 @@ test('health endpoint returns demo service status without exposing secrets', asy
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true, mode: 'DEMO', status: 'scanning', now: 123 });
 });
+
+test('live balance endpoint returns only the read-only balance snapshot',async(t)=>{
+  const snapshot={status:'ready',collateral:125,positionValue:40,equity:165,positionCount:2,asOf:'2026-10-29T00:00:00Z'};
+  const server=startServer({snapshot:()=>({})},0,{snapshot:()=>snapshot});
+  await new Promise(resolve=>server.once('listening',resolve));
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const response=await fetch(`http://127.0.0.1:${server.address().port}/api/live-balance`);
+  assert.equal(response.status,200);
+  assert.deepEqual(await response.json(),snapshot);
+});

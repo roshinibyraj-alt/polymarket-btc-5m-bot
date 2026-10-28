@@ -50,10 +50,11 @@ function stopLossHit(q,now=Date.now()){
 }
 class WickBot{
   constructor({timeframe='5m',windowMs=cfg.WINDOW_MS_5M,capital=cfg.DEMO_CAPITAL_5M,
-    strategyMode='candle-pattern',priceFeed=chainlinkFeed}={}){
+    strategyMode='candle-pattern',priceFeed=chainlinkFeed,onLiveEntryOrders=null}={}){
     this.timeframe=timeframe;this.windowMs=windowMs;this.capital=capital;this.cash=capital;
     this.orderCutoffMs=cfg.ORDER_CUTOFF_MS*(windowMs/cfg.WINDOW_MS_5M);
     this.strategyMode=strategyMode;this.priceFeed=priceFeed;
+    this.onLiveEntryOrders=onLiveEntryOrders;
     this.startedAt=Date.now();
     this.positions=[];this.events=[];this.status='starting';
     this.completedWindows=new Map();
@@ -145,6 +146,12 @@ class WickBot{
     }
     this.log('CANDLE_SIGNAL_LIMITS_PLACED',{side:signal.side,pattern:signal.pattern,
       previousCandle:signal.previous,orders:this.windowOrders.map(o=>({price:o.limitPrice,shares:o.shares}))});
+    if(this.timeframe==='5m'&&typeof this.onLiveEntryOrders==='function'){
+      const liveEntry={windowStart:start,cutoffAt:start+this.orderCutoffMs,slug:this.market.slug,
+        tokenId,side:signal.side,orders:cfg.RESTING_LIMITS.map(({price})=>({price,shares:cfg.LIVE_SHARES_PER_RUNG}))};
+      Promise.resolve().then(()=>this.onLiveEntryOrders(liveEntry))
+        .catch(error=>this.log('LIVE_ENTRY_MIRROR_ERROR',{note:error.message,slug:this.market?.slug||null}));
+    }
   }
   processCandleOrders(start,now){
     for(const order of this.windowOrders){

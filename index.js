@@ -1,19 +1,32 @@
 'use strict';
 
 async function main() {
-  if (process.env.LIVE_TRADING === 'true') {
-    console.error('Live execution was removed. Unset LIVE_TRADING; this bot runs in demo mode only.');
-    process.exitCode = 1;
-    return;
-  }
-
   const Bot = require('./multi-bot');
   const startServer = require('./server');
-  const bot = new Bot();
+  const enabled=process.env.LIVE_TRADING==='true';
+  let liveMirror=null;
+  if(enabled){
+    const LiveOrderMirror=require('./live-order-mirror');
+    const PolymarketTrader=require('./polymarket-trader');
+    liveMirror=new LiveOrderMirror({startedAt:Date.now()});
+    liveMirror.setReadyPromise((async()=>{
+      try{
+        const trader=new PolymarketTrader(process.env.PRIVATE_KEY);
+        await trader.authenticate();
+        liveMirror.setTrader(trader);
+        liveMirror.startBalanceRefresh();
+        console.log('[live] Entry-only 5m mirroring enabled; TP/SL and claims are not managed by this bot.');
+      }catch(error){
+        liveMirror.setError(error.message);
+        console.error('[live] Real trading unavailable; demo remains running:',error.message);
+      }
+    })());
+  }
+  const bot = new Bot({onLiveEntryOrders:liveMirror?(entry=>liveMirror.placeEntryOrders(entry)):null});
   bot.start();
-  startServer(bot, process.env.PORT || 3000);
+  startServer(bot, process.env.PORT || 3000,liveMirror);
 
-  console.log('MODE: DEMO -- BTC candle-pattern strategy on 5m and 15m markets; no live order code is loaded.');
+  console.log(`MODE: DEMO${enabled?' + LIVE 5m entry mirror':' ONLY'} -- demo order management remains unchanged.`);
 }
 
 main().catch((e) => {

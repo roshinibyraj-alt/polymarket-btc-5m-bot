@@ -5,10 +5,10 @@ const Bot=require('./wick-bot');
 const {feed:chainlinkFeed}=require('./chainlink-feed');
 
 class MultiBot {
-  constructor(){
+  constructor({onLiveEntryOrders=null}={}){
     this.bots={
       '5m':new Bot({timeframe:'5m',windowMs:cfg.WINDOW_MS_5M,capital:cfg.DEMO_CAPITAL_5M,
-        strategyMode:'candle-pattern',priceFeed:chainlinkFeed}),
+        strategyMode:'candle-pattern',priceFeed:chainlinkFeed,onLiveEntryOrders}),
       '15m':new Bot({timeframe:'15m',windowMs:cfg.WINDOW_MS_15M,capital:cfg.DEMO_CAPITAL_15M,
         strategyMode:'candle-pattern',priceFeed:chainlinkFeed})
     };
