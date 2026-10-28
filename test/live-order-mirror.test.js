@@ -30,3 +30,12 @@ test('skips the already-open market after restart and orders too near the expiry
   assert.ok(result.orders.every(order=>order.status==='skipped_expiry_too_soon'));
   assert.equal(count,0);
 });
+
+test('paused mirror does not submit real orders',async()=>{
+  let count=0;
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>1_000_000,tradingEnabled:false});
+  mirror.setTrader({placeGtdOrder:async()=>{count++;return{id:'unexpected'}}});
+  assert.equal((await mirror.placeEntryOrders(entry)).status,'paused');
+  assert.equal(count,0);
+  assert.equal(mirror.snapshot().tradingEnabled,false);
+});

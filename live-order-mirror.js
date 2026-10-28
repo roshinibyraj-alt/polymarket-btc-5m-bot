@@ -4,16 +4,17 @@ const MIN_GTD_EXPIRATION_SECONDS=180;
 const POLYMARKET_GTD_BUFFER_SECONDS=60;
 
 class LiveOrderMirror{
-  constructor({startedAt=Date.now(),clock=()=>Date.now()}={}){
+  constructor({startedAt=Date.now(),clock=()=>Date.now(),tradingEnabled=true}={}){
     this.startedAt=startedAt;this.clock=clock;this.trader=null;this.status='starting';
     this.error=null;this.lastBalance=null;this.orders=[];this.seen=new Set();this.balanceTimer=null;
-    this.readyPromise=Promise.resolve();
+    this.readyPromise=Promise.resolve();this.tradingEnabled=tradingEnabled;
   }
   setReadyPromise(promise){this.readyPromise=Promise.resolve(promise)}
   setTrader(trader){this.trader=trader;this.status='ready';this.error=null}
   setError(message){this.status='error';this.error=String(message||'Live trading unavailable')}
   async placeEntryOrders(entry){
     await this.readyPromise;
+    if(!this.tradingEnabled)return {status:'paused'};
     if(!this.trader||this.status!=='ready')return {status:this.status};
     if(entry?.windowStart<this.startedAt)return {status:'skipped_restart_window'};
     if(!entry?.slug||!entry?.tokenId||!Array.isArray(entry.orders))return {status:'skipped_invalid_signal'};
@@ -52,8 +53,8 @@ class LiveOrderMirror{
   }
   snapshot(){
     return this.lastBalance
-      ?{...this.lastBalance,status:this.status,error:this.error,orders:this.orders.slice(0,10)}
-      :{status:this.status,error:this.error,collateral:null,positionValue:null,equity:null,asOf:null,orders:this.orders.slice(0,10)};
+      ?{...this.lastBalance,status:this.status,tradingEnabled:this.tradingEnabled,error:this.error,orders:this.orders.slice(0,10)}
+      :{status:this.status,tradingEnabled:this.tradingEnabled,error:this.error,collateral:null,positionValue:null,equity:null,asOf:null,orders:this.orders.slice(0,10)};
   }
   stop(){if(this.balanceTimer)clearInterval(this.balanceTimer)}
 }

@@ -9,11 +9,10 @@
     "test": "node --test"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=24"
   },
   "dependencies": {
-    "@polymarket/builder-relayer-client": "latest",
-    "@polymarket/clob-client-v2": "1.1.0",
-    "viem": "^2.21.0"
+    "@polymarket/client": "0.14.0",
+    "viem": "^2.46.3"
   }
 }
