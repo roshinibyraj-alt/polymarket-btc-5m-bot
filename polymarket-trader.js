@@ -25,24 +25,51 @@ class PolymarketTrader{
     if(!response.orderId)throw new Error('GTD response did not include an order ID');
     return{id:response.orderId,status:response.status||'LIVE'};
   }
+  async listOpenOrders(){
+    if(!this.client)throw new Error('Polymarket authentication is not ready');
+    const orders=[];
+    for await(const page of this.client.listOpenOrders()){
+      if(Array.isArray(page?.items))orders.push(...page.items);
+    }
+    return orders;
+  }
+  async cancelOrder(orderId){
+    if(!this.client)throw new Error('Polymarket authentication is not ready');
+    const result=await this.client.cancelOrder({orderId:String(orderId)});
+    const canceled=Array.isArray(result?.canceled)?result.canceled.map(String):[];
+    if(!canceled.includes(String(orderId))){
+      const reason=result?.notCanceled?.[orderId]||result?.not_canceled?.[orderId];
+      throw new Error(reason||`Polymarket did not confirm cancellation for ${orderId}`);
+    }
+    return result;
+  }
+  async getMarket(conditionId){
+    const response=await this.fetcher(`https://gamma-api.polymarket.com/markets/${encodeURIComponent(conditionId)}`,
+      {signal:AbortSignal.timeout(10000)});
+    if(!response.ok)throw new Error(`Market API ${response.status}`);
+    return response.json();
+  }
   async getEquitySnapshot(){
     if(!this.client)throw new Error('Polymarket authentication is not ready');
     const wallet=this.depositWallet||this.address;
-    const [balance,positions]=await Promise.all([
+    const [balance,positions,orders]=await Promise.all([
       this.actions.fetchBalanceAllowance(this.client,{assetType:this.sdk.AssetType.COLLATERAL}),
       this.fetcher(`https://data-api.polymarket.com/positions?user=${encodeURIComponent(wallet)}&sizeThreshold=0.01&limit=500&offset=0`,
-        {signal:AbortSignal.timeout(10000)}).then(async r=>{if(!r.ok)throw new Error(`Positions API ${r.status}`);return r.json()})
+        {signal:AbortSignal.timeout(10000)}).then(async r=>{if(!r.ok)throw new Error(`Positions API ${r.status}`);return r.json()}),
+      this.listOpenOrders()
     ]);
     const collateral=Number(balance?.balance)/1e6;
     if(!Number.isFinite(collateral))throw new Error('Collateral balance unavailable');
-    const positionValue=(Array.isArray(positions)?positions:[]).reduce((sum,p)=>{
-      const value=Number(p.currentValue);
-      if(Number.isFinite(value))return sum+value;
-      const size=Number(p.size),price=Number(p.curPrice);
-      return sum+(Number.isFinite(size)&&Number.isFinite(price)?size*price:0);
-    },0);
+    const normalizedPositions=(Array.isArray(positions)?positions:[]).map(p=>({
+      market:String(p.title||p.question||p.market||'Unknown market'),
+      slug:p.slug||null,outcome:String(p.outcome||'Unknown'),
+      shares:Number(p.size)||0,avgEntry:Number(p.avgPrice)||0,
+      markPrice:Number(p.curPrice)||0,value:Number(p.currentValue)||0,
+      pnl:Number(p.cashPnl)||0,assetId:p.asset||p.assetId||null
+    }));
+    const positionValue=normalizedPositions.reduce((sum,p)=>sum+(p.value||p.shares*p.markPrice),0);
     return{status:'ready',collateral,positionValue,equity:collateral+positionValue,
-      positionCount:Array.isArray(positions)?positions.length:0,asOf:new Date().toISOString()};
+      positionCount:normalizedPositions.length,positions:normalizedPositions,orders,asOf:new Date().toISOString()};
   }
 }
 module.exports=PolymarketTrader;

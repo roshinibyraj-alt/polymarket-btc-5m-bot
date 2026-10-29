@@ -39,3 +39,40 @@ test('paused mirror does not submit real orders',async()=>{
   assert.equal(count,0);
   assert.equal(mirror.snapshot().tradingEnabled,false);
 });
+
+test('cancels known live entries at the demo cutoff',async()=>{
+  const cancelled=[];
+  let now=1_000_000;
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>now});
+  mirror.setTrader({
+    placeGtdOrder:async(_token,_side,price)=>({id:`order-${price}`,status:'LIVE'}),
+    getEquitySnapshot:async()=>({orders:[]}),
+    cancelOrder:async id=>cancelled.push(id)
+  });
+  await mirror.placeEntryOrders(entry);
+  now=1_180_001;
+  await mirror.cancelExpiredOrders([
+    {id:'order-0.3',status:'LIVE'},
+    {id:'order-0.2',status:'LIVE'}
+  ]);
+  assert.deepEqual(cancelled,['order-0.3','order-0.2']);
+  assert.ok(mirror.orders.every(order=>order.status==='CANCELLED_AT_CUTOFF'));
+});
+
+test('after restart discovers only matching BTC 5m bot orders and cancels after cutoff',async()=>{
+  const cancelled=[],lookups=[];
+  const mirror=new LiveOrderMirror({startedAt:2_000_000,clock:()=>2_180_001});
+  mirror.setTrader({
+    getMarket:async id=>{lookups.push(id);return id==='btc-condition'
+      ?{slug:'btc-updown-5m-2000',clobTokenIds:['btc-token']}
+      :{slug:'eth-updown-5m-2000',clobTokenIds:['btc-token']}},
+    cancelOrder:async id=>cancelled.push(id)
+  });
+  await mirror.cancelExpiredOrders([
+    {id:'bot-order',conditionId:'btc-condition',assetId:'btc-token',side:'BUY',price:'0.30',originalSize:'20',orderType:'GTD',createdAt:new Date(2_000_030).toISOString(),status:'LIVE'},
+    {id:'manual-other-token',conditionId:'btc-condition',assetId:'other-token',side:'BUY',price:'0.30',originalSize:'20',orderType:'GTD',createdAt:new Date(2_000_030).toISOString(),status:'LIVE'},
+    {id:'other-market',conditionId:'other-condition',assetId:'btc-token',side:'BUY',price:'0.20',originalSize:'20',orderType:'GTD',createdAt:new Date(2_000_030).toISOString(),status:'LIVE'}
+  ]);
+  assert.deepEqual(cancelled,['bot-order']);
+  assert.deepEqual(lookups,['btc-condition','other-condition']);
+});

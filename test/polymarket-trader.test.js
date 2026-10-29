@@ -8,7 +8,9 @@ function setup(response={ok:true,orderId:'mock-order',status:'live'}){
   const calls=[];
   const client={
     account:{wallet:'0xdepositwallet'},
-    placeLimitOrder:async input=>{calls.push(input);return response}
+    placeLimitOrder:async input=>{calls.push(input);return response},
+    listOpenOrders:async function*(){yield{items:[{id:'open-1',side:'BUY',status:'LIVE'}],hasMore:false}},
+    cancelOrder:async input=>{calls.push(input);return{canceled:[input.orderId],notCanceled:{}}}
   };
   const sdk={createSecureClient:async options=>{calls.push(options);return client},
     OrderSide:{BUY:'BUY',SELL:'SELL'},AssetType:{COLLATERAL:'COLLATERAL'}};
@@ -39,8 +41,19 @@ test('reports collateral plus marked position value without exposing wallet iden
   assert.equal(snapshot.positionValue,4);
   assert.equal(snapshot.equity,129);
   assert.equal(snapshot.positionCount,1);
+  assert.deepEqual(snapshot.positions[0],{market:'Unknown market',slug:null,outcome:'Unknown',
+    shares:10,avgEntry:0,markPrice:.4,value:4,pnl:0,assetId:null});
+  assert.deepEqual(snapshot.orders,[{id:'open-1',side:'BUY',status:'LIVE'}]);
   assert.equal(Object.hasOwn(snapshot,'wallet'),false);
   assert.ok(calls.some(value=>value?.assetType==='COLLATERAL'));
+});
+
+test('lists all open-order pages and confirms cancellation by order ID',async()=>{
+  const {trader,calls}=setup();
+  await trader.authenticate();
+  assert.deepEqual(await trader.listOpenOrders(),[{id:'open-1',side:'BUY',status:'LIVE'}]);
+  await trader.cancelOrder('open-1');
+  assert.deepEqual(calls.at(-1),{orderId:'open-1'});
 });
 
 test('rejects unsuccessful order responses',async()=>{

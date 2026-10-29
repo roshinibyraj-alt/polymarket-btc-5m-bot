@@ -30,16 +30,17 @@
     <div class="card danger"><div class="label">Losses</div><div class="value" id="losses">—</div></div>
     <div class="card"><div class="label">Open positions</div><div class="value" id="open">—</div></div>
   </section>
-  <section class="panel">
-        <h2>Real Polymarket account · read-only</h2>
-        <div class="cards">
-          <div class="card primary"><div class="label">Real equity</div><div class="value" id="realEquity">—</div></div>
-          <div class="card"><div class="label">USDC collateral</div><div class="value" id="realCollateral">—</div></div>
-          <div class="card"><div class="label">Position value</div><div class="value" id="realPositionValue">—</div></div>
-        </div>
-        <div class="small" id="realBalanceStatus">Loading real balance…</div>
-      </section>
-      <section class="panel"><h2>Active market windows</h2><div id="windows" class="windows"></div></section>
+  <section class="panel"><h2>Real Polymarket account · read-only</h2><p class="small section-note" id="liveStatus">Connecting to the account…</p>
+    <div class="cards">
+      <div class="card"><div class="label">Real USDC</div><div class="value" id="liveCollateral">—</div></div>
+      <div class="card"><div class="label">Real position value</div><div class="value" id="livePositionValue">—</div></div>
+      <div class="card primary"><div class="label">Real equity</div><div class="value" id="liveEquity">—</div></div>
+      <div class="card"><div class="label">Open real orders</div><div class="value" id="liveOrderCount">—</div></div>
+    </div>
+    <h3 class="subhead">Real positions</h3><div id="livePositions" class="scroll"></div>
+    <h3 class="subhead">Real open orders</h3><div id="liveOrders" class="scroll"></div>
+  </section>
+  <section class="panel"><h2>Active market windows</h2><div id="windows" class="windows"></div></section>
   <section class="panel"><h2>Floating positions · live own-side marks</h2><p class="small section-note">Open shares are marked using their own-side best bid. Stale or missing marks are not shown as current unrealized P&amp;L.</p><div id="openPositions" class="scroll"></div><h2 class="subhead">Recent closed trades · realized P&amp;L</h2><div id="closedPositions" class="scroll"></div></section>
   <section class="panel"><h2>Recent bot events</h2><div id="events"></div></section>
   <p class="small">Signals use the previous completed candle: green → UP, red → DOWN; a doji follows two or more consecutive prior red/green candles in the opposite direction. Each signal places 500-share limits at $0.30 and $0.20; unfilled orders cancel at 180 seconds on 5m windows and 540 seconds on 15m windows. A fresh own-side best bid at $0.99 or $0.01 completes the whole window, closes remaining shares at their own bid or $0, and cancels pending entries. Open shares close at rollover. No official outcomes are used. Paper ledgers reset when the process restarts. No live orders are submitted.</p>
@@ -78,6 +79,18 @@ function windowCard(tf,s){
  <div class="row"><span>Resting orders</span><b>${orders.map(o=>`${price(o.limitPrice)} ${o.status}`).join(' · ')||'None'}</b></div>
  <div class="row"><span>Open shares / paper cash</span><b>${pos.reduce((n,p)=>n+p.shares,0)} / ${money(s.account?.cash)}</b></div></article>`;
 }
+function renderLiveAccount(data){
+ const d=data||{},status=document.querySelector('#liveStatus');
+ status.textContent=`Account: ${d.status||'unavailable'} · live entries ${d.tradingEnabled?'enabled':'paused'} · cutoff cancellation checks every 5 seconds${d.error?' · '+d.error:''}`;
+ document.querySelector('#liveCollateral').textContent=d.collateral==null?'—':money(d.collateral);
+ document.querySelector('#livePositionValue').textContent=d.positionValue==null?'—':money(d.positionValue);
+ document.querySelector('#liveEquity').textContent=d.equity==null?'—':money(d.equity);
+ const positions=Array.isArray(d.positions)?d.positions:[];
+ document.querySelector('#livePositions').innerHTML=positions.length?`<table><thead><tr><th>Market</th><th>Outcome</th><th>Shares</th><th>Avg entry</th><th>Mark</th><th>Value</th><th>P&amp;L</th></tr></thead><tbody>${positions.map(p=>`<tr><td>${esc(p.market)}</td><td>${esc(p.outcome)}</td><td>${Number(p.shares||0).toLocaleString()}</td><td>${price(p.avgEntry)}</td><td>${price(p.markPrice)}</td><td>${money(p.value)}</td><td class="${pnlClass(p.pnl)}">${money(p.pnl)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No real positions found.</div>';
+ const orders=Array.isArray(d.orders)?d.orders:[];
+ document.querySelector('#liveOrderCount').textContent=orders.length;
+ document.querySelector('#liveOrders').innerHTML=orders.length?`<table><thead><tr><th>Order ID</th><th>Side</th><th>Outcome</th><th>Price</th><th>Size</th><th>Matched</th><th>Status</th><th>Expires</th></tr></thead><tbody>${orders.map(o=>`<tr><td>${esc(String(o.id||'').slice(0,14))}</td><td>${esc(o.side||'—')}</td><td>${esc(o.outcome||'—')}</td><td>${price(o.price)}</td><td>${esc(o.originalSize||'—')}</td><td>${esc(o.sizeMatched||'0')}</td><td>${esc(o.status||'—')}</td><td>${esc(o.expiresAt?ts(o.expiresAt):'—')}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No real open orders.</div>';
+}
 async function refresh(){try{
  const r=await fetch('/api/state?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw Error('State request failed: '+r.status);
   const s=await r.json(),a=s.account||{};
@@ -100,21 +113,7 @@ async function refresh(){try{
   document.querySelector('#closedPositions').innerHTML=positionTable(closedPositions,false);
  document.querySelector('#events').innerHTML=(s.events||[]).slice(0,16).map(e=>`<div class="event"><span class="muted">${ts(e.ts)}</span> · <b>${esc(e.event)}</b> · ${esc(e.note||e.pattern||e.side||'')}</div>`).join('')||'<div class="empty">Waiting for events.</div>';
  document.querySelector('#error').textContent=s.error||'';
+  fetch('/api/live-balance?ts='+Date.now(),{cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject(Error('Live account request failed'))).then(renderLiveAccount).catch(e=>renderLiveAccount({status:'unavailable',error:e.message}));
 }catch(e){document.querySelector('#error').textContent=e.message}}
-async function refreshRealBalance(){
-     try{
-      const r=await fetch('/api/live-balance?ts='+Date.now(),{cache:'no-store'});
-      if(!r.ok)throw Error('Balance request failed: '+r.status);
-      const d=await r.json(),ready=d.status==='ready';
-      document.querySelector('#realEquity').textContent=ready?money(d.equity):'—';
-      document.querySelector('#realCollateral').textContent=ready?money(d.collateral):'—';
-      document.querySelector('#realPositionValue').textContent=ready?money(d.positionValue):'—';
-      document.querySelector('#realBalanceStatus').textContent=ready
-       ?'Read-only balance · updated '+ts(d.asOf)+' · '+(d.tradingEnabled?'live entries enabled':'live entries paused')
-       :'Real balance '+String(d.status||'unavailable').replaceAll('_',' ')+(d.error?': '+d.error:'');
-     }catch(e){document.querySelector('#realBalanceStatus').textContent='Real balance unavailable: '+e.message}
-    }
-    refreshRealBalance();setInterval(refreshRealBalance,15000);
-    refresh();setInterval(refresh,2000);
-    </script></body></html>
-    
+refresh();setInterval(refresh,2000);
+</script></body></html>
