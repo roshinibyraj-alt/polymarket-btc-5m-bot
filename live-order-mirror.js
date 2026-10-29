@@ -2,7 +2,7 @@
 
 const MIN_GTD_EXPIRATION_SECONDS=180;
 const POLYMARKET_GTD_BUFFER_SECONDS=60;
-const LIVE_REFRESH_MS=5000;
+const LIVE_REFRESH_MS=1000;
 const BOT_RUNG_PRICES=new Set(['0.3','0.30','0.2','0.20']);
 
 class LiveOrderMirror{
