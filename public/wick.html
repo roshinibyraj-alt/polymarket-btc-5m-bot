@@ -37,7 +37,7 @@
       <div class="card primary"><div class="label">Real equity</div><div class="value" id="liveEquity">—</div></div>
       <div class="card"><div class="label">Open real orders</div><div class="value" id="liveOrderCount">—</div></div>
     </div>
-    <h3 class="subhead">Recent real positions</h3><p class="small section-note">Showing the two most recently traded open positions. Position value and equity still include the full account.</p><div id="livePositions" class="scroll"></div>
+    <h3 class="subhead">Current-window real positions</h3><p class="small section-note">Showing only positions for the active BTC 5-minute window. This stays empty when that window has no position. Account value and equity still include all positions.</p><div id="livePositions" class="scroll"></div>
      <h3 class="subhead">Real open orders</h3><p class="small section-note">Matched shares are fills on orders that remain open. Current holdings are matched by token, not attributed to a specific order. Fully filled orders leave this list; any remaining holdings still appear above.</p><div id="liveOrders" class="scroll"></div>
   </section>
   <section class="panel"><h2>Active market windows</h2><div id="windows" class="windows"></div></section>
@@ -79,9 +79,10 @@ function windowCard(tf,s){
  <div class="row"><span>Resting orders</span><b>${orders.map(o=>`${price(o.limitPrice)} ${o.status}`).join(' · ')||'None'}</b></div>
  <div class="row"><span>Open shares / paper cash</span><b>${pos.reduce((n,p)=>n+p.shares,0)} / ${money(s.account?.cash)}</b></div></article>`;
 }
+let liveRequestInFlight=false;
 function renderLiveAccount(data){
  const d=data||{},status=document.querySelector('#liveStatus');
- status.textContent=`Account: ${d.status||'unavailable'} · live entries ${d.tradingEnabled?'enabled':'paused'} · cutoff cancellation checks every 5 seconds${d.error?' · '+d.error:''}`;
+  status.textContent=`Account: ${d.status||'unavailable'} · live entries ${d.tradingEnabled?'enabled':'paused'} · account refresh every second · cutoff checks every second${d.error?' · '+d.error:''}`;
  document.querySelector('#liveCollateral').textContent=d.collateral==null?'—':money(d.collateral);
  document.querySelector('#livePositionValue').textContent=d.positionValue==null?'—':money(d.positionValue);
  document.querySelector('#liveEquity').textContent=d.equity==null?'—':money(d.equity);
@@ -113,7 +114,10 @@ async function refresh(){try{
   document.querySelector('#closedPositions').innerHTML=positionTable(closedPositions,false);
  document.querySelector('#events').innerHTML=(s.events||[]).slice(0,16).map(e=>`<div class="event"><span class="muted">${ts(e.ts)}</span> · <b>${esc(e.event)}</b> · ${esc(e.note||e.pattern||e.side||'')}</div>`).join('')||'<div class="empty">Waiting for events.</div>';
  document.querySelector('#error').textContent=s.error||'';
-  fetch('/api/live-balance?ts='+Date.now(),{cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject(Error('Live account request failed'))).then(renderLiveAccount).catch(e=>renderLiveAccount({status:'unavailable',error:e.message}));
+   if(!liveRequestInFlight){
+     liveRequestInFlight=true;
+     fetch('/api/live-balance?ts='+Date.now(),{cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject(Error('Live account request failed'))).then(renderLiveAccount).catch(e=>renderLiveAccount({status:'unavailable',error:e.message})).finally(()=>{liveRequestInFlight=false});
+   }
 }catch(e){document.querySelector('#error').textContent=e.message}}
-refresh();setInterval(refresh,2000);
+refresh();setInterval(refresh,1000);
 </script></body></html>
