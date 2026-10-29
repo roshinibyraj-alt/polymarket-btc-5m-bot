@@ -30,9 +30,9 @@ function setup(response={ok:true,orderId:'mock-order',status:'live'},{positions=
     if(url.includes('/positions'))return{ok:true,json:async()=>{
       const offset=Number(new URL(url).searchParams.get('offset'))||0;
       return(positions||[
-      {asset:'asset-1',title:'Older position',outcome:'Yes',size:10,curPrice:.4,currentValue:4},
-      {asset:'asset-2',title:'Newest position',outcome:'No',size:5,curPrice:.2,currentValue:1},
-      {asset:'asset-3',title:'Second newest position',outcome:'Yes',size:4,curPrice:.5,currentValue:2}
+      {asset:'asset-1',title:'Older position',slug:'btc-updown-5m-0',outcome:'Yes',size:10,curPrice:.4,currentValue:4},
+      {asset:'asset-2',title:'Newest position',slug:'btc-updown-5m-300',outcome:'No',size:5,curPrice:.2,currentValue:1},
+      {asset:'asset-3',title:'Second newest position',slug:'btc-updown-5m-300',outcome:'Yes',size:4,curPrice:.5,currentValue:2}
       ]).slice(offset,offset+500);
     }};
     throw new Error(`Unexpected API request: ${url}`);
@@ -49,10 +49,10 @@ test('authenticates with the unified SDK and places a post-only GTD order',async
   assert.deepEqual(calls[1],{assetId:'token-1',side:'BUY',price:'0.3',size:'20',expiration:1234567890,postOnly:true});
 });
 
-test('reports full equity but shows only the two most recently traded positions',async()=>{
+test('reports full equity and shows only positions for the active window',async()=>{
   const {trader,calls}=setup();
   await trader.authenticate();
-  const snapshot=await trader.getEquitySnapshot();
+  const snapshot=await trader.getEquitySnapshot({windowSlug:'btc-updown-5m-300'});
   assert.equal(snapshot.collateral,125);
   assert.equal(snapshot.positionValue,7);
   assert.equal(snapshot.equity,132);
@@ -70,17 +70,27 @@ test('reports full equity but shows only the two most recently traded positions'
   assert.ok(calls.some(value=>value?.assetType==='COLLATERAL'));
 });
 
+test('shows no real positions when the active window has no holdings',async()=>{
+  const {trader}=setup();
+  await trader.authenticate();
+  const snapshot=await trader.getEquitySnapshot({windowSlug:'btc-updown-5m-600'});
+  assert.equal(snapshot.positionValue,7);
+  assert.equal(snapshot.equity,132);
+  assert.deepEqual(snapshot.positions,[]);
+});
+
 test('paginates position results so a recent fill beyond the first 500 is visible',async()=>{
   const positions=Array.from({length:500},(_,i)=>({
-    asset:`old-${i}`,title:`Older position ${i}`,outcome:'Yes',size:1,curPrice:.1,currentValue:.1
+    asset:`old-${i}`,title:`Older position ${i}`,slug:'btc-updown-5m-300',
+    outcome:'Yes',size:1,curPrice:.1,currentValue:.1
   }));
   positions.push({
-    asset:'current-token',title:'Current BTC window',outcome:'Up',
+    asset:'current-token',title:'Current BTC window',slug:'btc-updown-5m-600',outcome:'Up',
     size:20,avgPrice:.3,curPrice:.45,currentValue:9,cashPnl:3
   });
   const {trader,calls}=setup(undefined,{positions,activity:[{asset:'current-token',timestamp:500}]});
   await trader.authenticate();
-  const snapshot=await trader.getEquitySnapshot();
+  const snapshot=await trader.getEquitySnapshot({windowSlug:'btc-updown-5m-600'});
   assert.equal(snapshot.positionCount,501);
   assert.ok(Math.abs(snapshot.positionValue-59)<1e-8);
   assert.ok(Math.abs(snapshot.equity-184)<1e-8);
