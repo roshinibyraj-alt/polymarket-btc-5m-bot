@@ -86,12 +86,24 @@ class PolymarketTrader{
       pnl:Number(p.cashPnl)||0,assetId:p.asset||p.assetId||null,
       lastTradeAt:recentTradeByAsset.get(String(p.asset||p.assetId||''))||null
     }));
+    const positionByAsset=new Map(normalizedPositions.map(position=>[String(position.assetId||''),position]));
+    const ordersWithPositions=(Array.isArray(orders)?orders:[]).map(order=>{
+      const assetId=order.assetId||order.asset_id||order.tokenId||order.token_id;
+      const position=assetId?positionByAsset.get(String(assetId)):null;
+      return{
+        ...order,
+        currentPosition:position?{
+          market:position.market,outcome:position.outcome,
+          shares:position.shares,value:position.value
+        }:null
+      };
+    });
     const positionValue=normalizedPositions.reduce((sum,p)=>sum+(p.value||p.shares*p.markPrice),0);
     const recentPositions=normalizedPositions
       .sort((a,b)=>(Date.parse(b.lastTradeAt||'')||0)-(Date.parse(a.lastTradeAt||'')||0))
       .slice(0,2);
     return{status:'ready',collateral,positionValue,equity:collateral+positionValue,
-      positionCount:normalizedPositions.length,positions:recentPositions,orders,asOf:new Date().toISOString()};
+      positionCount:normalizedPositions.length,positions:recentPositions,orders:ordersWithPositions,asOf:new Date().toISOString()};
   }
 }
 module.exports=PolymarketTrader;
