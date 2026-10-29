@@ -72,7 +72,7 @@ class PolymarketTrader{
     }
     throw new Error(`Positions API exceeded the ${maxPages*pageSize}-row safety limit; account equity would be incomplete`);
   }
-  async getEquitySnapshot(){
+  async getEquitySnapshot({windowSlug=`btc-updown-5m-${Math.floor(Date.now()/300000)*300}`}={}){
     if(!this.client)throw new Error('Polymarket authentication is not ready');
     const wallet=this.depositWallet||this.address;
     const [balance,positions,orders,activity]=await Promise.all([
@@ -112,11 +112,11 @@ class PolymarketTrader{
       };
     });
     const positionValue=normalizedPositions.reduce((sum,p)=>sum+(p.value||p.shares*p.markPrice),0);
-    const recentPositions=normalizedPositions
-      .sort((a,b)=>(Date.parse(b.lastTradeAt||'')||0)-(Date.parse(a.lastTradeAt||'')||0))
-      .slice(0,2);
+    const currentWindowPositions=normalizedPositions
+      .filter(position=>position.slug===windowSlug)
+      .sort((a,b)=>(Date.parse(b.lastTradeAt||'')||0)-(Date.parse(a.lastTradeAt||'')||0));
     return{status:'ready',collateral,positionValue,equity:collateral+positionValue,
-      positionCount:normalizedPositions.length,positions:recentPositions,orders:ordersWithPositions,asOf:new Date().toISOString()};
+      positionCount:normalizedPositions.length,positions:currentWindowPositions,orders:ordersWithPositions,asOf:new Date().toISOString()};
   }
 }
 module.exports=PolymarketTrader;
