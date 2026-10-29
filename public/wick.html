@@ -37,7 +37,7 @@
       <div class="card primary"><div class="label">Real equity</div><div class="value" id="liveEquity">—</div></div>
       <div class="card"><div class="label">Open real orders</div><div class="value" id="liveOrderCount">—</div></div>
     </div>
-    <h3 class="subhead">Real positions</h3><div id="livePositions" class="scroll"></div>
+    <h3 class="subhead">Recent real positions</h3><p class="small section-note">Showing the two most recently traded open positions. Position value and equity still include the full account.</p><div id="livePositions" class="scroll"></div>
     <h3 class="subhead">Real open orders</h3><div id="liveOrders" class="scroll"></div>
   </section>
   <section class="panel"><h2>Active market windows</h2><div id="windows" class="windows"></div></section>
@@ -86,7 +86,7 @@ function renderLiveAccount(data){
  document.querySelector('#livePositionValue').textContent=d.positionValue==null?'—':money(d.positionValue);
  document.querySelector('#liveEquity').textContent=d.equity==null?'—':money(d.equity);
  const positions=Array.isArray(d.positions)?d.positions:[];
- document.querySelector('#livePositions').innerHTML=positions.length?`<table><thead><tr><th>Market</th><th>Outcome</th><th>Shares</th><th>Avg entry</th><th>Mark</th><th>Value</th><th>P&amp;L</th></tr></thead><tbody>${positions.map(p=>`<tr><td>${esc(p.market)}</td><td>${esc(p.outcome)}</td><td>${Number(p.shares||0).toLocaleString()}</td><td>${price(p.avgEntry)}</td><td>${price(p.markPrice)}</td><td>${money(p.value)}</td><td class="${pnlClass(p.pnl)}">${money(p.pnl)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No real positions found.</div>';
+ document.querySelector('#livePositions').innerHTML=positions.length?`<table><thead><tr><th>Market</th><th>Outcome</th><th>Shares</th><th>Avg entry</th><th>Mark</th><th>Value</th><th>P&amp;L</th><th>Last trade</th></tr></thead><tbody>${positions.map(p=>`<tr><td>${esc(p.market)}</td><td>${esc(p.outcome)}</td><td>${Number(p.shares||0).toLocaleString()}</td><td>${price(p.avgEntry)}</td><td>${price(p.markPrice)}</td><td>${money(p.value)}</td><td class="${pnlClass(p.pnl)}">${money(p.pnl)}</td><td>${ts(p.lastTradeAt)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No real positions found.</div>';
  const orders=Array.isArray(d.orders)?d.orders:[];
  document.querySelector('#liveOrderCount').textContent=orders.length;
  document.querySelector('#liveOrders').innerHTML=orders.length?`<table><thead><tr><th>Order ID</th><th>Side</th><th>Outcome</th><th>Price</th><th>Size</th><th>Matched</th><th>Status</th><th>Expires</th></tr></thead><tbody>${orders.map(o=>`<tr><td>${esc(String(o.id||'').slice(0,14))}</td><td>${esc(o.side||'—')}</td><td>${esc(o.outcome||'—')}</td><td>${price(o.price)}</td><td>${esc(o.originalSize||'—')}</td><td>${esc(o.sizeMatched||'0')}</td><td>${esc(o.status||'—')}</td><td>${esc(o.expiresAt?ts(o.expiresAt):'—')}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No real open orders.</div>';

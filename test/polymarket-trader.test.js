@@ -19,7 +19,16 @@ function setup(response={ok:true,orderId:'mock-order',status:'live'}){
   }};
   const fetcher=async url=>{
     calls.push(url);
-    return{ok:true,json:async()=>[{size:10,curPrice:.4,currentValue:4}]};
+    if(url.includes('/activity')){
+      return{ok:true,json:async()=>[
+        {asset:'asset-1',timestamp:100},{asset:'asset-2',timestamp:300},{asset:'asset-3',timestamp:200}
+      ]};
+    }
+    return{ok:true,json:async()=>[
+      {asset:'asset-1',title:'Older position',outcome:'Yes',size:10,curPrice:.4,currentValue:4},
+      {asset:'asset-2',title:'Newest position',outcome:'No',size:5,curPrice:.2,currentValue:1},
+      {asset:'asset-3',title:'Second newest position',outcome:'Yes',size:4,curPrice:.5,currentValue:2}
+    ]};
   };
   return{trader:new PolymarketTrader('test-key',{sdk,actions,privateKeyAdapter:key=>({key}),fetcher}),calls};
 }
@@ -33,16 +42,18 @@ test('authenticates with the unified SDK and places a post-only GTD order',async
   assert.deepEqual(calls[1],{assetId:'token-1',side:'BUY',price:'0.3',size:'20',expiration:1234567890,postOnly:true});
 });
 
-test('reports collateral plus marked position value without exposing wallet identity',async()=>{
+test('reports full equity but shows only the two most recently traded positions',async()=>{
   const {trader,calls}=setup();
   await trader.authenticate();
   const snapshot=await trader.getEquitySnapshot();
   assert.equal(snapshot.collateral,125);
-  assert.equal(snapshot.positionValue,4);
-  assert.equal(snapshot.equity,129);
-  assert.equal(snapshot.positionCount,1);
-  assert.deepEqual(snapshot.positions[0],{market:'Unknown market',slug:null,outcome:'Unknown',
-    shares:10,avgEntry:0,markPrice:.4,value:4,pnl:0,assetId:null});
+  assert.equal(snapshot.positionValue,7);
+  assert.equal(snapshot.equity,132);
+  assert.equal(snapshot.positionCount,3);
+  assert.deepEqual(snapshot.positions.map(p=>p.market),['Newest position','Second newest position']);
+  assert.equal(snapshot.positions[0].lastTradeAt,new Date(300_000).toISOString());
+  assert.equal(snapshot.positions[1].lastTradeAt,new Date(200_000).toISOString());
+  assert.equal(snapshot.positions.some(p=>p.market==='Older position'),false);
   assert.deepEqual(snapshot.orders,[{id:'open-1',side:'BUY',status:'LIVE'}]);
   assert.equal(Object.hasOwn(snapshot,'wallet'),false);
   assert.ok(calls.some(value=>value?.assetType==='COLLATERAL'));
