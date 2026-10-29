@@ -58,13 +58,26 @@ class PolymarketTrader{
     this.activityCacheAt=Date.now();
     return this.activityCache;
   }
+  async getAllPositions(wallet){
+    const pageSize=500,maxPages=20,all=[];
+    for(let page=0;page<maxPages;page++){
+      const offset=page*pageSize;
+      const response=await this.fetcher(`https://data-api.polymarket.com/positions?user=${encodeURIComponent(wallet)}&sizeThreshold=0.01&limit=${pageSize}&offset=${offset}`,
+        {signal:AbortSignal.timeout(10000)});
+      if(!response.ok)throw new Error(`Positions API ${response.status}`);
+      const rows=await response.json();
+      if(!Array.isArray(rows))throw new Error('Positions API returned an invalid response');
+      all.push(...rows);
+      if(rows.length<pageSize)return all;
+    }
+    throw new Error(`Positions API exceeded the ${maxPages*pageSize}-row safety limit; account equity would be incomplete`);
+  }
   async getEquitySnapshot(){
     if(!this.client)throw new Error('Polymarket authentication is not ready');
     const wallet=this.depositWallet||this.address;
     const [balance,positions,orders,activity]=await Promise.all([
       this.actions.fetchBalanceAllowance(this.client,{assetType:this.sdk.AssetType.COLLATERAL}),
-      this.fetcher(`https://data-api.polymarket.com/positions?user=${encodeURIComponent(wallet)}&sizeThreshold=0.01&limit=500&offset=0`,
-        {signal:AbortSignal.timeout(10000)}).then(async r=>{if(!r.ok)throw new Error(`Positions API ${r.status}`);return r.json()}),
+      this.getAllPositions(wallet),
       this.listOpenOrders(),
       this.getRecentActivity(wallet)
     ]);
