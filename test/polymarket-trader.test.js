@@ -9,7 +9,10 @@ function setup(response={ok:true,orderId:'mock-order',status:'live'}){
   const client={
     account:{wallet:'0xdepositwallet'},
     placeLimitOrder:async input=>{calls.push(input);return response},
-    listOpenOrders:async function*(){yield{items:[{id:'open-1',side:'BUY',status:'LIVE'}],hasMore:false}},
+     listOpenOrders:async function*(){yield{items:[
+       {id:'open-1',assetId:'asset-2',side:'BUY',status:'LIVE',sizeMatched:'2'},
+       {id:'open-2',assetId:'unheld-token',side:'BUY',status:'LIVE',sizeMatched:'0'}
+     ],hasMore:false}},
     cancelOrder:async input=>{calls.push(input);return{canceled:[input.orderId],notCanceled:{}}}
   };
   const sdk={createSecureClient:async options=>{calls.push(options);return client},
@@ -54,7 +57,11 @@ test('reports full equity but shows only the two most recently traded positions'
   assert.equal(snapshot.positions[0].lastTradeAt,new Date(300_000).toISOString());
   assert.equal(snapshot.positions[1].lastTradeAt,new Date(200_000).toISOString());
   assert.equal(snapshot.positions.some(p=>p.market==='Older position'),false);
-  assert.deepEqual(snapshot.orders,[{id:'open-1',side:'BUY',status:'LIVE'}]);
+  assert.deepEqual(snapshot.orders,[
+    {id:'open-1',assetId:'asset-2',side:'BUY',status:'LIVE',sizeMatched:'2',
+      currentPosition:{market:'Newest position',outcome:'No',shares:5,value:1}},
+    {id:'open-2',assetId:'unheld-token',side:'BUY',status:'LIVE',sizeMatched:'0',currentPosition:null}
+  ]);
   assert.equal(Object.hasOwn(snapshot,'wallet'),false);
   assert.ok(calls.some(value=>value?.assetType==='COLLATERAL'));
 });
@@ -62,7 +69,10 @@ test('reports full equity but shows only the two most recently traded positions'
 test('lists all open-order pages and confirms cancellation by order ID',async()=>{
   const {trader,calls}=setup();
   await trader.authenticate();
-  assert.deepEqual(await trader.listOpenOrders(),[{id:'open-1',side:'BUY',status:'LIVE'}]);
+  assert.deepEqual(await trader.listOpenOrders(),[
+    {id:'open-1',assetId:'asset-2',side:'BUY',status:'LIVE',sizeMatched:'2'},
+    {id:'open-2',assetId:'unheld-token',side:'BUY',status:'LIVE',sizeMatched:'0'}
+  ]);
   await trader.cancelOrder('open-1');
   assert.deepEqual(calls.at(-1),{orderId:'open-1'});
 });
