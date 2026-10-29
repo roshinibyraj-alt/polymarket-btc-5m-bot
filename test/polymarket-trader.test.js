@@ -4,7 +4,7 @@ const test=require('node:test');
 const assert=require('node:assert/strict');
 const PolymarketTrader=require('../polymarket-trader');
 
-function setup(response={ok:true,orderId:'mock-order',status:'live'}){
+function setup(response={ok:true,orderId:'mock-order',status:'live'},{positions=null,activity=null}={}){
   const calls=[];
   const client={
     account:{wallet:'0xdepositwallet'},
@@ -23,15 +23,19 @@ function setup(response={ok:true,orderId:'mock-order',status:'live'}){
   const fetcher=async url=>{
     calls.push(url);
     if(url.includes('/activity')){
-      return{ok:true,json:async()=>[
+      return{ok:true,json:async()=>activity||[
         {asset:'asset-1',timestamp:100},{asset:'asset-2',timestamp:300},{asset:'asset-3',timestamp:200}
       ]};
     }
-    return{ok:true,json:async()=>[
+    if(url.includes('/positions'))return{ok:true,json:async()=>{
+      const offset=Number(new URL(url).searchParams.get('offset'))||0;
+      return(positions||[
       {asset:'asset-1',title:'Older position',outcome:'Yes',size:10,curPrice:.4,currentValue:4},
       {asset:'asset-2',title:'Newest position',outcome:'No',size:5,curPrice:.2,currentValue:1},
       {asset:'asset-3',title:'Second newest position',outcome:'Yes',size:4,curPrice:.5,currentValue:2}
-    ]};
+      ]).slice(offset,offset+500);
+    }};
+    throw new Error(`Unexpected API request: ${url}`);
   };
   return{trader:new PolymarketTrader('test-key',{sdk,actions,privateKeyAdapter:key=>({key}),fetcher}),calls};
 }
@@ -64,6 +68,25 @@ test('reports full equity but shows only the two most recently traded positions'
   ]);
   assert.equal(Object.hasOwn(snapshot,'wallet'),false);
   assert.ok(calls.some(value=>value?.assetType==='COLLATERAL'));
+});
+
+test('paginates position results so a recent fill beyond the first 500 is visible',async()=>{
+  const positions=Array.from({length:500},(_,i)=>({
+    asset:`old-${i}`,title:`Older position ${i}`,outcome:'Yes',size:1,curPrice:.1,currentValue:.1
+  }));
+  positions.push({
+    asset:'current-token',title:'Current BTC window',outcome:'Up',
+    size:20,avgPrice:.3,curPrice:.45,currentValue:9,cashPnl:3
+  });
+  const {trader,calls}=setup(undefined,{positions,activity:[{asset:'current-token',timestamp:500}]});
+  await trader.authenticate();
+  const snapshot=await trader.getEquitySnapshot();
+  assert.equal(snapshot.positionCount,501);
+  assert.ok(Math.abs(snapshot.positionValue-59)<1e-8);
+  assert.ok(Math.abs(snapshot.equity-184)<1e-8);
+  assert.equal(snapshot.positions[0].market,'Current BTC window');
+  assert.equal(snapshot.positions[0].shares,20);
+  assert.ok(calls.some(value=>typeof value==='string'&&value.includes('limit=500&offset=500')));
 });
 
 test('lists all open-order pages and confirms cancellation by order ID',async()=>{
