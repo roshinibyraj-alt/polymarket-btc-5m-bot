@@ -4,6 +4,7 @@ const cfg=require('./config');
 const md=require('./wick-market-data');
 const {feed:chainlinkFeed}=require('./chainlink-feed');
 const candleStrategy=require('./candle-strategy');
+const rouletteModel=require('./roulette-model');
 
 function levels(xs){return (xs||[]).map(x=>({price:Number(x.price),size:Number(x.size)}))
   .filter(x=>Number.isFinite(x.price)&&x.size>0).sort((a,b)=>a.price-b.price)}
@@ -55,10 +56,10 @@ function freshBidAtLeast(q,price,now=Date.now()){
 }
 class WickBot{
   constructor({timeframe='5m',windowMs=cfg.WINDOW_MS_5M,capital=cfg.DEMO_CAPITAL_5M,
-    strategyMode='candle-pattern',priceFeed=chainlinkFeed,onLiveEntryOrders=null}={}){
+    strategyMode='candle-pattern',priceFeed=chainlinkFeed,onLiveEntryOrders=null,roulettePredictor=rouletteModel}={}){
     this.timeframe=timeframe;this.windowMs=windowMs;this.capital=capital;this.cash=capital;
     this.orderCutoffMs=cfg.ORDER_CUTOFF_MS*(windowMs/cfg.WINDOW_MS_5M);
-    this.strategyMode=strategyMode;this.priceFeed=priceFeed;
+    this.strategyMode=strategyMode;this.priceFeed=priceFeed;this.roulettePredictor=roulettePredictor;this.rouletteEvaluation={ready:false,status:'waiting',reason:'Waiting for model'};this.rouletteOrderPlaced=false;
     this.onLiveEntryOrders=onLiveEntryOrders;
     this.startedAt=Date.now();
     this.positions=[];this.events=[];this.status='starting';
@@ -77,7 +78,7 @@ class WickBot{
     this.articleEntryFilled=false;
     this.candleEvaluation={side:null,reason:'Waiting for closed-candle history'};
     this.candleOrdersPlaced=false;
-    this.liveCandleSignalSent=false;
+    this.liveCandleSignalSent=false;this.rouletteOrderPlaced=false;this.rouletteEvaluation={ready:false,status:'waiting',reason:'Computing next 15-minute candle probability'};
   }
   log(event,data={}){const e={ts:Date.now(),timeframe:this.timeframe,event,...data};this.events.unshift(e);this.events.length=Math.min(100,this.events.length);console.log('[wick] '+JSON.stringify(e))}
   async tick(){
@@ -100,7 +101,7 @@ class WickBot{
       await this.refreshLiveQuotes(now);
       if(this.orderWindowStart!==start)this.openStrategyWindow(start,now);
       this.updateCandleContext(start);
-      this.processCandleEntries(start,now);
+      if(this.strategyMode==='roulette-rf-15m')await this.processRouletteEntries(start,now);else this.processCandleEntries(start,now);
       this.processCandleOrders(start,now);
       this.lastScanAt=now;this.error=null;
       const hasOpen=this.positions.some(p=>p.windowStart===start&&p.status==='OPEN');
@@ -122,7 +123,7 @@ class WickBot{
     this.articleEntryFilled=false;
     this.candleEvaluation={side:null,reason:'Waiting for closed-candle history'};
     this.candleOrdersPlaced=false;
-    this.liveCandleSignalSent=false;
+    this.liveCandleSignalSent=false;this.rouletteOrderPlaced=false;this.rouletteEvaluation={ready:false,status:'waiting',reason:'Computing next 15-minute candle probability'};
     this.windowOrders=[];
     this.log('CANDLE_PATTERN_WINDOW_STARTED',{windowStart:start,timeframe:this.timeframe});
   }
@@ -130,7 +131,18 @@ class WickBot{
     try{this.articleCandles=this.priceFeed.getMinuteCandles()}
     catch(error){this.candleEvaluation={side:null,reason:error.message}}
   }
-  processCandleEntries(start,now){
+  async processRouletteEntries(start,now){
+        if(this.timeframe!=='15m'||this.windowMs!==cfg.WINDOW_MS_15M||this.rouletteOrderPlaced||this.completedWindows.has(start)||now-start>=cfg.ROULETTE_ENTRY_WINDOW_MS_15M)return;
+        let prediction;try{prediction=await this.roulettePredictor.predict(start)}catch(error){prediction={ready:false,status:'error',reason:error.message}}
+        this.rouletteEvaluation=prediction;if(!prediction?.ready||prediction.signal!=='UP'||Number(prediction.probabilityStrongUp)<cfg.ROULETTE_UP_THRESHOLD_15M)return;
+        const q=this.liveQuotes.UP,ask=Number(q?.bestAsk);if(q?.status!=='LIVE'||!Number.isFinite(q.updatedAt)||now<q.updatedAt||now-q.updatedAt>5000||!Number.isFinite(ask)||ask<=0||ask>=1)return;
+        this.rouletteOrderPlaced=true;const stake=cfg.ROULETTE_STAKE_USD_15M,shares=stake/ask,cost=shares*ask,fee=feeFor(this.market,ask,shares),totalCost=cost+fee,id='15m-'+start+'-roulette-rf-up';
+        const order={id,timeframe:'15m',windowStart:start,side:'UP',tokenId:this.market.tokens.UP,orderType:'MARKET',entryType:'ROULETTE_RF_15M',shares,status:'FILLED',createdAt:now,submittedAt:now,filledAt:now,fillPrice:ask,averageFillPrice:ask,fee,totalCost};
+        if(totalCost>this.cash+1e-9){order.status='REJECTED_INSUFFICIENT_CASH';order.reason='Insufficient paper cash for the $50 model entry.';this.orders.unshift(order);this.windowOrders.unshift(order);return;}
+        const position={id,timeframe:'15m',windowMs:this.windowMs,windowStart:start,marketId:this.market.id,slug:this.market.slug,title:this.market.title,side:'UP',tokenId:this.market.tokens.UP,entryLabel:'15m Roulette model · strong UP probability',entryMode:'ROULETTE_RF_15M',entryType:'ROULETTE_RF_15M',orderType:'MARKET',shares,initialShares:shares,avgEntry:ask,fillPrice:ask,cost,totalCost,fees:fee,status:'OPEN',openedAt:now,filledAt:now,entryProbability:prediction.probabilityStrongUp,modelVersion:prediction.modelVersion,submissionQuotes:this.captureQuotePair(now),entryQuotes:this.captureQuotePair(now)};
+        order.positionId=id;this.orders.unshift(order);this.windowOrders.unshift(order);this.positions.unshift(position);this.cash-=totalCost;this.log('PAPER_ROULETTE_RF_ENTRY',{id,ask,stake,shares,probabilityStrongUp:prediction.probabilityStrongUp,validationAccuracy:prediction.validationAccuracy});
+      }
+      processCandleEntries(start,now){
     if(this.completedWindows.has(start)||this.orderWindowStart!==start||this.candleOrdersPlaced)return;
     const windows=candleStrategy.aggregateCompleteCandles(this.articleCandles,this.windowMs)
       .filter(c=>c.end<=start);
@@ -371,8 +383,8 @@ class WickBot{
         }
       }
     }
-    const stopLossPosition=currentWindowOpen.find(p=>p.status==='OPEN'&&stopLossHit(this.liveQuotes[p.side],now));
-    const legacyTakeProfitPosition=this.timeframe==='5m'?null:
+    const stopLossPosition=this.strategyMode==='roulette-rf-15m'?null:currentWindowOpen.find(p=>p.status==='OPEN'&&stopLossHit(this.liveQuotes[p.side],now));
+    const legacyTakeProfitPosition=this.strategyMode==='roulette-rf-15m'||this.timeframe==='5m'?null:
       currentWindowOpen.find(p=>takeProfitHit(this.liveQuotes[p.side],now));
     const trigger=legacyTakeProfitPosition||stopLossPosition;
     if(trigger){
@@ -480,7 +492,7 @@ class WickBot{
       const mark=p.markBid==null?null:p.markBid*p.shares;p.markAgeMs=p.markUpdatedAt?Math.max(0,now-p.markUpdatedAt):null;p.markStatus=mark==null?'UNAVAILABLE':p.markAgeMs>15000?'STALE':'LIVE';const freshMark=mark!=null&&p.markAgeMs<=15000;p.markValue=freshMark?mark:null;p.unrealizedPnl=freshMark?mark-p.totalCost:null;if(!freshMark)unpricedOpenPositions++;else{markedValue+=mark;unrealizedPnl+=p.unrealizedPnl}
     }
       const strategy={timeframe:this.timeframe,market:`Polymarket BTC ${this.timeframe} UP/DOWN`,
-        signal:'Previous green → UP; previous red → DOWN; doji after 2+ red → UP; doji after 2+ green → DOWN',
+        signal:this.strategyMode==='roulette-rf-15m'?'Random forest: probability next 15m BTC candle rises >0.52%; UP at ≥60%, otherwise no trade.':'Previous green → UP; previous red → DOWN; doji after 2+ red → UP; doji after 2+ green → DOWN',
         dojiDefinition:'Body ≤10% of candle high-low range',
         orders:{type:'Resting paper limit buys',
           levels:this.timeframe==='5m'?cfg.DEMO_RESTING_LIMITS_5M:cfg.RESTING_LIMITS,
@@ -490,7 +502,7 @@ class WickBot{
           ?'Each filled signal-side rung exits at a fresh own-side bid >= $0.80 and places an opposite-side $0.20 paper limit for the same shares; opposite-side positions have no take-profit. A fresh own-side bid <= $0.01 completes the window and closes remaining positions. Unresolved shares close at rollover. No official outcomes are used.'
           :'A fresh own-side best bid >= $0.99 or <= $0.01 completes the whole window. All remaining positions close at their own bids (or $0 if no bid); pending entries are cancelled. Unresolved shares close at the next window start. No official outcomes are used.',
         execution:'PAPER ONLY',
-        signalState:this.candleEvaluation,priceFeed:this.priceFeed?.snapshot?.()||null};
+        signalState:this.strategyMode==='roulette-rf-15m'?this.rouletteEvaluation:this.candleEvaluation,model:this.strategyMode==='roulette-rf-15m'?this.rouletteEvaluation:null,priceFeed:this.priceFeed?.snapshot?.()||null};
      return {now,mode:'DEMO ONLY',status:this.status,error:this.error,strategy,
         account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,takerFees,estimatedMakerRebate,
           totalTrades,settledTrades,wins,losses,breakEvenExits,profitableExits,losingExits,

@@ -10,7 +10,7 @@ class MultiBot {
       '5m':new Bot({timeframe:'5m',windowMs:cfg.WINDOW_MS_5M,capital:cfg.DEMO_CAPITAL_5M,
         strategyMode:'candle-pattern',priceFeed:chainlinkFeed,onLiveEntryOrders}),
       '15m':new Bot({timeframe:'15m',windowMs:cfg.WINDOW_MS_15M,capital:cfg.DEMO_CAPITAL_15M,
-        strategyMode:'candle-pattern',priceFeed:chainlinkFeed})
+        strategyMode:'roulette-rf-15m',priceFeed:chainlinkFeed})
     };
   }
   start(){for(const bot of Object.values(this.bots))bot.start()}
