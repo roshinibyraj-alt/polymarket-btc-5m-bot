@@ -43,7 +43,7 @@
   <section class="panel"><h2>Active market windows</h2><div id="windows" class="windows"></div></section>
   <section class="panel"><h2>Floating positions · live own-side marks</h2><p class="small section-note">Open shares are marked using their own-side best bid. Stale or missing marks are not shown as current unrealized P&amp;L.</p><div id="openPositions" class="scroll"></div><h2 class="subhead">Recent closed trades · realized P&amp;L</h2><div id="closedPositions" class="scroll"></div></section>
   <section class="panel"><h2>Recent bot events</h2><div id="events"></div></section>
-  <p class="small">Demo strategy only: signals use the previous completed candle (green → UP, red → DOWN; doji confirmation remains unchanged). The 5m demo waits 120 seconds, then places 500-share limits at $0.30, $0.20, and $0.12 with no 180-second entry cutoff. If the best ask is below a rung, the simulated fill uses that lower price. Each filled signal-side rung exits when its own-side bid reaches $0.80 and then places an opposite-side $0.20 limit for the same shares; opposite-side positions have no take-profit. A fresh own-side bid at $0.01 still completes the window. Unresolved shares close at rollover. The 15m demo remains unchanged. Real trading behavior has not been changed.</p>
+  <p class="small">Demo strategy only: signals use the previous completed candle (green → UP, red → DOWN; doji confirmation remains unchanged). The 5m demo waits 120 seconds, then places 500-share limits at $0.30, $0.20, and $0.12 with no 180-second entry cutoff. If the best ask is below a rung, the simulated fill uses that lower price. Each filled signal-side rung exits when its own-side bid reaches $0.80 and then places an opposite-side $0.20 limit for the same shares; opposite-side positions have no take-profit. A fresh own-side bid at $0.01 still completes the window. Unresolved shares close at rollover. The 15m demo uses the Roulette random-forest model in paper mode only. At a ≥60% probability of a >0.52% BTC rise, it buys UP with a $50 stake and holds to rollover; otherwise it does not trade (not DOWN). The 5m strategy and live mirror are unchanged.</p>
   <div id="error" class="bad"></div>
 </main>
 <script>
@@ -71,7 +71,7 @@ function windowCard(tf,s){
  const q=s.livePrices||{}, remaining=w.end?Math.max(0,Math.floor((w.end-Date.now())/1000)):0;
  return `<article class="card window ${tf==='15m'?'tf15':''}"><h2>${tf} · ${esc(w.slug||'Waiting for market')}</h2>
  <div class="row"><span>Status</span><b>${esc(s.status||'starting')}</b></div>
- <div class="row"><span>Previous candle</span><b>${esc(sig.previous?.color||'—')} ${esc(sig.pattern||'')}</b></div>
+ ${tf==='15m'?`<div class="row"><span>Roulette probability</span><b>${s.strategy?.model?.ready?(Number(s.strategy.model.probabilityStrongUp)*100).toFixed(1)+'%':'Waiting for model'}</b></div><div class="row"><span>Model action</span><b>${esc(s.strategy?.model?.signal||'No trade')}</b></div>`:''}<div class="row"><span>Previous candle</span><b>${esc(sig.previous?.color||'—')} ${esc(sig.pattern||'')}</b></div>
  <div class="row"><span>Selected side</span><b class="${sig.side==='UP'?'good':sig.side==='DOWN'?'bad':''}">${esc(sig.side||'—')}</b></div>
  <div class="row"><span>Signal reason</span><span>${esc(sig.reason||'—')}</span></div>
  <div class="row"><span>Window remaining</span><b>${Math.floor(remaining/60)}:${String(remaining%60).padStart(2,'0')}</b></div>
