@@ -137,7 +137,7 @@ class WickBot{
         let prediction;try{prediction=await this.roulettePredictor.predict(start,this.timeframe)}catch(error){prediction={ready:false,status:'error',reason:error.message}}
         this.rouletteEvaluation=prediction;
         if(now-start>=cfg.ROULETTE_ENTRY_WINDOW_MS)return;
-        if(!prediction?.ready||prediction.signal!=='UP'||Number(prediction.probabilityStrongUp)<cfg.ROULETTE_UP_THRESHOLD)return;
+        if(!prediction?.ready||prediction.signal!=='UP')return;
         const q=this.liveQuotes.UP,ask=Number(q?.bestAsk);
         if(q?.status!=='LIVE'||!Number.isFinite(q.updatedAt)||now<q.updatedAt||now-q.updatedAt>5000||!Number.isFinite(ask)||ask<=0||ask>=1)return;
         this.rouletteOrderPlaced=true;
