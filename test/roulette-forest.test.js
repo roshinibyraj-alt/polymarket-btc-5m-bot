@@ -1,0 +1,4 @@
+'use strict';
+    const test=require('node:test');const assert=require('node:assert/strict');const {Worker}=require('node:worker_threads');const path=require('node:path');
+    test('forest worker learns upward threshold and reports holdout accuracy',async()=>{const train=Array.from({length:300},(_,i)=>({x:[i/300,0,0,0,0,0,0,0,0,0],y:i>=150?1:0}));const rows=Array.from({length:60},(_,i)=>({x:[(i+240)/300,0,0,0,0,0,0,0,0,0],y:i+240>=150?1:0}));const worker=new Worker(path.join(__dirname,'..','roulette-forest-worker.js'));const result=await new Promise((resolve,reject)=>{worker.once('message',resolve);worker.once('error',reject);worker.postMessage({train,test:rows,latest:[.95,0,0,0,0,0,0,0,0,0]})});await worker.terminate();assert.ok(result.probabilityStrongUp>.5);assert.ok(result.validationAccuracy>.5)});
+    
