@@ -132,9 +132,9 @@ class WickBot{
     catch(error){this.candleEvaluation={side:null,reason:error.message}}
   }
   async processRouletteEntries(start,now){
-        if(this.timeframe!=='15m'||this.windowMs!==cfg.WINDOW_MS_15M||this.rouletteOrderPlaced||this.completedWindows.has(start)||now-start>=cfg.ROULETTE_ENTRY_WINDOW_MS_15M)return;
+        if(this.timeframe!=='15m'||this.windowMs!==cfg.WINDOW_MS_15M||this.rouletteOrderPlaced||this.completedWindows.has(start)||this.completedWindows.has(start))return;
         let prediction;try{prediction=await this.roulettePredictor.predict(start)}catch(error){prediction={ready:false,status:'error',reason:error.message}}
-        this.rouletteEvaluation=prediction;if(!prediction?.ready||prediction.signal!=='UP'||Number(prediction.probabilityStrongUp)<cfg.ROULETTE_UP_THRESHOLD_15M)return;
+        this.rouletteEvaluation=prediction;if(now-start>=cfg.ROULETTE_ENTRY_WINDOW_MS_15M)return;if(!prediction?.ready||prediction.signal!=='UP'||Number(prediction.probabilityStrongUp)<cfg.ROULETTE_UP_THRESHOLD_15M)return;
         const q=this.liveQuotes.UP,ask=Number(q?.bestAsk);if(q?.status!=='LIVE'||!Number.isFinite(q.updatedAt)||now<q.updatedAt||now-q.updatedAt>5000||!Number.isFinite(ask)||ask<=0||ask>=1)return;
         this.rouletteOrderPlaced=true;const stake=cfg.ROULETTE_STAKE_USD_15M,shares=stake/ask,cost=shares*ask,fee=feeFor(this.market,ask,shares),totalCost=cost+fee,id='15m-'+start+'-roulette-rf-up';
         const order={id,timeframe:'15m',windowStart:start,side:'UP',tokenId:this.market.tokens.UP,orderType:'MARKET',entryType:'ROULETTE_RF_15M',shares,status:'FILLED',createdAt:now,submittedAt:now,filledAt:now,fillPrice:ask,averageFillPrice:ask,fee,totalCost};

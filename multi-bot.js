@@ -37,7 +37,7 @@ class MultiBot {
     for(const point of equityCurve){peak=Math.max(peak,point.equity);maxDrawdown=Math.max(maxDrawdown,peak-point.equity);}
     return {...primary,now:Date.now(),status,timeframes,positions,events,
       error:states.find(s=>s.error)?.error||null,
-       strategy:{execution:'PAPER ONLY',timeframes:['5m','15m'],style:'previous-candle direction with doji-run confirmation'},
+       strategy:{execution:'PAPER ONLY',timeframes:['5m','15m'],style:'5m previous-candle strategy; 15m Roulette random forest' },
       account:{capital,
         cash:states.reduce((n,s)=>n+s.account.cash,0),
         realizedPnl:states.reduce((n,s)=>n+s.account.realizedPnl,0),
