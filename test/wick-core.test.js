@@ -29,18 +29,27 @@ function minuteWindow(start,open,close,high,low,count=5){
     h:high,l:low,v:1}));
 }
 
-test('5m and 15m strategies place the same two 500-share resting limits',()=>{
+test('5m demo waits 120 seconds and uses three rungs; 15m remains unchanged',()=>{
   for(const windowMs of [300_000,900_000]){
-    const bot=new Bot({timeframe:windowMs===300_000?'5m':'15m',windowMs,capital:10_000,
+    const timeframe=windowMs===300_000?'5m':'15m';
+    const bot=new Bot({timeframe,windowMs,capital:10_000,
       priceFeed:{getMinuteCandles:()=>[],snapshot:()=>({status:'live'})}});
     const start=windowMs,prior=minuteWindow(0,100,105,106,99,windowMs/60_000);
     bot.market={id:'market',slug:'btc-updown',title:'BTC',tokens:{UP:'up',DOWN:'down'}};
     bot.orderWindowStart=start;bot.articleCandles=prior;
     bot.processCandleEntries(start,start+1_000);
     assert.equal(bot.candleEvaluation.side,'UP');
-    assert.deepEqual(bot.windowOrders.map(o=>[o.limitPrice,o.shares]),[[.30,500],[.20,500]]);
-    const expectedCutoff=cfg.ORDER_CUTOFF_MS*(windowMs/cfg.WINDOW_MS_5M);
-    assert.ok(bot.windowOrders.every(o=>o.expiresAt===start+expectedCutoff));
+    if(timeframe==='5m'){
+      assert.equal(bot.windowOrders.length,0);
+      bot.processCandleEntries(start,start+cfg.DEMO_ENTRY_DELAY_MS_5M);
+      assert.deepEqual(bot.windowOrders.map(o=>[o.limitPrice,o.shares]),
+        [[.30,500],[.20,500],[.12,500]]);
+      assert.ok(bot.windowOrders.every(o=>o.expiresAt===start+windowMs));
+      assert.ok(bot.windowOrders.every(o=>o.takeProfitPrice===.80));
+    }else{
+      assert.deepEqual(bot.windowOrders.map(o=>[o.limitPrice,o.shares]),[[.30,500],[.20,500]]);
+      assert.ok(bot.windowOrders.every(o=>o.expiresAt===start+cfg.ORDER_CUTOFF_MS*(windowMs/cfg.WINDOW_MS_5M)));
+    }
     assert.equal(bot.orderCutoffMs/1000,windowMs===300_000?180:540);
   }
 });
@@ -56,8 +65,9 @@ test('live mirror callback receives only the 5m rung signal and does not alter p
     bot.market={id:'market',slug:'btc-updown',title:'BTC',tokens:{UP:'up',DOWN:'down'}};
     bot.orderWindowStart=start;bot.articleCandles=minuteWindow(0,100,105,106,99,windowMs/60_000);
     bot.processCandleEntries(start,start+1_000);
+    if(timeframe==='5m')bot.processCandleEntries(start,start+cfg.DEMO_ENTRY_DELAY_MS_5M);
     await new Promise(resolve=>setImmediate(resolve));
-    assert.deepEqual(bot.windowOrders.map(o=>o.shares),[500,500]);
+    assert.deepEqual(bot.windowOrders.map(o=>o.shares),timeframe==='5m'?[500,500,500]:[500,500]);
   }
   assert.equal(captured.length,1);
   assert.equal(captured[0].tokenId,'up');
@@ -65,21 +75,26 @@ test('live mirror callback receives only the 5m rung signal and does not alter p
   assert.equal(captured[0].cutoffAt,300_000+180_000);
 });
 
-test('paper orders fill on fresh ask touches and expire at 180 seconds',()=>{
+test('5m demo orders wait for 120 seconds, fill at a discounted ask, and remain until rollover',()=>{
   const bot=new Bot({timeframe:'5m',windowMs:300_000,capital:10_000,
     priceFeed:{getMinuteCandles:()=>[],snapshot:()=>({status:'live'})}});
   const start=300_000;
   bot.market={id:'market',slug:'btc-updown',title:'BTC',tokens:{UP:'up',DOWN:'down'}};
   bot.orderWindowStart=start;bot.articleCandles=minuteWindow(0,100,105,106,99);
   bot.processCandleEntries(start,start+1_000);
-  bot.liveQuotes.UP={status:'LIVE',updatedAt:start+1_000,bestAsk:.25,bestBid:.24};
-  bot.processCandleOrders(start,start+1_000);
+  assert.equal(bot.windowOrders.length,0,'no demo entry before the delay');
+  bot.processCandleEntries(start,start+120_000);
+  bot.liveQuotes.UP={status:'LIVE',updatedAt:start+120_000,bestAsk:.25,bestBid:.24};
+  bot.processCandleOrders(start,start+120_000);
   assert.equal(bot.windowOrders[0].status,'FILLED');
+  assert.equal(bot.windowOrders[0].fillPrice,.25);
   assert.equal(bot.positions.length,1);
-  assert.equal(bot.cash,9850);
+  assert.equal(bot.cash,9875);
   bot.liveQuotes.UP={status:'LIVE',updatedAt:start+180_000,bestAsk:.25,bestBid:.24};
   bot.processCandleOrders(start,start+180_000);
-  assert.equal(bot.windowOrders[1].status,'EXPIRED');
+  assert.equal(bot.windowOrders[1].status,'LIVE','the former 180-second entry cutoff is removed');
+  bot.processCandleOrders(start,start+300_000);
+  assert.equal(bot.windowOrders[1].status,'EXPIRED','unfilled orders expire with their market window');
 });
 
 test('TP and SL require a fresh own-side best bid at $0.99 or $0.01',()=>{
@@ -91,30 +106,36 @@ test('TP and SL require a fresh own-side best bid at $0.99 or $0.01',()=>{
   assert.equal(stopLossHit({status:'LIVE',updatedAt:now-5001,bestBid:.01},now),false);
 });
 
-test('TP completes the full window, closes both sides at their own bids, and cancels entries',async()=>{
+test('5m TP closes only the rung, then fills opposite-side entry without TP',async()=>{
   const bot=new Bot({timeframe:'5m',windowMs:300_000,capital:1_000,
     priceFeed:{getMinuteCandles:()=>[],snapshot:()=>({status:'live'})}});
-  const start=300_000,now=start+10_000,oldGetBook=md.getBook;
+  const start=300_000,now=start+130_000,oldGetBook=md.getBook;
   bot.market={id:'market',start,feesEnabled:false,tokens:{UP:'up',DOWN:'down'}};
   bot.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
   bot.positions=[
-    {id:'up',windowStart:start,status:'OPEN',side:'UP',tokenId:'up',shares:10,totalCost:5},
-    {id:'down',windowStart:start,status:'OPEN',side:'DOWN',tokenId:'down',shares:10,totalCost:5},
+    {id:'up',windowStart:start,status:'OPEN',side:'UP',tokenId:'up',shares:10,totalCost:5,
+      takeProfitEnabled:true,takeProfitPrice:.80},
   ];
   bot.orders=[{id:'pending',windowStart:start,status:'LIVE'}];
-  md.getBook=async token=>({bids:[{price:token==='up'?.99:.2,size:10}],asks:[]});
+  md.getBook=async token=>token==='up'
+    ?{bids:[{price:.81,size:10}],asks:[{price:.82,size:10}]}
+    :{bids:[{price:.19,size:10}],asks:[{price:.19,size:10}]};
   try{
     await bot.refreshLiveQuotes(now);
     assert.equal(bot.positions[0].status,'SETTLED_EXIT');
-    assert.equal(bot.positions[0].exitPrice,.99);
-    assert.equal(bot.positions[0].proceeds,9.9);
-    assert.equal(bot.positions[1].exitPrice,.2);
-    assert.equal(bot.positions[1].proceeds,2);
-    assert.equal(bot.orders[0].status,'EXPIRED_WINDOW_COMPLETE');
-    assert.equal(bot.snapshot().account.openPositions,0);
-    bot.processTimedEntries(start,now+10_000);
-    assert.equal(bot.orders.length,1,'completed window must not add another entry');
-    assert.match(bot.snapshot().strategy.exit,/No official results are used/);
+    assert.equal(bot.positions[0].exitPrice,.81);
+    assert.ok(Math.abs(bot.positions[0].proceeds-8.1)<1e-9);
+    const opposite=bot.windowOrders[0];
+    assert.equal(opposite.side,'DOWN');
+    assert.equal(opposite.limitPrice,.20);
+    assert.equal(opposite.shares,10);
+    bot.processCandleOrders(start,now);
+    const oppositePosition=bot.positions.find(p=>p.entryType==='TP_OPPOSITE');
+    assert.equal(oppositePosition.avgEntry,.19,'opposite limit can fill below its rung');
+    assert.equal(oppositePosition.takeProfitEnabled,false);
+    assert.equal(bot.orders.find(order=>order.id==='pending').status,'LIVE',
+      'TP does not cancel remaining entries');
+    assert.match(bot.snapshot().strategy.exit,/opposite-side positions have no take-profit/);
   }finally{md.getBook=oldGetBook}
 });
 
