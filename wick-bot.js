@@ -487,7 +487,7 @@ class WickBot{
           entryDelaySeconds:this.timeframe==='5m'?cfg.DEMO_ENTRY_DELAY_MS_5M/1000:0,
           cutoffSeconds:this.timeframe==='5m'?null:this.orderCutoffMs/1000},
         exit:this.timeframe==='5m'
-          ?'Each filled signal-side rung exits at a fresh own-side bid >= $0.80 and places an opposite-side $0.20 paper limit for the same shares; opposite-side positions have no take-profit. Remaining positions close at rollover. No official outcomes are used.'
+          ?'Each filled signal-side rung exits at a fresh own-side bid >= $0.80 and places an opposite-side $0.20 paper limit for the same shares; opposite-side positions have no take-profit. A fresh own-side bid <= $0.01 completes the window and closes remaining positions. Unresolved shares close at rollover. No official outcomes are used.'
           :'A fresh own-side best bid >= $0.99 or <= $0.01 completes the whole window. All remaining positions close at their own bids (or $0 if no bid); pending entries are cancelled. Unresolved shares close at the next window start. No official outcomes are used.',
         execution:'PAPER ONLY',
         signalState:this.candleEvaluation,priceFeed:this.priceFeed?.snapshot?.()||null};
