@@ -1,0 +1,10 @@
+'use strict';
+    const {parentPort}=require('node:worker_threads');
+    function rng(seed){return function(){seed|=0;seed=seed+0x6D2B79F5|0;let t=Math.imul(seed^seed>>>15,1|seed);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+    const gini=(positive,n)=>{const p=positive/n;return 2*p*(1-p)};
+    function build(rows,random){let positives=0;for(const r of rows)positives+=r.y;if(rows.length<50||positives===0||positives===rows.length)return{p:positives/rows.length};const parent=gini(positives,rows.length),features=Array.from({length:rows[0].x.length},(_,i)=>i);for(let i=0;i<3;i++){const j=i+Math.floor(random()*(features.length-i));[features[i],features[j]]=[features[j],features[i]]}let best=null;for(const f of features.slice(0,3)){const sorted=rows.slice().sort((a,b)=>a.x[f]-b.x[f]);let lp=0;for(let i=0;i<sorted.length-1;i++){lp+=sorted[i].y;const lv=sorted[i].x[f],rv=sorted[i+1].x[f];if(lv===rv)continue;const n=i+1,rn=sorted.length-n,gain=parent-(n/sorted.length)*gini(lp,n)-(rn/sorted.length)*gini(positives-lp,rn);if(!best||gain>best.gain)best={f,t:(lv+rv)/2,gain}}}if(!best||best.gain<=1e-12)return{p:positives/rows.length};const left=[],right=[];for(const r of rows)(r.x[best.f]<=best.t?left:right).push(r);if(!left.length||!right.length)return{p:positives/rows.length};return{f:best.f,t:best.t,l:build(left,random),r:build(right,random)}}
+    function predictTree(node,x){while(node.f!==undefined)node=x[node.f]<=node.t?node.l:node.r;return node.p}
+    function trainForest({train,test,latest}){const random=rng(1),trees=[],count=200;for(let i=0;i<count;i++){const sample=[];for(let j=0;j<train.length;j++)sample.push(train[Math.floor(random()*train.length)]);trees.push(build(sample,random))}const probability=x=>trees.reduce((sum,t)=>sum+predictTree(t,x),0)/trees.length;let correct=0;for(const row of test)if((probability(row.x)>=.5?1:0)===row.y)correct++;return{probabilityStrongUp:probability(latest),validationAccuracy:test.length?correct/test.length:null}}
+    if(parentPort)parentPort.on('message',payload=>{try{parentPort.postMessage(trainForest(payload))}catch(error){throw error}});
+    module.exports={trainForest};
+    
