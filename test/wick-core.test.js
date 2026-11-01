@@ -4,6 +4,7 @@ const test=require('node:test');
 const assert=require('node:assert/strict');
 const strategy=require('../candle-strategy');
 const cfg=require('../config');
+const confusion=require('../market-confusion-strategy');
 const Bot=require('../wick-bot');
 const md=require('../wick-market-data');
 
@@ -57,6 +58,13 @@ test('market-confusion entries never call the live-order mirror',async()=>{
   assert.equal(captured.length,0);
 });
 
+test('market-confusion midpoint band includes 0.30 and 0.71 only',()=>{
+  const now=10_000,quote=mid=>({status:'LIVE',updatedAt:now,mid});
+  assert.equal(confusion.isMarketConfused(quote(.30),quote(.71),now).eligible,true);
+  assert.equal(confusion.isMarketConfused(quote(.2999),quote(.50),now).eligible,false);
+  assert.equal(confusion.isMarketConfused(quote(.50),quote(.7101),now).eligible,false);
+  assert.equal(confusion.isMarketConfused({...quote(.50),updatedAt:now-5001},quote(.50),now).eligible,false);
+});
 test('market confusion places the requested two-sided ladder only in the final 60 seconds',()=>{
   for(const asset of ['BTC','ETH'])for(const timeframe of ['5m','15m']){
     const windowMs=timeframe==='5m'?300_000:900_000;
@@ -71,11 +79,11 @@ test('market confusion places the requested two-sided ladder only in the final 6
     bot.processMarketConfusionEntries(start,now-1);
     assert.equal(bot.windowOrders.length,0,'do not start before the 60-second window');
     bot.processMarketConfusionEntries(start,now);
-    assert.equal(bot.windowOrders.length,12,`${asset} ${timeframe}`);
+    assert.equal(bot.windowOrders.length,4,`${asset} ${timeframe}`);
     assert.ok(bot.windowOrders.every(o=>o.asset===asset&&o.timeframe===timeframe));
     assert.deepEqual(bot.windowOrders.map(o=>[o.side,o.limitPrice,o.shares,o.takeProfitPrice]),[
-      ...[.30,.25,.20,.15,.10,.05].map((price,i)=>['UP',price,500,[.70,.75,.80,.85,.90,.95][i]]),
-      ...[.30,.25,.20,.15,.10,.05].map((price,i)=>['DOWN',price,500,[.70,.75,.80,.85,.90,.95][i]]),
+      ...[.25,.15].map((price,i)=>['UP',price,500,[.75,.85][i]]),
+      ...[.25,.15].map((price,i)=>['DOWN',price,500,[.75,.85][i]]),
     ]);
   }
 });
