@@ -81,7 +81,7 @@ class WickBot{
     this.candleOrdersPlaced=false;
     this.liveCandleSignalSent=false;
     this.marketConfusionOrdersPlaced=false;
-    this.marketConfusionEvaluation={eligible:false,reason:'Waiting for final 30 seconds',upMid:null,downMid:null};
+    this.marketConfusionEvaluation={eligible:false,reason:'Waiting for final 60 seconds',upMid:null,downMid:null};
   }
   log(event,data={}){const e={ts:Date.now(),asset:this.asset,timeframe:this.timeframe,event,...data};this.events.unshift(e);this.events.length=Math.min(100,this.events.length);console.log('[wick] '+JSON.stringify(e))}
   async tick(){
@@ -128,7 +128,7 @@ class WickBot{
     this.candleOrdersPlaced=false;
     this.liveCandleSignalSent=false;
     this.marketConfusionOrdersPlaced=false;
-    this.marketConfusionEvaluation={eligible:false,reason:'Waiting for final 30 seconds',upMid:null,downMid:null};
+    this.marketConfusionEvaluation={eligible:false,reason:'Waiting for final 60 seconds',upMid:null,downMid:null};
     this.windowOrders=[];
     this.log('STRATEGY_WINDOW_STARTED',{windowStart:start,asset:this.asset,timeframe:this.timeframe,strategyMode:'market-confusion'});
   }
@@ -140,7 +140,7 @@ class WickBot{
     if(this.completedWindows.has(start)||this.orderWindowStart!==start||this.marketConfusionOrdersPlaced)return;
     const remaining=start+this.windowMs-now;
     if(remaining<=0||remaining>cfg.MARKET_CONFUSION_WINDOW_MS){
-      this.marketConfusionEvaluation={eligible:false,reason:'Waiting for the final 30 seconds',upMid:null,downMid:null};
+      this.marketConfusionEvaluation={eligible:false,reason:'Waiting for the final 60 seconds',upMid:null,downMid:null};
       return;
     }
     const evaluation=confusionStrategy.isMarketConfused(this.liveQuotes.UP,this.liveQuotes.DOWN,now);
@@ -154,7 +154,7 @@ class WickBot{
         const order={id:`${this.asset}-${this.timeframe}-${start}-${side}-${price}-0`,asset:this.asset,timeframe:this.timeframe,windowStart:start,
           side,tokenId:this.market.tokens[side],limitPrice:price,shares:cfg.MARKET_CONFUSION_SHARES,
           status:'LIVE',createdAt:now,expiresAt:start+this.windowMs,entryType:'MARKET_CONFUSION',
-          rungPrice:price,takeProfitPrice:cfg.MARKET_CONFUSION_TAKE_PROFITS[index],rearmCount:0};
+          rungPrice:price,takeProfitPrice:cfg.MARKET_CONFUSION_TAKE_PROFITS[index]};
         this.windowOrders.push(order);this.orders.unshift(order);
       }
     }
@@ -208,29 +208,14 @@ class WickBot{
         shares:order.shares,initialShares:order.shares,avgEntry:fillPrice,
         cost,totalCost:cost,fees:0,status:'OPEN',submittedAt:order.createdAt,
         openedAt:now,filledAt:now,markBid:this.liveQuotes[order.side]?.bestBid??null,
-        takeProfitEnabled:order.takeProfitPrice!=null,
-         takeProfitPrice:order.takeProfitPrice??null,
          entryType:order.entryType||'CANDLE_PATTERN_LIMIT',
          rungPrice:order.rungPrice??order.limitPrice,
-         rearmCount:order.rearmCount||0};
+         takeProfitEnabled:order.takeProfitPrice!=null,
+         takeProfitPrice:order.takeProfitPrice??null};
       this.cash-=cost;this.positions.unshift(position);
       this.log('PAPER_LIMIT_FILLED',{id:order.id,side:order.side,limitPrice:order.limitPrice,
         fillPrice,shares:order.shares,entryType:position.entryType});
     }
-  }
-  rearmMarketConfusionRung(position,now){
-    if(now>=position.windowStart+this.windowMs)return null;
-    const takeProfit=confusionStrategy.takeProfitForEntry(position.rungPrice);
-    if(takeProfit==null)return null;
-    const rearmCount=(position.rearmCount||0)+1,price=position.rungPrice,side=position.side;
-    const order={id:`${this.asset}-${this.timeframe}-${position.windowStart}-${side}-${price}-${rearmCount}-${now}`,
-      asset:this.asset,timeframe:this.timeframe,windowStart:position.windowStart,side,tokenId:position.tokenId,
-      limitPrice:price,shares:cfg.MARKET_CONFUSION_SHARES,status:'LIVE',createdAt:now,
-      expiresAt:position.windowStart+this.windowMs,entryType:'MARKET_CONFUSION',
-      rungPrice:price,takeProfitPrice:takeProfit,rearmCount};
-    this.windowOrders.push(order);this.orders.unshift(order);
-    this.log('MARKET_CONFUSION_RUNG_REARMED',{side,price,takeProfit,rearmCount});
-    return order;
   }
   updateArticlePriceContext(start){
     try{
@@ -398,7 +383,6 @@ class WickBot{
       const quote=this.liveQuotes[position.side];
       if(freshBidAtLeast(quote,Number(position.takeProfitPrice),now)){
         this.finalizeExit(position,Number(quote.bestBid),`TP_HIT_${Number(position.takeProfitPrice).toFixed(2)}`);
-        if(position.entryType==='MARKET_CONFUSION')this.rearmMarketConfusionRung(position,now);
       }
     }
   }
@@ -486,12 +470,12 @@ class WickBot{
       const mark=p.markBid==null?null:p.markBid*p.shares;p.markAgeMs=p.markUpdatedAt?Math.max(0,now-p.markUpdatedAt):null;p.markStatus=mark==null?'UNAVAILABLE':p.markAgeMs>15000?'STALE':'LIVE';const freshMark=mark!=null&&p.markAgeMs<=15000;p.markValue=freshMark?mark:null;p.unrealizedPnl=freshMark?mark-p.totalCost:null;if(!freshMark)unpricedOpenPositions++;else{markedValue+=mark;unrealizedPnl+=p.unrealizedPnl}
     }
        const strategy={asset:this.asset,timeframe:this.timeframe,market:`Polymarket ${this.asset} ${this.timeframe} UP/DOWN`,
-         signal:'During the final 30 seconds, buy both outcomes when fresh midpoints are between $0.05 and $0.96.',
+         signal:'During the final 60 seconds, buy both outcomes when fresh midpoints are between $0.05 and $0.96.',
          orders:{type:'Two-sided paper limit buys',
            levels:cfg.MARKET_CONFUSION_ENTRY_PRICES.map((price,index)=>({price,shares:cfg.MARKET_CONFUSION_SHARES,takeProfit:cfg.MARKET_CONFUSION_TAKE_PROFITS[index]})),
            entryDelaySeconds:null,
            cutoffSeconds:cfg.MARKET_CONFUSION_WINDOW_MS/1000},
-          exit:'Each filled rung exits at its mapped own-side take-profit. After a take-profit, rearm that same buy rung until window rollover.',
+          exit:'Each filled rung exits at its mapped own-side take-profit. No replacement buy is placed after a take-profit.',
         execution:'PAPER ONLY',
          signalState:this.marketConfusionEvaluation,priceFeed:this.priceFeed?.snapshot?.()||null};
      return {now,mode:'DEMO ONLY',status:this.status,error:this.error,strategy,

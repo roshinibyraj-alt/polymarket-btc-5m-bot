@@ -57,17 +57,19 @@ test('market-confusion entries never call the live-order mirror',async()=>{
   assert.equal(captured.length,0);
 });
 
-test('market confusion places the requested two-sided ladder only in the final 30 seconds',()=>{
+test('market confusion places the requested two-sided ladder only in the final 60 seconds',()=>{
   for(const asset of ['BTC','ETH'])for(const timeframe of ['5m','15m']){
     const windowMs=timeframe==='5m'?300_000:900_000;
     const bot=new Bot({asset,timeframe,windowMs,strategyMode:'market-confusion',
       priceFeed:{getMinuteCandles:()=>[],snapshot:()=>({status:'live'})}});
-    const start=windowMs,now=start+windowMs-29_999;
+    const start=windowMs,now=start+windowMs-60_000;
     bot.market={id:'market',start,feesEnabled:false,tokens:{UP:'up',DOWN:'down'}};
     bot.orderWindowStart=start;
     bot.liveQuotes={UP:{status:'LIVE',updatedAt:now,mid:.52},DOWN:{status:'LIVE',updatedAt:now,mid:.48}};
     bot.processMarketConfusionEntries(start,start+200_000);
     assert.equal(bot.windowOrders.length,0);
+    bot.processMarketConfusionEntries(start,now-1);
+    assert.equal(bot.windowOrders.length,0,'do not start before the 60-second window');
     bot.processMarketConfusionEntries(start,now);
     assert.equal(bot.windowOrders.length,12,`${asset} ${timeframe}`);
     assert.ok(bot.windowOrders.every(o=>o.asset===asset&&o.timeframe===timeframe));
@@ -86,8 +88,8 @@ test('multi-bot registers confusion strategy for BTC and ETH on both intervals',
   assert.equal(combined.account.capital,cfg.DEMO_CAPITAL_5M+cfg.DEMO_CAPITAL_15M);
   for(const state of Object.values(combined.timeframes)){
     assert.equal(state.strategy.orders.type,'Two-sided paper limit buys');
-    assert.equal(state.strategy.orders.cutoffSeconds,30);
-    assert.equal(state.strategy.signalState.reason,'Waiting for final 30 seconds');
+    assert.equal(state.strategy.orders.cutoffSeconds,60);
+    assert.equal(state.strategy.signalState.reason,'Waiting for final 60 seconds');
   }
 });
 
@@ -118,7 +120,7 @@ test('TP and SL require a fresh own-side best bid at $0.99 or $0.01',()=>{
   assert.equal(stopLossHit({status:'LIVE',updatedAt:now-5001,bestBid:.01},now),false);
 });
 
-test('market-confusion TP rearms the same rung and side',async()=>{
+test('market-confusion TP does not rearm its rung',async()=>{
   const bot=new Bot({timeframe:'5m',windowMs:300_000,capital:1_000,
     priceFeed:{getMinuteCandles:()=>[],snapshot:()=>({status:'live'})}});
   const start=300_000,now=start+130_000,oldGetBook=md.getBook;
@@ -126,7 +128,7 @@ test('market-confusion TP rearms the same rung and side',async()=>{
   bot.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
   bot.positions=[
     {id:'up',windowStart:start,status:'OPEN',side:'UP',tokenId:'up',shares:10,totalCost:5,
-      entryType:'MARKET_CONFUSION',rungPrice:.30,rearmCount:0,takeProfitEnabled:true,takeProfitPrice:.70},
+      entryType:'MARKET_CONFUSION',rungPrice:.30,takeProfitEnabled:true,takeProfitPrice:.70},
   ];
   bot.orders=[{id:'pending',windowStart:start,status:'LIVE'}];
   md.getBook=async token=>token==='up'
@@ -137,15 +139,10 @@ test('market-confusion TP rearms the same rung and side',async()=>{
     assert.equal(bot.positions[0].status,'SETTLED_EXIT');
     assert.equal(bot.positions[0].exitPrice,.71);
     assert.ok(Math.abs(bot.positions[0].proceeds-7.1)<1e-9);
-    const rearm=bot.windowOrders[0];
-    assert.equal(rearm.side,'UP');
-    assert.equal(rearm.limitPrice,.30);
-    assert.equal(rearm.takeProfitPrice,.70);
-    assert.equal(rearm.shares,500);
-    assert.equal(rearm.rearmCount,1);
+    assert.equal(bot.windowOrders.length,0,'a TP does not create a replacement entry');
     assert.equal(bot.orders.find(order=>order.id==='pending').status,'LIVE',
       'TP does not cancel remaining entries');
-    assert.match(bot.snapshot().strategy.exit,/rearm that same buy rung/);
+    assert.match(bot.snapshot().strategy.exit,/No replacement buy/);
   }finally{md.getBook=oldGetBook}
 });
 

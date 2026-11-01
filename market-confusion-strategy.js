@@ -22,9 +22,4 @@ function isMarketConfused(up, down, now = Date.now()) {
   };
 }
 
-function takeProfitForEntry(price) {
-  const index = cfg.MARKET_CONFUSION_ENTRY_PRICES.indexOf(Number(price));
-  return index < 0 ? null : cfg.MARKET_CONFUSION_TAKE_PROFITS[index];
-}
-
-module.exports = { isMarketConfused, takeProfitForEntry };
+module.exports = { isMarketConfused };
