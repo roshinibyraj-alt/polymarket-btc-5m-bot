@@ -131,7 +131,7 @@ class WickBot{
     this.marketConfusionOrdersPlaced=false;
     this.marketConfusionEvaluation={eligible:false,reason:'Waiting for final 30 seconds',upMid:null,downMid:null};
     this.windowOrders=[];
-    this.log('CANDLE_PATTERN_WINDOW_STARTED',{windowStart:start,timeframe:this.timeframe});
+    this.log('STRATEGY_WINDOW_STARTED',{windowStart:start,timeframe:this.timeframe,strategyMode:this.timeframe==='5m'?'market-confusion':this.strategyMode});
   }
   updateCandleContext(){
     try{this.articleCandles=this.priceFeed.getMinuteCandles()}
@@ -545,8 +545,9 @@ class WickBot{
            marketResolution:'No official results are used; fresh own-side $0.99/$0.01 bids complete the window, and remaining shares close at their own bids or $0 on rollover'},
        positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }
-      start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,
-        note:'Paper-only previous-candle strategy with two resting limit orders; no live orders.'});
+       start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,
+         note:this.timeframe==='5m'?'Paper-only market-confusion ladder; real order submission paused.':
+           this.strategyMode==='roulette-rf'?'Paper-only Roulette model; no live orders.':'Paper-only candle strategy; no live orders.'});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};
     void loop();}
   stop(){this.running=false;clearTimeout(this.timer)}
