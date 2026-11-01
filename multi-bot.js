@@ -6,12 +6,16 @@ const {feed:chainlinkFeed}=require('./chainlink-feed');
 
 class MultiBot {
   constructor({onLiveEntryOrders=null}={}){
-    this.bots={
-      '5m':new Bot({timeframe:'5m',windowMs:cfg.WINDOW_MS_5M,capital:cfg.DEMO_CAPITAL_5M,
-        strategyMode:'market-confusion',priceFeed:chainlinkFeed}),
-      '15m':new Bot({timeframe:'15m',windowMs:cfg.WINDOW_MS_15M,capital:cfg.DEMO_CAPITAL_15M,
-        strategyMode:'roulette-rf',priceFeed:chainlinkFeed})
-    };
+    this.bots={};
+    for(const asset of ['BTC','ETH']){
+      for(const timeframe of ['5m','15m']){
+        const windowMs=timeframe==='5m'?cfg.WINDOW_MS_5M:cfg.WINDOW_MS_15M;
+        const capital=(timeframe==='5m'?cfg.DEMO_CAPITAL_5M:cfg.DEMO_CAPITAL_15M)/2;
+        this.bots[`${asset}-${timeframe}`]=new Bot({
+          asset,timeframe,windowMs,capital,strategyMode:'market-confusion',priceFeed:chainlinkFeed
+        });
+      }
+    }
   }
   start(){for(const bot of Object.values(this.bots))bot.start()}
   stop(){for(const bot of Object.values(this.bots))bot.stop();chainlinkFeed.stop()}
@@ -25,7 +29,7 @@ class MultiBot {
     const status=states.some(s=>s.status==='blocked_or_error')?'blocked_or_error':
       states.some(s=>['scanning','position_open'].includes(s.status))?
         (openPositions?'position_open':'scanning'):'waiting_for_market';
-     const primary=timeframes['5m'],capital=states.reduce((n,s)=>n+s.account.capital,0);
+      const primary=timeframes['BTC-5m'],capital=states.reduce((n,s)=>n+s.account.capital,0);
     const series=states.map(s=>s.account.equityCurve||[]);
     const current=series.map(x=>Number(x[0]?.equity||0));
     const startTs=Math.min(...series.map(x=>Number(x[0]?.ts||Date.now())));
@@ -37,7 +41,7 @@ class MultiBot {
     for(const point of equityCurve){peak=Math.max(peak,point.equity);maxDrawdown=Math.max(maxDrawdown,peak-point.equity);}
     return {...primary,now:Date.now(),status,timeframes,positions,events,
       error:states.find(s=>s.error)?.error||null,
-       strategy:{execution:'PAPER ONLY',timeframes:['5m','15m'],style:'Market confusion on 5m; Roulette random forest remains on 15m' },
+       strategy:{execution:'PAPER ONLY',markets:['BTC 5m','BTC 15m','ETH 5m','ETH 15m'],style:'Market confusion on BTC and ETH 5m and 15m' },
       account:{capital,
         cash:states.reduce((n,s)=>n+s.account.cash,0),
         realizedPnl:states.reduce((n,s)=>n+s.account.realizedPnl,0),

@@ -58,20 +58,55 @@ test('market-confusion entries never call the live-order mirror',async()=>{
 });
 
 test('market confusion places the requested two-sided ladder only in the final 30 seconds',()=>{
-  const bot=new Bot({timeframe:'5m',windowMs:300_000,strategyMode:'market-confusion',
-    priceFeed:{getMinuteCandles:()=>[],snapshot:()=>({status:'live'})}});
-  const start=300_000,now=start+270_001;
-  bot.market={id:'market',start,feesEnabled:false,tokens:{UP:'up',DOWN:'down'}};
-  bot.orderWindowStart=start;
-  bot.liveQuotes={UP:{status:'LIVE',updatedAt:now,mid:.52},DOWN:{status:'LIVE',updatedAt:now,mid:.48}};
-  bot.processMarketConfusionEntries(start,start+200_000);
-  assert.equal(bot.windowOrders.length,0);
-  bot.processMarketConfusionEntries(start,now);
-  assert.equal(bot.windowOrders.length,12);
-  assert.deepEqual(bot.windowOrders.map(o=>[o.side,o.limitPrice,o.shares,o.takeProfitPrice]),[
-    ...[.30,.25,.20,.15,.10,.05].map((price,i)=>['UP',price,500,[.70,.75,.80,.85,.90,.95][i]]),
-    ...[.30,.25,.20,.15,.10,.05].map((price,i)=>['DOWN',price,500,[.70,.75,.80,.85,.90,.95][i]]),
-  ]);
+  for(const asset of ['BTC','ETH'])for(const timeframe of ['5m','15m']){
+    const windowMs=timeframe==='5m'?300_000:900_000;
+    const bot=new Bot({asset,timeframe,windowMs,strategyMode:'market-confusion',
+      priceFeed:{getMinuteCandles:()=>[],snapshot:()=>({status:'live'})}});
+    const start=windowMs,now=start+windowMs-29_999;
+    bot.market={id:'market',start,feesEnabled:false,tokens:{UP:'up',DOWN:'down'}};
+    bot.orderWindowStart=start;
+    bot.liveQuotes={UP:{status:'LIVE',updatedAt:now,mid:.52},DOWN:{status:'LIVE',updatedAt:now,mid:.48}};
+    bot.processMarketConfusionEntries(start,start+200_000);
+    assert.equal(bot.windowOrders.length,0);
+    bot.processMarketConfusionEntries(start,now);
+    assert.equal(bot.windowOrders.length,12,`${asset} ${timeframe}`);
+    assert.ok(bot.windowOrders.every(o=>o.asset===asset&&o.timeframe===timeframe));
+    assert.deepEqual(bot.windowOrders.map(o=>[o.side,o.limitPrice,o.shares,o.takeProfitPrice]),[
+      ...[.30,.25,.20,.15,.10,.05].map((price,i)=>['UP',price,500,[.70,.75,.80,.85,.90,.95][i]]),
+      ...[.30,.25,.20,.15,.10,.05].map((price,i)=>['DOWN',price,500,[.70,.75,.80,.85,.90,.95][i]]),
+    ]);
+  }
+});
+
+test('multi-bot registers confusion strategy for BTC and ETH on both intervals',()=>{
+  const MultiBot=require('../multi-bot');
+  const combined=new MultiBot().snapshot();
+  assert.deepEqual(Object.keys(combined.timeframes),['BTC-5m','BTC-15m','ETH-5m','ETH-15m']);
+  assert.equal(combined.strategy.execution,'PAPER ONLY');
+  assert.equal(combined.account.capital,cfg.DEMO_CAPITAL_5M+cfg.DEMO_CAPITAL_15M);
+  for(const state of Object.values(combined.timeframes)){
+    assert.equal(state.strategy.orders.type,'Two-sided paper limit buys');
+    assert.equal(state.strategy.orders.cutoffSeconds,30);
+    assert.equal(state.strategy.signalState.reason,'Waiting for final 30 seconds');
+  }
+});
+
+test('market discovery uses the correct BTC or ETH slug and maps outcomes',async()=>{
+  const original=global.fetch,urls=[];
+  global.fetch=async url=>{
+    urls.push(String(url));
+    return{ok:true,json:async()=>[{id:'condition',question:'Asset up or down',outcomes:'["Up","Down"]',clobTokenIds:'["up-token","down-token"]'}]};
+  };
+  try{
+    for(const asset of ['BTC','ETH']){
+      const market=await md.getMarketForAsset(300_000,300_000,asset);
+      assert.equal(market.tokens.UP,'up-token');
+      assert.equal(market.tokens.DOWN,'down-token');
+      assert.match(market.slug,new RegExp(`^${asset.toLowerCase()}-updown-5m-`));
+    }
+    assert.ok(urls.some(url=>url.includes('slug=btc-updown-5m-')));
+    assert.ok(urls.some(url=>url.includes('slug=eth-updown-5m-')));
+  }finally{global.fetch=original}
 });
 
 test('TP and SL require a fresh own-side best bid at $0.99 or $0.01',()=>{

@@ -1,4 +1,0 @@
-'use strict';
-    const test=require('node:test');const assert=require('node:assert/strict');const {Worker}=require('node:worker_threads');const path=require('node:path');
-    test('forest tunes a confidence cutoff on earlier calibration rows',async()=>{const make=(start,n)=>Array.from({length:n},(_,j)=>{const i=start+j,x=(i%100)/100;return{x:[x,0,0,0,0,0,0,0,0,0],y:x>=.5?1:0}}),train=make(0,300),calibration=make(300,100),testRows=make(400,100);const worker=new Worker(path.join(__dirname,'..','roulette-forest-worker.js'));const result=await new Promise((resolve,reject)=>{worker.once('message',resolve);worker.once('error',reject);worker.postMessage({train,calibration,test:testRows,latest:[.95,0,0,0,0,0,0,0,0,0]})});await worker.terminate();assert.ok(result.probabilityStrongUp>=result.threshold);assert.ok(result.threshold<1);assert.ok(result.calibrationPrecision>.5);assert.ok(result.validationAccuracy>.5)});
-    

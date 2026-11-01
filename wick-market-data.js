@@ -10,9 +10,11 @@ async function getJson(url){
 }
 function parseArray(x){if(Array.isArray(x))return x;if(typeof x==='string'){try{return JSON.parse(x)}catch(_){}}return []}
 
-async function getBtcMarket(windowStart,windowMs){
+async function getMarketForAsset(windowStart,windowMs,asset='BTC'){
   const minutes=windowMs/60000;
-  const slug=`btc-updown-${minutes}m-${Math.floor(windowStart/1000)}`;
+  const symbol=String(asset).toLowerCase();
+  if(!['btc','eth'].includes(symbol))throw new Error(`Unsupported market asset: ${asset}`);
+  const slug=`${symbol}-updown-${minutes}m-${Math.floor(windowStart/1000)}`;
   const data=await getJson(`${GAMMA}/markets?slug=${encodeURIComponent(slug)}`);
   const market=(Array.isArray(data)?data:data.markets||[])[0];
   if(!market)return null;
@@ -23,7 +25,7 @@ async function getBtcMarket(windowStart,windowMs){
     if(label==='up'||label==='yes')tokens.UP=ids[i];
     if(label==='down'||label==='no')tokens.DOWN=ids[i];
   }
-  if(!tokens.UP||!tokens.DOWN)throw new Error(`BTC ${minutes}-minute market outcomes could not be mapped to UP/DOWN`);
+  if(!tokens.UP||!tokens.DOWN)throw new Error(`${asset} ${minutes}-minute market outcomes could not be mapped to UP/DOWN`);
   return {id:String(market.id||market.conditionId),slug,title:market.question||market.title||slug,
     start:windowStart,end:windowStart+windowMs,tokens,raw:market};
 }
@@ -33,4 +35,4 @@ async function getBook(tokenId){
 }
 async function getMarket(id){return getJson(`${GAMMA}/markets/${encodeURIComponent(id)}`)}
 
-module.exports={getBtcMarket,getBook,getMarket};
+module.exports={getMarketForAsset,getBook,getMarket};
