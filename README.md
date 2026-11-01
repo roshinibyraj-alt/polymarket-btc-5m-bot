@@ -1,17 +1,11 @@
 # Polymarket BTC candle-pattern paper bot
 
-Paper BTC UP/DOWN trading on 5-minute and 15-minute Polymarket markets, with an optional, separately gated 5-minute live entry mirror.
+Paper BTC UP/DOWN trading on 5-minute and 15-minute Polymarket markets. Real order submission remains paused.
 
-At each window open, evaluate the previous fully closed market candle:
+For 5-minute markets, during the final 30 seconds, require fresh UP and DOWN midpoint quotes between $0.05 and $0.96 inclusive. Place 500-share paper limit buys on both sides at $0.30, $0.25, $0.20, $0.15, $0.10, and $0.05. Their respective take-profits are $0.70, $0.75, $0.80, $0.85, $0.90, and $0.95. Rearm each rung after its take-profit until window rollover.
 
-- Green selects UP.
-- Red selects DOWN.
-- A doji after at least two consecutive red candles selects UP.
-- A doji after at least two consecutive green candles selects DOWN.
-- An unconfirmed doji does not trade.
+The 15-minute paper strategy remains the Roulette random forest with its adaptive target and paper-only execution.
 
-Doji means the candle body is no more than 10% of its high-low range. In the demo 5-minute strategy, a signal waits 120 seconds after the window opens, then places 500-share paper limit buys on the selected outcome at $0.30, $0.20, and $0.12. There is no 180-second entry cutoff; unfilled orders expire at market-window rollover. If the best ask is below a rung's limit price, the simulated fill uses the lower ask. Each filled signal-side rung exits when its own-side bid reaches $0.80 and then places an opposite-side $0.20 limit for the same share count; opposite-side positions have no take-profit. A fresh own-side bid at $0.01 still completes the window. Unresolved shares close at rollover. Both 5-minute and 15-minute demos use a paper-only Roulette random forest. For each timeframe, the model trains on the matching BTC candle interval and defines a strong UP candle as a rise exceeding the average absolute percentage move across the previous 20 closed candles. At a confidence cutoff tuned on an earlier calibration slice, it paper-buys UP at the best ask with a $50 stake during the first 60 seconds; otherwise it abstains (not DOWN). The most recent 200 candles remain a separate holdout used for metrics. Positions hold to window rollover. The separate live-entry mirror is not invoked by the model.
-
-Each timeframe has an independent $10,000 in-memory paper ledger. The dashboard shows demo state plus real USDC, equity, the two most recently traded open positions, and all open orders. Position value and equity still include the full account. When `PRIVATE_KEY` is present, account reads remain available; real 5-minute entry mirroring remains unchanged at two 20-share orders per eligible signal and is separately gated by `LIVE_TRADING=true`. Live exit management is not part of this demo change. Paper ledgers reset when the process restarts.
+Each timeframe has an independent $10,000 in-memory paper ledger. The dashboard shows paper state plus read-only real-account information. The 5-minute strategy does not invoke the live-entry mirror. Paper ledgers reset when the process restarts.
 
 Run `npm test` and `npm start`. The Railway `node index.js` start command remains valid.

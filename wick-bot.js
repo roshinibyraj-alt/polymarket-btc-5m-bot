@@ -4,6 +4,7 @@ const cfg=require('./config');
 const md=require('./wick-market-data');
 const {feed:chainlinkFeed}=require('./chainlink-feed');
 const candleStrategy=require('./candle-strategy');
+const confusionStrategy=require('./market-confusion-strategy');
 const rouletteModel=require('./roulette-model');
 
 function levels(xs){return (xs||[]).map(x=>({price:Number(x.price),size:Number(x.size)}))
@@ -79,6 +80,8 @@ class WickBot{
     this.candleEvaluation={side:null,reason:'Waiting for closed-candle history'};
     this.candleOrdersPlaced=false;
     this.liveCandleSignalSent=false;this.rouletteOrderPlaced=false;this.rouletteEvaluation={ready:false,status:'waiting',reason:'Computing next 15-minute candle probability'};
+    this.marketConfusionOrdersPlaced=false;
+    this.marketConfusionEvaluation={eligible:false,reason:'Waiting for final 30 seconds',upMid:null,downMid:null};
   }
   log(event,data={}){const e={ts:Date.now(),timeframe:this.timeframe,event,...data};this.events.unshift(e);this.events.length=Math.min(100,this.events.length);console.log('[wick] '+JSON.stringify(e))}
   async tick(){
@@ -101,7 +104,8 @@ class WickBot{
       await this.refreshLiveQuotes(now);
       if(this.orderWindowStart!==start)this.openStrategyWindow(start,now);
       this.updateCandleContext(start);
-      if(this.strategyMode==='roulette-rf')await this.processRouletteEntries(start,now);else this.processCandleEntries(start,now);
+       if(this.timeframe==='5m')this.processMarketConfusionEntries(start,now);
+       else if(this.strategyMode==='roulette-rf')await this.processRouletteEntries(start,now);else this.processCandleEntries(start,now);
       this.processCandleOrders(start,now);
       this.lastScanAt=now;this.error=null;
       const hasOpen=this.positions.some(p=>p.windowStart===start&&p.status==='OPEN');
@@ -124,12 +128,39 @@ class WickBot{
     this.candleEvaluation={side:null,reason:'Waiting for closed-candle history'};
     this.candleOrdersPlaced=false;
     this.liveCandleSignalSent=false;this.rouletteOrderPlaced=false;this.rouletteEvaluation={ready:false,status:'waiting',reason:'Computing next 15-minute candle probability'};
+    this.marketConfusionOrdersPlaced=false;
+    this.marketConfusionEvaluation={eligible:false,reason:'Waiting for final 30 seconds',upMid:null,downMid:null};
     this.windowOrders=[];
     this.log('CANDLE_PATTERN_WINDOW_STARTED',{windowStart:start,timeframe:this.timeframe});
   }
   updateCandleContext(){
     try{this.articleCandles=this.priceFeed.getMinuteCandles()}
     catch(error){this.candleEvaluation={side:null,reason:error.message}}
+  }
+  processMarketConfusionEntries(start,now){
+    if(this.timeframe!=='5m'||this.completedWindows.has(start)||this.orderWindowStart!==start||this.marketConfusionOrdersPlaced)return;
+    const remaining=start+this.windowMs-now;
+    if(remaining<=0||remaining>cfg.MARKET_CONFUSION_WINDOW_MS){
+      this.marketConfusionEvaluation={eligible:false,reason:'Waiting for the final 30 seconds',upMid:null,downMid:null};
+      return;
+    }
+    const evaluation=confusionStrategy.isMarketConfused(this.liveQuotes.UP,this.liveQuotes.DOWN,now);
+    this.marketConfusionEvaluation=evaluation;
+    if(!evaluation.eligible)return;
+    this.marketConfusionOrdersPlaced=true;
+    this.windowOrders=[];
+    for(const side of ['UP','DOWN']){
+      for(let index=0;index<cfg.MARKET_CONFUSION_ENTRY_PRICES.length;index++){
+        const price=cfg.MARKET_CONFUSION_ENTRY_PRICES[index];
+        const order={id:`5m-${start}-${side}-${price}-0`,timeframe:'5m',windowStart:start,
+          side,tokenId:this.market.tokens[side],limitPrice:price,shares:cfg.MARKET_CONFUSION_SHARES,
+          status:'LIVE',createdAt:now,expiresAt:start+this.windowMs,entryType:'MARKET_CONFUSION',
+          rungPrice:price,takeProfitPrice:cfg.MARKET_CONFUSION_TAKE_PROFITS[index],rearmCount:0};
+        this.windowOrders.push(order);this.orders.unshift(order);
+      }
+    }
+    this.log('MARKET_CONFUSION_LADDER_PLACED',{windowStart:start,upMid:evaluation.upMid,downMid:evaluation.downMid,
+      orders:this.windowOrders.map(order=>({side:order.side,price:order.limitPrice,shares:order.shares,tp:order.takeProfitPrice}))});
   }
   async processRouletteEntries(start,now){
         const validWindow=(this.timeframe==='5m'&&this.windowMs===cfg.WINDOW_MS_5M)||(this.timeframe==='15m'&&this.windowMs===cfg.WINDOW_MS_15M);
@@ -150,7 +181,7 @@ class WickBot{
         this.log('PAPER_ROULETTE_RF_ENTRY',{id,timeframe:this.timeframe,ask,stake,shares,probabilityStrongUp:prediction.probabilityStrongUp,targetReturn:prediction.targetReturn,validationAccuracy:prediction.validationAccuracy});
       }
       processCandleEntries(start,now){
-    if(this.completedWindows.has(start)||this.orderWindowStart!==start||this.candleOrdersPlaced)return;
+    if(this.timeframe==='5m'||this.completedWindows.has(start)||this.orderWindowStart!==start||this.candleOrdersPlaced)return;
     const windows=candleStrategy.aggregateCompleteCandles(this.articleCandles,this.windowMs)
       .filter(c=>c.end<=start);
     const signal=candleStrategy.signalForPrevious(windows);
@@ -159,34 +190,18 @@ class WickBot{
     if(!windows.length||windows.at(-1).end!==start){
       this.candleEvaluation={side:null,reason:'Previous market candle is incomplete or unavailable'};return;
     }
-    const isFiveMinute=this.timeframe==='5m'&&this.windowMs===cfg.WINDOW_MS_5M;
-    if(isFiveMinute&&!this.liveCandleSignalSent&&typeof this.onLiveEntryOrders==='function'){
-      this.liveCandleSignalSent=true;
-      const tokenId=this.market.tokens[signal.side];
-      const liveEntry={windowStart:start,cutoffAt:start+this.orderCutoffMs,slug:this.market.slug,
-        tokenId,side:signal.side,
-        orders:cfg.RESTING_LIMITS.map(({price})=>({price,shares:cfg.LIVE_SHARES_PER_RUNG}))};
-      Promise.resolve().then(()=>this.onLiveEntryOrders(liveEntry))
-        .catch(error=>this.log('LIVE_ENTRY_MIRROR_ERROR',{note:error.message,slug:this.market?.slug||null}));
-    }
-    if(isFiveMinute&&now<start+cfg.DEMO_ENTRY_DELAY_MS_5M){
-      this.candleEvaluation={...signal,reason:'Waiting for 120-second demo entry delay'};
-      return;
-    }
-    if(!isFiveMinute&&now>=start+this.orderCutoffMs){
+    if(now>=start+this.orderCutoffMs){
       this.candleEvaluation={...signal,reason:`${this.orderCutoffMs/1000}-second entry cutoff has passed`};return;
     }
     this.candleOrdersPlaced=true;
     const tokenId=this.market.tokens[signal.side];
     this.windowOrders=[];
-    const levels=isFiveMinute?cfg.DEMO_RESTING_LIMITS_5M:cfg.RESTING_LIMITS;
-    const expiresAt=isFiveMinute?start+this.windowMs:start+this.orderCutoffMs;
-    for(const level of levels){
+    for(const level of cfg.RESTING_LIMITS){
       const price=level.price;
       const order={id:`${this.timeframe}-${start}-${price}`,timeframe:this.timeframe,windowStart:start,
         side:signal.side,tokenId,limitPrice:price,shares:level.shares,status:'LIVE',
-        createdAt:now,expiresAt,pattern:signal.pattern,entryType:'CANDLE_PATTERN_LIMIT',
-        takeProfitPrice:isFiveMinute?cfg.DEMO_TAKE_PROFIT_PRICE_5M:null};
+        createdAt:now,expiresAt:start+this.orderCutoffMs,pattern:signal.pattern,entryType:'CANDLE_PATTERN_LIMIT',
+        takeProfitPrice:null};
       this.windowOrders.push(order);this.orders.unshift(order);
     }
     this.log('CANDLE_SIGNAL_LIMITS_PLACED',{side:signal.side,pattern:signal.pattern,
@@ -213,11 +228,28 @@ class WickBot{
         cost,totalCost:cost,fees:0,status:'OPEN',submittedAt:order.createdAt,
         openedAt:now,filledAt:now,markBid:this.liveQuotes[order.side]?.bestBid??null,
         takeProfitEnabled:order.takeProfitPrice!=null,
-        takeProfitPrice:order.takeProfitPrice??null};
+         takeProfitPrice:order.takeProfitPrice??null,
+         entryType:order.entryType||'CANDLE_PATTERN_LIMIT',
+         rungPrice:order.rungPrice??order.limitPrice,
+         rearmCount:order.rearmCount||0};
       this.cash-=cost;this.positions.unshift(position);
       this.log('PAPER_LIMIT_FILLED',{id:order.id,side:order.side,limitPrice:order.limitPrice,
         fillPrice,shares:order.shares,entryType:position.entryType});
     }
+  }
+  rearmMarketConfusionRung(position,now){
+    if(now>=position.windowStart+this.windowMs)return null;
+    const takeProfit=confusionStrategy.takeProfitForEntry(position.rungPrice);
+    if(takeProfit==null)return null;
+    const rearmCount=(position.rearmCount||0)+1,price=position.rungPrice,side=position.side;
+    const order={id:`5m-${position.windowStart}-${side}-${price}-${rearmCount}-${now}`,
+      timeframe:'5m',windowStart:position.windowStart,side,tokenId:position.tokenId,
+      limitPrice:price,shares:cfg.MARKET_CONFUSION_SHARES,status:'LIVE',createdAt:now,
+      expiresAt:position.windowStart+this.windowMs,entryType:'MARKET_CONFUSION',
+      rungPrice:price,takeProfitPrice:takeProfit,rearmCount};
+    this.windowOrders.push(order);this.orders.unshift(order);
+    this.log('MARKET_CONFUSION_RUNG_REARMED',{side,price,takeProfit,rearmCount});
+    return order;
   }
   updateArticlePriceContext(start){
     try{
@@ -380,17 +412,17 @@ class WickBot{
       catch(_){p.markStatus=p.markBid!=null?'STALE':'MISSING'}
     }));
     const currentWindowOpen=open.filter(p=>p.windowStart===this.market.start);
-    if(this.timeframe==='5m'&&this.strategyMode!=='roulette-rf'){
+    if(this.timeframe==='5m'){
       for(const position of currentWindowOpen){
-        if(position.status!=='OPEN'||!position.takeProfitEnabled)continue;
+        if(position.status!=='OPEN'||!position.takeProfitEnabled||!Number.isFinite(Number(position.takeProfitPrice)))continue;
         const quote=this.liveQuotes[position.side];
-        if(freshBidAtLeast(quote,position.takeProfitPrice??cfg.DEMO_TAKE_PROFIT_PRICE_5M,now)){
-          this.finalizeExit(position,Number(quote.bestBid),'TP_HIT_0_80');
-          this.placeOppositeDemoOrder(position,now);
+        if(freshBidAtLeast(quote,Number(position.takeProfitPrice),now)){
+          this.finalizeExit(position,Number(quote.bestBid),`TP_HIT_${Number(position.takeProfitPrice).toFixed(2)}`);
+          if(position.entryType==='MARKET_CONFUSION')this.rearmMarketConfusionRung(position,now);
         }
       }
     }
-    const stopLossPosition=this.strategyMode==='roulette-rf'?null:currentWindowOpen.find(p=>p.status==='OPEN'&&stopLossHit(this.liveQuotes[p.side],now));
+    const stopLossPosition=this.timeframe==='5m'||this.strategyMode==='roulette-rf'?null:currentWindowOpen.find(p=>p.status==='OPEN'&&stopLossHit(this.liveQuotes[p.side],now));
     const legacyTakeProfitPosition=this.strategyMode==='roulette-rf'||this.timeframe==='5m'?null:
       currentWindowOpen.find(p=>takeProfitHit(this.liveQuotes[p.side],now));
     const trigger=legacyTakeProfitPosition||stopLossPosition;
@@ -398,22 +430,6 @@ class WickBot{
       const reason=legacyTakeProfitPosition?'TP_HIT_0_99':'STOP_LOSS_HIT_0_01';
       await this.completeWindow(trigger.windowStart,trigger,reason,now);
     }
-  }
-  placeOppositeDemoOrder(position,now){
-    if(position.oppositeOrderCreatedAt)return null;
-    position.oppositeOrderCreatedAt=now;
-    const side=position.side==='UP'?'DOWN':'UP';
-    const id=`${position.id}-opposite-0.20`;
-    const order={id,timeframe:this.timeframe,windowStart:position.windowStart,
-      side,tokenId:this.market?.tokens?.[side]||null,
-      limitPrice:cfg.DEMO_OPPOSITE_ENTRY_PRICE_5M,shares:position.shares,
-      status:'LIVE',createdAt:now,expiresAt:position.windowStart+this.windowMs,
-      pattern:'TP opposite-side entry',entryType:'TP_OPPOSITE',
-      takeProfitPrice:null};
-    this.windowOrders.push(order);this.orders.unshift(order);
-    this.log('PAPER_TP_OPPOSITE_ORDER_PLACED',{triggerPositionId:position.id,
-      side,price:order.limitPrice,shares:order.shares});
-    return order;
   }
   cancelWindowOrders(windowStart,now,reason){
     for(const order of this.orders){
@@ -498,18 +514,22 @@ class WickBot{
       }
       const mark=p.markBid==null?null:p.markBid*p.shares;p.markAgeMs=p.markUpdatedAt?Math.max(0,now-p.markUpdatedAt):null;p.markStatus=mark==null?'UNAVAILABLE':p.markAgeMs>15000?'STALE':'LIVE';const freshMark=mark!=null&&p.markAgeMs<=15000;p.markValue=freshMark?mark:null;p.unrealizedPnl=freshMark?mark-p.totalCost:null;if(!freshMark)unpricedOpenPositions++;else{markedValue+=mark;unrealizedPnl+=p.unrealizedPnl}
     }
-      const strategy={timeframe:this.timeframe,market:`Polymarket BTC ${this.timeframe} UP/DOWN`,
-        signal:this.strategyMode==='roulette-rf'?'Random forest: UP when probability ≥60% that the next candle rises by the average absolute percentage move across the last 20 closed candles; otherwise no trade.':'Previous green → UP; previous red → DOWN; doji after 2+ red → UP; doji after 2+ green → DOWN',
+       const fiveMinute=this.timeframe==='5m';
+       const strategy={timeframe:this.timeframe,market:`Polymarket BTC ${this.timeframe} UP/DOWN`,
+         signal:fiveMinute?'During the final 30 seconds, buy both outcomes when fresh midpoints are between $0.05 and $0.96.':
+           this.strategyMode==='roulette-rf'?'Random forest: UP when probability ≥60% that the next candle rises by the average absolute percentage move across the last 20 closed candles; otherwise no trade.':'Previous green → UP; previous red → DOWN; doji after 2+ red → UP; doji after 2+ green → DOWN',
         dojiDefinition:'Body ≤10% of candle high-low range',
-        orders:{type:this.strategyMode==='roulette-rf'?'Paper ask fill on model confirmation':'Resting paper limit buys',
-          levels:this.strategyMode==='roulette-rf'?[]:this.timeframe==='5m'?cfg.DEMO_RESTING_LIMITS_5M:cfg.RESTING_LIMITS,
-          entryDelaySeconds:this.strategyMode==='roulette-rf'?0:this.timeframe==='5m'?cfg.DEMO_ENTRY_DELAY_MS_5M/1000:0,
-          cutoffSeconds:this.strategyMode==='roulette-rf'?cfg.ROULETTE_ENTRY_WINDOW_MS/1000:this.timeframe==='5m'?null:this.orderCutoffMs/1000},
-        exit:this.strategyMode==='roulette-rf'?'Roulette paper positions are held until the market-window rollover; no bot-managed early exits.':this.timeframe==='5m'
-          ?'Each filled signal-side rung exits at a fresh own-side bid >= $0.80 and places an opposite-side $0.20 paper limit for the same shares; opposite-side positions have no take-profit. A fresh own-side bid <= $0.01 completes the window and closes remaining positions. Unresolved shares close at rollover. No official outcomes are used.'
-          :'A fresh own-side best bid >= $0.99 or <= $0.01 completes the whole window. All remaining positions close at their own bids (or $0 if no bid); pending entries are cancelled. Unresolved shares close at the next window start. No official outcomes are used.',
+         orders:{type:fiveMinute?'Two-sided paper limit buys':this.strategyMode==='roulette-rf'?'Paper ask fill on model confirmation':'Resting paper limit buys',
+           levels:fiveMinute?cfg.MARKET_CONFUSION_ENTRY_PRICES.map((price,index)=>({price,shares:cfg.MARKET_CONFUSION_SHARES,takeProfit:cfg.MARKET_CONFUSION_TAKE_PROFITS[index]})):
+             this.strategyMode==='roulette-rf'?[]:cfg.RESTING_LIMITS,
+           entryDelaySeconds:fiveMinute?null:this.strategyMode==='roulette-rf'?0:0,
+           cutoffSeconds:fiveMinute?cfg.MARKET_CONFUSION_WINDOW_MS/1000:this.strategyMode==='roulette-rf'?cfg.ROULETTE_ENTRY_WINDOW_MS/1000:this.orderCutoffMs/1000},
+          exit:fiveMinute?'Each filled rung exits at its mapped own-side take-profit. After a take-profit, rearm that same buy rung until window rollover.':
+            this.strategyMode==='roulette-rf'?'Roulette paper positions are held until the market-window rollover; no bot-managed early exits.':
+              'A fresh own-side best bid >= $0.99 or <= $0.01 completes the whole window. All remaining positions close at their own bids (or $0 if no bid); pending entries are cancelled. Unresolved shares close at the next window start. No official outcomes are used.',
         execution:'PAPER ONLY',
-        signalState:this.strategyMode==='roulette-rf'?this.rouletteEvaluation:this.candleEvaluation,model:this.strategyMode==='roulette-rf'?this.rouletteEvaluation:null,priceFeed:this.priceFeed?.snapshot?.()||null};
+         signalState:fiveMinute?this.marketConfusionEvaluation:this.strategyMode==='roulette-rf'?this.rouletteEvaluation:this.candleEvaluation,
+         model:!fiveMinute&&this.strategyMode==='roulette-rf'?this.rouletteEvaluation:null,priceFeed:this.priceFeed?.snapshot?.()||null};
      return {now,mode:'DEMO ONLY',status:this.status,error:this.error,strategy,
         account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,takerFees,estimatedMakerRebate,
           totalTrades,settledTrades,wins,losses,breakEvenExits,profitableExits,losingExits,
