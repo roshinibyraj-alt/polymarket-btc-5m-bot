@@ -470,7 +470,7 @@ class WickBot{
       const mark=p.markBid==null?null:p.markBid*p.shares;p.markAgeMs=p.markUpdatedAt?Math.max(0,now-p.markUpdatedAt):null;p.markStatus=mark==null?'UNAVAILABLE':p.markAgeMs>15000?'STALE':'LIVE';const freshMark=mark!=null&&p.markAgeMs<=15000;p.markValue=freshMark?mark:null;p.unrealizedPnl=freshMark?mark-p.totalCost:null;if(!freshMark)unpricedOpenPositions++;else{markedValue+=mark;unrealizedPnl+=p.unrealizedPnl}
     }
        const strategy={asset:this.asset,timeframe:this.timeframe,market:`Polymarket ${this.asset} ${this.timeframe} UP/DOWN`,
-         signal:'During the final 60 seconds, buy both outcomes when fresh midpoints are between $0.05 and $0.96.',
+         signal:'During the final 60 seconds, buy both outcomes when fresh midpoints are between $0.30 and $0.71.',
          orders:{type:'Two-sided paper limit buys',
            levels:cfg.MARKET_CONFUSION_ENTRY_PRICES.map((price,index)=>({price,shares:cfg.MARKET_CONFUSION_SHARES,takeProfit:cfg.MARKET_CONFUSION_TAKE_PROFITS[index]})),
            entryDelaySeconds:null,
