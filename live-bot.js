@@ -34,6 +34,13 @@ function isTerminalStatus(status) {
     || normalized.includes('MARKET RESOLVED');
 }
 
+function resolvedMarketSlugs(orders) {
+  return new Set([...orders]
+    .filter(order => /MARKET RESOLVED/i.test(String(order.status || '')))
+    .map(order => order.slug)
+    .filter(Boolean));
+}
+
 function matchedSize(order) {
   return Math.max(0, numeric(
     order?.sizeMatched ?? order?.size_matched ?? order?.matchedSize ?? order?.matched_size,
@@ -303,8 +310,11 @@ class LiveBot {
       await this.recoverOpenOrders();
       await this.refreshAccountSnapshot();
       if (this.account.accountReady) {
+        const resolvedSlugs = resolvedMarketSlugs(this.ordersById.values());
         for (const order of this.ordersById.values()) {
-          if (order.kind === 'ENTRY' && order.matchedShares > 0) {
+          if (order.kind === 'ENTRY'
+            && order.matchedShares > 0
+            && !resolvedSlugs.has(order.slug)) {
             await this.maybeSubmitTakeProfit(order);
           }
         }
@@ -741,9 +751,7 @@ class LiveBot {
           });
         }
       }
-      const resolvedSlugs = new Set([...this.ordersById.values()]
-        .filter(order => /MARKET RESOLVED/i.test(String(order.status || '')))
-        .map(order => order.slug));
+      const resolvedSlugs = resolvedMarketSlugs(this.ordersById.values());
       for (const order of this.ordersById.values()) {
         if (order.kind === 'ENTRY'
           && isTerminalStatus(order.status)
