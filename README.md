@@ -16,11 +16,11 @@ This document does not authorize a real order or a production deployment. Never 
 
 ### Price inputs
 
-For the current BTC window, obtain a valid best bid and best ask for both UP and DOWN. Calculate each midpoint as:
+For the current BTC window, obtain valid best bid and best ask quotes for UP and DOWN when available. Calculate each midpoint as:
 
 `midpoint = (best bid + best ask) / 2`
 
-Both quotes must be marked live, have valid prices, and be no more than **5 seconds old** when evaluated. If either side is missing, stale, or invalid, do not trigger because the strategy submits orders on both outcomes.
+Each quote used for a trigger must be live, valid, and no more than **5 seconds old**. Either outcome can trigger independently; a stale or missing quote on the other side does not cancel a qualifying fresh tick.
 
 ### Entry condition
 
@@ -29,7 +29,9 @@ Evaluate during the **last 60 seconds of the current window**. Trigger while the
 - UP midpoint: $0.30–$0.71, or
 - DOWN midpoint: $0.30–$0.71
 
-At least one condition must be true at the same evaluation. The band applies to the outcome midpoint, not the buy-limit price. Both quotes still must be fresh.
+The band applies to the outcome midpoint, not the buy-limit price. The first qualifying tick is latched immediately and saved for that window, so a later out-of-band quote or temporary account-data failure does not erase it.
+
+Read the market's Gamma `version` before choosing its outcome asset IDs: use `clobTokenIds` for `v1` and `positionIds` for `v2`, aligned with the decoded `outcomes` array. Do not substitute one ID type for the other.
 
 ### Orders after a trigger
 
@@ -47,7 +49,7 @@ That is four buy orders per eligible window. If all four fill at their limits, t
 - Submit each rung once per market window; do not continuously rebuy, add replacement buys after a take-profit, or flip/reverse the signal.
 - The $0.25 rung always maps to a $0.75 take-profit; the $0.15 rung always maps to a $0.85 take-profit. Each sell is for the **same outcome token** that was bought.
 - Do not add a 30-second delay. The strategy is eligible only in the final 60 seconds.
-- A trade is **not guaranteed every window**. Missing/stale quotes or a midpoint outside the band means no trigger. Do not bypass these conditions to force an order.
+- A trade is **not guaranteed every window**. If neither fresh outcome midpoint enters the band in the final minute, there is no trigger.
 
 ### Dashboard mode
 
@@ -62,10 +64,10 @@ Real strategy orders require:
 - `LIVE_TRADING=true`
 - `PRIVATE_KEY` provided only through the deployment's secret manager
 - `BOT_STATE_DIR` pointing to a persistent mounted directory for the live-order ledger
-- Successful Polymarket authentication and a healthy, reconciled live account snapshot
+- Successful Polymarket authentication and durable live-order storage
 - `LIVE_ORDER_FLOW_TEST=false`
 
-If live trading is enabled without `PRIVATE_KEY` or durable state storage, fail safely and do not start real trading. If authentication, account readiness, reconciliation, or order status is unhealthy, block new buys and show the reason. Do not silently fall back to paper and label it live.
+If live trading is enabled without `PRIVATE_KEY` or durable state storage, fail safely and do not start real trading. Positions, collateral, activity, and open-order snapshots are informational and do not gate entries. Polymarket validates funds and allowances on each order. Keep the hard stop for failed authentication, durable-ledger failures, or an order submission whose acceptance is uncertain. Do not silently fall back to paper and label it live.
 
 ### Entry order
 
@@ -89,16 +91,17 @@ There is **no live stop-loss rule** in this strategy. Live exits are the mapped 
 
 ## 4. Account readiness, rate limits, and safety
 
-- Account balance, positions, open orders, and recent activity are read separately from market quotes and order polling.
+- Account balance, positions, open orders, and recent activity are read separately from market quotes and order polling. Snapshot health is informational; it does not determine whether the authenticated CLOB order path is ready.
 - The normal live account snapshot interval is **15 seconds**. Cache informational `/v2/activity` results for five minutes. If `/v2/positions` returns 429, honor `Retry-After` and apply a separate exponential cooldown from 15 seconds up to five minutes across repeated 429s. A successful complete positions read resets that cooldown.
 - The 429 cooldown applies only to account snapshots. The **500 ms** tracked-order fill poll remains independent and continues during account-read backoff.
 - The 500 ms tracked-order poll is **not** permission to poll the Positions API every 500 ms.
-- Require `accountReady=true` and a healthy live status before submitting new strategy orders. A successful HTTP response with an error payload is not readiness.
-- If the Positions API returns 429, keep the account unready, show the error and next retry, and block new real entries. Never bypass a 429 by using stale account data.
+- `accountReady=true` means the live trading client authenticated and the bot is not halted by an uncertain submission or ledger failure. It does not mean the positions snapshot is fresh.
+- If the Positions API returns 429, show the error and next retry while keeping the authenticated CLOB order path available. The exchange accepts or rejects each order based on its current balance and allowance checks.
+- Unclassified open orders are shown as warnings but do not block entries; never blindly retry a submission whose exchange acceptance is uncertain.
 
 ### Restart and duplicate protection
 
-The live bot writes an order ledger atomically to `BOT_STATE_DIR` before submitting orders. In Railway, attach a persistent volume at `/data` and set `BOT_STATE_DIR=/data`. The bot skips markets whose window began before the current process started and reconciles saved orders against Polymarket before enabling new entries. If the volume is missing, the ledger is invalid, or an order cannot be reconciled, live execution remains blocked.
+The live bot writes an order ledger atomically to `BOT_STATE_DIR` before submitting orders. In Railway, attach a persistent volume at `/data` and set `BOT_STATE_DIR=/data`. A qualifying final-minute price tick is also saved; it can fire once after an authentication delay or process restart, but only before that same window ends. A restart does not invent a trigger for a window with no saved qualifying tick. If the volume is missing or the ledger is invalid, live execution remains blocked.
 
 Persist before/with every live submission:
 
@@ -108,7 +111,7 @@ Persist before/with every live submission:
 - Submitted, filled, reserved-for-exit, and exited share quantities
 - Per-window/per-side/per-rung idempotency keys
 
-On startup, reconcile the persisted ledger against Polymarket open orders and positions before enabling new entries. If an order's submission result is uncertain, search/reconcile before retrying. Do not reset live order state or paper balances as an implicit side effect of deployment.
+On startup, load the durable ledger before enabling new entries. Open-order and positions snapshots are useful for recovery and dashboard visibility, but they do not gate authenticated CLOB submissions. If an order's submission result is uncertain, reconcile that specific order before any retry. Do not reset live order state or paper balances as an implicit side effect of deployment.
 
 Run one active trading instance per wallet unless shared durable coordination prevents duplicate orders across instances.
 
@@ -120,25 +123,25 @@ The dashboard must show, separately for BTC 5m and BTC 15m:
 - UP and DOWN best bid, best ask, and midpoint
 - Quote timestamp/age and an explicit `LIVE`, `STALE`, or `MISSING` state
 - The evaluated midpoint band, signal decision, and skip reason
-- Live trading enabled/paused state, account readiness, last successful snapshot, next retry, and any 429/error
+- Live trading enabled/paused state, CLOB order-path readiness, snapshot freshness, last successful snapshot, next retry, and any 429/error
 - Each live BUY and SELL order's side, limit price, requested shares, matched shares, status, and linked take-profit
 - Live account readiness, tracked BUY/SELL orders, matched shares, and bot events
 
-`/api/state` is the live bot snapshot. `/api/live-balance` reports the last account snapshot and tracked live orders. `/api/healthz` returns 503 until live account reconciliation is healthy. Never display private keys or secrets.
+`/api/state` is the live bot snapshot. `/api/live-balance` reports the last account snapshot and tracked live orders. `/api/healthz` returns 503 until the CLOB client authenticates or while a hard safety halt is active; a stale Positions API snapshot alone does not fail health. Never display private keys or secrets.
 
 ## 7. Acceptance tests before using real funds
 
 At minimum, test that:
 
 1. Only BTC 5m and BTC 15m markets are accepted; ETH and malformed/expired markets are rejected.
-2. No signal is produced before the final 60 seconds, after window end, with stale/missing quotes, or if both midpoints are outside $0.30–$0.71.
+2. No signal is produced before the final 60 seconds, after window end, without any fresh quote, or if no fresh midpoint is inside $0.30–$0.71.
 3. An eligible signal produces exactly four 10-share BUY attempts: both outcomes at $0.25 and $0.15, with the correct $0.75/$0.85 take-profit mapping.
 4. Repeated scans of the same window do not duplicate a rung.
 5. Confirmed full and partial fills produce SELL orders only for unsold matched shares; sub-5-share exits are reported as blocked; SELL fills/cancellations/rejections are reconciled.
-6. 429 responses honor `Retry-After`, block new orders, and do not cause rapid retries or stale-account trading.
+6. 429 responses honor `Retry-After` for snapshot retries but do not block an authenticated CLOB order path.
 7. Restart recovery reconciles previous order IDs and partial fills without duplicating BUYs or SELLs.
-8. A restarted process loads the durable ledger and does not duplicate a submitted entry.
-9. Missing/corrupt persistent state and unknown open orders block live execution.
+8. A restarted process loads the durable ledger, preserves a latched trigger only for its still-open window, and does not duplicate a submitted entry.
+9. Missing/corrupt persistent state and ambiguous order submissions halt live execution; unclassified open orders are visible warnings.
 
 ## 8. Development
 

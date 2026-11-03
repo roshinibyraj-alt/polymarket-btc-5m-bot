@@ -71,7 +71,8 @@ function evaluateWindow({ now = Date.now(), market, quotes, startedAt = null } =
     };
   }
 
-  const values = {};
+  const values = { UP: null, DOWN: null };
+  const freshSides = [];
   for (const side of ['UP', 'DOWN']) {
     const quote = quotes?.[side];
     const updatedAt = Number(quote?.updatedAt);
@@ -88,22 +89,24 @@ function evaluateWindow({ now = Date.now(), market, quotes, startedAt = null } =
       && ask >= bid
       && ask <= 1;
 
-    if (!fresh) {
-      return {
-        eligible: false,
-        status: 'waiting_for_fresh_quotes',
-        remainingMs,
-        upMid: values.UP ?? null,
-        downMid: values.DOWN ?? null,
-        reason: `Waiting for a fresh ${side} bid/ask quote`,
-      };
-    }
-
+    if (!fresh) continue;
     values[side] = (bid + ask) / 2;
+    freshSides.push(side);
   }
 
   const inBand = price => price >= MIN_MIDPOINT && price <= MAX_MIDPOINT;
   const qualifyingSides = ['UP', 'DOWN'].filter(side => inBand(values[side]));
+  if (freshSides.length === 0) {
+    return {
+      eligible: false,
+      status: 'waiting_for_fresh_quotes',
+      remainingMs,
+      upMid: values.UP,
+      downMid: values.DOWN,
+      freshSides,
+      reason: 'Waiting for at least one fresh UP or DOWN bid/ask quote',
+    };
+  }
   const eligible = qualifyingSides.length > 0;
   return {
     eligible,
@@ -111,10 +114,11 @@ function evaluateWindow({ now = Date.now(), market, quotes, startedAt = null } =
     remainingMs,
     upMid: values.UP,
     downMid: values.DOWN,
+    freshSides,
     qualifyingSides,
     reason: eligible
       ? `${qualifyingSides.join(' and ')} midpoint is in the $0.30–$0.71 band`
-      : 'Neither outcome midpoint is in the $0.30–$0.71 band',
+      : 'No fresh outcome midpoint is in the $0.30–$0.71 band',
   };
 }
 

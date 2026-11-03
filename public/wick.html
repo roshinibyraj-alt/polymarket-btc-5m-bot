@@ -48,7 +48,7 @@
 
   <section class="grid" aria-label="Execution status">
     <div class="stat"><div class="label">Live orders</div><div class="value" id="tradingState">—</div><span class="note" id="modeNote">Checking configuration</span></div>
-    <div class="stat"><div class="label">Account readiness</div><div class="value" id="accountReady">—</div><span class="note" id="accountNote">Waiting for exchange reconciliation</span></div>
+    <div class="stat"><div class="label">Live order access</div><div class="value" id="accountReady">—</div><span class="note" id="accountNote">Waiting for Polymarket authentication</span></div>
     <div class="stat"><div class="label">USDC collateral</div><div class="value" id="collateral">—</div><span class="note">Most recent complete account snapshot</span></div>
     <div class="stat"><div class="label">Equity</div><div class="value" id="equity">—</div><span class="note" id="snapshotTime">Not yet synchronized</span></div>
   </section>
@@ -136,7 +136,11 @@
       document.querySelector('#modeNote').textContent = state.tradingEnabled ? 'Real limit orders configured' : 'Live order switch is off';
       document.querySelector('#accountReady').textContent = account.accountReady ? 'READY' : 'BLOCKED';
       document.querySelector('#accountReady').className = `value ${account.accountReady?'good':'bad'}`;
-      document.querySelector('#accountNote').textContent = account.error || (account.accountReady?'Orders and account synchronized':'Waiting for a complete account snapshot');
+      document.querySelector('#accountNote').textContent = account.accountReady
+        ? (account.snapshotHealthy
+          ? (account.error ? `CLOB ready; snapshot/order warning: ${account.error}` : 'CLOB authenticated; Polymarket checks each order')
+          : `CLOB ready; account snapshot unavailable${account.error ? `: ${account.error}` : ''}`)
+        : (account.error || 'Waiting for Polymarket authentication or safety recovery');
       document.querySelector('#collateral').textContent = money(account.collateral);
       document.querySelector('#equity').textContent = money(account.equity);
       document.querySelector('#snapshotTime').textContent = account.asOf ? `Snapshot ${new Date(account.asOf).toLocaleTimeString()}` : 'Not yet synchronized';

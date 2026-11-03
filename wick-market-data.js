@@ -16,12 +16,18 @@ async function getBtcMarket(windowStart,windowMs){
   const data=await getJson(`${GAMMA}/markets?slug=${encodeURIComponent(slug)}`);
   const market=(Array.isArray(data)?data:data.markets||[])[0];
   if(!market)return null;
-  const outcomes=parseArray(market.outcomes), ids=parseArray(market.clobTokenIds||market.outcomeTokenIds);
+   const version=String(market.version||'').toLowerCase();
+   if(version!=='v1'&&version!=='v2')throw new Error(`BTC ${minutes}-minute market has unsupported or missing Polymarket version`);
+   const outcomes=parseArray(market.outcomes);
+   const ids=parseArray(version==='v2'?market.positionIds:market.clobTokenIds);
+   if(!outcomes.length||ids.length!==outcomes.length)throw new Error(`BTC ${minutes}-minute market outcome IDs do not match its outcomes`);
   const tokens={};
   for(let i=0;i<outcomes.length;i++){
     const label=String(typeof outcomes[i]==='string'?outcomes[i]:outcomes[i].name||outcomes[i].label).toLowerCase();
-    if(label==='up'||label==='yes')tokens.UP=ids[i];
-    if(label==='down'||label==='no')tokens.DOWN=ids[i];
+     const id=String(ids[i]||'');
+     if(!/^\d+$/.test(id))throw new Error(`BTC ${minutes}-minute market has an invalid ${version} outcome ID`);
+     if(label==='up'||label==='yes')tokens.UP=id;
+     if(label==='down'||label==='no')tokens.DOWN=id;
   }
   if(!tokens.UP||!tokens.DOWN)throw new Error(`BTC ${minutes}-minute market outcomes could not be mapped to UP/DOWN`);
   return {id:String(market.id||market.conditionId),slug,title:market.question||market.title||slug,

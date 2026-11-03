@@ -83,12 +83,24 @@ test('the final-minute boundary is inclusive and quotes older than five seconds 
   const stale = evaluateWindow({
     now: 1_299_000,
     market: market(),
-    quotes: { UP: quote(0.50, 1_293_999), DOWN: quote(0.50, 1_299_000) },
+    quotes: { UP: quote(0.50, 1_293_999), DOWN: quote(0.50, 1_293_999) },
     startedAt: 900_000,
   });
   assert.equal(atBoundary.eligible, true);
   assert.equal(stale.eligible, false);
   assert.equal(stale.status, 'waiting_for_fresh_quotes');
+});
+
+test('one fresh qualifying outcome triggers even if the other quote is stale', () => {
+  const result = evaluateWindow({
+    now: 1_299_000,
+    market: market(),
+    quotes: { UP: quote(0.50, 1_299_000), DOWN: quote(0.50, 1_293_999) },
+    startedAt: 900_000,
+  });
+  assert.equal(result.eligible, true);
+  assert.deepEqual(result.freshSides, ['UP']);
+  assert.deepEqual(result.qualifyingSides, ['UP']);
 });
 
 test('windows that began before process startup are skipped after restart', () => {

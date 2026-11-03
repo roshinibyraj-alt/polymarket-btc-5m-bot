@@ -171,6 +171,7 @@ class LiveBot {
       status: this.tradingEnabled ? 'reconciling' : 'live_trading_disabled',
       accountReady: false,
       snapshotHealthy: false,
+      snapshotError: null,
       error: null,
       failures: 0,
       collateral: null,
@@ -191,6 +192,32 @@ class LiveBot {
 
   async restoreState(document) {
     this.entryKeys = new Set(document.entryKeys || []);
+    for (const timeframe of TIMEFRAMES) {
+      const saved = document.markets?.[timeframe];
+      if (!saved || saved.windowStart === null || saved.windowStart === undefined
+        || saved.windowEnd === null || saved.windowEnd === undefined
+        || !Number.isFinite(Number(saved.windowStart))
+        || !Number.isFinite(Number(saved.windowEnd)) || Number(saved.windowEnd) <= this.clock()) continue;
+      const pendingTrigger = saved.pendingTrigger;
+      const validPendingTrigger = pendingTrigger?.evaluation?.eligible === true
+        && pendingTrigger.windowStart !== null && pendingTrigger.windowStart !== undefined
+        && pendingTrigger.windowEnd !== null && pendingTrigger.windowEnd !== undefined
+        && Number(pendingTrigger.windowStart) === Number(saved.windowStart)
+        && Number(pendingTrigger.windowEnd) === Number(saved.windowEnd)
+        ? pendingTrigger
+        : null;
+      const restored = this.newMarketState(timeframe);
+      restored.windowStart = Number(saved.windowStart);
+      restored.windowEnd = Number(saved.windowEnd);
+      restored.slug = typeof saved.slug === 'string' ? saved.slug : null;
+      restored.title = typeof saved.title === 'string' ? saved.title : null;
+      restored.pendingTrigger = validPendingTrigger;
+      restored.triggeredAt = saved.triggeredAt !== null && saved.triggeredAt !== undefined
+        && Number.isFinite(Number(saved.triggeredAt)) ? Number(saved.triggeredAt) : null;
+      restored.orderIds = Array.isArray(saved.orderIds) ? saved.orderIds.map(String) : [];
+      if (saved.signal && typeof saved.signal === 'object') restored.signal = saved.signal;
+      this.markets[timeframe] = restored;
+    }
     const byReference = new Map();
     for (const saved of document.orders || []) {
       const { exitRefs = [], ...fields } = saved;
@@ -230,6 +257,19 @@ class LiveBot {
       updatedAt: this.clock(),
       entryKeys: [...this.entryKeys],
       orders,
+      markets: Object.fromEntries(TIMEFRAMES.map(timeframe => {
+        const state = this.markets[timeframe];
+        return [timeframe, {
+          windowStart: state.windowStart,
+          windowEnd: state.windowEnd,
+          slug: state.slug,
+          title: state.title,
+          pendingTrigger: state.pendingTrigger,
+          triggeredAt: state.triggeredAt,
+          orderIds: state.orderIds,
+          signal: state.signal,
+        }];
+      })),
     });
   }
 
@@ -244,6 +284,7 @@ class LiveBot {
       market: null,
       quotes: { UP: null, DOWN: null },
       signal: { eligible: false, status: 'starting', reason: 'Waiting for market data' },
+      pendingTrigger: null,
       triggeredAt: null,
       orderIds: [],
       lastMarketLookupAt: 0,
@@ -257,6 +298,15 @@ class LiveBot {
     this.events.unshift(event);
     if (this.events.length > 100) this.events.length = 100;
     return event;
+  }
+
+  refreshOrderReadiness() {
+    this.account.accountReady = this.tradingEnabled && this.authenticated && !this.halted;
+    if (this.account.accountReady) this.account.status = 'ready';
+    else if (this.halted) this.account.status = 'halted_reconciliation_required';
+    else if (!this.tradingEnabled) this.account.status = 'live_trading_disabled';
+    else if (this.account.status !== 'error') this.account.status = 'reconciling';
+    return this.account.accountReady;
   }
 
   start() {
@@ -307,6 +357,7 @@ class LiveBot {
       }
       await this.trader.authenticate();
       this.authenticated = true;
+      this.refreshOrderReadiness();
       await this.recoverOpenOrders();
       await this.refreshAccountSnapshot();
       if (this.account.accountReady) {
@@ -320,9 +371,9 @@ class LiveBot {
         }
       }
     } catch (error) {
-      this.account.accountReady = false;
-      this.account.status = 'error';
       this.account.error = error.message || String(error);
+      this.refreshOrderReadiness();
+      if (!this.account.accountReady && !this.halted) this.account.status = 'error';
       this.lastError = this.account.error;
       this.log('ERROR', 'Live account initialization failed', { error: this.account.error });
       this.scheduleAccountRefresh(Math.max(1_000, retryAfterMs(error)));
@@ -364,18 +415,23 @@ class LiveBot {
       }
       this.account.untrackedOpenOrders = untracked;
       this.account.openOrders = rows;
-      await this.persistState();
+      try {
+        await this.persistState();
+      } catch (error) {
+        this.halted = true;
+        throw error;
+      }
       if (untracked) {
-        this.account.accountReady = false;
         this.account.error = `${untracked} open exchange order(s) could not be classified safely`;
       }
+      this.refreshOrderReadiness();
     } catch (error) {
-      this.account.accountReady = false;
-      this.account.snapshotHealthy = false;
       this.account.error = `Open-order recovery failed: ${error.message || error}`;
+      this.refreshOrderReadiness();
       this.lastError = this.account.error;
-      this.log('ERROR', 'Could not reconcile existing exchange orders', { error: this.account.error });
-      throw error;
+      this.log('WARNING', 'Open-order recovery failed; account snapshot does not gate the order path', {
+        error: this.account.error,
+      });
     }
   }
 
@@ -412,31 +468,37 @@ class LiveBot {
       this.account.asOf = snapshot.asOf || new Date(this.clock()).toISOString();
       this.account.lastSuccessAt = this.clock();
       this.account.snapshotHealthy = true;
+      this.account.snapshotError = null;
       this.account.failures = 0;
       this.account.nextRetryAt = null;
       this.account.error = untracked
         ? `${untracked} open exchange order(s) could not be classified safely`
         : this.orderError || null;
-      this.account.accountReady = untracked === 0 && !this.halted && !this.orderError;
-      this.account.status = this.account.accountReady ? 'ready' : 'reconciliation_required';
-      if (this.account.accountReady) this.lastError = null;
-      await this.persistState();
-      this.log('ACCOUNT', this.account.accountReady ? 'Account snapshot and open orders reconciled' : 'Account snapshot needs reconciliation', {
+      this.refreshOrderReadiness();
+      try {
+        await this.persistState();
+      } catch (error) {
+        this.halted = true;
+        throw error;
+      }
+      if (this.account.accountReady && !this.account.error) this.lastError = null;
+      this.log('ACCOUNT', 'Account snapshot refreshed; CLOB order readiness is independent', {
         openOrders: rows.length,
         untrackedOpenOrders: untracked,
       });
       this.scheduleAccountRefresh(this.accountRefreshMs);
     } catch (error) {
-      this.account.accountReady = false;
       this.account.snapshotHealthy = false;
+      this.account.snapshotError = error.message || String(error);
       this.account.failures++;
-      this.account.status = 'error';
-      this.account.error = error.message || String(error);
+      this.account.error = this.orderError || this.account.snapshotError;
+      this.refreshOrderReadiness();
       this.lastError = this.account.error;
+      if (!this.account.accountReady && !this.halted) this.account.status = 'error';
       const backoff = Math.min(15_000, 1_000 * (2 ** Math.min(this.account.failures - 1, 4)));
       const delay = Math.max(backoff, retryAfterMs(error));
       this.account.nextRetryAt = this.clock() + delay;
-      this.log('ERROR', 'Account snapshot failed; live entries remain blocked', {
+      this.log('WARNING', 'Account snapshot failed; authenticated CLOB order readiness remains independent', {
         error: this.account.error,
         retryInMs: delay,
         failures: this.account.failures,
@@ -531,31 +593,80 @@ class LiveBot {
       now,
       market: current.market,
       quotes: current.quotes,
-      startedAt: this.startedAt,
+      startedAt: current.pendingTrigger ? null : this.startedAt,
     });
-    current.signal = current.triggeredAt
-      ? {
+    if (evaluation.eligible && !current.pendingTrigger && !current.triggeredAt
+      && this.tradingEnabled && !this.flowTestEnabled) {
+      current.pendingTrigger = {
+        observedAt: now,
+        windowStart: current.windowStart,
+        windowEnd: current.windowEnd,
+        slug: current.slug,
+        evaluation: { ...evaluation },
+      };
+      current.signal = {
         ...evaluation,
+        status: 'trigger_latched',
+        reason: 'The first qualifying fresh-price tick is saved until this window ends',
+      };
+      this.log('SIGNAL', 'Qualifying midpoint tick latched for this window', {
+        slug: current.slug,
+        timeframe,
+        windowStart: current.windowStart,
+        windowEnd: current.windowEnd,
+        qualifyingSides: evaluation.qualifyingSides,
+        upMid: evaluation.upMid,
+        downMid: evaluation.downMid,
+      });
+      try {
+        await this.persistState();
+      } catch (error) {
+        this.halted = true;
+        this.refreshOrderReadiness();
+        this.account.status = 'state_store_error';
+        this.account.error = `Could not persist the qualifying trigger: ${error.message || error}`;
+        current.signal = { ...evaluation, status: 'state_store_error', reason: this.account.error };
+        this.log('ERROR', 'Qualifying trigger was not submitted because it could not be saved', {
+          slug: current.slug,
+          error: this.account.error,
+        });
+        return;
+      }
+    }
+
+    const triggerEvaluation = current.pendingTrigger?.evaluation || evaluation;
+    if (current.triggeredAt) {
+      current.signal = {
+        ...triggerEvaluation,
         eligible: true,
         status: 'triggered_once',
         reason: 'Order set already triggered for this window; entry rearm is disabled',
-      }
-      : evaluation;
-
-    if (evaluation.eligible && !current.triggeredAt) {
+      };
+    } else if (current.pendingTrigger) {
+      current.signal = {
+        ...triggerEvaluation,
+        status: 'trigger_latched',
+        reason: 'A qualifying price tick is saved until this window ends',
+      };
       if (!this.tradingEnabled) {
-        current.signal = { ...evaluation, status: 'eligible_live_disabled', reason: 'Signal is eligible, but live trading is disabled' };
+        current.signal = { ...current.signal, status: 'eligible_live_disabled', reason: 'Signal is saved, but live trading is disabled' };
       } else if (this.flowTestEnabled) {
-        current.signal = { ...evaluation, status: 'eligible_flow_test_disabled', reason: 'Live flow-test mode is not supported by this strategy' };
-      } else if (!this.account.accountReady || this.halted || this.account.untrackedOpenOrders > 0) {
+        current.signal = { ...current.signal, status: 'eligible_flow_test_disabled', reason: 'Live flow-test mode is not supported by this strategy' };
+      } else if (!this.account.accountReady || this.halted) {
         current.signal = {
-          ...evaluation,
-          status: 'eligible_account_blocked',
-          reason: this.account.error || this.orderError || 'Account/order reconciliation is not ready',
+          ...current.signal,
+          status: 'trigger_latched_waiting_order_path',
+          reason: this.account.error || 'Waiting for Polymarket authentication or safe order recovery',
         };
       } else {
-        await this.fireWindowOrders(current, evaluation);
+        await this.fireWindowOrders(current, triggerEvaluation);
       }
+    } else if (evaluation.eligible && !this.tradingEnabled) {
+      current.signal = { ...evaluation, status: 'eligible_live_disabled', reason: 'Signal is eligible, but live trading is disabled' };
+    } else if (evaluation.eligible && this.flowTestEnabled) {
+      current.signal = { ...evaluation, status: 'eligible_flow_test_disabled', reason: 'Live flow-test mode is not supported by this strategy' };
+    } else {
+      current.signal = evaluation;
     }
 
     if (now >= current.windowEnd) {
@@ -565,6 +676,15 @@ class LiveBot {
 
   async fireWindowOrders(state, evaluation) {
     if (state.triggeredAt) return;
+    if (!state.pendingTrigger) {
+      state.pendingTrigger = {
+        observedAt: this.clock(),
+        windowStart: state.windowStart,
+        windowEnd: state.windowEnd,
+        slug: state.slug,
+        evaluation: { ...evaluation },
+      };
+    }
     state.triggeredAt = this.clock();
     state.signal = { ...evaluation, status: 'orders_submitting' };
     this.log('SIGNAL', 'Midpoint-band trigger fired; submitting the four limit buys once', {
@@ -775,17 +895,17 @@ class LiveBot {
         }
       }
       if (failures.length) {
-        this.account.accountReady = false;
-        this.account.status = 'order_reconciliation_error';
+        this.refreshOrderReadiness();
+        this.account.status = this.account.accountReady ? 'ready' : 'order_reconciliation_error';
         this.account.error = failures[0];
       } else if (this.account.snapshotHealthy
         && this.account.lastSuccessAt
         && now - this.account.lastSuccessAt <= Math.max(this.accountRefreshMs * 2, 30_000)
-        && this.account.untrackedOpenOrders === 0
         && !this.halted) {
-        this.account.accountReady = true;
-        this.account.error = null;
-        this.account.status = 'ready';
+        this.refreshOrderReadiness();
+        this.account.error = this.account.untrackedOpenOrders > 0
+          ? `${this.account.untrackedOpenOrders} open exchange order(s) could not be classified safely`
+          : null;
       }
     } catch (error) {
       this.orderError = error.message || String(error);
@@ -964,6 +1084,7 @@ class LiveBot {
         title: state.title,
         quotes: state.quotes,
         signal: state.signal,
+        pendingTrigger: state.pendingTrigger,
         triggeredAt: state.triggeredAt,
         error: state.error,
         orders,
@@ -973,8 +1094,7 @@ class LiveBot {
       : this.flowTestEnabled ? 'paused_flow_test_mode'
         : this.halted ? 'halted_reconciliation_required'
           : !this.account.accountReady ? (this.account.status || 'reconciling')
-            : this.orderError ? 'order_reconciliation_error'
-              : 'ready';
+            : 'ready';
     return {
       ok: status === 'ready' || status === 'live_disabled',
       mode: 'REAL ORDERS',
@@ -985,7 +1105,8 @@ class LiveBot {
       strategy: {
         markets: ['BTC 5m', 'BTC 15m'],
         windowRule: 'Evaluate only during the final 60 seconds',
-        trigger: 'At least one fresh UP or DOWN midpoint is in the inclusive $0.30–$0.71 band',
+        trigger: 'Any one fresh UP or DOWN midpoint in the inclusive $0.30–$0.71 band during the final minute',
+        triggerPersistence: 'First qualifying tick is saved through account delays and process restarts until the window ends',
         orders: ENTRY_RUNGS.map(rung => ({
           buyPrice: rung.price,
           shares: SHARES_PER_RUNG,
@@ -999,6 +1120,7 @@ class LiveBot {
         status: this.account.status,
         accountReady: this.account.accountReady,
         snapshotHealthy: this.account.snapshotHealthy,
+        snapshotError: this.account.snapshotError,
         error: this.account.error,
         tradingEnabled: this.tradingEnabled,
         failures: this.account.failures,

@@ -209,15 +209,67 @@ test('startup does not submit take-profit orders for a resolved market', async (
   assert.deepEqual(calls, []);
 });
 
-test('an eligible signal waits for account readiness and submits when still eligible', async () => {
-  const { bot, calls } = setup({ accountReady: false });
+test('a qualifying tick stays latched and submits after prices leave the band', async () => {
+  const { bot, calls, marketData } = setup();
+  bot.authenticated = false;
+  bot.account.accountReady = false;
   await bot.scanTimeframe('5m', 250_000);
   assert.equal(calls.length, 0);
   assert.equal(bot.markets['5m'].triggeredAt, null);
-  assert.equal(bot.markets['5m'].signal.status, 'eligible_account_blocked');
+  assert.equal(bot.markets['5m'].signal.status, 'trigger_latched_waiting_order_path');
+  assert.ok(bot.markets['5m'].pendingTrigger);
 
-  bot.account.accountReady = true;
+  marketData.getBook = async tokenId => ({
+    bids: [{ price: tokenId === 'token-up' ? '0.79' : '0.19', size: '10' }],
+    asks: [{ price: tokenId === 'token-up' ? '0.81' : '0.21', size: '10' }],
+  });
+  bot.authenticated = true;
+  bot.refreshOrderReadiness();
   await bot.scanTimeframe('5m', 251_000);
+  assert.equal(calls.filter(call => call.side === 'BUY').length, 4);
+});
+
+test('a latched trigger survives a process restart until its window closes', async () => {
+  let ledger = null;
+  const store = {
+    durable: true,
+    load: async () => ledger,
+    save: async document => { ledger = JSON.parse(JSON.stringify(document)); },
+  };
+  const first = setup();
+  first.bot.stateStore = store;
+  first.bot.requirePersistentState = true;
+  first.bot.authenticated = false;
+  first.bot.account.accountReady = false;
+  await first.bot.scanTimeframe('5m', 250_000);
+  assert.equal(ledger.markets['5m'].pendingTrigger.observedAt, 250_000);
+
+  const second = setup({ now: 251_000 });
+  second.bot.startedAt = 251_000;
+  second.bot.stateStore = store;
+  second.bot.requirePersistentState = true;
+  second.marketData.getBook = async tokenId => ({
+    bids: [{ price: tokenId === 'token-up' ? '0.79' : '0.19', size: '10' }],
+    asks: [{ price: tokenId === 'token-up' ? '0.81' : '0.21', size: '10' }],
+  });
+  await second.bot.bootstrapTrading();
+  await second.bot.scanTimeframe('5m', 251_000);
+
+  assert.equal(second.bot.markets['5m'].triggeredAt, 251_000);
+  assert.equal(second.bot.markets['5m'].pendingTrigger.observedAt, 250_000);
+  assert.equal(second.calls.filter(call => call.side === 'BUY').length, 4);
+});
+
+test('an account snapshot 429 does not block an authenticated qualifying entry', async () => {
+  const { bot, trader, calls } = setup();
+  trader.getEquitySnapshot = async () => { throw new Error('Positions API 429'); };
+
+  await bot.refreshAccountSnapshot();
+
+  assert.equal(bot.account.snapshotHealthy, false);
+  assert.equal(bot.account.accountReady, true);
+  assert.match(bot.account.error, /429/);
+  await bot.scanTimeframe('5m', 250_000);
   assert.equal(calls.filter(call => call.side === 'BUY').length, 4);
 });
 
@@ -256,6 +308,8 @@ test('live entry placeholders are persisted before the first exchange submission
 
 test('live trading bootstrap refuses to authenticate without durable order storage', async () => {
   const { bot, trader } = setup();
+  bot.authenticated = false;
+  bot.account.accountReady = false;
   bot.requirePersistentState = true;
   bot.stateStore = null;
   let authenticated = false;
@@ -266,15 +320,15 @@ test('live trading bootstrap refuses to authenticate without durable order stora
   assert.match(bot.account.error, /Persistent live-order storage is required/);
 });
 
-test('order polling cannot clear a failed or stale account snapshot', async () => {
+test('stale account snapshots do not change authenticated CLOB readiness', async () => {
   const { bot } = setup();
-  bot.account.accountReady = false;
   bot.account.snapshotHealthy = false;
+  bot.account.snapshotError = 'Positions API 429';
   bot.account.error = 'Positions API 429';
   bot.account.status = 'error';
   bot.account.lastSuccessAt = 200_000;
   await bot.reconcileOrders();
-  assert.equal(bot.account.accountReady, false);
+  assert.equal(bot.account.accountReady, true);
   assert.equal(bot.account.error, 'Positions API 429');
 });
 
@@ -297,8 +351,8 @@ test('window close cancels entry buys but leaves take-profit sells resting', asy
   assert.equal(exit.status, 'LIVE');
 });
 
-test('an order from the account that cannot be classified blocks new entries', async () => {
-  const { bot, trader } = setup({ accountReady: false });
+test('unclassified account orders warn but do not block the authenticated order path', async () => {
+  const { bot, trader, calls } = setup();
   trader.listOpenOrders = async () => [{
     id: 'manual-order',
     assetId: 'unknown-token',
@@ -310,7 +364,9 @@ test('an order from the account that cannot be classified blocks new entries', a
   }];
   await bot.recoverOpenOrders();
   assert.equal(bot.account.untrackedOpenOrders, 1);
-  assert.equal(bot.account.accountReady, false);
+  assert.equal(bot.account.accountReady, true);
+  await bot.scanTimeframe('5m', 250_000);
+  assert.equal(calls.filter(call => call.side === 'BUY').length, 4);
 });
 
 test('dashboard snapshot identifies the live strategy and separate 5m/15m windows', () => {

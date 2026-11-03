@@ -113,19 +113,38 @@ test('multi-bot registers only BTC 5m and 15m with optional live order mirroring
   assert.equal(typeof live.bots['BTC-5m'].onLiveMarketState,'function');
 });
 
-test('market discovery requests the BTC slug and maps UP/DOWN outcomes',async()=>{
+test('v1 market discovery maps clobTokenIds to UP/DOWN outcomes',async()=>{
   const original=global.fetch,urls=[];
   global.fetch=async url=>{
     urls.push(String(url));
-    return{ok:true,json:async()=>[{id:'condition',question:'BTC up or down',outcomes:'["Up","Down"]',clobTokenIds:'["up-token","down-token"]'}]};
+    return{ok:true,json:async()=>[{id:'condition',version:'v1',question:'BTC up or down',outcomes:'["Up","Down"]',clobTokenIds:'["11","22"]'}]};
   };
   try{
     const market=await md.getBtcMarket(300_000,300_000);
-    assert.equal(market.tokens.UP,'up-token');
-    assert.equal(market.tokens.DOWN,'down-token');
+    assert.equal(market.tokens.UP,'11');
+    assert.equal(market.tokens.DOWN,'22');
     assert.match(market.slug,/^btc-updown-5m-/);
     assert.ok(urls.some(url=>url.includes('slug=btc-updown-5m-')));
     assert.equal(urls.some(url=>url.includes('slug=eth-updown-5m-')),false);
+  }finally{global.fetch=original}
+});
+
+test('v2 market discovery selects positionIds even when clobTokenIds are present',async()=>{
+  const original=global.fetch;
+  global.fetch=async()=>({
+    ok:true,
+    json:async()=>[{
+      id:'condition-v2',
+      version:'v2',
+      outcomes:'["Up","Down"]',
+      clobTokenIds:'["11","22"]',
+      positionIds:['33','44'],
+    }],
+  });
+  try{
+    const market=await md.getBtcMarket(300_000,300_000);
+    assert.equal(market.tokens.UP,'33');
+    assert.equal(market.tokens.DOWN,'44');
   }finally{global.fetch=original}
 });
 
