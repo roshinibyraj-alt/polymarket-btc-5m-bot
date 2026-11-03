@@ -478,6 +478,46 @@ test('smoke test submits its take-profit only after Polymarket confirms the buy 
   assert.equal(bot.flowTestPausesStrategy(), false);
 });
 
+test('MATCHED placement status continues polling until the matched share count is confirmed', async () => {
+  const { bot, trader, calls, exchangeOrders } = setup();
+  armFlowTest(bot);
+  fillableMarket(bot);
+  const placeLimitOrder = trader.placeLimitOrder;
+  trader.placeLimitOrder = async (tokenId, side, price, shares) => {
+    const accepted = await placeLimitOrder(tokenId, side, price, shares);
+    if (side === 'BUY') return { id: accepted.id, status: 'MATCHED' };
+    return accepted;
+  };
+
+  let fetchCount = 0;
+  trader.fetchOrder = async id => {
+    const order = exchangeOrders.get(id);
+    fetchCount++;
+    const response = { ...order, status: 'MATCHED' };
+    delete response.sizeMatched;
+    response.size_matched = fetchCount === 1 ? '0' : '5';
+    return response;
+  };
+
+  await bot.scanTimeframe('5m', 250_000);
+  const entry = [...bot.ordersById.values()].find(order => order.testOnly);
+  assert.equal(entry.status, 'MATCHED');
+  assert.equal(entry.matchedShares, 0);
+
+  await bot.reconcileOrders();
+  assert.equal(fetchCount, 1);
+  assert.equal(entry.matchedShares, 0);
+  assert.equal(calls.some(call => call.side === 'SELL'), false);
+
+  await bot.reconcileOrders();
+  assert.equal(fetchCount, 2);
+  assert.equal(entry.matchedShares, 5);
+  assert.deepEqual(calls.filter(call => call.side === 'SELL').map(({ price, shares }) => [price, shares]), [
+    [0.75, 5],
+  ]);
+  assert.equal(bot.flowTestState.status, 'complete');
+});
+
 test('smoke-test order is not submitted again after restart', async () => {
   let ledger = null;
   const store = {

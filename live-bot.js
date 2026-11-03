@@ -37,6 +37,12 @@ function isTerminalStatus(status) {
     || normalized.includes('MARKET RESOLVED');
 }
 
+function needsFillConfirmation(order) {
+  const status = orderStatus(order);
+  return ['MATCHED', 'FILLED'].includes(status)
+    && numeric(order?.matchedShares) < numeric(order?.shares);
+}
+
 function resolvedMarketSlugs(orders) {
   return new Set([...orders]
     .filter(order => /MARKET RESOLVED/i.test(String(order.status || '')))
@@ -1049,7 +1055,8 @@ class LiveBot {
     try {
       const now = this.clock();
       const candidates = [...this.ordersById.values()].filter(order =>
-        order.id && !isTerminalStatus(order.status) && now >= (order.nextPollAt || 0));
+        order.id && (!isTerminalStatus(order.status) || needsFillConfirmation(order))
+        && now >= (order.nextPollAt || 0));
       const results = await Promise.allSettled(candidates.map(order => this.trader.fetchOrder(order.id)));
       const failures = [];
       let changed = false;
