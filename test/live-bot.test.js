@@ -188,6 +188,27 @@ test('resolved-market orders are terminal and pending sell retries are not repea
   assert.equal(entry.exits.length, 0);
 });
 
+test('startup does not submit take-profit orders for a resolved market', async () => {
+  const { bot, calls } = setup();
+  const slug = 'btc-updown-5m-0';
+  bot.ordersById.set('matched-entry', {
+    id: 'matched-entry', kind: 'ENTRY', side: 'BUY', outcome: 'UP',
+    tokenId: 'token-up', price: 0.25, shares: 10, matchedShares: 10,
+    takeProfitPrice: 0.75, slug, windowEnd: 300_000, status: 'MATCHED',
+    retryAt: 0, exitSubmittingShares: 0, exits: [],
+  });
+  bot.ordersById.set('resolved-exit', {
+    id: 'resolved-exit', kind: 'TAKE_PROFIT', side: 'SELL', outcome: 'UP',
+    tokenId: 'token-up', price: 0.85, shares: 10, matchedShares: 0,
+    slug, status: 'CANCELED MARKET RESOLVED',
+  });
+
+  await bot.bootstrapTrading();
+
+  assert.equal(bot.account.accountReady, true);
+  assert.deepEqual(calls, []);
+});
+
 test('an eligible signal waits for account readiness and submits when still eligible', async () => {
   const { bot, calls } = setup({ accountReady: false });
   await bot.scanTimeframe('5m', 250_000);
