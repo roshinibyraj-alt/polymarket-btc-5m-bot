@@ -36,7 +36,7 @@ test('account timeout blocks entries, successful full reconciliation clears the 
   assert.equal(await mirror.refreshAccountSnapshot(),true);
   assert.equal(mirror.snapshot().error,null);
   assert.equal((await mirror.placeEntryOrders(entry)).orders.length,2);
-  assert.deepEqual(calls,[['token','BUY',.25,5],['token','BUY',.15,5]]);
+  assert.deepEqual(calls,[['token','BUY',.25,10],['token','BUY',.15,10]]);
   assert.deepEqual(mirror.snapshot().recovery.entryDecisions.map(d=>d.status),['submitted','error']);
 });
 
@@ -93,7 +93,7 @@ test('successful account reads never clear an uncertain-submission halt or retry
   assert.equal(mirror.status,'error');
   assert.match(mirror.error,/could not be confirmed/);
   assert.equal((await mirror.placeEntryOrders(entry)).status,'halted');
-  assert.equal(calls.length,1);
+  assert.equal(calls.length,2,'both intentional rung submissions may be in flight concurrently');
 });
 
 test('unknown outstanding exchange orders block new entries without cancelling or replacing them',async()=>{

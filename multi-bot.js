@@ -5,7 +5,7 @@ const Bot=require('./wick-bot');
 const {feed:chainlinkFeed}=require('./chainlink-feed');
 
 class MultiBot {
-  constructor({onLiveEntryOrders=null,liveTradingEnabled=false}={}){
+  constructor({onLiveMarketState=null,liveTradingEnabled=false}={}){
     this.liveTradingEnabled=liveTradingEnabled;
     this.bots={};
     for(const timeframe of ['5m','15m']){
@@ -13,7 +13,7 @@ class MultiBot {
       const capital=(timeframe==='5m'?cfg.DEMO_CAPITAL_5M:cfg.DEMO_CAPITAL_15M)/2;
       this.bots[`BTC-${timeframe}`]=new Bot({
         asset:'BTC',timeframe,windowMs,capital,strategyMode:'market-confusion',
-        priceFeed:chainlinkFeed,onLiveEntryOrders
+        priceFeed:chainlinkFeed,onLiveMarketState
       });
     }
   }

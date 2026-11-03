@@ -1,8 +1,9 @@
 'use strict';
 
 const cfg=require('./config');
+const confusionStrategy=require('./market-confusion-strategy');
 
-const ACTIVE_ORDER_STATUSES=new Set(['LIVE','OPEN','ACTIVE']);
+const ACTIVE_ORDER_STATUSES=new Set(['LIVE','OPEN','ACTIVE','PARTIALLY_FILLED']);
 const SHARE_EPSILON=0.0001;
 
 function normalizedPrice(value){
@@ -46,6 +47,7 @@ class LiveOrderMirror{
     this.reconcilePromise=null;
     this.untrackedOpenOrders=0;
     this.entryDecisions=[];
+    this.liveSignals=new Map();
     this.stopped=false;
   }
 
@@ -79,18 +81,16 @@ class LiveOrderMirror{
   async placeEntryOrders(entry){
     try{
       const result=await this.submitEntryOrders(entry);
-      this.entryDecisions.unshift({at:this.clock(),slug:entry?.slug||null,
+      this.recordEntryDecision({at:this.clock(),slug:entry?.slug||null,
         timeframe:entry?.timeframe||null,side:entry?.side||null,status:result.status,
         error:result.error||null,submittedOrders:(result.orders||[]).filter(order=>order.orderId).length,
         rejectedOrders:(result.orders||[]).filter(order=>order.status==='REJECTED').length,
         orderErrors:(result.orders||[]).filter(order=>order.error)
           .map(order=>({status:order.status,error:order.error}))});
-      this.entryDecisions.length=Math.min(50,this.entryDecisions.length);
       return result;
     }catch(error){
-      this.entryDecisions.unshift({at:this.clock(),slug:entry?.slug||null,
+      this.recordEntryDecision({at:this.clock(),slug:entry?.slug||null,
         side:entry?.side||null,status:'error',error:error.message});
-      this.entryDecisions.length=Math.min(50,this.entryDecisions.length);
       throw error;
     }
   }
@@ -99,6 +99,95 @@ class LiveOrderMirror{
     this.orders.unshift(order);
     this.orders.length=Math.min(100,this.orders.length);
     if(order.orderId)this.orderStates.set(String(order.orderId),order);
+  }
+
+  recordEntryDecision(decision){
+    const previous=this.entryDecisions.find(item=>item.slug===decision.slug
+      &&item.side===decision.side&&item.status===decision.status&&item.error===decision.error);
+    if(previous){
+      previous.at=decision.at;
+      previous.submittedOrders=decision.submittedOrders??previous.submittedOrders;
+      previous.rejectedOrders=decision.rejectedOrders??previous.rejectedOrders;
+      previous.orderErrors=decision.orderErrors??previous.orderErrors;
+      return;
+    }
+    this.entryDecisions.unshift(decision);
+    this.entryDecisions.length=Math.min(50,this.entryDecisions.length);
+  }
+
+  async scanMarketState(snapshot){
+    const now=Number(snapshot?.now??this.clock());
+    const asset=snapshot?.asset;
+    const timeframe=snapshot?.timeframe;
+    const market=snapshot?.market;
+    const windowStart=Number(snapshot?.windowStart);
+    const cutoffAt=Number(snapshot?.windowEnd);
+    const slug=String(market?.slug||'');
+    const windowMs=timeframe==='5m'?cfg.WINDOW_MS_5M:timeframe==='15m'?cfg.WINDOW_MS_15M:null;
+    if(!this.tradingEnabled)return{status:'paused'};
+    if(asset!=='BTC'||!windowMs||!/^btc-updown-(5m|15m)-\d+$/.test(slug)
+      ||!slug.startsWith(`btc-updown-${timeframe}-`)
+      ||!Number.isFinite(windowStart)||!Number.isFinite(cutoffAt)
+      ||cutoffAt!==windowStart+windowMs
+      ||!market?.tokens?.UP||!market?.tokens?.DOWN){
+      return{status:'skipped_invalid_signal'};
+    }
+    if(now>=cutoffAt)return{status:'skipped_window_ended'};
+
+    for(const [key,signal] of this.liveSignals){
+      if(now>signal.cutoffAt+cfg.WINDOW_MS_15M)this.liveSignals.delete(key);
+    }
+
+    let signal=this.liveSignals.get(slug);
+    if(!signal){
+      if(cutoffAt-now>cfg.MARKET_CONFUSION_WINDOW_MS)return{status:'watching'};
+      const evaluation=confusionStrategy.isMarketConfused(
+        snapshot.quotes?.UP,snapshot.quotes?.DOWN,now
+      );
+      if(!evaluation.eligible)return{status:'watching',reason:evaluation.reason};
+      signal={
+        slug,timeframe,windowStart,cutoffAt,triggeredAt:now,
+        upMid:evaluation.upMid,downMid:evaluation.downMid,
+        sides:{UP:{inFlight:false,done:false},DOWN:{inFlight:false,done:false}},
+      };
+      this.liveSignals.set(slug,signal);
+      while(this.liveSignals.size>100){
+        this.liveSignals.delete(this.liveSignals.keys().next().value);
+      }
+      console.log('[live] '+JSON.stringify({event:'LIVE_SIGNAL_TRIGGERED',slug,timeframe,
+        windowStart,upMid:evaluation.upMid,downMid:evaluation.downMid,at:now}));
+    }
+
+    const results=await Promise.all(['UP','DOWN'].map(async side=>{
+      const sideState=signal.sides[side];
+      if(sideState.done||sideState.inFlight)return{side,status:sideState.done?'submitted':'in_flight'};
+      sideState.inFlight=true;
+      try{
+        const entry={
+          asset:'BTC',timeframe,windowStart,cutoffAt,slug,side,
+          tokenId:market.tokens[side],
+          orders:cfg.MARKET_CONFUSION_ENTRY_PRICES.map((price,index)=>({
+            price,shares:cfg.MARKET_CONFUSION_SHARES,
+            takeProfitPrice:cfg.MARKET_CONFUSION_TAKE_PROFITS[index],
+          })),
+        };
+        const result=await this.placeEntryOrders(entry);
+        sideState.lastStatus=result.status;
+        sideState.lastError=result.error||null;
+        if(['submitted','rejected','already_submitted','halted','paused',
+          'skipped_restart_window','skipped_invalid_signal','skipped_window_ended'].includes(result.status)){
+          sideState.done=true;
+        }
+        return{side,...result};
+      }catch(error){
+        sideState.lastStatus='error';
+        sideState.lastError=error.message;
+        return{side,status:'error',error:error.message};
+      }finally{
+        sideState.inFlight=false;
+      }
+    }));
+    return{status:'triggered',slug,triggeredAt:signal.triggeredAt,results};
   }
 
   async submitEntryOrders(entry){
@@ -122,6 +211,7 @@ class LiveOrderMirror{
     }
 
     const results=[];
+    const pending=[];
     for(const rung of entry.orders){
       const priceKey=normalizedPrice(rung?.price);
       const rungIndex=cfg.MARKET_CONFUSION_ENTRY_PRICES.findIndex(
@@ -154,7 +244,9 @@ class LiveOrderMirror{
         nextSellRetryAt:0,sellRetryAttempts:0,error:null,
       };
       this.rememberOrder(tracked);
-
+      pending.push(tracked);
+    }
+    const posted=await Promise.all(pending.map(async tracked=>{
       try{
         const response=await this.trader.placeLimitOrder(
           tracked.tokenId,'BUY',tracked.price,tracked.shares
@@ -162,19 +254,22 @@ class LiveOrderMirror{
         tracked.orderId=String(response.id);
         tracked.status=response.status||'LIVE';
         this.orderStates.set(tracked.orderId,tracked);
-        results.push(tracked);
+        return tracked;
       }catch(error){
         tracked.status=error.submissionUncertain?'SUBMISSION_UNCERTAIN':'REJECTED';
         tracked.error=error.message;
-        results.push(tracked);
         if(error.submissionUncertain){
           this.halted=true;
           this.setError(`Order submission could not be confirmed: ${error.message}`);
-          break;
         }
+        return tracked;
       }
-    }
-    return{status:'submitted',orders:results};
+    }));
+    results.push(...posted);
+    const status=this.halted?'halted'
+      :results.some(order=>order.orderId)?'submitted'
+        :results.length?'rejected':'already_submitted';
+    return{status,orders:results,error:this.halted?this.error:null};
   }
 
   async placeFlowTestOrder(entry){
@@ -310,9 +405,16 @@ class LiveOrderMirror{
     this.polling=true;
     this.reconcilePromise=(async()=>{
       try{
-      const tracked=[...this.orderStates.values()].filter(
-        order=>order.kind==='ENTRY'||order.kind==='FLOW_TEST_ENTRY'
-      );
+      const tracked=[...this.orderStates.values()].filter(order=>{
+        if(order.kind!=='ENTRY'&&order.kind!=='FLOW_TEST_ENTRY')return false;
+        const status=String(order.status).toUpperCase();
+        const active=ACTIVE_ORDER_STATUSES.has(status);
+        const hasUnsubmittedFill=order.filledShares
+          -(order.exitSubmittedShares||0)-(order.exitSubmittingShares||0)>SHARE_EPSILON;
+        const terminalMinimumBlock=Number.isFinite(order.minSellBlockedAtFilledShares)
+          &&['MATCHED','FILLED','CANCELLED','CANCELED','EXPIRED'].includes(status);
+        return active||(hasUnsubmittedFill&&!terminalMinimumBlock);
+      });
       const results=await Promise.all(tracked.map(order=>this.refreshTrackedOrder(order)));
       const failed=results.some(ok=>!ok);
       this.orderError=failed?'Order reconciliation failed; waiting for successful order-status reads':null;
@@ -362,7 +464,20 @@ class LiveOrderMirror{
       (entryOrder.filledShares-entryOrder.exitSubmittedShares
         -(entryOrder.exitSubmittingShares||0)).toFixed(2)
     );
+    if(Number.isFinite(entryOrder.minSellBlockedAtFilledShares)){
+      if(entryOrder.filledShares<=entryOrder.minSellBlockedAtFilledShares+SHARE_EPSILON)return;
+      entryOrder.minSellBlockedAtFilledShares=null;
+      entryOrder.exitBlockedShares=0;
+      entryOrder.exitBlockedReason=null;
+    }
     if(available<=SHARE_EPSILON||this.clock()<entryOrder.nextSellRetryAt)return;
+    if(available<cfg.LIVE_MIN_ORDER_SHARES){
+      entryOrder.minSellBlockedAtFilledShares=entryOrder.filledShares;
+      entryOrder.exitBlockedShares=available;
+      entryOrder.exitBlockedAt=this.clock();
+      entryOrder.exitBlockedReason=`Polymarket requires at least ${cfg.LIVE_MIN_ORDER_SHARES} shares per sell; ${available} confirmed shares are below that minimum.`;
+      return;
+    }
     entryOrder.exitSubmittingShares=Number(
       ((entryOrder.exitSubmittingShares||0)+available).toFixed(2)
     );
@@ -431,7 +546,15 @@ class LiveOrderMirror{
     const recovery={accountReady:this.accountReady,accountFailures:this.accountFailures,
       lastAccountSuccessAt:this.lastAccountSuccessAt,lastReconciledAt:this.lastReconciledAt,
       nextAccountRefreshAt:this.nextAccountRefreshAt,untrackedOpenOrders:this.untrackedOpenOrders,
-      entryDecisions:this.entryDecisions.map(decision=>({...decision}))};
+      entryDecisions:this.entryDecisions.map(decision=>({...decision})),
+      liveSignals:[...this.liveSignals.values()].slice(-10).map(signal=>({
+        slug:signal.slug,timeframe:signal.timeframe,triggeredAt:signal.triggeredAt,
+        upMid:signal.upMid,downMid:signal.downMid,
+        sides:Object.fromEntries(Object.entries(signal.sides).map(([side,state])=>[side,{
+          status:state.lastStatus||(state.done?'submitted':state.inFlight?'submitting':'pending'),
+          error:state.lastError||null,
+        }])),
+      }))};
     return this.lastBalance
       ?{
         ...this.lastBalance,status:this.status,tradingEnabled:this.tradingEnabled,

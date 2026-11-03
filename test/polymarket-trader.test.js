@@ -150,6 +150,17 @@ test('a balance-settlement rejection is definite and can be retried safely',asyn
   );
 });
 
+test('a minimum-size rejection is definite and does not halt future orders',async()=>{
+  const {trader}=setup(undefined,{
+    placeError:new Error('order is invalid. Size (4.99) lower than the minimum: 5'),
+  });
+  await trader.authenticate();
+  await assert.rejects(
+    ()=>trader.placeLimitOrder('token-1','SELL',.75,4.99),
+    error=>error.submissionUncertain===false&&error.minimumOrderSize===true
+  );
+});
+
 test('a transport failure keeps the order submission uncertain',async()=>{
   const {trader}=setup(undefined,{placeError:new Error('connection reset')});
   await trader.authenticate();

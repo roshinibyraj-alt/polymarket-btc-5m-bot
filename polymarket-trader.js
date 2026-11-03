@@ -25,7 +25,11 @@ class PolymarketTrader{
       });
     }catch(error){
       const message=String(error?.message||error);
-      error.submissionUncertain=!/not enough balance|balance is not enough|insufficient (?:balance|allowance)/i.test(message);
+      const explicitRejection=/not enough balance|balance is not enough|insufficient (?:balance|allowance)|(?:invalid|below|lower than|less than).{0,60}(?:minimum|min(?:imum)? size|size)|(?:minimum|min(?:imum)? size|size).{0,60}(?:below|lower than|less than|invalid)/i.test(message);
+      error.submissionUncertain=!explicitRejection;
+      if(/(?:size|order).{0,60}(?:minimum|min(?:imum)? size)|(?:minimum|min(?:imum)? size).{0,60}(?:size|order)/i.test(message)){
+        error.minimumOrderSize=true;
+      }
       throw error;
     }
     if(!response?.ok){

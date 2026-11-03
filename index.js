@@ -30,8 +30,8 @@ async function main() {
     })());
   }
   const bot = new Bot({
-    onLiveEntryOrders:enabled&&liveMirror&&!flowTestEnabled
-      ?(entry=>liveMirror.placeEntryOrders(entry)):null,
+    onLiveMarketState:enabled&&liveMirror&&!flowTestEnabled
+      ?(marketState=>liveMirror.scanMarketState(marketState)):null,
     liveTradingEnabled:enabled,
   });
   bot.start();

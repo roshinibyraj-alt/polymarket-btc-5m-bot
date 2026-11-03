@@ -41,29 +41,29 @@ test('15m candle fallback keeps its existing resting paper limits',()=>{
   assert.ok(bot.windowOrders.every(o=>o.expiresAt===start+540_000));
 });
 
-test('market-confusion sends only BTC entry rungs to the live-order mirror',async()=>{
+test('the standalone live scanner receives BTC market state without waiting for demo orders',()=>{
   const captured=[];
   for(const asset of ['BTC','ETH'])for(const timeframe of ['5m','15m']){
     const windowMs=timeframe==='5m'?300_000:900_000;
     const start=windowMs,now=start+windowMs-60_000;
     const bot=new Bot({asset,timeframe,windowMs,capital:10_000,strategyMode:'market-confusion',
       priceFeed:{getMinuteCandles:()=>[],snapshot:()=>({status:'live'})},
-      onLiveEntryOrders:entry=>{captured.push(entry)}});
+      onLiveMarketState:state=>{captured.push(state)}});
     bot.market={
       id:'market',slug:`${asset.toLowerCase()}-updown-${timeframe}-${start/1000}`,
       title:asset,tokens:{UP:`${asset}-up`,DOWN:`${asset}-down`}
     };
     bot.orderWindowStart=start;
     bot.liveQuotes={UP:{status:'LIVE',updatedAt:now,mid:.52},DOWN:{status:'LIVE',updatedAt:now,mid:.48}};
-    bot.processMarketConfusionEntries(start,now);
-    await new Promise(resolve=>setImmediate(resolve));
-    assert.equal(bot.windowOrders.length,4);
+    bot.scanLiveMarket(now,start);
+    assert.equal(bot.windowOrders.length,0,'live signal evaluation must not depend on demo orders');
   }
-  assert.equal(captured.length,4);
-  assert.ok(captured.every(signal=>signal.asset==='BTC'));
-  assert.deepEqual(captured[0].orders.map(order=>[
-    order.price,order.shares,order.takeProfitPrice
-  ]),[[.25,5,.75],[.15,5,.85]]);
+  assert.equal(captured.length,2);
+  assert.ok(captured.every(state=>state.asset==='BTC'));
+  assert.deepEqual(captured.map(state=>state.timeframe),['5m','15m']);
+  assert.equal(captured[0].quotes.UP.mid,.52);
+  assert.equal(captured[0].quotes.DOWN.mid,.48);
+  assert.equal(captured[0].windowStart,300_000);
 });
 
 test('market-confusion midpoint band includes 0.30 and 0.71 only',()=>{
@@ -108,9 +108,9 @@ test('multi-bot registers only BTC 5m and 15m with optional live order mirroring
     assert.equal(state.strategy.orders.cutoffSeconds,60);
     assert.equal(state.strategy.signalState.reason,'Waiting for final 60 seconds');
   }
-  const live=new MultiBot({onLiveEntryOrders:()=>{},liveTradingEnabled:true});
+  const live=new MultiBot({onLiveMarketState:()=>{},liveTradingEnabled:true});
   assert.equal(live.snapshot().strategy.execution,'PAPER + LIVE LIMIT ORDERS');
-  assert.equal(typeof live.bots['BTC-5m'].onLiveEntryOrders,'function');
+  assert.equal(typeof live.bots['BTC-5m'].onLiveMarketState,'function');
 });
 
 test('market discovery requests the BTC slug and maps UP/DOWN outcomes',async()=>{

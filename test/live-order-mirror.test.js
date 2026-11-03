@@ -10,17 +10,71 @@ const entry={
   orders:[{price:.25,shares:500,takeProfitPrice:.75},{price:.15,shares:500,takeProfitPrice:.85}],
 };
 
-test('mirrors BTC rungs as five-share non-expiring limit buys',async()=>{
+test('mirrors BTC rungs as ten-share non-expiring limit buys',async()=>{
   const calls=[];
   const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>1_000_000});
   mirror.setTrader({placeLimitOrder:async(...args)=>{calls.push(args);return{id:`order-${calls.length}`,status:'LIVE'}}});
   const result=await mirror.placeEntryOrders(entry);
   assert.equal(calls.length,2);
   assert.deepEqual(calls,[
-    ['token-up','BUY',.25,5],['token-up','BUY',.15,5]
+    ['token-up','BUY',.25,10],['token-up','BUY',.15,10]
   ]);
   assert.equal(result.orders.length,2);
   assert.equal((await mirror.placeEntryOrders(entry)).orders.length,0);
+});
+
+test('standalone live scanner posts both sides once without a demo-order callback',async()=>{
+  const calls=[];
+  const now=1_250_000;
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>now});
+  mirror.setTrader({
+    placeLimitOrder:async(...args)=>{calls.push(args);return{id:`order-${calls.length}`,status:'LIVE'}},
+  });
+  const snapshot={
+    asset:'BTC',timeframe:'5m',now,windowStart:1_000_000,windowEnd:1_300_000,
+    market:{slug:'btc-updown-5m-1000',tokens:{UP:'token-up',DOWN:'token-down'}},
+    quotes:{
+      UP:{status:'LIVE',updatedAt:now,mid:.52},
+      DOWN:{status:'LIVE',updatedAt:now,mid:.48},
+    },
+  };
+
+  const result=await mirror.scanMarketState(snapshot);
+  assert.equal(result.status,'triggered');
+  assert.equal(calls.length,4);
+  assert.deepEqual(calls.slice().sort((a,b)=>`${a[0]}${a[2]}`.localeCompare(`${b[0]}${b[2]}`)),[
+    ['token-down','BUY',.15,10],['token-down','BUY',.25,10],
+    ['token-up','BUY',.15,10],['token-up','BUY',.25,10],
+  ]);
+  await mirror.scanMarketState(snapshot);
+  assert.equal(calls.length,4,'the signal must not duplicate orders on subsequent scans');
+  assert.equal(mirror.snapshot().recovery.liveSignals[0].sides.UP.status,'submitted');
+});
+
+test('live scanner retries a qualifying signal after initial account reconciliation',async()=>{
+  const calls=[];
+  const now=1_250_000;
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>now});
+  mirror.accountMonitoring=true;
+  mirror.accountReady=false;
+  mirror.lastReconciledAt=null;
+  mirror.updateHealth();
+  mirror.setTrader({
+    placeLimitOrder:async(...args)=>{calls.push(args);return{id:`order-${calls.length}`,status:'LIVE'}},
+  });
+  const snapshot={
+    asset:'BTC',timeframe:'5m',now,windowStart:1_000_000,windowEnd:1_300_000,
+    market:{slug:'btc-updown-5m-1000',tokens:{UP:'token-up',DOWN:'token-down'}},
+    quotes:{UP:{status:'LIVE',updatedAt:now,mid:.52},DOWN:{status:'LIVE',updatedAt:now,mid:.48}},
+  };
+
+  await mirror.scanMarketState(snapshot);
+  assert.equal(calls.length,0);
+  mirror.accountReady=true;
+  mirror.lastReconciledAt=now;
+  mirror.updateHealth();
+  await mirror.scanMarketState(snapshot);
+  assert.equal(calls.length,4);
 });
 
 test('accepts the existing BTC 15-minute ladder without adding another strategy gate',async()=>{
@@ -33,7 +87,7 @@ test('accepts the existing BTC 15-minute ladder without adding another strategy 
     orders:[{price:.15,shares:500,takeProfitPrice:.85}],
   });
   assert.equal(result.orders.length,1);
-  assert.deepEqual(calls[0],['token-up','BUY',.15,5]);
+  assert.deepEqual(calls[0],['token-up','BUY',.15,10]);
 });
 
 test('skips an already-open window after restart',async()=>{
@@ -55,7 +109,7 @@ test('paused mirror does not submit real orders',async()=>{
 
 test('creates TP limit sells only for confirmed fills without duplicate quantities',async()=>{
   const calls=[];
-  let matched='2';
+  let matched='5';
   let now=1_000_000;
   const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>now});
   mirror.setTrader({
@@ -67,15 +121,54 @@ test('creates TP limit sells only for confirmed fills without duplicate quantiti
   await mirror.reconcileTrackedOrders();
   await mirror.reconcileTrackedOrders();
   assert.equal(calls.length,2,'the same confirmed fill must not create a duplicate sell');
-  assert.deepEqual(calls[1],['token-up','SELL',.75,2]);
+  assert.deepEqual(calls[1],['token-up','SELL',.75,5]);
 
-  matched='3';
+  matched='10';
   await mirror.reconcileTrackedOrders();
   assert.equal(calls.length,3);
-  assert.deepEqual(calls[2],['token-up','SELL',.75,1]);
+  assert.deepEqual(calls[2],['token-up','SELL',.75,5]);
   const buy=mirror.orderStates.get('order-1');
-  assert.equal(buy.filledShares,3);
-  assert.equal(buy.exitSubmittedShares,3);
+  assert.equal(buy.filledShares,10);
+  assert.equal(buy.exitSubmittedShares,10);
+});
+
+test('holds a confirmed subminimum fill without halting and sells once five shares accumulate',async()=>{
+  const calls=[];
+  let matched='4.990932';
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>1_000_000});
+  mirror.setTrader({
+    placeLimitOrder:async(...args)=>{calls.push(args);return{id:`order-${calls.length}`,status:'LIVE'}},
+    fetchOrder:async id=>({id,status:'LIVE',sizeMatched:matched}),
+  });
+  await mirror.placeEntryOrders({...entry,orders:[entry.orders[0]]});
+  await mirror.reconcileTrackedOrders();
+  const buy=mirror.orderStates.get('order-1');
+  assert.equal(calls.length,1);
+  assert.equal(buy.exitBlockedShares,4.99);
+  assert.match(buy.exitBlockedReason,/at least 5 shares/);
+  assert.equal(mirror.halted,false);
+
+  matched='5';
+  await mirror.reconcileTrackedOrders();
+  assert.deepEqual(calls[1],['token-up','SELL',.75,5]);
+  assert.equal(buy.exitSubmittedShares,5);
+  assert.equal(buy.exitBlockedShares,0);
+});
+
+test('terminal entry orders stop being polled after their final confirmed fill',async()=>{
+  let reads=0;
+  const calls=[];
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>1_000_000});
+  mirror.setTrader({
+    placeLimitOrder:async(...args)=>{calls.push(args);return{id:`order-${calls.length}`,status:'LIVE'}},
+    fetchOrder:async id=>{reads++;return{id,status:'MATCHED',sizeMatched:'5'}},
+  });
+  await mirror.placeEntryOrders({...entry,orders:[entry.orders[0]]});
+  await mirror.reconcileTrackedOrders();
+  assert.equal(calls.length,2,'a confirmed fill at the five-share minimum should place its take-profit');
+  assert.equal(reads,1);
+  await mirror.reconcileTrackedOrders();
+  assert.equal(reads,1,'terminal matches should not create ongoing API polling');
 });
 
 test('retries a definite sell rejection after settlement without halting',async()=>{

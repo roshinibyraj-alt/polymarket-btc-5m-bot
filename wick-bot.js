@@ -56,12 +56,12 @@ function freshBidAtLeast(q,price,now=Date.now()){
 }
 class WickBot{
   constructor({asset='BTC',timeframe='5m',windowMs=cfg.WINDOW_MS_5M,capital=cfg.DEMO_CAPITAL_5M,
-    strategyMode='market-confusion',priceFeed=chainlinkFeed,onLiveEntryOrders=null}={}){
+    strategyMode='market-confusion',priceFeed=chainlinkFeed,onLiveMarketState=null}={}){
     this.asset=asset;
     this.timeframe=timeframe;this.windowMs=windowMs;this.capital=capital;this.cash=capital;
     this.orderCutoffMs=cfg.ORDER_CUTOFF_MS*(windowMs/cfg.WINDOW_MS_5M);
     this.strategyMode=strategyMode;this.priceFeed=priceFeed;
-    this.onLiveEntryOrders=onLiveEntryOrders;
+    this.onLiveMarketState=onLiveMarketState;
     this.startedAt=Date.now();
     this.positions=[];this.events=[];this.status='starting';
     this.completedWindows=new Map();
@@ -80,7 +80,6 @@ class WickBot{
     this.candleEvaluation={side:null,reason:'Waiting for closed-candle history'};
     this.candleOrdersPlaced=false;
     this.liveCandleSignalSent=false;
-    this.liveMarketConfusionSignalSent=false;
     this.marketConfusionOrdersPlaced=false;
     this.marketConfusionEvaluation={eligible:false,reason:'Waiting for final 60 seconds',upMid:null,downMid:null};
   }
@@ -104,6 +103,7 @@ class WickBot{
       }
       await this.refreshLiveQuotes(now);
       if(this.orderWindowStart!==start)this.openStrategyWindow(start,now);
+      this.scanLiveMarket(now,start);
       this.updateCandleContext(start);
        this.processMarketConfusionEntries(start,now);
       this.processCandleOrders(start,now);
@@ -128,11 +128,25 @@ class WickBot{
     this.candleEvaluation={side:null,reason:'Waiting for closed-candle history'};
     this.candleOrdersPlaced=false;
     this.liveCandleSignalSent=false;
-    this.liveMarketConfusionSignalSent=false;
     this.marketConfusionOrdersPlaced=false;
     this.marketConfusionEvaluation={eligible:false,reason:'Waiting for final 60 seconds',upMid:null,downMid:null};
     this.windowOrders=[];
     this.log('STRATEGY_WINDOW_STARTED',{windowStart:start,asset:this.asset,timeframe:this.timeframe,strategyMode:'market-confusion'});
+  }
+  scanLiveMarket(now,start){
+    if(this.asset!=='BTC'||typeof this.onLiveMarketState!=='function'||!this.market)return;
+    const marketState={
+      asset:this.asset,timeframe:this.timeframe,now,windowStart:start,
+      windowEnd:start+this.windowMs,
+      market:{slug:this.market.slug,tokens:{...this.market.tokens}},
+      quotes:{UP:{...this.liveQuotes.UP},DOWN:{...this.liveQuotes.DOWN}},
+    };
+    try{
+      Promise.resolve(this.onLiveMarketState(marketState))
+        .catch(error=>this.log('LIVE_MARKET_SCAN_ERROR',{slug:marketState.market.slug,note:error.message}));
+    }catch(error){
+      this.log('LIVE_MARKET_SCAN_ERROR',{slug:marketState.market.slug,note:error.message});
+    }
   }
   updateCandleContext(){
     try{this.articleCandles=this.priceFeed.getMinuteCandles()}
@@ -162,27 +176,6 @@ class WickBot{
     }
     this.log('MARKET_CONFUSION_LADDER_PLACED',{asset:this.asset,windowStart:start,upMid:evaluation.upMid,downMid:evaluation.downMid,
       orders:this.windowOrders.map(order=>({side:order.side,price:order.limitPrice,shares:order.shares,tp:order.takeProfitPrice}))});
-    if(this.asset==='BTC'&&!this.liveMarketConfusionSignalSent
-      &&typeof this.onLiveEntryOrders==='function'){
-      this.liveMarketConfusionSignalSent=true;
-      for(const side of ['UP','DOWN']){
-        const liveEntry={
-          asset:'BTC',timeframe:this.timeframe,windowStart:start,cutoffAt:start+this.windowMs,
-          slug:this.market.slug,tokenId:this.market.tokens[side],side,
-          orders:this.windowOrders.filter(order=>order.side===side).map(order=>({
-            price:order.limitPrice,shares:cfg.LIVE_SHARES_PER_RUNG,
-            takeProfitPrice:order.takeProfitPrice
-          }))
-        };
-        Promise.resolve().then(()=>this.onLiveEntryOrders(liveEntry))
-          .then(result=>this.log('LIVE_ENTRY_MIRROR_RESULT',{slug:liveEntry.slug,
-            side:liveEntry.side,status:result?.status||'unknown',
-            note:result?.error||result?.orders?.find(order=>order.error)?.error||null,
-            orderStatuses:(result?.orders||[]).map(order=>order.status),
-            submittedOrders:(result?.orders||[]).filter(order=>order.orderId).length}))
-          .catch(error=>this.log('LIVE_ENTRY_MIRROR_ERROR',{note:error.message,slug:this.market?.slug||null}));
-      }
-    }
   }
       processCandleEntries(start,now){
     if(this.timeframe==='5m'||this.completedWindows.has(start)||this.orderWindowStart!==start||this.candleOrdersPlaced)return;
