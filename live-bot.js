@@ -26,6 +26,14 @@ function orderStatus(order) {
   return String(order?.status || order?.state || 'UNKNOWN').toUpperCase().replaceAll('_', ' ');
 }
 
+function isTerminalStatus(status) {
+  const normalized = String(status || '').toUpperCase().replaceAll('_', ' ');
+  return TERMINAL.has(normalized)
+    || normalized.startsWith('CANCELED ')
+    || normalized.startsWith('CANCELLED ')
+    || normalized.includes('MARKET RESOLVED');
+}
+
 function matchedSize(order) {
   return Math.max(0, numeric(
     order?.sizeMatched ?? order?.size_matched ?? order?.matchedSize ?? order?.matched_size,
@@ -676,7 +684,7 @@ class LiveBot {
     try {
       const now = this.clock();
       const candidates = [...this.ordersById.values()].filter(order =>
-        order.id && !TERMINAL.has(order.status) && now >= (order.nextPollAt || 0));
+        order.id && !isTerminalStatus(order.status) && now >= (order.nextPollAt || 0));
       const results = await Promise.allSettled(candidates.map(order => this.trader.fetchOrder(order.id)));
       const failures = [];
       let changed = false;
@@ -717,7 +725,7 @@ class LiveBot {
           });
           await this.maybeSubmitTakeProfit(order);
         }
-        if (order.kind === 'ENTRY' && order.windowEnd && now >= order.windowEnd && !TERMINAL.has(order.status)) {
+        if (order.kind === 'ENTRY' && order.windowEnd && now >= order.windowEnd && !isTerminalStatus(order.status)) {
           await this.cancelEntryOrder(order);
         }
         if (order.kind === 'ENTRY' && order.matchedShares > 0) {
@@ -733,8 +741,16 @@ class LiveBot {
           });
         }
       }
+      const resolvedSlugs = new Set([...this.ordersById.values()]
+        .filter(order => /MARKET RESOLVED/i.test(String(order.status || '')))
+        .map(order => order.slug));
       for (const order of this.ordersById.values()) {
-        if (order.kind === 'ENTRY' && TERMINAL.has(order.status) && order.matchedShares > 0) {
+        if (order.kind === 'ENTRY'
+          && isTerminalStatus(order.status)
+          && order.matchedShares > 0
+          && order.retryAt > 0
+          && now >= order.retryAt
+          && !resolvedSlugs.has(order.slug)) {
           await this.maybeSubmitTakeProfit(order);
         }
       }
@@ -833,6 +849,7 @@ class LiveBot {
       this.ordersById.delete(exit.clientKey);
       exit.status = orderStatus(response);
       this.ordersById.set(exit.id, exit);
+      entry.retryAt = 0;
       try {
         await this.persistState();
       } catch (error) {
@@ -865,6 +882,7 @@ class LiveBot {
         this.account.accountReady = false;
         this.account.error = 'A take-profit order may have reached the exchange; reconciliation is required';
       } else {
+        entry.retryAt = 0;
         entry.exitBlockedReason = exit.error;
         this.log('ERROR', 'Take-profit limit sell was rejected', {
           entryOrderId: entry.id,
@@ -887,7 +905,7 @@ class LiveBot {
   }
 
   async cancelEntryOrder(order) {
-    if (order.kind !== 'ENTRY' || TERMINAL.has(order.status) || !order.id || !this.trader?.cancelOrder) return;
+    if (order.kind !== 'ENTRY' || isTerminalStatus(order.status) || !order.id || !this.trader?.cancelOrder) return;
     try {
       const result = await this.trader.cancelOrder(order.id);
       order.status = 'CANCELED';
