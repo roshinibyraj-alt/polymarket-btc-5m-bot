@@ -175,6 +175,11 @@ class WickBot{
           }))
         };
         Promise.resolve().then(()=>this.onLiveEntryOrders(liveEntry))
+          .then(result=>this.log('LIVE_ENTRY_MIRROR_RESULT',{slug:liveEntry.slug,
+            side:liveEntry.side,status:result?.status||'unknown',
+            note:result?.error||result?.orders?.find(order=>order.error)?.error||null,
+            orderStatuses:(result?.orders||[]).map(order=>order.status),
+            submittedOrders:(result?.orders||[]).filter(order=>order.orderId).length}))
           .catch(error=>this.log('LIVE_ENTRY_MIRROR_ERROR',{note:error.message,slug:this.market?.slug||null}));
       }
     }

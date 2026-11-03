@@ -34,6 +34,19 @@ class LiveOrderMirror{
     this.flowTestAttempted=false;
     this.readyPromise=Promise.resolve();
     this.tradingEnabled=tradingEnabled;
+    this.accountMonitoring=false;
+    this.accountReady=false;
+    this.accountError=null;
+    this.orderError=null;
+    this.fatalError=null;
+    this.accountFailures=0;
+    this.lastAccountSuccessAt=null;
+    this.lastReconciledAt=null;
+    this.nextAccountRefreshAt=null;
+    this.reconcilePromise=null;
+    this.untrackedOpenOrders=0;
+    this.entryDecisions=[];
+    this.stopped=false;
   }
 
   setReadyPromise(promise){
@@ -42,13 +55,44 @@ class LiveOrderMirror{
 
   setTrader(trader){
     this.trader=trader;
-    this.status='ready';
-    this.error=null;
+    if(!this.halted)this.fatalError=null;
+    this.updateHealth();
   }
 
   setError(message){
-    this.status='error';
-    this.error=String(message||'Live trading unavailable');
+    this.fatalError=String(message||'Live trading unavailable');
+    this.updateHealth();
+  }
+
+  updateHealth(){
+    const stale=this.accountMonitoring&&this.lastAccountSuccessAt!==null
+      &&this.clock()-this.lastAccountSuccessAt>Math.max(30000,cfg.LIVE_BALANCE_REFRESH_MS*2);
+    const error=this.fatalError||this.accountError||this.orderError
+      ||(this.untrackedOpenOrders?'Outstanding account orders are not tracked by this process; reconciliation required':null)
+      ||(stale?'Account snapshot is stale; waiting for successful reconciliation':null);
+    this.error=error;
+    this.status=this.halted||error?'error'
+      :this.accountMonitoring&&(!this.accountReady||this.lastReconciledAt===null)?'reconciling'
+      :this.trader?'ready':'starting';
+  }
+
+  async placeEntryOrders(entry){
+    try{
+      const result=await this.submitEntryOrders(entry);
+      this.entryDecisions.unshift({at:this.clock(),slug:entry?.slug||null,
+        timeframe:entry?.timeframe||null,side:entry?.side||null,status:result.status,
+        error:result.error||null,submittedOrders:(result.orders||[]).filter(order=>order.orderId).length,
+        rejectedOrders:(result.orders||[]).filter(order=>order.status==='REJECTED').length,
+        orderErrors:(result.orders||[]).filter(order=>order.error)
+          .map(order=>({status:order.status,error:order.error}))});
+      this.entryDecisions.length=Math.min(50,this.entryDecisions.length);
+      return result;
+    }catch(error){
+      this.entryDecisions.unshift({at:this.clock(),slug:entry?.slug||null,
+        side:entry?.side||null,status:'error',error:error.message});
+      this.entryDecisions.length=Math.min(50,this.entryDecisions.length);
+      throw error;
+    }
   }
 
   rememberOrder(order){
@@ -57,11 +101,12 @@ class LiveOrderMirror{
     if(order.orderId)this.orderStates.set(String(order.orderId),order);
   }
 
-  async placeEntryOrders(entry){
+  async submitEntryOrders(entry){
     await this.readyPromise;
+    this.updateHealth();
     if(!this.tradingEnabled)return{status:'paused'};
     if(this.halted)return{status:'halted',error:this.error};
-    if(!this.trader||this.status!=='ready')return{status:this.status};
+    if(!this.trader||this.status!=='ready')return{status:this.status,error:this.error};
     if(entry?.windowStart<this.startedAt)return{status:'skipped_restart_window'};
 
     const slugMatch=String(entry?.slug||'').match(/^btc-updown-(5m|15m)-(\d+)$/);
@@ -124,8 +169,7 @@ class LiveOrderMirror{
         results.push(tracked);
         if(error.submissionUncertain){
           this.halted=true;
-          this.error=`Order submission could not be confirmed: ${error.message}`;
-          this.status='error';
+          this.setError(`Order submission could not be confirmed: ${error.message}`);
           break;
         }
       }
@@ -135,9 +179,10 @@ class LiveOrderMirror{
 
   async placeFlowTestOrder(entry){
     await this.readyPromise;
+    this.updateHealth();
     if(!this.tradingEnabled)return{status:'paused'};
     if(this.halted)return{status:'halted',error:this.error};
-    if(!this.trader||this.status!=='ready')return{status:this.status};
+    if(!this.trader||this.status!=='ready')return{status:this.status,error:this.error};
     if(this.flowTestAttempted)return{status:'already_attempted'};
 
     const slugMatch=String(entry?.slug||'').match(/^btc-updown-5m-(\d+)$/);
@@ -189,34 +234,30 @@ class LiveOrderMirror{
       tracked.error=error.message;
       if(error.submissionUncertain){
         this.halted=true;
-        this.error=`Test-order submission could not be confirmed: ${error.message}`;
-        this.status='error';
+        this.setError(`Test-order submission could not be confirmed: ${error.message}`);
       }
       return{status:tracked.status,order:tracked};
     }
   }
 
   startBalanceRefresh(){
-    if(this.balanceTimer)clearInterval(this.balanceTimer);
+    if(this.balanceTimer)clearTimeout(this.balanceTimer);
     if(this.orderTimer)clearInterval(this.orderTimer);
-
+    this.stopped=false;
+    this.accountMonitoring=true;
+    this.accountReady=false;
+    this.updateHealth();
     const refresh=async()=>{
-      if(this.refreshing||!this.trader)return;
-      this.refreshing=true;
-      try{
-        this.lastBalance=await this.trader.getEquitySnapshot();
-        if(!this.error)this.status='ready';
-      }catch(error){
-        this.error=error.message;
-        this.status='error';
-      }finally{
-        this.refreshing=false;
-      }
+      await this.refreshAccountSnapshot();
+      if(this.stopped)return;
+      const delay=this.accountFailures
+        ?Math.min(cfg.LIVE_BALANCE_REFRESH_MS,1000*2**Math.min(4,this.accountFailures-1))
+        :cfg.LIVE_BALANCE_REFRESH_MS;
+      this.nextAccountRefreshAt=this.clock()+delay;
+      this.balanceTimer=setTimeout(refresh,delay);
+      this.balanceTimer.unref?.();
     };
-
     void refresh();
-    this.balanceTimer=setInterval(refresh,cfg.LIVE_BALANCE_REFRESH_MS);
-    this.balanceTimer.unref?.();
 
     if(this.tradingEnabled){
       void this.reconcileTrackedOrders();
@@ -228,17 +269,65 @@ class LiveOrderMirror{
     }
   }
 
-  async reconcileTrackedOrders(){
-    if(this.polling||!this.trader||!this.tradingEnabled)return;
-    this.polling=true;
+  async refreshAccountSnapshot(){
+    if(this.refreshing||!this.trader)return false;
+    this.refreshing=true;
+    this.accountMonitoring=true;
+    this.updateHealth();
     try{
+      const snapshot=await this.trader.getEquitySnapshot();
+      if(!Array.isArray(snapshot?.orders)||!Array.isArray(snapshot?.positions)){
+        throw new Error('Account reconciliation returned an incomplete snapshot');
+      }
+      this.lastBalance=snapshot;
+      this.untrackedOpenOrders=snapshot.orders.filter(order=>
+        !this.orderStates.has(String(order.id||order.orderId||''))).length;
+      const reconciliation=await this.reconcileTrackedOrders();
+      this.accountError=null;
+      this.accountReady=reconciliation.ok;
+      this.lastAccountSuccessAt=this.clock();
+      this.accountFailures=0;
+      this.updateHealth();
+      return this.status==='ready';
+    }catch(error){
+      this.accountReady=false;
+      this.accountFailures++;
+      this.accountError=error.message;
+      this.updateHealth();
+      return false;
+    }finally{
+      this.refreshing=false;
+    }
+  }
+
+  async reconcileTrackedOrders(){
+    if(this.reconcilePromise)return this.reconcilePromise;
+    if(!this.trader)return{ok:false};
+    if(!this.tradingEnabled){
+      this.lastReconciledAt=this.clock();
+      return{ok:true};
+    }
+    this.polling=true;
+    this.reconcilePromise=(async()=>{
+      try{
       const tracked=[...this.orderStates.values()].filter(
         order=>order.kind==='ENTRY'||order.kind==='FLOW_TEST_ENTRY'
       );
-      await Promise.all(tracked.map(order=>this.refreshTrackedOrder(order)));
-    }finally{
-      this.polling=false;
-    }
+      const results=await Promise.all(tracked.map(order=>this.refreshTrackedOrder(order)));
+      const failed=results.some(ok=>!ok);
+      this.orderError=failed?'Order reconciliation failed; waiting for successful order-status reads':null;
+      if(!failed)this.lastReconciledAt=this.clock();
+      this.updateHealth();
+      return{ok:!failed&&!this.halted};
+      }catch(error){
+        this.orderError=`Order reconciliation failed: ${error.message}`;
+        this.updateHealth();
+        return{ok:false};
+      }finally{
+        this.polling=false;
+      }
+    })();
+    try{return await this.reconcilePromise;}finally{this.reconcilePromise=null;}
   }
 
   async refreshTrackedOrder(tracked){
@@ -246,6 +335,7 @@ class LiveOrderMirror{
       const latest=await this.trader.fetchOrder(tracked.orderId);
       tracked.status=String(latest.status||tracked.status);
       tracked.updatedAt=this.clock();
+      tracked.lastPollError=null;
 
       if(tracked.kind==='ENTRY'||tracked.kind==='FLOW_TEST_ENTRY'){
         const filled=Math.min(tracked.shares,matchedShares(latest));
@@ -257,12 +347,13 @@ class LiveOrderMirror{
 
       if(this.clock()>=tracked.windowEnd
         &&ACTIVE_ORDER_STATUSES.has(String(tracked.status).toUpperCase())){
-        await this.cancelAtWindowEnd(tracked);
+        if(!await this.cancelAtWindowEnd(tracked))return false;
       }
+      return !this.halted;
     }catch(error){
       tracked.lastPollError=error.message;
       tracked.lastPollAt=this.clock();
-      this.error=`Order status check failed: ${error.message}`;
+      return false;
     }
   }
 
@@ -309,8 +400,7 @@ class LiveOrderMirror{
       entryOrder.lastSellError=error.message;
       if(error.submissionUncertain){
         this.halted=true;
-        this.error=`Take-profit submission could not be confirmed: ${error.message}`;
-        this.status='error';
+        this.setError(`Take-profit submission could not be confirmed: ${error.message}`);
         return;
       }
       entryOrder.exitSubmittingShares=Number(
@@ -327,29 +417,37 @@ class LiveOrderMirror{
       await this.trader.cancelOrder(order.orderId);
       order.status='CANCELLED_AT_WINDOW_END';
       order.cancelledAt=this.clock();
+      order.cancelError=null;
+      return true;
     }catch(error){
       order.cancelError=error.message;
-      this.error=`Window-end order cancellation failed: ${error.message}`;
+      return false;
     }
   }
 
   snapshot(){
+    this.updateHealth();
     const botOrders=this.orders.map(order=>({...order}));
+    const recovery={accountReady:this.accountReady,accountFailures:this.accountFailures,
+      lastAccountSuccessAt:this.lastAccountSuccessAt,lastReconciledAt:this.lastReconciledAt,
+      nextAccountRefreshAt:this.nextAccountRefreshAt,untrackedOpenOrders:this.untrackedOpenOrders,
+      entryDecisions:this.entryDecisions.map(decision=>({...decision}))};
     return this.lastBalance
       ?{
         ...this.lastBalance,status:this.status,tradingEnabled:this.tradingEnabled,
         halted:this.halted,error:this.error,
-        orders:this.lastBalance.orders||[],botOrders,
+        orders:this.lastBalance.orders||[],botOrders,recovery,
       }
       :{
         status:this.status,tradingEnabled:this.tradingEnabled,halted:this.halted,
         error:this.error,collateral:null,positionValue:null,equity:null,
-        positions:[],orders:[],botOrders,asOf:null,
+        positions:[],orders:[],botOrders,asOf:null,recovery,
       };
   }
 
   stop(){
-    if(this.balanceTimer)clearInterval(this.balanceTimer);
+    this.stopped=true;
+    if(this.balanceTimer)clearTimeout(this.balanceTimer);
     if(this.orderTimer)clearInterval(this.orderTimer);
   }
 }
