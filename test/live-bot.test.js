@@ -184,8 +184,9 @@ test('resolved-market orders are terminal and pending sell retries are not repea
   const slug = 'btc-updown-5m-0';
   const entry = {
     id: 'matched-entry', kind: 'ENTRY', side: 'BUY', outcome: 'UP',
-    tokenId: 'token-up', price: 0.25, shares: 10, matchedShares: 10,
+    tokenId: 'token-up', price: 0.25, shares: 10, matchedShares: 9.996466,
     takeProfitPrice: 0.75, slug, windowEnd: 300_000, status: 'MATCHED',
+    error: 'The resolved order is no longer available from CLOB lookup',
     retryAt: bot.clock() - 1_000, exitSubmittingShares: 0, exits: [],
   };
   const resolvedExit = {
@@ -206,6 +207,7 @@ test('resolved-market orders are terminal and pending sell retries are not repea
   assert.deepEqual(polled, []);
   assert.deepEqual(calls, []);
   assert.equal(entry.exits.length, 0);
+  assert.equal(entry.error, null);
 });
 
 test('startup does not submit take-profit orders for a resolved market', async () => {

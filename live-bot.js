@@ -1054,12 +1054,20 @@ class LiveBot {
     this.orderScanInFlight = true;
     try {
       const now = this.clock();
+      const resolvedSlugs = resolvedMarketSlugs(this.ordersById.values());
       const candidates = [...this.ordersById.values()].filter(order =>
-        order.id && (!isTerminalStatus(order.status) || needsFillConfirmation(order))
+        order.id && !resolvedSlugs.has(order.slug)
+        && (!isTerminalStatus(order.status) || needsFillConfirmation(order))
         && now >= (order.nextPollAt || 0));
       const results = await Promise.allSettled(candidates.map(order => this.trader.fetchOrder(order.id)));
       const failures = [];
       let changed = false;
+      for (const order of this.ordersById.values()) {
+        if (resolvedSlugs.has(order.slug) && order.error) {
+          order.error = null;
+          changed = true;
+        }
+      }
       for (let i = 0; i < candidates.length; i++) {
         const order = candidates[i];
         const result = results[i];
@@ -1116,7 +1124,6 @@ class LiveBot {
           });
         }
       }
-      const resolvedSlugs = resolvedMarketSlugs(this.ordersById.values());
       for (const order of this.ordersById.values()) {
         if (order.kind === 'ENTRY'
           && isTerminalStatus(order.status)
