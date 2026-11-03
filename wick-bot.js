@@ -80,6 +80,7 @@ class WickBot{
     this.candleEvaluation={side:null,reason:'Waiting for closed-candle history'};
     this.candleOrdersPlaced=false;
     this.liveCandleSignalSent=false;
+    this.liveMarketConfusionSignalSent=false;
     this.marketConfusionOrdersPlaced=false;
     this.marketConfusionEvaluation={eligible:false,reason:'Waiting for final 60 seconds',upMid:null,downMid:null};
   }
@@ -127,6 +128,7 @@ class WickBot{
     this.candleEvaluation={side:null,reason:'Waiting for closed-candle history'};
     this.candleOrdersPlaced=false;
     this.liveCandleSignalSent=false;
+    this.liveMarketConfusionSignalSent=false;
     this.marketConfusionOrdersPlaced=false;
     this.marketConfusionEvaluation={eligible:false,reason:'Waiting for final 60 seconds',upMid:null,downMid:null};
     this.windowOrders=[];
@@ -160,6 +162,22 @@ class WickBot{
     }
     this.log('MARKET_CONFUSION_LADDER_PLACED',{asset:this.asset,windowStart:start,upMid:evaluation.upMid,downMid:evaluation.downMid,
       orders:this.windowOrders.map(order=>({side:order.side,price:order.limitPrice,shares:order.shares,tp:order.takeProfitPrice}))});
+    if(this.asset==='BTC'&&!this.liveMarketConfusionSignalSent
+      &&typeof this.onLiveEntryOrders==='function'){
+      this.liveMarketConfusionSignalSent=true;
+      for(const side of ['UP','DOWN']){
+        const liveEntry={
+          asset:'BTC',timeframe:this.timeframe,windowStart:start,cutoffAt:start+this.windowMs,
+          slug:this.market.slug,tokenId:this.market.tokens[side],side,
+          orders:this.windowOrders.filter(order=>order.side===side).map(order=>({
+            price:order.limitPrice,shares:cfg.LIVE_SHARES_PER_RUNG,
+            takeProfitPrice:order.takeProfitPrice
+          }))
+        };
+        Promise.resolve().then(()=>this.onLiveEntryOrders(liveEntry))
+          .catch(error=>this.log('LIVE_ENTRY_MIRROR_ERROR',{note:error.message,slug:this.market?.slug||null}));
+      }
+    }
   }
       processCandleEntries(start,now){
     if(this.timeframe==='5m'||this.completedWindows.has(start)||this.orderWindowStart!==start||this.candleOrdersPlaced)return;

@@ -5,16 +5,16 @@ const Bot=require('./wick-bot');
 const {feed:chainlinkFeed}=require('./chainlink-feed');
 
 class MultiBot {
-  constructor({onLiveEntryOrders=null}={}){
+  constructor({onLiveEntryOrders=null,liveTradingEnabled=false}={}){
+    this.liveTradingEnabled=liveTradingEnabled;
     this.bots={};
-    for(const asset of ['BTC','ETH']){
-      for(const timeframe of ['5m','15m']){
-        const windowMs=timeframe==='5m'?cfg.WINDOW_MS_5M:cfg.WINDOW_MS_15M;
-        const capital=(timeframe==='5m'?cfg.DEMO_CAPITAL_5M:cfg.DEMO_CAPITAL_15M)/2;
-        this.bots[`${asset}-${timeframe}`]=new Bot({
-          asset,timeframe,windowMs,capital,strategyMode:'market-confusion',priceFeed:chainlinkFeed
-        });
-      }
+    for(const timeframe of ['5m','15m']){
+      const windowMs=timeframe==='5m'?cfg.WINDOW_MS_5M:cfg.WINDOW_MS_15M;
+      const capital=(timeframe==='5m'?cfg.DEMO_CAPITAL_5M:cfg.DEMO_CAPITAL_15M)/2;
+      this.bots[`BTC-${timeframe}`]=new Bot({
+        asset:'BTC',timeframe,windowMs,capital,strategyMode:'market-confusion',
+        priceFeed:chainlinkFeed,onLiveEntryOrders
+      });
     }
   }
   start(){for(const bot of Object.values(this.bots))bot.start()}
@@ -41,7 +41,11 @@ class MultiBot {
     for(const point of equityCurve){peak=Math.max(peak,point.equity);maxDrawdown=Math.max(maxDrawdown,peak-point.equity);}
     return {...primary,now:Date.now(),status,timeframes,positions,events,
       error:states.find(s=>s.error)?.error||null,
-       strategy:{execution:'PAPER ONLY',markets:['BTC 5m','BTC 15m','ETH 5m','ETH 15m'],style:'Market confusion on BTC and ETH 5m and 15m' },
+       strategy:{
+         execution:this.liveTradingEnabled?'PAPER + LIVE LIMIT ORDERS':'PAPER ONLY',
+         markets:['BTC 5m','BTC 15m'],
+         style:'Market confusion on BTC 5m and 15m'
+       },
       account:{capital,
         cash:states.reduce((n,s)=>n+s.account.cash,0),
         realizedPnl:states.reduce((n,s)=>n+s.account.realizedPnl,0),

@@ -1,117 +1,286 @@
 'use strict';
 
-const MIN_GTD_EXPIRATION_SECONDS=180;
-const POLYMARKET_GTD_BUFFER_SECONDS=60;
-const LIVE_REFRESH_MS=1000;
-const BOT_RUNG_PRICES=new Set(['0.3','0.30','0.2','0.20']);
+const cfg=require('./config');
+
+const ACTIVE_ORDER_STATUSES=new Set(['LIVE','OPEN','ACTIVE']);
+const SHARE_EPSILON=0.0001;
+
+function normalizedPrice(value){
+  const price=Number(value);
+  return Number.isFinite(price)?price.toFixed(2):null;
+}
+
+function matchedShares(order){
+  const value=Number(order?.sizeMatched??order?.size_matched??0);
+  return Number.isFinite(value)&&value>0?value:0;
+}
 
 class LiveOrderMirror{
   constructor({startedAt=Date.now(),clock=()=>Date.now(),tradingEnabled=true}={}){
-    this.startedAt=startedAt;this.clock=clock;this.trader=null;this.status='starting';
-    this.error=null;this.lastBalance=null;this.orders=[];this.seen=new Set();this.balanceTimer=null;
-    this.cutoffByOrderId=new Map();this.marketCache=new Map();this.refreshing=false;
-    this.readyPromise=Promise.resolve();this.tradingEnabled=tradingEnabled;
+    this.startedAt=startedAt;
+    this.clock=clock;
+    this.trader=null;
+    this.status='starting';
+    this.error=null;
+    this.lastBalance=null;
+    this.orders=[];
+    this.orderStates=new Map();
+    this.seen=new Set();
+    this.balanceTimer=null;
+    this.orderTimer=null;
+    this.refreshing=false;
+    this.polling=false;
+    this.halted=false;
+    this.readyPromise=Promise.resolve();
+    this.tradingEnabled=tradingEnabled;
   }
-  setReadyPromise(promise){this.readyPromise=Promise.resolve(promise)}
-  setTrader(trader){this.trader=trader;this.status='ready';this.error=null}
-  setError(message){this.status='error';this.error=String(message||'Live trading unavailable')}
+
+  setReadyPromise(promise){
+    this.readyPromise=Promise.resolve(promise);
+  }
+
+  setTrader(trader){
+    this.trader=trader;
+    this.status='ready';
+    this.error=null;
+  }
+
+  setError(message){
+    this.status='error';
+    this.error=String(message||'Live trading unavailable');
+  }
+
+  rememberOrder(order){
+    this.orders.unshift(order);
+    this.orders.length=Math.min(100,this.orders.length);
+    if(order.orderId)this.orderStates.set(String(order.orderId),order);
+  }
+
   async placeEntryOrders(entry){
     await this.readyPromise;
-    if(!this.tradingEnabled)return {status:'paused'};
-    if(!this.trader||this.status!=='ready')return {status:this.status};
-    if(entry?.windowStart<this.startedAt)return {status:'skipped_restart_window'};
-    if(!entry?.slug||!entry?.tokenId||!Array.isArray(entry.orders))return {status:'skipped_invalid_signal'};
+    if(!this.tradingEnabled)return{status:'paused'};
+    if(this.halted)return{status:'halted',error:this.error};
+    if(!this.trader||this.status!=='ready')return{status:this.status};
+    if(entry?.windowStart<this.startedAt)return{status:'skipped_restart_window'};
+
+    const slugMatch=String(entry?.slug||'').match(/^btc-updown-(5m|15m)-(\d+)$/);
+    if(entry?.asset!=='BTC'||!slugMatch||slugMatch[1]!==entry?.timeframe
+      ||!['UP','DOWN'].includes(entry?.side)||!entry?.tokenId
+      ||!Array.isArray(entry?.orders)||!entry.orders.length){
+      return{status:'skipped_invalid_signal'};
+    }
+
+    const cutoffAt=Number(entry.cutoffAt);
+    const expiration=Math.floor(cutoffAt/1000)+cfg.POLYMARKET_GTD_EXPIRATION_BUFFER_SECONDS;
+    const nowSeconds=Math.floor(this.clock()/1000);
+    if(!Number.isFinite(cutoffAt)||cutoffAt<=this.clock()
+      ||!Number.isFinite(expiration)
+      ||expiration-nowSeconds<cfg.POLYMARKET_GTD_EXPIRATION_BUFFER_SECONDS){
+      return{status:'skipped_expiry_too_soon'};
+    }
+
     const results=[];
     for(const rung of entry.orders){
-      const key=`${entry.slug}:${entry.side}:${rung.price}:${rung.shares}`;
-      if(this.seen.has(key))continue;
-      this.seen.add(key);
-      const expiration=Math.floor(Number(entry.cutoffAt)/1000)+POLYMARKET_GTD_BUFFER_SECONDS;
-      const now=Math.floor(this.clock()/1000);
-      if(!Number.isFinite(expiration)||expiration-now<MIN_GTD_EXPIRATION_SECONDS){
-        results.push({status:'skipped_expiry_too_soon',price:rung.price});
-        this.orders.unshift({slug:entry.slug,side:entry.side,price:rung.price,shares:rung.shares,status:'SKIPPED_EXPIRY_TOO_SOON',at:this.clock()});
+      const priceKey=normalizedPrice(rung?.price);
+      const rungIndex=cfg.MARKET_CONFUSION_ENTRY_PRICES.findIndex(
+        price=>normalizedPrice(price)===priceKey
+      );
+      if(rungIndex<0){
+        results.push({status:'skipped_unrecognized_rung',price:rung?.price});
         continue;
       }
-      try{
-        const response=await this.trader.placeGtdOrder(entry.tokenId,'BUY',rung.price,rung.shares,expiration);
-        const item={slug:entry.slug,side:entry.side,price:rung.price,shares:rung.shares,
-          orderId:response.id,status:response.status||'LIVE',expiresAt:Number(entry.cutoffAt),at:this.clock()};
-        this.cutoffByOrderId.set(String(response.id),Number(entry.cutoffAt));
-        this.orders.unshift(item);results.push(item);
-      }catch(error){
-        const item={slug:entry.slug,side:entry.side,price:rung.price,shares:rung.shares,status:'REJECTED',error:error.message,at:this.clock()};
-        this.orders.unshift(item);results.push(item);
+
+      const takeProfitPrice=Number(cfg.MARKET_CONFUSION_TAKE_PROFITS[rungIndex]);
+      if(normalizedPrice(rung?.takeProfitPrice)!==normalizedPrice(takeProfitPrice)){
+        results.push({status:'skipped_invalid_take_profit',price:rung?.price});
+        continue;
       }
-      this.orders.length=Math.min(50,this.orders.length);
+
+      const shares=cfg.LIVE_SHARES_PER_RUNG;
+      const key=`${entry.slug}:${entry.side}:${priceKey}:${shares}`;
+      if(this.seen.has(key))continue;
+      this.seen.add(key);
+
+      const tracked={
+        orderId:null,kind:'ENTRY',orderSide:'BUY',asset:'BTC',
+        timeframe:entry.timeframe,slug:entry.slug,side:entry.side,
+        tokenId:String(entry.tokenId),price:Number(rung.price),shares,
+        takeProfitPrice,filledShares:0,exitSubmittedShares:0,
+        windowStart:Number(entry.windowStart),windowEnd:cutoffAt,
+        expiration,status:'SUBMITTING',createdAt:this.clock(),
+        nextSellRetryAt:0,sellRetryAttempts:0,error:null,
+      };
+      this.rememberOrder(tracked);
+
+      try{
+        const response=await this.trader.placeGtdOrder(
+          tracked.tokenId,'BUY',tracked.price,tracked.shares,expiration
+        );
+        tracked.orderId=String(response.id);
+        tracked.status=response.status||'LIVE';
+        this.orderStates.set(tracked.orderId,tracked);
+        results.push(tracked);
+      }catch(error){
+        tracked.status=error.submissionUncertain?'SUBMISSION_UNCERTAIN':'REJECTED';
+        tracked.error=error.message;
+        results.push(tracked);
+        if(error.submissionUncertain){
+          this.halted=true;
+          this.error=`Order submission could not be confirmed: ${error.message}`;
+          this.status='error';
+          break;
+        }
+      }
     }
-    return {status:'submitted',orders:results};
+    return{status:'submitted',orders:results};
   }
+
   startBalanceRefresh(){
     if(this.balanceTimer)clearInterval(this.balanceTimer);
+    if(this.orderTimer)clearInterval(this.orderTimer);
+
     const refresh=async()=>{
-      if(this.refreshing)return;
+      if(this.refreshing||!this.trader)return;
       this.refreshing=true;
-      try{this.lastBalance=await this.trader.getEquitySnapshot();this.status='ready';this.error=null}
-      catch(error){this.lastBalance=null;this.status='error';this.error=error.message}
-      try{if(this.lastBalance)await this.cancelExpiredOrders(this.lastBalance.orders||[])}
-      catch(error){this.error=`${this.error?`${this.error}; `:''}Order reconciliation: ${error.message}`}
-      finally{this.refreshing=false}
-    };
-    void refresh();this.balanceTimer=setInterval(refresh,LIVE_REFRESH_MS);this.balanceTimer.unref?.();
-  }
-  async cancelExpiredOrders(orders){
-    const now=this.clock();
-    for(const order of orders){
-      const id=String(order.id||'');
-      if(!id)continue;
-      let cutoffAt=this.cutoffByOrderId.get(id);
-      if(!cutoffAt&&this.isCandidateBotOrder(order)){
-        const marketId=order.conditionId||order.market;
-        if(!marketId)continue;
-        let market=this.marketCache.get(String(marketId));
-        if(!market){
-          market=await this.trader.getMarket(marketId);
-          this.marketCache.set(String(marketId),market);
-        }
-        const slug=String(market?.slug||'');
-        const match=slug.match(/^btc-updown-5m-(\d+)$/);
-        if(!match||!this.isCandidateBotOrder(order,market))continue;
-        const windowStart=Number(match[1])*1000;
-        const createdAt=Date.parse(order.createdAt||'');
-        if(String(order.orderType||'').toUpperCase()!=='GTD'
-          ||!Number.isFinite(createdAt)||createdAt<windowStart||createdAt>=windowStart+180000)continue;
-        cutoffAt=windowStart+180000;
-        this.cutoffByOrderId.set(id,cutoffAt);
-      }
-      if(!cutoffAt||now<cutoffAt||!['LIVE','OPEN','ACTIVE'].includes(String(order.status||'LIVE').toUpperCase()))continue;
       try{
-        await this.trader.cancelOrder(id);
-        const local=this.orders.find(item=>String(item.orderId)===id);
-        if(local){local.status='CANCELLED_AT_CUTOFF';local.cancelledAt=now}
-        this.cutoffByOrderId.delete(id);
+        this.lastBalance=await this.trader.getEquitySnapshot();
+        if(!this.error)this.status='ready';
       }catch(error){
-        const local=this.orders.find(item=>String(item.orderId)===id);
-        if(local){local.status='CANCEL_FAILED';local.error=error.message}
-        throw error;
+        this.error=error.message;
+        this.status='error';
+      }finally{
+        this.refreshing=false;
       }
+    };
+
+    void refresh();
+    this.balanceTimer=setInterval(refresh,cfg.LIVE_BALANCE_REFRESH_MS);
+    this.balanceTimer.unref?.();
+
+    if(this.tradingEnabled){
+      void this.reconcileTrackedOrders();
+      this.orderTimer=setInterval(
+        ()=>void this.reconcileTrackedOrders(),
+        cfg.LIVE_ORDER_POLL_MS
+      );
+      this.orderTimer.unref?.();
     }
   }
-  isCandidateBotOrder(order,market=null){
-    const price=String(Number(order.price).toFixed(2));
-    const size=Number(order.originalSize??order.size??order.shares);
-    if(String(order.side||'').toUpperCase()!=='BUY'||!BOT_RUNG_PRICES.has(price)||size!==20)return false;
-    if(!market)return true;
-    const ids=Array.isArray(market.clobTokenIds)?market.clobTokenIds:
-      typeof market.clobTokenIds==='string'?(()=>{try{return JSON.parse(market.clobTokenIds)}catch{return []}})():[];
-    return ids.map(String).includes(String(order.assetId||order.asset_id||''));
+
+  async reconcileTrackedOrders(){
+    if(this.polling||!this.trader||!this.tradingEnabled)return;
+    this.polling=true;
+    try{
+      const tracked=[...this.orderStates.values()].filter(order=>order.kind==='ENTRY');
+      await Promise.all(tracked.map(order=>this.refreshTrackedOrder(order)));
+    }finally{
+      this.polling=false;
+    }
   }
+
+  async refreshTrackedOrder(tracked){
+    try{
+      const latest=await this.trader.fetchOrder(tracked.orderId);
+      tracked.status=String(latest.status||tracked.status);
+      tracked.updatedAt=this.clock();
+
+      if(tracked.kind==='ENTRY'){
+        const filled=Math.min(tracked.shares,matchedShares(latest));
+        tracked.filledShares=Math.max(tracked.filledShares,filled);
+        if(this.clock()<tracked.windowEnd){
+          await this.submitTakeProfitForConfirmedFill(tracked);
+        }
+      }
+
+      if(this.clock()>=tracked.windowEnd
+        &&ACTIVE_ORDER_STATUSES.has(String(tracked.status).toUpperCase())){
+        await this.cancelAtWindowEnd(tracked);
+      }
+    }catch(error){
+      tracked.lastPollError=error.message;
+      tracked.lastPollAt=this.clock();
+      this.error=`Order status check failed: ${error.message}`;
+    }
+  }
+
+  async submitTakeProfitForConfirmedFill(entryOrder){
+    const available=Number(
+      (entryOrder.filledShares-entryOrder.exitSubmittedShares).toFixed(2)
+    );
+    if(available<=SHARE_EPSILON||this.clock()<entryOrder.nextSellRetryAt)return;
+
+    const expiration=Math.floor(entryOrder.windowEnd/1000)
+      +cfg.POLYMARKET_GTD_EXPIRATION_BUFFER_SECONDS;
+    const sellOrder={
+      orderId:null,kind:'TAKE_PROFIT',orderSide:'SELL',asset:'BTC',
+      timeframe:entryOrder.timeframe,slug:entryOrder.slug,
+      side:entryOrder.side,tokenId:entryOrder.tokenId,
+      price:entryOrder.takeProfitPrice,shares:available,
+      parentOrderId:entryOrder.orderId,filledShares:0,
+      windowStart:entryOrder.windowStart,windowEnd:entryOrder.windowEnd,
+      expiration,status:'SUBMITTING',createdAt:this.clock(),error:null,
+    };
+
+    try{
+      const response=await this.trader.placeGtdOrder(
+        sellOrder.tokenId,'SELL',sellOrder.price,sellOrder.shares,expiration
+      );
+      sellOrder.orderId=String(response.id);
+      sellOrder.status=response.status||'LIVE';
+      entryOrder.exitSubmittedShares=Number(
+        (entryOrder.exitSubmittedShares+available).toFixed(2)
+      );
+      entryOrder.nextSellRetryAt=0;
+      entryOrder.sellRetryAttempts=0;
+      entryOrder.lastSellError=null;
+      this.rememberOrder(sellOrder);
+    }catch(error){
+      sellOrder.status=error.submissionUncertain?'SUBMISSION_UNCERTAIN':'REJECTED';
+      sellOrder.error=error.message;
+      this.rememberOrder(sellOrder);
+      entryOrder.lastSellError=error.message;
+      if(error.submissionUncertain){
+        this.halted=true;
+        this.error=`Take-profit submission could not be confirmed: ${error.message}`;
+        this.status='error';
+        return;
+      }
+      entryOrder.sellRetryAttempts+=1;
+      const backoff=Math.min(15000,1000*2**(entryOrder.sellRetryAttempts-1));
+      entryOrder.nextSellRetryAt=this.clock()+backoff;
+    }
+  }
+
+  async cancelAtWindowEnd(order){
+    try{
+      await this.trader.cancelOrder(order.orderId);
+      order.status='CANCELLED_AT_WINDOW_END';
+      order.cancelledAt=this.clock();
+    }catch(error){
+      order.cancelError=error.message;
+      this.error=`Window-end order cancellation failed: ${error.message}`;
+    }
+  }
+
   snapshot(){
+    const botOrders=this.orders.map(order=>({...order}));
     return this.lastBalance
-      ?{...this.lastBalance,status:this.status,tradingEnabled:this.tradingEnabled,error:this.error,orders:this.lastBalance.orders||[]}
-      :{status:this.status,tradingEnabled:this.tradingEnabled,error:this.error,collateral:null,positionValue:null,equity:null,positions:[],orders:[],asOf:null};
+      ?{
+        ...this.lastBalance,status:this.status,tradingEnabled:this.tradingEnabled,
+        halted:this.halted,error:this.error,
+        orders:this.lastBalance.orders||[],botOrders,
+      }
+      :{
+        status:this.status,tradingEnabled:this.tradingEnabled,halted:this.halted,
+        error:this.error,collateral:null,positionValue:null,equity:null,
+        positions:[],orders:[],botOrders,asOf:null,
+      };
   }
-  stop(){if(this.balanceTimer)clearInterval(this.balanceTimer)}
+
+  stop(){
+    if(this.balanceTimer)clearInterval(this.balanceTimer);
+    if(this.orderTimer)clearInterval(this.orderTimer);
+  }
 }
 
 module.exports=LiveOrderMirror;

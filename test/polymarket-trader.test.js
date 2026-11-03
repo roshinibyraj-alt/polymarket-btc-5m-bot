@@ -9,6 +9,7 @@ function setup(response={ok:true,orderId:'mock-order',status:'live'},{positions=
   const client={
     account:{wallet:'0xdepositwallet'},
     placeLimitOrder:async input=>{calls.push(input);return response},
+    fetchOrder:async input=>{calls.push(input);return{id:input.orderId,status:'LIVE',sizeMatched:'2'}},
      listOpenOrders:async function*(){yield{items:[
        {id:'open-1',assetId:'asset-2',side:'BUY',status:'LIVE',sizeMatched:'2'},
        {id:'open-2',assetId:'unheld-token',side:'BUY',status:'LIVE',sizeMatched:'0'}
@@ -40,13 +41,22 @@ function setup(response={ok:true,orderId:'mock-order',status:'live'},{positions=
   return{trader:new PolymarketTrader('test-key',{sdk,actions,privateKeyAdapter:key=>({key}),fetcher}),calls};
 }
 
-test('authenticates with the unified SDK and places a post-only GTD order',async()=>{
+test('authenticates with the unified SDK and places a GTD limit order',async()=>{
   const {trader,calls}=setup();
   await trader.authenticate();
-  const result=await trader.placeGtdOrder('token-1','BUY',.3,20,1234567890);
+  const result=await trader.placeGtdOrder('token-1','BUY',.3,5,1234567890);
   assert.deepEqual(result,{id:'mock-order',status:'live'});
   assert.deepEqual(calls[0],{signer:{key:'0xtest-key'}});
-  assert.deepEqual(calls[1],{assetId:'token-1',side:'BUY',price:'0.3',size:'20',expiration:1234567890,postOnly:true});
+  assert.deepEqual(calls[1],{assetId:'token-1',side:'BUY',price:'0.3',size:'5',expiration:1234567890,postOnly:false});
+});
+
+test('fetches the exchange order by ID to reconcile confirmed fills',async()=>{
+  const {trader,calls}=setup();
+  await trader.authenticate();
+  assert.deepEqual(await trader.fetchOrder('live-order'),{
+    id:'live-order',status:'LIVE',sizeMatched:'2'
+  });
+  assert.deepEqual(calls.at(-1),{orderId:'live-order'});
 });
 
 test('reports full equity and shows only positions for the active window',async()=>{
@@ -113,5 +123,8 @@ test('lists all open-order pages and confirms cancellation by order ID',async()=
 test('rejects unsuccessful order responses',async()=>{
   const {trader}=setup({ok:false,message:'rejected'});
   await trader.authenticate();
-  await assert.rejects(()=>trader.placeGtdOrder('token-1','BUY',.3,20,1234567890),/rejected/);
+  await assert.rejects(
+    ()=>trader.placeGtdOrder('token-1','SELL',.75,5,1234567890),
+    error=>error.message==='rejected'&&error.submissionUncertain===false
+  );
 });

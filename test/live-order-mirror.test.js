@@ -4,30 +4,43 @@ const test=require('node:test');
 const assert=require('node:assert/strict');
 const LiveOrderMirror=require('../live-order-mirror');
 
-const entry={windowStart:1_000_000,cutoffAt:1_180_000,slug:'btc-updown-5m',
-  tokenId:'token-up',side:'UP',orders:[{price:.30,shares:20},{price:.20,shares:20}]};
+const entry={
+  asset:'BTC',timeframe:'5m',windowStart:1_000_000,cutoffAt:1_300_000,
+  slug:'btc-updown-5m-1000',tokenId:'token-up',side:'UP',
+  orders:[{price:.25,shares:500,takeProfitPrice:.75},{price:.15,shares:500,takeProfitPrice:.85}],
+};
 
-test('submits two 20-share GTD entry orders and prevents duplicate mirror calls',async()=>{
+test('mirrors the existing BTC rungs as five-share limit buys',async()=>{
   const calls=[];
   const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>1_000_000});
   mirror.setTrader({placeGtdOrder:async(...args)=>{calls.push(args);return{id:`order-${calls.length}`,status:'LIVE'}}});
   const result=await mirror.placeEntryOrders(entry);
   assert.equal(calls.length,2);
-  assert.deepEqual(calls.map(x=>[x[0],x[1],x[2],x[3],x[4]]),[
-    ['token-up','BUY',.30,20,1240],['token-up','BUY',.20,20,1240]
+  assert.deepEqual(calls,[
+    ['token-up','BUY',.25,5,1360],['token-up','BUY',.15,5,1360]
   ]);
   assert.equal(result.orders.length,2);
   assert.equal((await mirror.placeEntryOrders(entry)).orders.length,0);
 });
 
-test('skips the already-open market after restart and orders too near the expiry boundary',async()=>{
+test('accepts the existing BTC 15-minute ladder without adding another strategy gate',async()=>{
+  const calls=[];
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>1_500_000});
+  mirror.setTrader({placeGtdOrder:async(...args)=>{calls.push(args);return{id:'15m-order',status:'LIVE'}}});
+  const result=await mirror.placeEntryOrders({
+    ...entry,timeframe:'15m',windowStart:900_000,cutoffAt:1_800_000,
+    slug:'btc-updown-15m-900',
+    orders:[{price:.15,shares:500,takeProfitPrice:.85}],
+  });
+  assert.equal(result.orders.length,1);
+  assert.deepEqual(calls[0],['token-up','BUY',.15,5,1860]);
+});
+
+test('skips an already-open window after restart',async()=>{
   let count=0;
   const mirror=new LiveOrderMirror({startedAt:1_000_100,clock:()=>1_000_000});
   mirror.setTrader({placeGtdOrder:async()=>{count++;return{id:'unexpected'}}});
   assert.equal((await mirror.placeEntryOrders(entry)).status,'skipped_restart_window');
-  const late={...entry,windowStart:1_000_100,cutoffAt:1_060_000};
-  const result=await mirror.placeEntryOrders(late);
-  assert.ok(result.orders.every(order=>order.status==='skipped_expiry_too_soon'));
   assert.equal(count,0);
 });
 
@@ -40,39 +53,57 @@ test('paused mirror does not submit real orders',async()=>{
   assert.equal(mirror.snapshot().tradingEnabled,false);
 });
 
-test('cancels known live entries at the demo cutoff',async()=>{
-  const cancelled=[];
-  let now=1_000_000;
-  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>now});
+test('creates TP limit sells only for confirmed fills without duplicate quantities',async()=>{
+  const calls=[];
+  let matched='2';
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>1_000_000});
   mirror.setTrader({
-    placeGtdOrder:async(_token,_side,price)=>({id:`order-${price}`,status:'LIVE'}),
-    getEquitySnapshot:async()=>({orders:[]}),
-    cancelOrder:async id=>cancelled.push(id)
+    placeGtdOrder:async(...args)=>{calls.push(args);return{id:`order-${calls.length}`,status:'LIVE'}},
+    fetchOrder:async id=>({id,status:'LIVE',sizeMatched:id==='order-1'?matched:'0'}),
   });
-  await mirror.placeEntryOrders(entry);
-  now=1_180_001;
-  await mirror.cancelExpiredOrders([
-    {id:'order-0.3',status:'LIVE'},
-    {id:'order-0.2',status:'LIVE'}
-  ]);
-  assert.deepEqual(cancelled,['order-0.3','order-0.2']);
-  assert.ok(mirror.orders.every(order=>order.status==='CANCELLED_AT_CUTOFF'));
+  await mirror.placeEntryOrders({...entry,orders:[entry.orders[0]]});
+
+  await mirror.reconcileTrackedOrders();
+  await mirror.reconcileTrackedOrders();
+  assert.equal(calls.length,2,'the same confirmed fill must not create a duplicate sell');
+  assert.deepEqual(calls[1],['token-up','SELL',.75,2,1360]);
+
+  matched='3';
+  await mirror.reconcileTrackedOrders();
+  assert.equal(calls.length,3);
+  assert.deepEqual(calls[2],['token-up','SELL',.75,1,1360]);
+  const buy=mirror.orderStates.get('order-1');
+  assert.equal(buy.filledShares,3);
+  assert.equal(buy.exitSubmittedShares,3);
 });
 
-test('after restart discovers only matching BTC 5m bot orders and cancels after cutoff',async()=>{
-  const cancelled=[],lookups=[];
-  const mirror=new LiveOrderMirror({startedAt:2_000_000,clock:()=>2_180_001});
+test('does not place a TP sell before Polymarket confirms a fill',async()=>{
+  const calls=[];
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>1_000_000});
   mirror.setTrader({
-    getMarket:async id=>{lookups.push(id);return id==='btc-condition'
-      ?{slug:'btc-updown-5m-2000',clobTokenIds:['btc-token']}
-      :{slug:'eth-updown-5m-2000',clobTokenIds:['btc-token']}},
-    cancelOrder:async id=>cancelled.push(id)
+    placeGtdOrder:async(...args)=>{calls.push(args);return{id:'entry-order',status:'LIVE'}},
+    fetchOrder:async id=>({id,status:'LIVE',sizeMatched:'0'}),
   });
-  await mirror.cancelExpiredOrders([
-    {id:'bot-order',conditionId:'btc-condition',assetId:'btc-token',side:'BUY',price:'0.30',originalSize:'20',orderType:'GTD',createdAt:new Date(2_000_030).toISOString(),status:'LIVE'},
-    {id:'manual-other-token',conditionId:'btc-condition',assetId:'other-token',side:'BUY',price:'0.30',originalSize:'20',orderType:'GTD',createdAt:new Date(2_000_030).toISOString(),status:'LIVE'},
-    {id:'other-market',conditionId:'other-condition',assetId:'btc-token',side:'BUY',price:'0.20',originalSize:'20',orderType:'GTD',createdAt:new Date(2_000_030).toISOString(),status:'LIVE'}
-  ]);
-  assert.deepEqual(cancelled,['bot-order']);
-  assert.deepEqual(lookups,['btc-condition','other-condition']);
+  await mirror.placeEntryOrders({...entry,orders:[entry.orders[0]]});
+  await mirror.reconcileTrackedOrders();
+  assert.equal(calls.length,1);
+  assert.equal(calls[0][1],'BUY');
+});
+
+test('halts new submissions after an order submission with unknown outcome',async()=>{
+  let calls=0;
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>1_000_000});
+  mirror.setTrader({
+    placeGtdOrder:async()=>{
+      calls++;
+      const error=new Error('connection lost');
+      error.submissionUncertain=true;
+      throw error;
+    },
+  });
+  const result=await mirror.placeEntryOrders({...entry,orders:[entry.orders[0]]});
+  assert.equal(result.orders[0].status,'SUBMISSION_UNCERTAIN');
+  assert.equal(mirror.halted,true);
+  assert.equal((await mirror.placeEntryOrders(entry)).status,'halted');
+  assert.equal(calls,1);
 });

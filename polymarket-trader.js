@@ -17,13 +17,33 @@ class PolymarketTrader{
   }
   async placeGtdOrder(tokenId,side,price,size,expiration){
     if(!this.client)throw new Error('Polymarket authentication is not ready');
-    const response=await this.client.placeLimitOrder({
-      assetId:String(tokenId),side:side==='BUY'?this.sdk.OrderSide.BUY:this.sdk.OrderSide.SELL,
-      price:String(price),size:String(size),expiration:Number(expiration),postOnly:true
-    });
-    if(!response?.ok)throw new Error(response?.message||response?.error||'GTD order rejected');
-    if(!response.orderId)throw new Error('GTD response did not include an order ID');
+    let response;
+    try{
+      response=await this.client.placeLimitOrder({
+        assetId:String(tokenId),side:side==='BUY'?this.sdk.OrderSide.BUY:this.sdk.OrderSide.SELL,
+        price:String(price),size:String(size),expiration:Number(expiration),postOnly:false
+      });
+    }catch(error){
+      error.submissionUncertain=true;
+      throw error;
+    }
+    if(!response?.ok){
+      const error=new Error(response?.message||response?.error||'GTD order rejected');
+      error.submissionUncertain=false;
+      throw error;
+    }
+    if(!response.orderId){
+      const error=new Error('GTD response did not include an order ID');
+      error.submissionUncertain=true;
+      throw error;
+    }
     return{id:response.orderId,status:response.status||'LIVE'};
+  }
+  async fetchOrder(orderId){
+    if(!this.client)throw new Error('Polymarket authentication is not ready');
+    const order=await this.client.fetchOrder({orderId:String(orderId)});
+    if(!order?.id)throw new Error(`Polymarket did not return order ${orderId}`);
+    return order;
   }
   async listOpenOrders(){
     if(!this.client)throw new Error('Polymarket authentication is not ready');

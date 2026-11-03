@@ -11,9 +11,15 @@ function startServer(bot, port, liveBalanceProvider=null) {
     const pathname = new URL(req.url, 'http://localhost').pathname;
     if (pathname === '/api/healthz') {
       const state = bot.snapshot();
-      const healthy = state.status !== 'blocked_or_error';
+      const live=liveBalanceProvider?.snapshot?.()||null;
+      const liveEnabled=live?.tradingEnabled===true;
+      const healthy = state.status !== 'blocked_or_error'
+        &&(!liveEnabled||(live.status==='ready'&&!live.halted));
       res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify({ ok: healthy, mode: 'DEMO', status: state.status, now: state.now }));
+      res.end(JSON.stringify({
+        ok:healthy,mode:liveEnabled?'LIVE':'DEMO',status:state.status,
+        liveStatus:live?.status||'disabled',now:state.now
+      }));
       return;
     }
     if (pathname === '/api/state') {
