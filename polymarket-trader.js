@@ -71,24 +71,42 @@ class PolymarketTrader{
   }
   async getRecentActivity(wallet){
     if(this.activityCache&&Date.now()-this.activityCacheAt<15000)return this.activityCache;
-    const response=await this.fetcher(`https://data-api.polymarket.com/activity?user=${encodeURIComponent(wallet)}&limit=500&type=TRADE&sortBy=TIMESTAMP&sortDirection=DESC`,
-      {signal:AbortSignal.timeout(10000)});
+    const url=new URL('https://data-api.polymarket.com/v2/activity');
+    url.searchParams.set('user',wallet);
+    url.searchParams.set('limit','500');
+    url.searchParams.set('type','TRADE');
+    url.searchParams.set('sort_by','TIMESTAMP');
+    url.searchParams.set('sort_direction','DESC');
+    const response=await this.fetcher(url.toString(),{signal:AbortSignal.timeout(10000)});
     if(!response.ok)throw new Error(`Activity API ${response.status}`);
-    this.activityCache=await response.json();
+    const payload=await response.json();
+    if(!Array.isArray(payload?.data))throw new Error('Activity API returned an invalid response');
+    this.activityCache=payload.data;
     this.activityCacheAt=Date.now();
     return this.activityCache;
   }
   async getAllPositions(wallet){
     const pageSize=500,maxPages=20,all=[];
+    let cursor=null;
     for(let page=0;page<maxPages;page++){
-      const offset=page*pageSize;
-      const response=await this.fetcher(`https://data-api.polymarket.com/positions?user=${encodeURIComponent(wallet)}&sizeThreshold=0.01&limit=${pageSize}&offset=${offset}`,
-        {signal:AbortSignal.timeout(10000)});
+      const url=new URL('https://data-api.polymarket.com/v2/positions');
+      url.searchParams.set('user',wallet);
+      url.searchParams.set('status','OPEN');
+      url.searchParams.set('filter_type','TOKENS');
+      url.searchParams.set('filter_amount','0.01');
+      url.searchParams.set('sort_by','TIMESTAMP');
+      url.searchParams.set('sort_direction','DESC');
+      url.searchParams.set('limit',String(pageSize));
+      if(cursor)url.searchParams.set('cursor',cursor);
+      const response=await this.fetcher(url.toString(),{signal:AbortSignal.timeout(10000)});
       if(!response.ok)throw new Error(`Positions API ${response.status}`);
-      const rows=await response.json();
-      if(!Array.isArray(rows))throw new Error('Positions API returned an invalid response');
-      all.push(...rows);
-      if(rows.length<pageSize)return all;
+      const payload=await response.json();
+      if(!Array.isArray(payload?.data)||!payload.pagination)throw new Error('Positions API returned an invalid response');
+      all.push(...payload.data);
+      const nextCursor=payload.pagination.next_cursor;
+      if(nextCursor===null||nextCursor===undefined||nextCursor==='')return all;
+      if(typeof nextCursor!=='string'||nextCursor===cursor)throw new Error('Positions API returned an invalid pagination cursor');
+      cursor=nextCursor;
     }
     throw new Error(`Positions API exceeded the ${maxPages*pageSize}-row safety limit; account equity would be incomplete`);
   }
@@ -105,7 +123,7 @@ class PolymarketTrader{
     if(!Number.isFinite(collateral))throw new Error('Collateral balance unavailable');
     const recentTradeByAsset=new Map();
     for(const trade of Array.isArray(activity)?activity:[]){
-      const asset=String(trade.asset||'');
+      const asset=String(trade.token_id||'');
       const timestamp=Number(trade.timestamp);
       if(asset&&!recentTradeByAsset.has(asset)&&Number.isFinite(timestamp)){
         recentTradeByAsset.set(asset,new Date(timestamp*1000).toISOString());
@@ -114,10 +132,10 @@ class PolymarketTrader{
     const normalizedPositions=(Array.isArray(positions)?positions:[]).map(p=>({
       market:String(p.title||p.question||p.market||'Unknown market'),
       slug:p.slug||null,outcome:String(p.outcome||'Unknown'),
-      shares:Number(p.size)||0,avgEntry:Number(p.avgPrice)||0,
-      markPrice:Number(p.curPrice)||0,value:Number(p.currentValue)||0,
-      pnl:Number(p.cashPnl)||0,assetId:p.asset||p.assetId||null,
-      lastTradeAt:recentTradeByAsset.get(String(p.asset||p.assetId||''))||null
+      shares:Number(p.current_size)||0,avgEntry:Number(p.avg_price)||0,
+      markPrice:Number(p.current_price)||0,value:Number(p.current_value)||0,
+      pnl:Number(p.unrealized_pnl)||0,assetId:p.token_id||null,
+      lastTradeAt:recentTradeByAsset.get(String(p.token_id||''))||null
     }));
     const positionByAsset=new Map(normalizedPositions.map(position=>[String(position.assetId||''),position]));
     const ordersWithPositions=(Array.isArray(orders)?orders:[]).map(order=>{

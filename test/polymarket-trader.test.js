@@ -23,18 +23,22 @@ function setup(response={ok:true,orderId:'mock-order',status:'live'},{positions=
   }};
   const fetcher=async url=>{
     calls.push(url);
-    if(url.includes('/activity')){
-      return{ok:true,json:async()=>activity||[
-        {asset:'asset-1',timestamp:100},{asset:'asset-2',timestamp:300},{asset:'asset-3',timestamp:200}
-      ]};
+    if(url.includes('/v2/activity')){
+      return{ok:true,json:async()=>({data:activity||[
+        {token_id:'asset-1',timestamp:100},{token_id:'asset-2',timestamp:300},{token_id:'asset-3',timestamp:200}
+      ],pagination:{next_cursor:null,has_more:false}})};
     }
-    if(url.includes('/positions'))return{ok:true,json:async()=>{
-      const offset=Number(new URL(url).searchParams.get('offset'))||0;
-      return(positions||[
-      {asset:'asset-1',title:'Older position',slug:'btc-updown-5m-0',outcome:'Yes',size:10,curPrice:.4,currentValue:4},
-      {asset:'asset-2',title:'Newest position',slug:'btc-updown-5m-300',outcome:'No',size:5,curPrice:.2,currentValue:1},
-      {asset:'asset-3',title:'Second newest position',slug:'btc-updown-5m-300',outcome:'Yes',size:4,curPrice:.5,currentValue:2}
-      ]).slice(offset,offset+500);
+    if(url.includes('/v2/positions'))return{ok:true,json:async()=>{
+      const query=new URL(url).searchParams;
+      const offset=query.has('cursor')?500:0;
+      const rows=positions||[
+      {token_id:'asset-1',title:'Older position',slug:'btc-updown-5m-0',outcome:'Yes',current_size:10,avg_price:.2,current_price:.4,current_value:4,unrealized_pnl:2},
+      {token_id:'asset-2',title:'Newest position',slug:'btc-updown-5m-300',outcome:'No',current_size:5,avg_price:.25,current_price:.2,current_value:1,unrealized_pnl:-.25},
+      {token_id:'asset-3',title:'Second newest position',slug:'btc-updown-5m-300',outcome:'Yes',current_size:4,avg_price:.4,current_price:.5,current_value:2,unrealized_pnl:.4}
+      ];
+      const data=rows.slice(offset,offset+500);
+      const hasMore=offset+data.length<rows.length;
+      return{data,pagination:{next_cursor:hasMore?'next-page':null,has_more:hasMore}};
     }};
     throw new Error(`Unexpected API request: ${url}`);
   };
@@ -71,6 +75,10 @@ test('reports full equity and shows only positions for the active window',async(
   assert.equal(snapshot.positions[0].lastTradeAt,new Date(300_000).toISOString());
   assert.equal(snapshot.positions[1].lastTradeAt,new Date(200_000).toISOString());
   assert.equal(snapshot.positions.some(p=>p.market==='Older position'),false);
+  assert.equal(snapshot.positions[0].assetId,'asset-2');
+  assert.equal(snapshot.positions[0].avgEntry,.25);
+  assert.equal(snapshot.positions[0].markPrice,.2);
+  assert.equal(snapshot.positions[0].pnl,-.25);
   assert.deepEqual(snapshot.orders,[
     {id:'open-1',assetId:'asset-2',side:'BUY',status:'LIVE',sizeMatched:'2',
       currentPosition:{market:'Newest position',outcome:'No',shares:5,value:1}},
@@ -78,6 +86,8 @@ test('reports full equity and shows only positions for the active window',async(
   ]);
   assert.equal(Object.hasOwn(snapshot,'wallet'),false);
   assert.ok(calls.some(value=>value?.assetType==='COLLATERAL'));
+  assert.ok(calls.some(value=>typeof value==='string'&&value.includes('/v2/positions?')&&value.includes('filter_type=TOKENS')));
+  assert.ok(calls.some(value=>typeof value==='string'&&value.includes('/v2/activity?')&&value.includes('type=TRADE')));
 });
 
 test('shows no real positions when the active window has no holdings',async()=>{
@@ -91,14 +101,14 @@ test('shows no real positions when the active window has no holdings',async()=>{
 
 test('paginates position results so a recent fill beyond the first 500 is visible',async()=>{
   const positions=Array.from({length:500},(_,i)=>({
-    asset:`old-${i}`,title:`Older position ${i}`,slug:'btc-updown-5m-300',
-    outcome:'Yes',size:1,curPrice:.1,currentValue:.1
+    token_id:`old-${i}`,title:`Older position ${i}`,slug:'btc-updown-5m-300',
+    outcome:'Yes',current_size:1,current_price:.1,current_value:.1
   }));
   positions.push({
-    asset:'current-token',title:'Current BTC window',slug:'btc-updown-5m-600',outcome:'Up',
-    size:20,avgPrice:.3,curPrice:.45,currentValue:9,cashPnl:3
+    token_id:'current-token',title:'Current BTC window',slug:'btc-updown-5m-600',outcome:'Up',
+    current_size:20,avg_price:.3,current_price:.45,current_value:9,unrealized_pnl:3
   });
-  const {trader,calls}=setup(undefined,{positions,activity:[{asset:'current-token',timestamp:500}]});
+  const {trader,calls}=setup(undefined,{positions,activity:[{token_id:'current-token',timestamp:500}]});
   await trader.authenticate();
   const snapshot=await trader.getEquitySnapshot({windowSlug:'btc-updown-5m-600'});
   assert.equal(snapshot.positionCount,501);
@@ -106,7 +116,7 @@ test('paginates position results so a recent fill beyond the first 500 is visibl
   assert.ok(Math.abs(snapshot.equity-184)<1e-8);
   assert.equal(snapshot.positions[0].market,'Current BTC window');
   assert.equal(snapshot.positions[0].shares,20);
-  assert.ok(calls.some(value=>typeof value==='string'&&value.includes('limit=500&offset=500')));
+  assert.ok(calls.some(value=>typeof value==='string'&&value.includes('/v2/positions?')&&value.includes('cursor=next-page')));
 });
 
 test('lists all open-order pages and confirms cancellation by order ID',async()=>{
