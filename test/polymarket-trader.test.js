@@ -169,7 +169,7 @@ test('positions requests honor Retry-After and withhold calls during cooldown',a
   assert.equal(calls,2);
 });
 
-test('positions requests without Retry-After wait at least one second',async()=>{
+test('positions requests without Retry-After use a conservative backoff',async()=>{
   let now=2_000_000,calls=0,allowSuccess=false;
   const trader=new PolymarketTrader('test-key',{
     clock:()=>now,
@@ -181,8 +181,8 @@ test('positions requests without Retry-After wait at least one second',async()=>
   });
 
   await assert.rejects(()=>trader.getAllPositions('wallet'),
-    error=>error.statusCode===429&&error.retryAfterMs===1000);
-  now+=999;
+    error=>error.statusCode===429&&error.retryAfterMs===15_000);
+  now+=14_999;
   await assert.rejects(()=>trader.getAllPositions('wallet'),
     error=>error.statusCode===429&&error.retryAfterMs===1);
   assert.equal(calls,1,'the rate-limit cooldown must withhold another request');
@@ -191,6 +191,64 @@ test('positions requests without Retry-After wait at least one second',async()=>
   allowSuccess=true;
   assert.deepEqual(await trader.getAllPositions('wallet'),[]);
   assert.equal(calls,2);
+});
+
+test('repeated Positions API 429s back off, log safe diagnostics, and reset after success',async()=>{
+  let now=3_000_000,calls=0,allowSuccess=false;
+  const logs=[];
+  const trader=new PolymarketTrader('test-key',{
+    clock:()=>now,
+    logger:{info:line=>logs.push(JSON.parse(line.slice('[polymarket-data] '.length)))},
+    fetcher:async()=>{
+      calls++;
+      if(!allowSuccess)return{ok:false,status:429,headers:{get:name=>
+        name==='retry-after'?'1':name==='poly-ratelimit-remaining'?'0':null}};
+      return{ok:true,json:async()=>({data:[],pagination:{next_cursor:null}})};
+    },
+  });
+
+  await assert.rejects(()=>trader.getAllPositions('private-wallet-value'),
+    error=>error.statusCode===429&&error.retryAfterMs===15_000&&error.serverRetryAfterMs===1_000);
+  assert.equal(logs[0].status,429);
+  assert.equal(logs[0].retryInMs,15_000);
+  assert.equal(logs[0].rateLimitRemaining,'0');
+  assert.equal(JSON.stringify(logs).includes('private-wallet-value'),false);
+
+  now+=15_000;
+  await assert.rejects(()=>trader.getAllPositions('private-wallet-value'),
+    error=>error.statusCode===429&&error.retryAfterMs===30_000);
+  assert.equal(calls,2);
+
+  now+=30_000;
+  allowSuccess=true;
+  assert.deepEqual(await trader.getAllPositions('private-wallet-value'),[]);
+  assert.equal(trader.positions429Count,0);
+
+  now+=1_000;
+  allowSuccess=false;
+  await assert.rejects(()=>trader.getAllPositions('private-wallet-value'),
+    error=>error.statusCode===429&&error.retryAfterMs===15_000,
+    'a complete successful positions read resets the adaptive cooldown');
+});
+
+test('activity reads are cached for five minutes',async()=>{
+  let now=4_000_000,calls=0;
+  const trader=new PolymarketTrader('test-key',{
+    clock:()=>now,
+    fetcher:async()=>{
+      calls++;
+      return{ok:true,json:async()=>({data:[]})};
+    },
+  });
+
+  await trader.getRecentActivity('wallet');
+  now+=4*60_000;
+  await trader.getRecentActivity('wallet');
+  assert.equal(calls,1,'activity is informational and should not be fetched each account snapshot');
+
+  now+=60_000;
+  await trader.getRecentActivity('wallet');
+  assert.equal(calls,2,'the activity cache refreshes after five minutes');
 });
 
 test('lists all open-order pages and confirms cancellation by order ID',async()=>{
@@ -217,6 +275,15 @@ test('a balance-settlement rejection is definite and can be retried safely',asyn
   const {trader}=setup(undefined,{
     placeError:new Error('not enough balance / allowance: the balance is not enough -> balance: 0'),
   });
+  await trader.authenticate();
+  await assert.rejects(
+    ()=>trader.placeLimitOrder('token-1','SELL',.75,5),
+    error=>error.submissionUncertain===false
+  );
+});
+
+test('an invalid token id is a definite rejection, not an unknown submission',async()=>{
+  const {trader}=setup(undefined,{placeError:new Error('invalid token id (https://clob.polymarket.com/order)')});
   await trader.authenticate();
   await assert.rejects(
     ()=>trader.placeLimitOrder('token-1','SELL',.75,5),
