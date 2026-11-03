@@ -78,6 +78,55 @@ test('creates TP limit sells only for confirmed fills without duplicate quantiti
   assert.equal(buy.exitSubmittedShares,3);
 });
 
+test('retries a definite sell rejection after settlement without halting',async()=>{
+  let now=1_000_000;
+  let sells=0;
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>now});
+  mirror.setTrader({
+    placeLimitOrder:async(token,side)=>{
+      if(side==='SELL'&&++sells===1){
+        const error=new Error('not enough balance / allowance');
+        error.submissionUncertain=false;
+        throw error;
+      }
+      return{id:side==='BUY'?'buy':'sell',status:'LIVE'};
+    },
+    fetchOrder:async()=>({status:'MATCHED',sizeMatched:'5'}),
+  });
+  await mirror.placeEntryOrders({...entry,orders:[entry.orders[0]]});
+  await mirror.reconcileTrackedOrders();
+  await mirror.reconcileTrackedOrders();
+  assert.equal(sells,1);
+  assert.equal(mirror.halted,false);
+  now+=1000;
+  await mirror.reconcileTrackedOrders();
+  await mirror.reconcileTrackedOrders();
+  assert.equal(sells,2);
+  assert.equal(mirror.orderStates.get('buy').exitSubmittedShares,5);
+});
+
+test('does not resend a sell whose submission outcome is unknown',async()=>{
+  let sells=0;
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>1_000_000});
+  mirror.setTrader({
+    placeLimitOrder:async(token,side)=>{
+      if(side==='SELL'){
+        sells++;
+        const error=new Error('connection reset');
+        error.submissionUncertain=true;
+        throw error;
+      }
+      return{id:'buy',status:'LIVE'};
+    },
+    fetchOrder:async()=>({status:'MATCHED',sizeMatched:'5'}),
+  });
+  await mirror.placeEntryOrders({...entry,orders:[entry.orders[0]]});
+  await mirror.reconcileTrackedOrders();
+  await mirror.reconcileTrackedOrders();
+  assert.equal(sells,1);
+  assert.equal(mirror.halted,true);
+});
+
 test('flow test submits exactly one five-share limit buy at $0.70',async()=>{
   const calls=[];
   const now=1_000_000;
@@ -136,6 +185,39 @@ test('flow test submits the $0.75 limit sell only after a confirmed fill',async(
     ['token-up','BUY',.70,5],
     ['token-up','SELL',.75,5],
   ]);
+});
+
+test('reserves shares while a take-profit sell is being submitted',async()=>{
+  const calls=[];
+  let releaseSell;
+  const sellResponse=new Promise(resolve=>{releaseSell=resolve});
+  const now=1_000_000;
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>now});
+  mirror.setTrader({
+    placeLimitOrder:async(...args)=>{
+      calls.push(args);
+      if(args[1]==='SELL')return sellResponse;
+      return{id:'test-buy',status:'LIVE'};
+    },
+  });
+  await mirror.placeFlowTestOrder({
+    asset:'BTC',timeframe:'5m',slug:'btc-updown-5m-1000',
+    side:'UP',tokenId:'token-up',windowStart:1_000_000,windowEnd:1_300_000,
+    bestAsk:.70,askSize:5,updatedAt:now,stale:false,
+  });
+  const entryOrder=mirror.orderStates.get('test-buy');
+  entryOrder.filledShares=5;
+  const first=mirror.submitTakeProfitForConfirmedFill(entryOrder);
+  const second=mirror.submitTakeProfitForConfirmedFill(entryOrder);
+  await second;
+  assert.deepEqual(calls,[
+    ['token-up','BUY',.70,5],
+    ['token-up','SELL',.75,5],
+  ]);
+  releaseSell({id:'test-sell',status:'LIVE'});
+  await first;
+  assert.equal(entryOrder.exitSubmittedShares,5);
+  assert.equal(entryOrder.exitSubmittingShares,0);
 });
 
 test('cancels an unfilled test entry at the five-minute window end',async()=>{

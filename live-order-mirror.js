@@ -103,6 +103,7 @@ class LiveOrderMirror{
         timeframe:entry.timeframe,slug:entry.slug,side:entry.side,
         tokenId:String(entry.tokenId),price:Number(rung.price),shares,
         takeProfitPrice,filledShares:0,exitSubmittedShares:0,
+        exitSubmittingShares:0,
         windowStart:Number(entry.windowStart),windowEnd:cutoffAt,
         status:'SUBMITTING',createdAt:this.clock(),
         nextSellRetryAt:0,sellRetryAttempts:0,error:null,
@@ -168,7 +169,8 @@ class LiveOrderMirror{
       tokenId:String(entry.tokenId),price:cfg.LIVE_FLOW_TEST_BUY_PRICE,
       shares:cfg.LIVE_FLOW_TEST_SHARES,
       takeProfitPrice:cfg.LIVE_FLOW_TEST_TAKE_PROFIT_PRICE,
-      filledShares:0,exitSubmittedShares:0,windowStart,windowEnd,
+      filledShares:0,exitSubmittedShares:0,exitSubmittingShares:0,
+      windowStart,windowEnd,
       status:'SUBMITTING',createdAt:now,nextSellRetryAt:0,
       sellRetryAttempts:0,error:null,testOnly:true,
     };
@@ -266,9 +268,13 @@ class LiveOrderMirror{
 
   async submitTakeProfitForConfirmedFill(entryOrder){
     const available=Number(
-      (entryOrder.filledShares-entryOrder.exitSubmittedShares).toFixed(2)
+      (entryOrder.filledShares-entryOrder.exitSubmittedShares
+        -(entryOrder.exitSubmittingShares||0)).toFixed(2)
     );
     if(available<=SHARE_EPSILON||this.clock()<entryOrder.nextSellRetryAt)return;
+    entryOrder.exitSubmittingShares=Number(
+      ((entryOrder.exitSubmittingShares||0)+available).toFixed(2)
+    );
 
     const sellOrder={
       orderId:null,kind:'TAKE_PROFIT',orderSide:'SELL',asset:'BTC',
@@ -286,6 +292,9 @@ class LiveOrderMirror{
       );
       sellOrder.orderId=String(response.id);
       sellOrder.status=response.status||'LIVE';
+      entryOrder.exitSubmittingShares=Number(
+        Math.max(0,entryOrder.exitSubmittingShares-available).toFixed(2)
+      );
       entryOrder.exitSubmittedShares=Number(
         (entryOrder.exitSubmittedShares+available).toFixed(2)
       );
@@ -304,6 +313,9 @@ class LiveOrderMirror{
         this.status='error';
         return;
       }
+      entryOrder.exitSubmittingShares=Number(
+        Math.max(0,entryOrder.exitSubmittingShares-available).toFixed(2)
+      );
       entryOrder.sellRetryAttempts+=1;
       const backoff=Math.min(15000,1000*2**(entryOrder.sellRetryAttempts-1));
       entryOrder.nextSellRetryAt=this.clock()+backoff;

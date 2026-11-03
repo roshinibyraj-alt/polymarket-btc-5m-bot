@@ -4,11 +4,11 @@ const test=require('node:test');
 const assert=require('node:assert/strict');
 const PolymarketTrader=require('../polymarket-trader');
 
-function setup(response={ok:true,orderId:'mock-order',status:'live'},{positions=null,activity=null}={}){
+function setup(response={ok:true,orderId:'mock-order',status:'live'},{positions=null,activity=null,placeError=null}={}){
   const calls=[];
   const client={
     account:{wallet:'0xdepositwallet'},
-    placeLimitOrder:async input=>{calls.push(input);return response},
+    placeLimitOrder:async input=>{calls.push(input);if(placeError)throw placeError;return response},
     fetchOrder:async input=>{calls.push(input);return{id:input.orderId,status:'LIVE',sizeMatched:'2'}},
      listOpenOrders:async function*(){yield{items:[
        {id:'open-1',assetId:'asset-2',side:'BUY',status:'LIVE',sizeMatched:'2'},
@@ -136,5 +136,25 @@ test('rejects unsuccessful order responses',async()=>{
   await assert.rejects(
     ()=>trader.placeLimitOrder('token-1','SELL',.75,5),
     error=>error.message==='rejected'&&error.submissionUncertain===false
+  );
+});
+
+test('a balance-settlement rejection is definite and can be retried safely',async()=>{
+  const {trader}=setup(undefined,{
+    placeError:new Error('not enough balance / allowance: the balance is not enough -> balance: 0'),
+  });
+  await trader.authenticate();
+  await assert.rejects(
+    ()=>trader.placeLimitOrder('token-1','SELL',.75,5),
+    error=>error.submissionUncertain===false
+  );
+});
+
+test('a transport failure keeps the order submission uncertain',async()=>{
+  const {trader}=setup(undefined,{placeError:new Error('connection reset')});
+  await trader.authenticate();
+  await assert.rejects(
+    ()=>trader.placeLimitOrder('token-1','SELL',.75,5),
+    error=>error.submissionUncertain===true
   );
 });

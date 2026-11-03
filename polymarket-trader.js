@@ -24,7 +24,8 @@ class PolymarketTrader{
         price:String(price),size:String(size),postOnly:false
       });
     }catch(error){
-      error.submissionUncertain=true;
+      const message=String(error?.message||error);
+      error.submissionUncertain=!/not enough balance|balance is not enough|insufficient (?:balance|allowance)/i.test(message);
       throw error;
     }
     if(!response?.ok){
