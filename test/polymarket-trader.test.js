@@ -45,13 +45,13 @@ function setup(response={ok:true,orderId:'mock-order',status:'live'},{positions=
   return{trader:new PolymarketTrader('test-key',{sdk,actions,privateKeyAdapter:key=>({key}),fetcher}),calls};
 }
 
-test('authenticates with the unified SDK and places a GTD limit order',async()=>{
+test('places a non-expiring GTC limit order without an expiration field',async()=>{
   const {trader,calls}=setup();
   await trader.authenticate();
-  const result=await trader.placeGtdOrder('token-1','BUY',.3,5,1234567890);
+  const result=await trader.placeLimitOrder('token-1','BUY',.3,5);
   assert.deepEqual(result,{id:'mock-order',status:'live'});
   assert.deepEqual(calls[0],{signer:{key:'0xtest-key'}});
-  assert.deepEqual(calls[1],{assetId:'token-1',side:'BUY',price:'0.3',size:'5',expiration:1234567890,postOnly:false});
+  assert.deepEqual(calls[1],{assetId:'token-1',side:'BUY',price:'0.3',size:'5',postOnly:false});
 });
 
 test('fetches the exchange order by ID to reconcile confirmed fills',async()=>{
@@ -134,7 +134,7 @@ test('rejects unsuccessful order responses',async()=>{
   const {trader}=setup({ok:false,message:'rejected'});
   await trader.authenticate();
   await assert.rejects(
-    ()=>trader.placeGtdOrder('token-1','SELL',.75,5,1234567890),
+    ()=>trader.placeLimitOrder('token-1','SELL',.75,5),
     error=>error.message==='rejected'&&error.submissionUncertain===false
   );
 });

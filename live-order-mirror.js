@@ -71,12 +71,8 @@ class LiveOrderMirror{
     }
 
     const cutoffAt=Number(entry.cutoffAt);
-    const expiration=Math.floor(cutoffAt/1000)+cfg.POLYMARKET_GTD_EXPIRATION_BUFFER_SECONDS;
-    const nowSeconds=Math.floor(this.clock()/1000);
-    if(!Number.isFinite(cutoffAt)||cutoffAt<=this.clock()
-      ||!Number.isFinite(expiration)
-      ||expiration-nowSeconds<cfg.POLYMARKET_GTD_EXPIRATION_BUFFER_SECONDS){
-      return{status:'skipped_expiry_too_soon'};
+    if(!Number.isFinite(cutoffAt)||cutoffAt<=this.clock()){
+      return{status:'skipped_window_ended'};
     }
 
     const results=[];
@@ -107,14 +103,14 @@ class LiveOrderMirror{
         tokenId:String(entry.tokenId),price:Number(rung.price),shares,
         takeProfitPrice,filledShares:0,exitSubmittedShares:0,
         windowStart:Number(entry.windowStart),windowEnd:cutoffAt,
-        expiration,status:'SUBMITTING',createdAt:this.clock(),
+        status:'SUBMITTING',createdAt:this.clock(),
         nextSellRetryAt:0,sellRetryAttempts:0,error:null,
       };
       this.rememberOrder(tracked);
 
       try{
-        const response=await this.trader.placeGtdOrder(
-          tracked.tokenId,'BUY',tracked.price,tracked.shares,expiration
+        const response=await this.trader.placeLimitOrder(
+          tracked.tokenId,'BUY',tracked.price,tracked.shares
         );
         tracked.orderId=String(response.id);
         tracked.status=response.status||'LIVE';
@@ -209,8 +205,6 @@ class LiveOrderMirror{
     );
     if(available<=SHARE_EPSILON||this.clock()<entryOrder.nextSellRetryAt)return;
 
-    const expiration=Math.floor(entryOrder.windowEnd/1000)
-      +cfg.POLYMARKET_GTD_EXPIRATION_BUFFER_SECONDS;
     const sellOrder={
       orderId:null,kind:'TAKE_PROFIT',orderSide:'SELL',asset:'BTC',
       timeframe:entryOrder.timeframe,slug:entryOrder.slug,
@@ -218,12 +212,12 @@ class LiveOrderMirror{
       price:entryOrder.takeProfitPrice,shares:available,
       parentOrderId:entryOrder.orderId,filledShares:0,
       windowStart:entryOrder.windowStart,windowEnd:entryOrder.windowEnd,
-      expiration,status:'SUBMITTING',createdAt:this.clock(),error:null,
+      status:'SUBMITTING',createdAt:this.clock(),error:null,
     };
 
     try{
-      const response=await this.trader.placeGtdOrder(
-        sellOrder.tokenId,'SELL',sellOrder.price,sellOrder.shares,expiration
+      const response=await this.trader.placeLimitOrder(
+        sellOrder.tokenId,'SELL',sellOrder.price,sellOrder.shares
       );
       sellOrder.orderId=String(response.id);
       sellOrder.status=response.status||'LIVE';

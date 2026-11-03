@@ -15,25 +15,25 @@ class PolymarketTrader{
     this.depositWallet=this.client.account?.wallet||null;
     if(!this.depositWallet)throw new Error('Polymarket SDK did not resolve the account wallet');
   }
-  async placeGtdOrder(tokenId,side,price,size,expiration){
+  async placeLimitOrder(tokenId,side,price,size){
     if(!this.client)throw new Error('Polymarket authentication is not ready');
     let response;
     try{
       response=await this.client.placeLimitOrder({
         assetId:String(tokenId),side:side==='BUY'?this.sdk.OrderSide.BUY:this.sdk.OrderSide.SELL,
-        price:String(price),size:String(size),expiration:Number(expiration),postOnly:false
+        price:String(price),size:String(size),postOnly:false
       });
     }catch(error){
       error.submissionUncertain=true;
       throw error;
     }
     if(!response?.ok){
-      const error=new Error(response?.message||response?.error||'GTD order rejected');
+      const error=new Error(response?.message||response?.error||'Limit order rejected');
       error.submissionUncertain=false;
       throw error;
     }
     if(!response.orderId){
-      const error=new Error('GTD response did not include an order ID');
+      const error=new Error('Limit order response did not include an order ID');
       error.submissionUncertain=true;
       throw error;
     }
