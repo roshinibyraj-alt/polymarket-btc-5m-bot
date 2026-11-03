@@ -78,6 +78,85 @@ test('creates TP limit sells only for confirmed fills without duplicate quantiti
   assert.equal(buy.exitSubmittedShares,3);
 });
 
+test('flow test submits exactly one five-share limit buy at $0.70',async()=>{
+  const calls=[];
+  const now=1_000_000;
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>now});
+  mirror.setTrader({placeLimitOrder:async(...args)=>{calls.push(args);return{id:'test-buy',status:'LIVE'}}});
+  const testOrder={
+    asset:'BTC',timeframe:'5m',slug:'btc-updown-5m-1000',
+    side:'DOWN',tokenId:'token-down',windowStart:1_000_000,windowEnd:1_300_000,
+    bestAsk:.70,askSize:5,updatedAt:now,stale:false,
+  };
+  const result=await mirror.placeFlowTestOrder(testOrder);
+  assert.equal(result.status,'submitted');
+  assert.deepEqual(calls,[['token-down','BUY',.70,5]]);
+  assert.equal(result.order.kind,'FLOW_TEST_ENTRY');
+  assert.equal(result.order.takeProfitPrice,.75);
+  assert.equal((await mirror.placeFlowTestOrder(testOrder)).status,'already_attempted');
+  assert.equal(calls.length,1);
+});
+
+test('flow test waits for a fresh ask at or below $0.70 with five shares visible',async()=>{
+  const calls=[];
+  const now=1_000_000;
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>now});
+  mirror.setTrader({placeLimitOrder:async(...args)=>{calls.push(args);return{id:'test-buy'}}});
+  const testOrder={
+    asset:'BTC',timeframe:'5m',slug:'btc-updown-5m-1000',
+    side:'UP',tokenId:'token-up',windowStart:1_000_000,windowEnd:1_300_000,
+    bestAsk:.70,askSize:4,updatedAt:now,stale:false,
+  };
+  assert.equal((await mirror.placeFlowTestOrder(testOrder)).status,'waiting_for_fillable_quote');
+  assert.equal(calls.length,0);
+  assert.equal((await mirror.placeFlowTestOrder({...testOrder,askSize:5,updatedAt:now-6000})).status,'waiting_for_fillable_quote');
+  assert.equal(calls.length,0);
+});
+
+test('flow test submits the $0.75 limit sell only after a confirmed fill',async()=>{
+  const calls=[];
+  let matched='0';
+  const now=1_000_000;
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>now});
+  mirror.setTrader({
+    placeLimitOrder:async(...args)=>{calls.push(args);return{id:`test-order-${calls.length}`,status:'LIVE'}},
+    fetchOrder:async id=>({id,status:'LIVE',sizeMatched:matched}),
+  });
+  await mirror.placeFlowTestOrder({
+    asset:'BTC',timeframe:'5m',slug:'btc-updown-5m-1000',
+    side:'UP',tokenId:'token-up',windowStart:1_000_000,windowEnd:1_300_000,
+    bestAsk:.70,askSize:5,updatedAt:now,stale:false,
+  });
+  await mirror.reconcileTrackedOrders();
+  assert.deepEqual(calls,[['token-up','BUY',.70,5]]);
+
+  matched='5';
+  await mirror.reconcileTrackedOrders();
+  assert.deepEqual(calls,[
+    ['token-up','BUY',.70,5],
+    ['token-up','SELL',.75,5],
+  ]);
+});
+
+test('cancels an unfilled test entry at the five-minute window end',async()=>{
+  let now=1_000_000;
+  const cancelled=[];
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>now});
+  mirror.setTrader({
+    placeLimitOrder:async()=>({id:'test-buy',status:'LIVE'}),
+    fetchOrder:async id=>({id,status:'LIVE',sizeMatched:'0'}),
+    cancelOrder:async id=>{cancelled.push(id)},
+  });
+  await mirror.placeFlowTestOrder({
+    asset:'BTC',timeframe:'5m',slug:'btc-updown-5m-1000',
+    side:'UP',tokenId:'token-up',windowStart:1_000_000,windowEnd:1_300_000,
+    bestAsk:.70,askSize:5,updatedAt:now,stale:false,
+  });
+  now=1_300_000;
+  await mirror.reconcileTrackedOrders();
+  assert.deepEqual(cancelled,['test-buy']);
+});
+
 test('does not place a TP sell before Polymarket confirms a fill',async()=>{
   const calls=[];
   const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>1_000_000});

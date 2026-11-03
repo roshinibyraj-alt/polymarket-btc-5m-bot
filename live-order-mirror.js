@@ -31,6 +31,7 @@ class LiveOrderMirror{
     this.refreshing=false;
     this.polling=false;
     this.halted=false;
+    this.flowTestAttempted=false;
     this.readyPromise=Promise.resolve();
     this.tradingEnabled=tradingEnabled;
   }
@@ -131,6 +132,68 @@ class LiveOrderMirror{
     return{status:'submitted',orders:results};
   }
 
+  async placeFlowTestOrder(entry){
+    await this.readyPromise;
+    if(!this.tradingEnabled)return{status:'paused'};
+    if(this.halted)return{status:'halted',error:this.error};
+    if(!this.trader||this.status!=='ready')return{status:this.status};
+    if(this.flowTestAttempted)return{status:'already_attempted'};
+
+    const slugMatch=String(entry?.slug||'').match(/^btc-updown-5m-(\d+)$/);
+    const windowStart=Number(entry?.windowStart),windowEnd=Number(entry?.windowEnd);
+    if(entry?.asset!=='BTC'||entry?.timeframe!=='5m'||!slugMatch
+      ||!['UP','DOWN'].includes(entry?.side)||!entry?.tokenId
+      ||!Number.isFinite(windowStart)||!Number.isFinite(windowEnd)
+      ||windowEnd<=windowStart){
+      return{status:'skipped_invalid_signal'};
+    }
+
+    const now=this.clock();
+    if(windowStart<this.startedAt)return{status:'skipped_restart_window'};
+    if(now>=windowEnd)return{status:'skipped_window_ended'};
+
+    const ask=Number(entry?.bestAsk),askSize=Number(entry?.askSize);
+    const updatedAt=Number(entry?.updatedAt);
+    if(entry?.stale===true||!Number.isFinite(updatedAt)||updatedAt>now
+      ||now-updatedAt>5000||!Number.isFinite(ask)||ask<=0
+      ||ask>cfg.LIVE_FLOW_TEST_BUY_PRICE
+      ||!Number.isFinite(askSize)||askSize<cfg.LIVE_FLOW_TEST_SHARES){
+      return{status:'waiting_for_fillable_quote'};
+    }
+
+    this.flowTestAttempted=true;
+    const tracked={
+      orderId:null,kind:'FLOW_TEST_ENTRY',orderSide:'BUY',asset:'BTC',
+      timeframe:'5m',slug:entry.slug,side:entry.side,
+      tokenId:String(entry.tokenId),price:cfg.LIVE_FLOW_TEST_BUY_PRICE,
+      shares:cfg.LIVE_FLOW_TEST_SHARES,
+      takeProfitPrice:cfg.LIVE_FLOW_TEST_TAKE_PROFIT_PRICE,
+      filledShares:0,exitSubmittedShares:0,windowStart,windowEnd,
+      status:'SUBMITTING',createdAt:now,nextSellRetryAt:0,
+      sellRetryAttempts:0,error:null,testOnly:true,
+    };
+    this.rememberOrder(tracked);
+
+    try{
+      const response=await this.trader.placeLimitOrder(
+        tracked.tokenId,'BUY',tracked.price,tracked.shares
+      );
+      tracked.orderId=String(response.id);
+      tracked.status=response.status||'LIVE';
+      this.orderStates.set(tracked.orderId,tracked);
+      return{status:'submitted',order:tracked};
+    }catch(error){
+      tracked.status=error.submissionUncertain?'SUBMISSION_UNCERTAIN':'REJECTED';
+      tracked.error=error.message;
+      if(error.submissionUncertain){
+        this.halted=true;
+        this.error=`Test-order submission could not be confirmed: ${error.message}`;
+        this.status='error';
+      }
+      return{status:tracked.status,order:tracked};
+    }
+  }
+
   startBalanceRefresh(){
     if(this.balanceTimer)clearInterval(this.balanceTimer);
     if(this.orderTimer)clearInterval(this.orderTimer);
@@ -167,7 +230,9 @@ class LiveOrderMirror{
     if(this.polling||!this.trader||!this.tradingEnabled)return;
     this.polling=true;
     try{
-      const tracked=[...this.orderStates.values()].filter(order=>order.kind==='ENTRY');
+      const tracked=[...this.orderStates.values()].filter(
+        order=>order.kind==='ENTRY'||order.kind==='FLOW_TEST_ENTRY'
+      );
       await Promise.all(tracked.map(order=>this.refreshTrackedOrder(order)));
     }finally{
       this.polling=false;
@@ -180,7 +245,7 @@ class LiveOrderMirror{
       tracked.status=String(latest.status||tracked.status);
       tracked.updatedAt=this.clock();
 
-      if(tracked.kind==='ENTRY'){
+      if(tracked.kind==='ENTRY'||tracked.kind==='FLOW_TEST_ENTRY'){
         const filled=Math.min(tracked.shares,matchedShares(latest));
         tracked.filledShares=Math.max(tracked.filledShares,filled);
         if(this.clock()<tracked.windowEnd){
