@@ -149,7 +149,7 @@ test('terminal matched entries retry a take-profit after the exchange releases s
   assert.equal(calls.filter(call => call.side === 'SELL').length, 0);
   assert.ok(entry.retryAt > bot.clock());
 
-  entry.retryAt = 0;
+  entry.retryAt = bot.clock() - 1;
   await bot.reconcileOrders();
   const sells = calls.filter(call => call.side === 'SELL');
   assert.equal(sells.length, 1);
@@ -157,6 +157,35 @@ test('terminal matched entries retry a take-profit after the exchange releases s
   assert.equal(sells[0].shares, 10);
   assert.equal(entry.exits.length, 1);
   assert.equal(entry.exitBlockedReason, null);
+});
+
+test('resolved-market orders are terminal and pending sell retries are not repeated', async () => {
+  const { bot, trader, calls } = setup();
+  const slug = 'btc-updown-5m-0';
+  const entry = {
+    id: 'matched-entry', kind: 'ENTRY', side: 'BUY', outcome: 'UP',
+    tokenId: 'token-up', price: 0.25, shares: 10, matchedShares: 10,
+    takeProfitPrice: 0.75, slug, windowEnd: 300_000, status: 'MATCHED',
+    retryAt: bot.clock() - 1_000, exitSubmittingShares: 0, exits: [],
+  };
+  const resolvedExit = {
+    id: 'resolved-exit', kind: 'TAKE_PROFIT', side: 'SELL', outcome: 'UP',
+    tokenId: 'token-up', price: 0.85, shares: 10, matchedShares: 0,
+    slug, status: 'CANCELED MARKET RESOLVED',
+  };
+  bot.ordersById.set(entry.id, entry);
+  bot.ordersById.set(resolvedExit.id, resolvedExit);
+  const polled = [];
+  trader.fetchOrder = async id => {
+    polled.push(id);
+    throw new Error('invalid token id');
+  };
+
+  await bot.reconcileOrders();
+
+  assert.deepEqual(polled, []);
+  assert.deepEqual(calls, []);
+  assert.equal(entry.exits.length, 0);
 });
 
 test('an eligible signal waits for account readiness and submits when still eligible', async () => {
