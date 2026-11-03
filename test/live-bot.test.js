@@ -88,6 +88,25 @@ function fillableMarket(bot) {
   return state;
 }
 
+function armFlowTest(bot, armedAt = 0) {
+  bot.flowTestEnabled = true;
+  bot.flowTestState = {
+    ...bot.flowTestState,
+    status: 'armed',
+    armedAt,
+    windowStart: null,
+    windowEnd: null,
+    slug: null,
+    side: null,
+    orderClientKey: null,
+    orderId: null,
+    takeProfitOrderId: null,
+    result: null,
+    error: null,
+    completedAt: null,
+  };
+}
+
 test('one qualifying outcome submits exactly four two-sided limit buys once', async () => {
   const { bot, calls } = setup();
   const state = fillableMarket(bot);
@@ -421,4 +440,69 @@ test('dashboard snapshot identifies the live strategy and separate 5m/15m window
   assert.ok(state.markets['5m']);
   assert.ok(state.markets['15m']);
   assert.equal(state.strategy.orderPollMs, 500);
+});
+
+test('one-shot smoke test submits one five-share buy and pauses strategy entries', async () => {
+  const { bot, calls } = setup();
+  armFlowTest(bot);
+  const state = fillableMarket(bot);
+
+  await bot.scanTimeframe('5m', 250_000);
+  await bot.scanTimeframe('15m', 250_000);
+
+  assert.deepEqual(calls.map(({ side, price, shares }) => [side, price, shares]), [
+    ['BUY', 0.70, 5],
+  ]);
+  assert.equal(bot.flowTestState.status, 'awaiting_fill');
+  assert.equal(bot.flowTestState.side, 'UP');
+  assert.equal(bot.flowTestPausesStrategy(), true);
+  assert.equal(state.triggeredAt, 250_000);
+  assert.equal(bot.snapshot().flowTest.maxBuyNotional, 3.5);
+});
+
+test('smoke test submits its take-profit only after Polymarket confirms the buy fill', async () => {
+  const { bot, calls, exchangeOrders } = setup();
+  armFlowTest(bot);
+  fillableMarket(bot);
+  await bot.scanTimeframe('5m', 250_000);
+
+  const buy = [...bot.ordersById.values()].find(order => order.testOnly);
+  exchangeOrders.get(buy.id).status = 'MATCHED';
+  await bot.reconcileOrders();
+
+  const sells = calls.filter(call => call.side === 'SELL');
+  assert.deepEqual(sells.map(({ price, shares }) => [price, shares]), [[0.75, 5]]);
+  assert.equal(bot.flowTestState.status, 'complete');
+  assert.equal(bot.flowTestState.result, 'take_profit_sell_submitted');
+  assert.ok(bot.flowTestState.takeProfitOrderId);
+  assert.equal(bot.flowTestPausesStrategy(), false);
+});
+
+test('smoke-test order is not submitted again after restart', async () => {
+  let ledger = null;
+  const store = {
+    durable: true,
+    load: async () => ledger,
+    save: async document => { ledger = JSON.parse(JSON.stringify(document)); },
+  };
+  const first = setup();
+  armFlowTest(first.bot);
+  first.bot.stateStore = store;
+  first.bot.requirePersistentState = true;
+  fillableMarket(first.bot);
+  await first.bot.scanTimeframe('5m', 250_000);
+  assert.equal(ledger.flowTest.status, 'awaiting_fill');
+  assert.equal(first.calls.length, 1);
+
+  const second = setup({ now: 251_000 });
+  second.bot.startedAt = 251_000;
+  second.bot.flowTestEnabled = true;
+  second.bot.stateStore = store;
+  second.bot.requirePersistentState = true;
+  await second.bot.bootstrapTrading();
+  await second.bot.scanTimeframe('5m', 251_000);
+
+  assert.equal(second.calls.length, 0);
+  assert.equal(second.bot.flowTestState.status, 'awaiting_fill');
+  assert.equal(second.bot.flowTestPausesStrategy(), true);
 });

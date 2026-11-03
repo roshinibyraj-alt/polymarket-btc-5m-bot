@@ -53,6 +53,11 @@
     <div class="stat"><div class="label">Equity</div><div class="value" id="equity">—</div><span class="note" id="snapshotTime">Not yet synchronized</span></div>
   </section>
 
+  <section class="panel" id="flowTestPanel" hidden>
+    <div class="panel-head"><h2>Live order-flow smoke test</h2><span class="pill wait" id="flowTestStatus">Armed</span></div>
+    <div class="hint" id="flowTestNote">Waiting for test status…</div>
+  </section>
+
   <section class="panel">
     <div class="panel-head"><h2>Current BTC windows</h2><span class="hint" id="quoteAge">Quotes refresh continuously</span></div>
     <div class="markets" id="markets"><div class="empty">Waiting for live BTC market data…</div></div>
@@ -114,7 +119,7 @@
       const outcome = o.outcome || '—';
       const tp = o.kind === 'ENTRY' ? price(o.takeProfitPrice) : '—';
       const status = String(o.status || 'unknown');
-      return `<tr><td>${esc(o.timeframe||'—')}</td><td>${esc(o.kind||'—')}</td><td class="${outcome==='UP'?'up':'down'}">${esc(outcome)}</td><td>${price(o.price)}</td><td>${Number(o.shares||0).toFixed(2)}</td><td>${Number(o.matchedShares||0).toFixed(2)}</td><td>${tp}</td><td><span class="pill ${statusClass(status)==='good'?'live':statusClass(status)==='bad'?'fail':'wait'}">${esc(status)}</span></td><td>${esc(o.error||o.exitBlockedReason||'—')}</td></tr>`;
+      return `<tr><td>${esc(o.timeframe||'—')}</td><td>${esc(o.kind||'—')}${o.testOnly?' · SMOKE TEST':''}</td><td class="${outcome==='UP'?'up':'down'}">${esc(outcome)}</td><td>${price(o.price)}</td><td>${Number(o.shares||0).toFixed(2)}</td><td>${Number(o.matchedShares||0).toFixed(2)}</td><td>${tp}</td><td><span class="pill ${statusClass(status)==='good'?'live':statusClass(status)==='bad'?'fail':'wait'}">${esc(status)}</span></td><td>${esc(o.error||o.exitBlockedReason||'—')}</td></tr>`;
     }).join('');
     return `<table><thead><tr><th>Window</th><th>Order</th><th>Outcome</th><th>Limit</th><th>Shares</th><th>Matched</th><th>TP</th><th>Status</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
@@ -128,6 +133,7 @@
       if (!response.ok) throw new Error(`Dashboard API returned ${response.status}`);
       const state = await response.json();
       const account = state.account || {};
+      const flowTest = state.flowTest || {};
       const badge = document.querySelector('#statusBadge');
       const good = state.status === 'ready';
       badge.className = `badge ${good?'good':state.status==='live_disabled'?'':'bad'}`;
@@ -144,6 +150,18 @@
       document.querySelector('#collateral').textContent = money(account.collateral);
       document.querySelector('#equity').textContent = money(account.equity);
       document.querySelector('#snapshotTime').textContent = account.asOf ? `Snapshot ${new Date(account.asOf).toLocaleTimeString()}` : 'Not yet synchronized';
+      const flowPanel = document.querySelector('#flowTestPanel');
+      flowPanel.hidden = !flowTest.enabled && flowTest.status === 'disabled';
+      const flowStatus = flowTest.enabled ? flowTest.status : (flowTest.status === 'complete' ? 'complete' : 'disabled');
+      const flowPill = document.querySelector('#flowTestStatus');
+      flowPill.textContent = flowStatus.replaceAll('_',' ');
+      flowPill.className = `pill ${flowStatus === 'complete' ? 'live' : flowStatus.includes('error') || flowStatus.includes('reject') || flowStatus.includes('uncertain') || flowStatus.includes('partial') ? 'fail' : 'wait'}`;
+      const flowWindow = flowTest.slug ? ` · ${flowTest.slug}${flowTest.side ? ` · ${flowTest.side}` : ''}` : '';
+      const flowResult = flowTest.result ? ` · Result: ${flowTest.result.replaceAll('_',' ')}` : '';
+      const flowError = flowTest.error ? ` · ${flowTest.error}` : '';
+      document.querySelector('#flowTestNote').textContent = flowTest.enabled
+        ? `One test BUY: ${Number(flowTest.shares||5)} shares at ${price(flowTest.buyLimitPrice||0.70)} (max ${money(flowTest.maxBuyNotional||3.50)}), then a confirmed-fill limit SELL at ${price(flowTest.takeProfitPrice||0.75)}. ${flowTest.pausesStrategy?'Normal strategy entries are paused during the test.':'The test is finished; normal strategy entries are active.'}${flowWindow}${flowResult}${flowError}`
+        : `No new smoke test is armed.${flowWindow}${flowResult}${flowError}`;
       document.querySelector('#markets').innerHTML = ['5m','15m'].map(tf=>renderMarket(tf,state.markets?.[tf]||{})).join('');
       document.querySelector('#orders').innerHTML = renderOrders(state.orders||[]);
       document.querySelector('#orderCount').textContent = `${(state.orders||[]).length} tracked orders`;

@@ -16,6 +16,9 @@ const MIN_SELL_SHARES = Number(cfg.LIVE_MIN_SELL_SHARES || 5);
 const SHARES_PER_RUNG = Number(cfg.LIVE_SHARES_PER_RUNG || 10);
 const ORDER_POLL_MS = Number(cfg.LIVE_ORDER_POLL_MS || 500);
 const ACCOUNT_REFRESH_MS = Number(cfg.LIVE_BALANCE_REFRESH_MS || 15_000);
+const FLOW_TEST_BUY_PRICE = Number(cfg.LIVE_FLOW_TEST_BUY_PRICE || 0.70);
+const FLOW_TEST_TAKE_PROFIT_PRICE = Number(cfg.LIVE_FLOW_TEST_TAKE_PROFIT_PRICE || 0.75);
+const FLOW_TEST_SHARES = Number(cfg.LIVE_FLOW_TEST_SHARES || MIN_SELL_SHARES);
 
 function numeric(value, fallback = 0) {
   const n = Number(value);
@@ -168,6 +171,20 @@ class LiveBot {
     this.markets = Object.fromEntries(TIMEFRAMES.map(timeframe => [timeframe, this.newMarketState(timeframe)]));
     this.ordersById = new Map();
     this.entryKeys = new Set();
+    this.flowTestState = {
+      status: this.flowTestEnabled ? 'armed' : 'disabled',
+      armedAt: null,
+      windowStart: null,
+      windowEnd: null,
+      slug: null,
+      side: null,
+      orderClientKey: null,
+      orderId: null,
+      takeProfitOrderId: null,
+      result: null,
+      error: null,
+      completedAt: null,
+    };
     this.account = {
       status: this.tradingEnabled ? 'reconciling' : 'live_trading_disabled',
       accountReady: false,
@@ -193,6 +210,25 @@ class LiveBot {
 
   async restoreState(document) {
     this.entryKeys = new Set(document.entryKeys || []);
+    const savedFlowTest = document.flowTest;
+    if (savedFlowTest && typeof savedFlowTest === 'object') {
+      this.flowTestState = { ...this.flowTestState, ...savedFlowTest };
+    }
+    if (this.flowTestEnabled
+      && (!savedFlowTest || ['disabled', 'not_armed'].includes(this.flowTestState.status))) {
+      this.flowTestState = {
+        ...this.flowTestState,
+        status: 'armed',
+        armedAt: this.startedAt,
+        result: null,
+        error: null,
+        completedAt: null,
+      };
+    } else if (!this.flowTestEnabled
+      && !['disabled', 'complete'].includes(this.flowTestState.status)) {
+      this.flowTestState.status = 'disabled';
+      this.flowTestState.result = 'disabled_by_configuration';
+    }
     for (const timeframe of TIMEFRAMES) {
       const saved = document.markets?.[timeframe];
       if (!saved || saved.windowStart === null || saved.windowStart === undefined
@@ -258,6 +294,10 @@ class LiveBot {
       updatedAt: this.clock(),
       entryKeys: [...this.entryKeys],
       orders,
+      flowTest: {
+        ...this.flowTestState,
+        enabled: this.flowTestEnabled,
+      },
       markets: Object.fromEntries(TIMEFRAMES.map(timeframe => {
         const state = this.markets[timeframe];
         return [timeframe, {
@@ -272,6 +312,161 @@ class LiveBot {
         }];
       })),
     });
+  }
+
+  flowTestPausesStrategy() {
+    return this.flowTestEnabled
+      && !['disabled', 'complete'].includes(this.flowTestState.status);
+  }
+
+  async completeFlowTest(result, error = null, order = null, exit = null) {
+    if (!this.flowTestEnabled || this.flowTestState.status === 'complete') return;
+    this.flowTestState.status = 'complete';
+    this.flowTestState.result = result;
+    this.flowTestState.error = error ? String(error) : null;
+    this.flowTestState.completedAt = this.clock();
+    if (order?.id) this.flowTestState.orderId = String(order.id);
+    if (exit?.id) this.flowTestState.takeProfitOrderId = String(exit.id);
+    try {
+      await this.persistState();
+    } catch (persistError) {
+      this.halted = true;
+      this.account.accountReady = false;
+      this.account.status = 'state_store_error';
+      this.account.error = `Could not persist smoke-test completion: ${persistError.message || persistError}`;
+    }
+    this.log('TEST', 'One-shot live order-flow test finished', {
+      result,
+      orderId: this.flowTestState.orderId,
+      takeProfitOrderId: this.flowTestState.takeProfitOrderId,
+      error: this.flowTestState.error,
+    });
+  }
+
+  async maybeRunFlowTest(state, now) {
+    if (!this.flowTestEnabled || state.timeframe !== '5m'
+      || !this.flowTestPausesStrategy() || this.halted
+      || !this.account.accountReady || !this.trader) return;
+
+    const flowTest = this.flowTestState;
+    if (!['armed', 'waiting_for_next_window', 'waiting_for_quote'].includes(flowTest.status)) return;
+    if (!Number.isFinite(Number(flowTest.armedAt))) flowTest.armedAt = this.startedAt;
+    if (state.windowStart < flowTest.armedAt) {
+      flowTest.status = 'waiting_for_next_window';
+      return;
+    }
+
+    if (flowTest.windowStart === null || flowTest.windowStart === undefined) {
+      flowTest.windowStart = state.windowStart;
+      flowTest.windowEnd = state.windowEnd;
+      flowTest.slug = state.slug;
+      flowTest.status = 'waiting_for_quote';
+      try {
+        await this.persistState();
+      } catch (error) {
+        this.halted = true;
+        this.account.accountReady = false;
+        this.account.status = 'state_store_error';
+        this.account.error = `Could not persist the smoke-test window: ${error.message || error}`;
+        flowTest.status = 'state_store_error';
+        flowTest.error = this.account.error;
+        return;
+      }
+    } else if (Number(flowTest.windowStart) !== Number(state.windowStart)) {
+      await this.completeFlowTest('window_ended_without_fillable_quote');
+      return;
+    }
+
+    if (now >= Number(flowTest.windowEnd)) {
+      await this.completeFlowTest('window_ended_without_fillable_quote');
+      return;
+    }
+
+    for (const outcome of ['UP', 'DOWN']) {
+      const quote = state.quotes[outcome];
+      const ask = Number(quote?.bestAsk);
+      const askSize = Number(quote?.askSize);
+      const updatedAt = Number(quote?.updatedAt);
+      const fresh = quote?.status === 'LIVE' && quote?.stale !== true
+        && Number.isFinite(updatedAt) && updatedAt <= now && now - updatedAt <= 5_000;
+      if (!fresh || !Number.isFinite(ask) || ask <= 0 || ask > FLOW_TEST_BUY_PRICE
+        || !Number.isFinite(askSize) || askSize < FLOW_TEST_SHARES) continue;
+
+      const tokenId = state.market?.tokens?.[outcome];
+      if (!tokenId) continue;
+      const clientKey = `${state.slug}:FLOW_TEST:${outcome}`;
+      const order = {
+        id: null,
+        clientKey,
+        kind: 'ENTRY',
+        side: 'BUY',
+        outcome,
+        tokenId: String(tokenId),
+        price: FLOW_TEST_BUY_PRICE,
+        shares: FLOW_TEST_SHARES,
+        matchedShares: 0,
+        takeProfitPrice: FLOW_TEST_TAKE_PROFIT_PRICE,
+        slug: state.slug,
+        timeframe: '5m',
+        windowStart: state.windowStart,
+        windowEnd: state.windowEnd,
+        status: 'SUBMITTING',
+        recovered: false,
+        testOnly: true,
+        exits: [],
+        exitSubmittingShares: 0,
+        retryAt: 0,
+        error: null,
+        createdAt: now,
+      };
+
+      flowTest.status = 'submitting';
+      flowTest.side = outcome;
+      flowTest.orderClientKey = clientKey;
+      flowTest.orderId = null;
+      flowTest.error = null;
+      state.triggeredAt = now;
+      state.orderIds.push(clientKey);
+      state.signal = {
+        eligible: false,
+        status: 'flow_test_submitting',
+        reason: `Submitting one ${FLOW_TEST_SHARES}-share diagnostic BUY at $${FLOW_TEST_BUY_PRICE.toFixed(2)}`,
+      };
+      this.ordersById.set(clientKey, order);
+      try {
+        await this.persistState();
+      } catch (error) {
+        this.halted = true;
+        this.account.accountReady = false;
+        this.account.status = 'state_store_error';
+        this.account.error = `Could not persist the smoke-test order before submission: ${error.message || error}`;
+        flowTest.status = 'state_store_error';
+        flowTest.error = this.account.error;
+        return;
+      }
+
+      await this.submitEntry(order);
+      flowTest.orderId = order.id || null;
+      if (order.status === 'REJECTED') {
+        await this.completeFlowTest('entry_rejected', order.error, order);
+      } else if (order.status === 'SUBMISSION_UNCERTAIN') {
+        flowTest.status = 'submission_uncertain';
+        flowTest.error = order.error || 'The exchange did not confirm whether the test BUY was accepted';
+        await this.persistState();
+      } else {
+        flowTest.status = 'awaiting_fill';
+        await this.persistState();
+      }
+      this.log('TEST', 'Submitted one-shot live smoke-test BUY', {
+        slug: order.slug,
+        outcome,
+        limitPrice: order.price,
+        shares: order.shares,
+        maxNotional: Number((order.price * order.shares).toFixed(2)),
+        orderId: order.id,
+      });
+      return;
+    }
   }
 
   newMarketState(timeframe) {
@@ -344,13 +539,6 @@ class LiveBot {
       this.bootstrapping = false;
       return;
     }
-    if (this.flowTestEnabled) {
-      this.account.status = 'paused_flow_test_mode';
-      this.account.error = 'The legacy flow-test mode is not used by this strategy; live entries are paused';
-      this.log('WARNING', this.account.error);
-      this.bootstrapping = false;
-      return;
-    }
     try {
       if (this.requirePersistentState && this.stateStore?.durable !== true) {
         throw new Error('Persistent live-order storage is required before real trading can start');
@@ -389,7 +577,7 @@ class LiveBot {
   }
 
   scheduleAccountRefresh(delayMs = this.accountRefreshMs) {
-    if (!this.running || !this.tradingEnabled || this.flowTestEnabled) return;
+    if (!this.running || !this.tradingEnabled) return;
     if (this.accountTimer) this.clearTimeout(this.accountTimer);
     this.accountTimer = this.setTimeout(() => {
       this.accountTimer = null;
@@ -442,7 +630,7 @@ class LiveBot {
   }
 
   async refreshAccountSnapshot() {
-    if (!this.running || !this.tradingEnabled || this.flowTestEnabled || !this.authenticated) return;
+    if (!this.running || !this.tradingEnabled || !this.authenticated) return;
     if (this.accountScanInFlight) return;
     this.accountScanInFlight = true;
     try {
@@ -602,8 +790,25 @@ class LiveBot {
       quotes: current.quotes,
       startedAt: current.pendingTrigger ? null : this.startedAt,
     });
+    if (this.flowTestPausesStrategy()) {
+      if (timeframe === '5m') await this.maybeRunFlowTest(current, now);
+      if (this.flowTestPausesStrategy()) {
+        const waitingForFill = ['awaiting_fill', 'submitting'].includes(this.flowTestState.status);
+        current.signal = {
+          ...evaluation,
+          eligible: false,
+          status: waitingForFill ? 'flow_test_order_pending' : 'flow_test_paused',
+          reason: this.flowTestState.error
+            || (waitingForFill
+              ? 'Normal entries are paused while the diagnostic BUY and confirmed-fill SELL are checked'
+              : 'Normal entries are paused for the one-shot live order-flow test'),
+        };
+        if (now >= current.windowEnd) await this.cancelWindowEntryOrders(current);
+        return;
+      }
+    }
     if (evaluation.eligible && !current.pendingTrigger && !current.triggeredAt
-      && this.tradingEnabled && !this.flowTestEnabled) {
+      && this.tradingEnabled && !this.flowTestPausesStrategy()) {
       current.pendingTrigger = {
         observedAt: now,
         windowStart: current.windowStart,
@@ -657,8 +862,8 @@ class LiveBot {
       };
       if (!this.tradingEnabled) {
         current.signal = { ...current.signal, status: 'eligible_live_disabled', reason: 'Signal is saved, but live trading is disabled' };
-      } else if (this.flowTestEnabled) {
-        current.signal = { ...current.signal, status: 'eligible_flow_test_disabled', reason: 'Live flow-test mode is not supported by this strategy' };
+      } else if (this.flowTestPausesStrategy()) {
+        current.signal = { ...current.signal, status: 'flow_test_paused', reason: 'Normal entries are paused for the live order-flow test' };
       } else if (!this.account.accountReady || this.halted) {
         current.signal = {
           ...current.signal,
@@ -670,8 +875,8 @@ class LiveBot {
       }
     } else if (evaluation.eligible && !this.tradingEnabled) {
       current.signal = { ...evaluation, status: 'eligible_live_disabled', reason: 'Signal is eligible, but live trading is disabled' };
-    } else if (evaluation.eligible && this.flowTestEnabled) {
-      current.signal = { ...evaluation, status: 'eligible_flow_test_disabled', reason: 'Live flow-test mode is not supported by this strategy' };
+    } else if (evaluation.eligible && this.flowTestPausesStrategy()) {
+      current.signal = { ...evaluation, status: 'flow_test_paused', reason: 'Normal entries are paused for the live order-flow test' };
     } else {
       current.signal = evaluation;
     }
@@ -682,6 +887,7 @@ class LiveBot {
   }
 
   async fireWindowOrders(state, evaluation) {
+    if (this.flowTestPausesStrategy()) return;
     if (state.triggeredAt) return;
     if (!state.pendingTrigger) {
       state.pendingTrigger = {
@@ -890,6 +1096,9 @@ class LiveBot {
         if (order.kind === 'ENTRY' && order.matchedShares > 0) {
           await this.maybeSubmitTakeProfit(order);
         }
+        if (order.testOnly && isTerminalStatus(order.status) && order.matchedShares === 0) {
+          await this.completeFlowTest(`entry_${order.status.toLowerCase().replaceAll(' ', '_')}`, order.error, order);
+        }
         if (order.kind === 'TAKE_PROFIT' && order.matchedShares > previousMatched) {
           this.log('FILL', 'Exchange confirmed a take-profit fill', {
             orderId: order.id,
@@ -1022,6 +1231,9 @@ class LiveBot {
         price: exit.price,
         shares: exit.shares,
       });
+      if (entry.testOnly) {
+        await this.completeFlowTest('take_profit_sell_submitted', null, entry, exit);
+      }
     } catch (error) {
       exit.status = 'REJECTED';
       exit.error = error.message || String(error);
@@ -1029,6 +1241,10 @@ class LiveBot {
         entry.retryAt = this.clock() + Math.max(1_000, retryAfterMs(error));
         this.ordersById.delete(exit.clientKey);
         entry.exits.pop();
+        if (entry.testOnly) {
+          this.flowTestState.status = 'awaiting_sell_retry';
+          this.flowTestState.error = exit.error;
+        }
         this.log('WARNING', 'Exchange has not released the confirmed shares yet; take-profit will retry', {
           entryOrderId: entry.id,
           retryAt: entry.retryAt,
@@ -1038,9 +1254,17 @@ class LiveBot {
         this.halted = true;
         this.account.accountReady = false;
         this.account.error = 'A take-profit order may have reached the exchange; reconciliation is required';
+        if (entry.testOnly) {
+          this.flowTestState.status = 'submission_uncertain';
+          this.flowTestState.error = this.account.error;
+        }
       } else {
         entry.retryAt = 0;
         entry.exitBlockedReason = exit.error;
+        if (entry.testOnly) {
+          this.flowTestState.status = 'sell_rejected';
+          this.flowTestState.error = exit.error;
+        }
         this.log('ERROR', 'Take-profit limit sell was rejected', {
           entryOrderId: entry.id,
           price: exit.price,
@@ -1068,6 +1292,17 @@ class LiveBot {
       order.status = 'CANCELED';
       order.cancelledAt = this.clock();
       await this.persistState();
+      if (order.testOnly && this.flowTestState.status !== 'complete'
+        && this.flowTestState.status === 'awaiting_fill') {
+        if (order.matchedShares > 0) {
+          this.flowTestState.status = 'partial_fill_below_sell_minimum';
+          this.flowTestState.error = order.exitBlockedReason
+            || `Only ${order.matchedShares.toFixed(2)} diagnostic shares matched; the minimum sell is ${MIN_SELL_SHARES}`;
+          await this.persistState();
+        } else {
+          await this.completeFlowTest('entry_canceled_unfilled', null, order);
+        }
+      }
       this.log('ORDER', 'Unfilled entry remainder canceled at window end', {
         orderId: order.id,
         slug: order.slug,
@@ -1120,10 +1355,9 @@ class LiveBot {
       }];
     }));
     const status = !this.tradingEnabled ? 'live_disabled'
-      : this.flowTestEnabled ? 'paused_flow_test_mode'
-        : this.halted ? 'halted_reconciliation_required'
-          : !this.account.accountReady ? (this.account.status || 'reconciling')
-            : 'ready';
+      : this.halted ? 'halted_reconciliation_required'
+        : !this.account.accountReady ? (this.account.status || 'reconciling')
+          : 'ready';
     return {
       ok: status === 'ready' || status === 'live_disabled',
       mode: 'REAL ORDERS',
@@ -1144,6 +1378,16 @@ class LiveBot {
         rearm: 'One entry set per window; no entry replacement',
         orderPollMs: this.orderPollMs,
         quoteMaxAgeMs: 5_000,
+        entriesPausedForSmokeTest: this.flowTestPausesStrategy(),
+      },
+      flowTest: {
+        ...this.flowTestState,
+        enabled: this.flowTestEnabled,
+        pausesStrategy: this.flowTestPausesStrategy(),
+        buyLimitPrice: FLOW_TEST_BUY_PRICE,
+        shares: FLOW_TEST_SHARES,
+        maxBuyNotional: Number((FLOW_TEST_BUY_PRICE * FLOW_TEST_SHARES).toFixed(2)),
+        takeProfitPrice: FLOW_TEST_TAKE_PROFIT_PRICE,
       },
       account: {
         status: this.account.status,

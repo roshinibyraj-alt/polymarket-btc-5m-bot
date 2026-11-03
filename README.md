@@ -65,9 +65,15 @@ Real strategy orders require:
 - `PRIVATE_KEY` provided only through the deployment's secret manager
 - `BOT_STATE_DIR` pointing to a persistent mounted directory for the live-order ledger
 - Successful Polymarket authentication and durable live-order storage
-- `LIVE_ORDER_FLOW_TEST=false`
+- `LIVE_ORDER_FLOW_TEST=false` for normal strategy operation; set true only to arm the one-shot smoke test below
 
 If live trading is enabled without `PRIVATE_KEY` or durable state storage, fail safely and do not start real trading. Positions, collateral, activity, and open-order snapshots are informational and do not gate entries. Polymarket validates funds and allowances on each order. Keep the hard stop for failed authentication, durable-ledger failures, or an order submission whose acceptance is uncertain. Do not silently fall back to paper and label it live.
+
+### One-shot real order-flow smoke test
+
+When explicitly enabled, the smoke test pauses normal strategy entries and waits for the next BTC 5-minute window after it was armed. On the first fresh UP or DOWN ask at or below $0.70 with at least five shares offered, it submits one five-share limit BUY at $0.70 (maximum buy notional $3.50 before fees). The order is stored in the same durable ledger as strategy orders. The regular 500 ms order poll waits for Polymarket-confirmed matched shares; only then does the bot submit a five-share limit SELL at $0.75.
+
+The test is one-shot and restart-safe. A confirmed take-profit submission completes the test and resumes normal strategy entries on later eligible windows. If the test window ends without a fillable quote, it completes without an order. A partial fill below the minimum sell size, a rejected take-profit, an uncertain submission, or a ledger failure stays visible and keeps strategy entries paused rather than risking a duplicate or leaving the test position unmanaged. Dashboard/API state identifies the test order and status.
 
 ### Entry order
 
