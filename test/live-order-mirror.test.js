@@ -171,6 +171,51 @@ test('terminal entry orders stop being polled after their final confirmed fill',
   assert.equal(reads,1,'terminal matches should not create ongoing API polling');
 });
 
+test('matched-order fractional dust below the sell minimum does not block later entries',async()=>{
+  let reads=0;
+  const calls=[];
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>1_000_000});
+  mirror.setTrader({
+    placeLimitOrder:async(...args)=>{calls.push(args);return{id:`order-${calls.length}`,status:'LIVE'}},
+    fetchOrder:async()=>{reads++;throw new Error('terminal order returned null')},
+  });
+  await mirror.placeEntryOrders({...entry,orders:[entry.orders[0]]});
+  const matched=mirror.orderStates.get('order-1');
+  matched.status='MATCHED';
+  matched.filledShares=9.991173;
+  matched.exitSubmittedShares=9.99;
+
+  assert.deepEqual(await mirror.reconcileTrackedOrders(),{ok:true});
+  assert.equal(reads,0,'sub-minimum rounded dust must not trigger a terminal-order read');
+  const nextWindow={...entry,slug:'btc-updown-5m-1300',windowStart:1_300_000,
+    cutoffAt:1_600_000};
+  assert.equal((await mirror.placeEntryOrders(nextWindow)).status,'submitted');
+  assert.equal(calls.length,3);
+  assert.equal(mirror.snapshot().error,null);
+});
+
+test('known matched fills retry a sell without refetching a terminal entry',async()=>{
+  let reads=0;
+  const calls=[];
+  const mirror=new LiveOrderMirror({startedAt:900_000,clock:()=>1_000_000});
+  mirror.setTrader({
+    placeLimitOrder:async(...args)=>{calls.push(args);return{id:`order-${calls.length}`,status:'LIVE'}},
+    fetchOrder:async()=>{reads++;throw new Error('terminal order returned null')},
+  });
+  await mirror.placeEntryOrders({...entry,orders:[entry.orders[0]]});
+  const matched=mirror.orderStates.get('order-1');
+  matched.status='MATCHED';
+  matched.filledShares=10;
+
+  assert.deepEqual(await mirror.reconcileTrackedOrders(),{ok:true});
+  assert.equal(reads,0);
+  assert.deepEqual(calls,[
+    ['token-up','BUY',.25,10],
+    ['token-up','SELL',.75,10],
+  ]);
+  assert.equal(matched.exitSubmittedShares,10);
+});
+
 test('retries a definite sell rejection after settlement without halting',async()=>{
   let now=1_000_000;
   let sells=0;

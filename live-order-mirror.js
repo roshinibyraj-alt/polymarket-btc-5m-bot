@@ -4,6 +4,10 @@ const cfg=require('./config');
 const confusionStrategy=require('./market-confusion-strategy');
 
 const ACTIVE_ORDER_STATUSES=new Set(['LIVE','OPEN','ACTIVE','PARTIALLY_FILLED']);
+const TERMINAL_ORDER_STATUSES=new Set([
+  'MATCHED','FILLED','CANCELLED','CANCELED','EXPIRED',
+  'CANCELLED_AT_WINDOW_END','CANCELED_AT_WINDOW_END',
+]);
 const SHARE_EPSILON=0.0001;
 
 function normalizedPrice(value){
@@ -113,6 +117,10 @@ class LiveOrderMirror{
     }
     this.entryDecisions.unshift(decision);
     this.entryDecisions.length=Math.min(50,this.entryDecisions.length);
+    console.log('[live] '+JSON.stringify({event:'LIVE_ENTRY_DECISION',
+      slug:decision.slug,timeframe:decision.timeframe,side:decision.side,
+      status:decision.status,submittedOrders:decision.submittedOrders||0,
+      rejectedOrders:decision.rejectedOrders||0,error:decision.error||null}));
   }
 
   async scanMarketState(snapshot){
@@ -409,11 +417,13 @@ class LiveOrderMirror{
         if(order.kind!=='ENTRY'&&order.kind!=='FLOW_TEST_ENTRY')return false;
         const status=String(order.status).toUpperCase();
         const active=ACTIVE_ORDER_STATUSES.has(status);
-        const hasUnsubmittedFill=order.filledShares
-          -(order.exitSubmittedShares||0)-(order.exitSubmittingShares||0)>SHARE_EPSILON;
+        const availableForExit=Number(Math.max(0,order.filledShares
+          -(order.exitSubmittedShares||0)-(order.exitSubmittingShares||0)).toFixed(2));
+        const hasSellableUnsubmittedFill=availableForExit
+          >=cfg.LIVE_MIN_ORDER_SHARES-SHARE_EPSILON;
         const terminalMinimumBlock=Number.isFinite(order.minSellBlockedAtFilledShares)
-          &&['MATCHED','FILLED','CANCELLED','CANCELED','EXPIRED'].includes(status);
-        return active||(hasUnsubmittedFill&&!terminalMinimumBlock);
+          &&TERMINAL_ORDER_STATUSES.has(status);
+        return active||(hasSellableUnsubmittedFill&&!terminalMinimumBlock);
       });
       const results=await Promise.all(tracked.map(order=>this.refreshTrackedOrder(order)));
       const failed=results.some(ok=>!ok);
@@ -433,6 +443,16 @@ class LiveOrderMirror{
   }
 
   async refreshTrackedOrder(tracked){
+    const currentStatus=String(tracked.status||'').toUpperCase();
+    if(TERMINAL_ORDER_STATUSES.has(currentStatus)){
+      tracked.updatedAt=this.clock();
+      tracked.lastPollError=null;
+      if((tracked.kind==='ENTRY'||tracked.kind==='FLOW_TEST_ENTRY')
+        &&this.clock()<tracked.windowEnd){
+        await this.submitTakeProfitForConfirmedFill(tracked);
+      }
+      return !this.halted;
+    }
     try{
       const latest=await this.trader.fetchOrder(tracked.orderId);
       tracked.status=String(latest.status||tracked.status);
