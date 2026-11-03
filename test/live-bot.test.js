@@ -127,6 +127,38 @@ test('take-profit sells are submitted only after matched entry shares are confir
   ]);
 });
 
+test('terminal matched entries retry a take-profit after the exchange releases shares', async () => {
+  const { bot, trader, calls, exchangeOrders } = setup();
+  const state = fillableMarket(bot);
+  await bot.fireWindowOrders(state, eligible);
+  let rejectFirstSell = true;
+  const placeLimitOrder = trader.placeLimitOrder;
+  trader.placeLimitOrder = async (tokenId, side, price, shares) => {
+    if (side === 'SELL' && rejectFirstSell) {
+      rejectFirstSell = false;
+      const error = new Error('not enough balance / allowance: balance: 0');
+      error.submissionUncertain = false;
+      throw error;
+    }
+    return placeLimitOrder(tokenId, side, price, shares);
+  };
+
+  const entry = [...bot.ordersById.values()].find(order => order.kind === 'ENTRY');
+  exchangeOrders.get(entry.id).status = 'MATCHED';
+  await bot.reconcileOrders();
+  assert.equal(calls.filter(call => call.side === 'SELL').length, 0);
+  assert.ok(entry.retryAt > bot.clock());
+
+  entry.retryAt = 0;
+  await bot.reconcileOrders();
+  const sells = calls.filter(call => call.side === 'SELL');
+  assert.equal(sells.length, 1);
+  assert.equal(sells[0].price, entry.takeProfitPrice);
+  assert.equal(sells[0].shares, 10);
+  assert.equal(entry.exits.length, 1);
+  assert.equal(entry.exitBlockedReason, null);
+});
+
 test('an eligible signal waits for account readiness and submits when still eligible', async () => {
   const { bot, calls } = setup({ accountReady: false });
   await bot.scanTimeframe('5m', 250_000);
