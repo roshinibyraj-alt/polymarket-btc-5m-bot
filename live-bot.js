@@ -685,6 +685,28 @@ class LiveBot {
         evaluation: { ...evaluation },
       };
     }
+    if (Math.max(this.clock(), Number(state.pendingTrigger.observedAt) || 0) >= state.windowEnd) {
+      state.pendingTrigger = null;
+      state.signal = {
+        ...evaluation,
+        status: 'trigger_expired',
+        reason: 'The window ended before the latched signal could be submitted',
+      };
+      try {
+        await this.persistState();
+      } catch (error) {
+        this.halted = true;
+        this.refreshOrderReadiness();
+        this.account.status = 'state_store_error';
+        this.account.error = `Could not persist expired trigger state: ${error.message || error}`;
+        state.signal = { ...evaluation, status: 'state_store_error', reason: this.account.error };
+      }
+      this.log('WARNING', 'Latched trigger expired before orders could be submitted', {
+        slug: state.slug,
+        timeframe: state.timeframe,
+      });
+      return;
+    }
     state.triggeredAt = this.clock();
     state.signal = { ...evaluation, status: 'orders_submitting' };
     this.log('SIGNAL', 'Midpoint-band trigger fired; submitting the four limit buys once', {

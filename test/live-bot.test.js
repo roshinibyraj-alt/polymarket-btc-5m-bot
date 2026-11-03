@@ -229,6 +229,17 @@ test('a qualifying tick stays latched and submits after prices leave the band', 
   assert.equal(calls.filter(call => call.side === 'BUY').length, 4);
 });
 
+test('a latched signal expires rather than submitting after the window ends', async () => {
+  const { bot, calls } = setup({ now: 299_000 });
+  bot.clock = () => 300_000;
+
+  await bot.scanTimeframe('5m', 299_000);
+
+  assert.equal(calls.length, 0);
+  assert.equal(bot.markets['5m'].signal.status, 'trigger_expired');
+  assert.equal(bot.markets['5m'].pendingTrigger, null);
+});
+
 test('a latched trigger survives a process restart until its window closes', async () => {
   let ledger = null;
   const store = {
