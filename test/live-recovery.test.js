@@ -111,7 +111,7 @@ test('incomplete snapshots and stale account data cannot enable entries',async()
   assert.equal(await mirror.refreshAccountSnapshot(),false);
   trader.getEquitySnapshot=async()=>account();
   assert.equal(await mirror.refreshAccountSnapshot(),true);
-  advance(120001);
+  advance(31000);
   assert.equal((await mirror.placeEntryOrders(entry)).status,'error');
   assert.equal(calls.length,0);
   assert.match(mirror.error,/stale/);
@@ -134,7 +134,7 @@ test('timeout reads retry with bounded backoff; a successful refresh returns to 
   t.mock.timers.tick(1999);await turn();assert.equal(attempts,2);
   t.mock.timers.tick(1);await turn();assert.equal(attempts,3);
   assert.equal(mirror.status,'ready');
-  t.mock.timers.tick(59999);await turn();assert.equal(attempts,3);
+  t.mock.timers.tick(14999);await turn();assert.equal(attempts,3);
   t.mock.timers.tick(1);await turn();assert.equal(attempts,4);
   mirror.stop();
   t.mock.timers.tick(30000);await turn();assert.equal(attempts,4);

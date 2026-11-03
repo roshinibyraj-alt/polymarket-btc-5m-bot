@@ -145,6 +145,30 @@ test('positions requests honor Retry-After and withhold calls during cooldown',a
   assert.equal(calls,2);
 });
 
+test('positions requests without Retry-After wait at least one second',async()=>{
+  let now=2_000_000,calls=0,allowSuccess=false;
+  const trader=new PolymarketTrader('test-key',{
+    clock:()=>now,
+    fetcher:async()=>{
+      calls++;
+      if(!allowSuccess)return{ok:false,status:429,headers:{get:()=>null}};
+      return{ok:true,json:async()=>({data:[],pagination:{next_cursor:null}})};
+    },
+  });
+
+  await assert.rejects(()=>trader.getAllPositions('wallet'),
+    error=>error.statusCode===429&&error.retryAfterMs===1000);
+  now+=999;
+  await assert.rejects(()=>trader.getAllPositions('wallet'),
+    error=>error.statusCode===429&&error.retryAfterMs===1);
+  assert.equal(calls,1,'the rate-limit cooldown must withhold another request');
+
+  now+=1;
+  allowSuccess=true;
+  assert.deepEqual(await trader.getAllPositions('wallet'),[]);
+  assert.equal(calls,2);
+});
+
 test('lists all open-order pages and confirms cancellation by order ID',async()=>{
   const {trader,calls}=setup();
   await trader.authenticate();

@@ -82,7 +82,7 @@ function windowCard(tf,s){
 let liveRequestInFlight=false;
 function renderLiveAccount(data){
  const d=data||{},status=document.querySelector('#liveStatus');
-  status.textContent=`Account: ${d.status||'unavailable'} · live entries ${d.tradingEnabled?'enabled':'paused'} · account refresh every 60 seconds · entry fill checks every second${d.error?' · '+d.error:''}`;
+  status.textContent=`Account: ${d.status||'unavailable'} · live entries ${d.tradingEnabled?'enabled':'paused'} · account refresh every 15 seconds · entry fill checks every second${d.error?' · '+d.error:''}`;
  document.querySelector('#liveCollateral').textContent=d.collateral==null?'—':money(d.collateral);
  document.querySelector('#livePositionValue').textContent=d.positionValue==null?'—':money(d.positionValue);
  document.querySelector('#liveEquity').textContent=d.equity==null?'—':money(d.equity);
