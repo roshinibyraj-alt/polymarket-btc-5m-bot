@@ -61,6 +61,7 @@ function setup({ now = 250_000, accountReady = true, fetchStatus = null } = {}) 
   bot.startedAt = 0;
   bot.running = true;
   bot.authenticated = true;
+  bot.stateReady = true;
   bot.account.accountReady = accountReady;
   return { bot, trader, calls, exchangeOrders, marketData };
 }
@@ -329,6 +330,38 @@ test('live trading bootstrap refuses to authenticate without durable order stora
   assert.equal(authenticated, false);
   assert.equal(bot.account.accountReady, false);
   assert.match(bot.account.error, /Persistent live-order storage is required/);
+});
+
+test('startup waits for the durable ledger before market scans can write state', async () => {
+  const { bot, marketData } = setup();
+  let releaseLoad;
+  let lookups = 0;
+  let saves = 0;
+  const loadGate = new Promise(resolve => { releaseLoad = resolve; });
+  const originalLookup = marketData.getBtcMarket;
+  marketData.getBtcMarket = async (...args) => {
+    lookups++;
+    return originalLookup(...args);
+  };
+  bot.running = false;
+  bot.requirePersistentState = true;
+  bot.stateStore = {
+    durable: true,
+    load: () => loadGate,
+    save: async () => { saves++; },
+  };
+  bot.stateReady = false;
+
+  bot.start();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(lookups, 0);
+  assert.equal(saves, 0);
+
+  releaseLoad({ version: 1, entryKeys: [], orders: [], markets: {} });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.ok(saves > 0);
+  assert.ok(lookups > 0);
+  bot.stop();
 });
 
 test('stale account snapshots do not change authenticated CLOB readiness', async () => {

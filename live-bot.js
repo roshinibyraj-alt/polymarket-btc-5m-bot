@@ -156,6 +156,7 @@ class LiveBot {
     this.orderPollMs = orderPollMs;
     this.startedAt = this.clock();
     this.running = false;
+    this.stateReady = !this.tradingEnabled;
     this.authenticated = false;
     this.bootstrapping = false;
     this.marketScanInFlight = false;
@@ -315,9 +316,12 @@ class LiveBot {
     this.startedAt = this.clock();
     this.marketTimer = this.setInterval(() => { void this.scanMarkets(); }, this.marketPollMs);
     this.orderTimer = this.setInterval(() => { void this.reconcileOrders(); }, this.orderPollMs);
-    void this.scanMarkets();
-    if (this.tradingEnabled) void this.bootstrapTrading();
-    else this.log('INFO', 'Live order execution is disabled by configuration');
+    if (this.tradingEnabled) {
+      void this.bootstrapTrading().finally(() => { void this.scanMarkets(); });
+    } else {
+      void this.scanMarkets();
+      this.log('INFO', 'Live order execution is disabled by configuration');
+    }
     return this.snapshot();
   }
 
@@ -332,6 +336,7 @@ class LiveBot {
   async bootstrapTrading() {
     if (this.bootstrapping || !this.tradingEnabled) return;
     this.bootstrapping = true;
+    this.stateReady = false;
     if (!this.trader) {
       this.account.status = 'error';
       this.account.error = 'Live trading is enabled but no exchange client is configured';
@@ -355,6 +360,7 @@ class LiveBot {
         if (saved) await this.restoreState(saved);
         await this.persistState();
       }
+      this.stateReady = true;
       await this.trader.authenticate();
       this.authenticated = true;
       this.refreshOrderReadiness();
@@ -510,7 +516,7 @@ class LiveBot {
   }
 
   async scanMarkets() {
-    if (!this.running || this.marketScanInFlight) return;
+    if (!this.running || this.marketScanInFlight || (this.tradingEnabled && !this.stateReady)) return;
     this.marketScanInFlight = true;
     try {
       const now = this.clock();
@@ -526,6 +532,7 @@ class LiveBot {
   }
 
   async scanTimeframe(timeframe, now) {
+    if (this.tradingEnabled && !this.stateReady) return;
     const state = this.markets[timeframe];
     const windowStart = windowStartFor(now, timeframe);
     if (state.windowStart !== windowStart) {
