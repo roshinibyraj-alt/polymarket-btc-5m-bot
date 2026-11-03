@@ -733,6 +733,11 @@ class LiveBot {
           });
         }
       }
+      for (const order of this.ordersById.values()) {
+        if (order.kind === 'ENTRY' && TERMINAL.has(order.status) && order.matchedShares > 0) {
+          await this.maybeSubmitTakeProfit(order);
+        }
+      }
       this.orderError = failures[0] || null;
       if (changed) {
         try {
@@ -772,6 +777,10 @@ class LiveBot {
     if (this.clock() < entry.retryAt) return;
     const coveredShares = (entry.exits || []).reduce((sum, exit) => sum + exit.shares, 0);
     const available = Math.floor((entry.matchedShares - coveredShares - entry.exitSubmittingShares) * 100) / 100;
+    if (available <= 0) {
+      entry.exitBlockedReason = null;
+      return;
+    }
     if (available < MIN_SELL_SHARES) {
       entry.exitBlockedReason = `Only ${available.toFixed(2)} shares available; minimum sell is ${MIN_SELL_SHARES}`;
       return;
