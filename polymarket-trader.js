@@ -13,11 +13,13 @@ function retryAfterMilliseconds(response,now){
 
 class PolymarketTrader{
   constructor(privateKey,{sdk=null,actions=null,privateKeyAdapter=null,
-    fetcher=globalThis.fetch,clock=()=>Date.now()}={}){
+    fetcher=globalThis.fetch,clock=()=>Date.now(),
+    sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}={}){
     if(!privateKey)throw new Error('PRIVATE_KEY is required when LIVE_TRADING=true');
     this.privateKey=privateKey.startsWith('0x')?privateKey:`0x${privateKey}`;
     this.sdk=sdk;this.actions=actions;this.privateKeyAdapter=privateKeyAdapter;this.fetcher=fetcher;
     this.clock=clock;
+    this.sleep=sleep;
     this.client=null;this.depositWallet=null;this.activityCache=null;this.activityCacheAt=0;
     this.positionsNextAllowedAt=0;this.positionsRequest=null;
   }
@@ -126,6 +128,11 @@ class PolymarketTrader{
     const pageSize=500,maxPages=20,all=[];
     let cursor=null;
     for(let page=0;page<maxPages;page++){
+      if(page>0){
+        const waitMs=Math.max(0,this.positionsNextAllowedAt-Number(this.clock()));
+        if(waitMs>0)await this.sleep(waitMs);
+        this.positionsNextAllowedAt=Number(this.clock())+cfg.LIVE_POSITIONS_MIN_INTERVAL_MS;
+      }
       const url=new URL('https://data-api.polymarket.com/v2/positions');
       url.searchParams.set('user',wallet);
       url.searchParams.set('status','OPEN');

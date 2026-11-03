@@ -119,6 +119,30 @@ test('paginates position results so a recent fill beyond the first 500 is visibl
   assert.ok(calls.some(value=>typeof value==='string'&&value.includes('/v2/positions?')&&value.includes('cursor=next-page')));
 });
 
+test('position pagination spaces each Data API request by at least one second',async()=>{
+  let now=10_000,page=0;
+  const requestTimes=[];
+  const trader=new PolymarketTrader('test-key',{
+    clock:()=>now,
+    sleep:async ms=>{now+=ms;},
+    fetcher:async url=>{
+      requestTimes.push(now);
+      page++;
+      const cursor=new URL(url).searchParams.get('cursor');
+      return{
+        ok:true,
+        json:async()=>({
+          data:[{token_id:`asset-${page}`}],
+          pagination:{next_cursor:cursor?null:'next-page',has_more:!cursor},
+        }),
+      };
+    },
+  });
+  assert.equal((await trader.getAllPositions('wallet')).length,2);
+  assert.equal(requestTimes.length,2);
+  assert.ok(requestTimes[1]-requestTimes[0]>=1_000);
+});
+
 test('positions requests honor Retry-After and withhold calls during cooldown',async()=>{
   let now=1_000_000,calls=0,allowSuccess=false;
   const trader=new PolymarketTrader('test-key',{

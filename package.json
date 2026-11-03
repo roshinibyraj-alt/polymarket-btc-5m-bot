@@ -1,8 +1,8 @@
 {
-  "name": "polymarket-btc-candle-pattern-paper-bot",
+  "name": "polymarket-btc-live-limit-ladder-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Polymarket BTC candle-pattern strategy with isolated 5m live entry mirroring.",
+  "description": "Standalone Polymarket BTC 5m and 15m live limit ladder bot.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
