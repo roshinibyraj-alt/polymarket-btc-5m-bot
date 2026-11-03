@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#08111f">
+  <title>BTC Limit Ladder Bot</title>
+  <style>
+    :root{color-scheme:dark;--bg:#08111f;--panel:#101d30;--panel2:#14243a;--line:#243650;--text:#edf4ff;--muted:#8fa3bd;--cyan:#67d8ff;--green:#4ee19b;--red:#ff778b;--amber:#ffd071}
+    *{box-sizing:border-box}
+    body{margin:0;background:radial-gradient(ellipse at 14% -8%,#1a3657 0,transparent 40%),var(--bg);color:var(--text);font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
+    main{max-width:1240px;margin:auto;padding:24px}
+    header{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:20px}
+    h1{margin:0;font-size:25px;letter-spacing:-.035em}.subtitle{margin-top:5px;color:var(--muted)}
+    .badge{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:999px;padding:8px 12px;color:var(--amber);font-size:11px;font-weight:850;letter-spacing:.1em;text-transform:uppercase;white-space:nowrap}
+    .dot{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 14px currentColor}
+    .badge.good{color:var(--green);border-color:#24634b}.badge.bad{color:var(--red);border-color:#663343}
+    .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+    .panel,.stat,.market{background:linear-gradient(150deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:16px}
+    .stat{padding:15px;min-height:88px}.label{color:var(--muted);font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.value{font-size:22px;font-weight:850;letter-spacing:-.035em;margin-top:5px;font-variant-numeric:tabular-nums}.note{display:block;color:var(--muted);font-size:11px;margin-top:3px}
+    .panel{padding:17px;margin-top:14px}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.panel h2{font-size:15px;margin:0}.hint{color:var(--muted);font-size:11px}
+    .markets{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+    .market{padding:16px;min-width:0}.market.m15{border-top:3px solid #a98cff}.market.m5{border-top:3px solid var(--cyan)}
+    .market-title{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.market-title h3{font-size:15px;margin:0}.slug{color:var(--muted);font-size:11px;overflow-wrap:anywhere;margin-top:3px}
+    .countdown{font-variant-numeric:tabular-nums;color:var(--cyan);font-weight:850;font-size:13px;white-space:nowrap}
+    .prices{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:15px 0}
+    .price-box{background:#0b1728;border:1px solid var(--line);border-radius:12px;padding:13px}
+    .price-head{display:flex;justify-content:space-between;align-items:center}
+    .side{font-size:11px;font-weight:900;letter-spacing:.12em}.up{color:var(--green)}.down{color:var(--red)}
+    .mid{font-size:30px;font-weight:900;letter-spacing:-.05em;margin:4px 0;font-variant-numeric:tabular-nums}
+    .quote-detail{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+    .rows{border-top:1px solid var(--line);margin-top:8px}.row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #1e3049;font-size:12px}.row:last-child{border-bottom:0}.row span{color:var(--muted)}.row strong{text-align:right}
+    .status-text{font-weight:800}.good{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}
+    .scroll{overflow:auto}table{width:100%;border-collapse:collapse;min-width:760px}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid var(--line);font-size:12px;white-space:nowrap}th{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.09em}td.muted{color:var(--muted)}.empty{padding:18px;color:var(--muted);text-align:center}
+    .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:3px 8px;font-size:10px;font-weight:800;color:var(--muted)}.pill.live{color:var(--green);border-color:#24634b}.pill.fail{color:var(--red);border-color:#663343}.pill.wait{color:var(--amber);border-color:#67512a}
+    .events{display:grid;gap:0}.event{display:grid;grid-template-columns:145px 90px 1fr;gap:12px;padding:9px 0;border-bottom:1px solid var(--line);font-size:12px}.event:last-child{border:0}.event time,.event-type{color:var(--muted)}.event-type{font-weight:850;letter-spacing:.06em}
+    .foot{color:var(--muted);font-size:11px;margin:14px 2px 0;line-height:1.6}.error{color:var(--red);font-size:12px;margin-top:10px}
+    @media(max-width:760px){main{padding:14px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.markets{grid-template-columns:1fr}header{align-items:flex-start;flex-direction:column}h1{font-size:21px}.event{grid-template-columns:1fr;gap:2px}.mid{font-size:27px}}
+    @media(max-width:420px){.grid{grid-template-columns:1fr 1fr}.stat{padding:12px}.value{font-size:19px}.market{padding:12px}.prices{gap:7px}.price-box{padding:10px}.countdown{font-size:12px}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>BTC Limit Ladder Bot</h1><div class="subtitle">Live order execution · BTC 5-minute and 15-minute markets only</div></div>
+    <div class="badge" id="statusBadge"><i class="dot"></i><span>Connecting</span></div>
+  </header>
+
+  <section class="grid" aria-label="Execution status">
+    <div class="stat"><div class="label">Live orders</div><div class="value" id="tradingState">—</div><span class="note" id="modeNote">Checking configuration</span></div>
+    <div class="stat"><div class="label">Account readiness</div><div class="value" id="accountReady">—</div><span class="note" id="accountNote">Waiting for exchange reconciliation</span></div>
+    <div class="stat"><div class="label">USDC collateral</div><div class="value" id="collateral">—</div><span class="note">Most recent complete account snapshot</span></div>
+    <div class="stat"><div class="label">Equity</div><div class="value" id="equity">—</div><span class="note" id="snapshotTime">Not yet synchronized</span></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Current BTC windows</h2><span class="hint" id="quoteAge">Quotes refresh continuously</span></div>
+    <div class="markets" id="markets"><div class="empty">Waiting for live BTC market data…</div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Tracked exchange orders</h2><span class="hint" id="orderCount">0 orders</span></div>
+    <div class="scroll" id="orders"><div class="empty">No orders tracked yet.</div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Recent bot activity</h2><span class="hint">Newest first</span></div>
+    <div class="events" id="events"><div class="empty">Waiting for bot activity…</div></div>
+  </section>
+
+  <p class="foot">Trigger: during the final 60 seconds, either fresh outcome midpoint must be in the inclusive $0.30–$0.71 band. The bot then submits UP and DOWN limit buys at $0.25 and $0.15, 10 shares per order. Confirmed fills receive $0.75 and $0.85 limit sells respectively. One entry set per window; no re-entry. Entry orders are canceled at window end; take-profit orders have no explicit expiry.</p>
+  <div class="error" id="error"></div>
+</main>
+<script>
+  const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const price = value => value == null || !Number.isFinite(Number(value)) ? '—' : '$' + Number(value).toFixed(3);
+  const money = value => value == null || !Number.isFinite(Number(value)) ? '—' : '$' + Number(value).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+  const time = value => value ? new Date(value).toLocaleTimeString() : '—';
+  const remaining = end => {
+    const secs = Math.max(0, Math.floor((Number(end || 0) - Date.now()) / 1000));
+    return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2,'0')}`;
+  };
+  const statusClass = status => {
+    const s = String(status || '').toLowerCase();
+    if (s === 'ready' || s === 'live' || s === 'matched' || s === 'filled') return 'good';
+    if (s.includes('error') || s.includes('halt') || s.includes('blocked') || s.includes('reject')) return 'bad';
+    return 'warn';
+  };
+  function renderMarket(tf, state) {
+    const q = state?.quotes || {};
+    const sig = state?.signal || {};
+    const title = state?.title || state?.slug || 'Waiting for market discovery';
+    const orders = (state?.orders || []).map(o => `${o.side} ${price(o.price)} ${o.status}`).join(' · ') || 'None';
+    const quoteBox = (side, cls) => {
+      const v = q[side] || {};
+      const live = v.status === 'LIVE' && !v.stale;
+      return `<div class="price-box"><div class="price-head"><span class="side ${cls}">${side}</span><span class="pill ${live?'live':'wait'}">${esc(live?'LIVE':v.status||'WAITING')}${v.stale?' · STALE':''}</span></div><div class="mid ${cls}">${price(v.mid)}</div><div class="quote-detail">Bid ${price(v.bestBid)} · Ask ${price(v.bestAsk)}</div></div>`;
+    };
+    return `<article class="market ${tf==='15m'?'m15':'m5'}">
+      <div class="market-title"><div><h3>BTC ${esc(tf)}</h3><div class="slug">${esc(title)}</div></div><div class="countdown">${remaining(state?.windowEnd)}</div></div>
+      <div class="prices">${quoteBox('UP','up')}${quoteBox('DOWN','down')}</div>
+      <div class="rows">
+        <div class="row"><span>Signal state</span><strong class="status-text ${statusClass(sig.status)}">${esc(sig.status||'waiting')}</strong></div>
+        <div class="row"><span>Signal reason</span><strong>${esc(sig.reason||'—')}</strong></div>
+        <div class="row"><span>Qualifying side</span><strong>${esc((sig.qualifyingSides||[]).join(' + ')||'—')}</strong></div>
+        <div class="row"><span>One-shot trigger</span><strong>${state?.triggeredAt?`Triggered ${time(state.triggeredAt)}`:'Not triggered'}</strong></div>
+        <div class="row"><span>Orders this window</span><strong>${esc(orders)}</strong></div>
+      </div>
+    </article>`;
+  }
+  function renderOrders(orders) {
+    if (!orders?.length) return '<div class="empty">No orders tracked yet.</div>';
+    const rows = orders.map(o => {
+      const outcome = o.outcome || '—';
+      const tp = o.kind === 'ENTRY' ? price(o.takeProfitPrice) : '—';
+      const status = String(o.status || 'unknown');
+      return `<tr><td>${esc(o.timeframe||'—')}</td><td>${esc(o.kind||'—')}</td><td class="${outcome==='UP'?'up':'down'}">${esc(outcome)}</td><td>${price(o.price)}</td><td>${Number(o.shares||0).toFixed(2)}</td><td>${Number(o.matchedShares||0).toFixed(2)}</td><td>${tp}</td><td><span class="pill ${statusClass(status)==='good'?'live':statusClass(status)==='bad'?'fail':'wait'}">${esc(status)}</span></td><td>${esc(o.error||o.exitBlockedReason||'—')}</td></tr>`;
+    }).join('');
+    return `<table><thead><tr><th>Window</th><th>Order</th><th>Outcome</th><th>Limit</th><th>Shares</th><th>Matched</th><th>TP</th><th>Status</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  function renderEvents(events) {
+    if (!events?.length) return '<div class="empty">Waiting for bot activity…</div>';
+    return events.slice(0,24).map(e => `<div class="event"><time>${esc(new Date(e.at).toLocaleString())}</time><span class="event-type">${esc(e.type)}</span><span>${esc(e.message)}${e.error?` · ${esc(e.error)}`:''}</span></div>`).join('');
+  }
+  async function refresh() {
+    try {
+      const response = await fetch('/api/state?t='+Date.now(), {cache:'no-store'});
+      if (!response.ok) throw new Error(`Dashboard API returned ${response.status}`);
+      const state = await response.json();
+      const account = state.account || {};
+      const badge = document.querySelector('#statusBadge');
+      const good = state.status === 'ready';
+      badge.className = `badge ${good?'good':state.status==='live_disabled'?'':'bad'}`;
+      badge.innerHTML = `<i class="dot"></i><span>${esc(state.status||'unknown')}</span>`;
+      document.querySelector('#tradingState').textContent = state.tradingEnabled ? 'ENABLED' : 'PAUSED';
+      document.querySelector('#modeNote').textContent = state.tradingEnabled ? 'Real limit orders configured' : 'Live order switch is off';
+      document.querySelector('#accountReady').textContent = account.accountReady ? 'READY' : 'BLOCKED';
+      document.querySelector('#accountReady').className = `value ${account.accountReady?'good':'bad'}`;
+      document.querySelector('#accountNote').textContent = account.error || (account.accountReady?'Orders and account synchronized':'Waiting for a complete account snapshot');
+      document.querySelector('#collateral').textContent = money(account.collateral);
+      document.querySelector('#equity').textContent = money(account.equity);
+      document.querySelector('#snapshotTime').textContent = account.asOf ? `Snapshot ${new Date(account.asOf).toLocaleTimeString()}` : 'Not yet synchronized';
+      document.querySelector('#markets').innerHTML = ['5m','15m'].map(tf=>renderMarket(tf,state.markets?.[tf]||{})).join('');
+      document.querySelector('#orders').innerHTML = renderOrders(state.orders||[]);
+      document.querySelector('#orderCount').textContent = `${(state.orders||[]).length} tracked orders`;
+      document.querySelector('#events').innerHTML = renderEvents(state.events||[]);
+      document.querySelector('#error').textContent = state.error || '';
+      const ages = ['5m','15m'].flatMap(tf=>Object.values(state.markets?.[tf]?.quotes||{}).map(q=>q?.updatedAt).filter(Boolean));
+      document.querySelector('#quoteAge').textContent = ages.length ? `Latest quote ${Math.max(0,Math.round((Date.now()-Math.max(...ages))/1000))}s ago · refreshes every second` : 'Waiting for fresh quotes';
+    } catch (error) {
+      document.querySelector('#error').textContent = error.message || String(error);
+    }
+  }
+  refresh();
+  setInterval(refresh, 1000);
+</script>
+</body>
+</html>
