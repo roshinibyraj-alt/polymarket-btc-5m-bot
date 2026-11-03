@@ -1,6 +1,9 @@
 'use strict';
 
 const cfg=require('./config');
+const ACTIVITY_CACHE_MS=5*60_000;
+const POSITIONS_429_BACKOFF_BASE_MS=15_000;
+const POSITIONS_429_BACKOFF_MAX_MS=5*60_000;
 
 function retryAfterMilliseconds(response,now){
   const value=response?.headers?.get?.('retry-after');
@@ -14,14 +17,16 @@ function retryAfterMilliseconds(response,now){
 class PolymarketTrader{
   constructor(privateKey,{sdk=null,actions=null,privateKeyAdapter=null,
     fetcher=globalThis.fetch,clock=()=>Date.now(),
-    sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}={}){
+    sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),logger=console}={}){
     if(!privateKey)throw new Error('PRIVATE_KEY is required when LIVE_TRADING=true');
     this.privateKey=privateKey.startsWith('0x')?privateKey:`0x${privateKey}`;
     this.sdk=sdk;this.actions=actions;this.privateKeyAdapter=privateKeyAdapter;this.fetcher=fetcher;
     this.clock=clock;
     this.sleep=sleep;
+    this.logger=logger;
     this.client=null;this.depositWallet=null;this.activityCache=null;this.activityCacheAt=0;
     this.positionsNextAllowedAt=0;this.positionsRequest=null;
+    this.positions429Count=0;
   }
   async authenticate(){
     this.sdk=this.sdk||await import('@polymarket/client');
@@ -91,7 +96,8 @@ class PolymarketTrader{
     return response.json();
   }
   async getRecentActivity(wallet){
-    if(this.activityCache&&Date.now()-this.activityCacheAt<15000)return this.activityCache;
+    const now=Number(this.clock());
+    if(this.activityCache&&now-this.activityCacheAt<ACTIVITY_CACHE_MS)return this.activityCache;
     const url=new URL('https://data-api.polymarket.com/v2/activity');
     url.searchParams.set('user',wallet);
     url.searchParams.set('limit','500');
@@ -103,15 +109,26 @@ class PolymarketTrader{
     const payload=await response.json();
     if(!Array.isArray(payload?.data))throw new Error('Activity API returned an invalid response');
     this.activityCache=payload.data;
-    this.activityCacheAt=Date.now();
+    this.activityCacheAt=Number(this.clock());
     return this.activityCache;
+  }
+  logPositionsEvent(event,details={}){
+    const sink=this.logger?.info||this.logger?.log;
+    if(typeof sink!=='function')return;
+    const timestamp=Number(this.clock());
+    const record={at:new Date(timestamp).toISOString(),endpoint:'/v2/positions',event,...details};
+    sink.call(this.logger,`[polymarket-data] ${JSON.stringify(record)}`);
   }
   async getAllPositions(wallet){
     if(this.positionsRequest)return this.positionsRequest;
     const now=Number(this.clock());
     const waitMs=Math.max(0,this.positionsNextAllowedAt-now);
     if(waitMs>0){
-      const error=new Error('Positions API rate-limit cooldown active; request withheld');
+      const nextAllowedAt=this.positionsNextAllowedAt;
+      this.logPositionsEvent('cooldown-withheld',{
+        waitMs,nextAllowedAt:new Date(nextAllowedAt).toISOString()
+      });
+      const error=new Error(`Positions API cooldown active; next request in ${Math.ceil(waitMs/1000)}s`);
       error.statusCode=429;
       error.retryAfterMs=waitMs;
       error.rateLimited=true;
@@ -142,26 +159,67 @@ class PolymarketTrader{
       url.searchParams.set('sort_direction','DESC');
       url.searchParams.set('limit',String(pageSize));
       if(cursor)url.searchParams.set('cursor',cursor);
-      const response=await this.fetcher(url.toString(),{signal:AbortSignal.timeout(10000)});
+      const requestStartedAt=Number(this.clock());
+      let response;
+      try{
+        response=await this.fetcher(url.toString(),{signal:AbortSignal.timeout(10000)});
+      }catch(error){
+        this.logPositionsEvent('transport-error',{
+          page:page+1,requestStartedAt:new Date(requestStartedAt).toISOString(),
+          durationMs:Math.max(0,Number(this.clock())-requestStartedAt),
+          error:String(error?.message||error).slice(0,160)
+        });
+        throw error;
+      }
+      const responseAt=Number(this.clock());
+      const durationMs=Math.max(0,responseAt-requestStartedAt);
       if(!response.ok){
         if(response.status===429){
+          this.positions429Count++;
+          const serverRetryAfterMs=retryAfterMilliseconds(response,responseAt);
+          const clientBackoffMs=Math.min(POSITIONS_429_BACKOFF_MAX_MS,
+            POSITIONS_429_BACKOFF_BASE_MS*(2**Math.min(this.positions429Count-1,5)));
           const retryAfterMs=Math.max(cfg.LIVE_POSITIONS_MIN_INTERVAL_MS,
-            retryAfterMilliseconds(response,Number(this.clock())));
-          this.positionsNextAllowedAt=Math.max(this.positionsNextAllowedAt,
-            Number(this.clock())+retryAfterMs);
-          const error=new Error(`Positions API 429; retrying after ${Math.ceil(retryAfterMs/1000)}s`);
+            serverRetryAfterMs,clientBackoffMs);
+          this.positionsNextAllowedAt=Math.max(this.positionsNextAllowedAt,responseAt+retryAfterMs);
+          const actualRetryMs=this.positionsNextAllowedAt-responseAt;
+          const nextAllowedAt=new Date(this.positionsNextAllowedAt).toISOString();
+          const rateLimitRemaining=response.headers?.get?.('poly-ratelimit-remaining')||null;
+          const rateLimitReset=response.headers?.get?.('poly-ratelimit-reset')||null;
+          const rateLimitTier=response.headers?.get?.('poly-ratelimit-tier')||null;
+          const cfRay=response.headers?.get?.('cf-ray')||null;
+          this.logPositionsEvent('http-response',{
+            page:page+1,requestStartedAt:new Date(requestStartedAt).toISOString(),
+            status:response.status,durationMs,consecutive429s:this.positions429Count,
+            serverRetryAfterMs,clientBackoffMs,retryInMs:actualRetryMs,nextAllowedAt,
+            rateLimitRemaining,rateLimitReset,rateLimitTier,cfRay
+          });
+          const error=new Error(`Positions API 429; next request in ${Math.ceil(actualRetryMs/1000)}s`);
           error.statusCode=429;
-          error.retryAfterMs=retryAfterMs;
+          error.retryAfterMs=actualRetryMs;
+          error.serverRetryAfterMs=serverRetryAfterMs;
+          error.clientBackoffMs=clientBackoffMs;
           error.rateLimited=true;
           throw error;
         }
+        this.logPositionsEvent('http-response',{
+          page:page+1,requestStartedAt:new Date(requestStartedAt).toISOString(),
+          status:response.status,durationMs
+        });
         throw new Error(`Positions API ${response.status}`);
       }
+      this.logPositionsEvent('http-response',{
+        page:page+1,requestStartedAt:new Date(requestStartedAt).toISOString(),
+        status:response.status,durationMs
+      });
       const payload=await response.json();
       if(!Array.isArray(payload?.data)||!payload.pagination)throw new Error('Positions API returned an invalid response');
       all.push(...payload.data);
       const nextCursor=payload.pagination.next_cursor;
-      if(nextCursor===null||nextCursor===undefined||nextCursor==='')return all;
+      if(nextCursor===null||nextCursor===undefined||nextCursor===''){
+        this.positions429Count=0;
+        return all;
+      }
       if(typeof nextCursor!=='string'||nextCursor===cursor)throw new Error('Positions API returned an invalid pagination cursor');
       cursor=nextCursor;
     }

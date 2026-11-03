@@ -90,7 +90,8 @@ There is **no live stop-loss rule** in this strategy. Live exits are the mapped 
 ## 4. Account readiness, rate limits, and safety
 
 - Account balance, positions, open orders, and recent activity are read separately from market quotes and order polling.
-- The normal live account snapshot interval is **15 seconds**. The Positions API has a minimum request interval and its `Retry-After` response must be honored. On errors, use bounded exponential backoff (up to 15 seconds); do not hammer the endpoint.
+- The normal live account snapshot interval is **15 seconds**. Cache informational `/v2/activity` results for five minutes. If `/v2/positions` returns 429, honor `Retry-After` and apply a separate exponential cooldown from 15 seconds up to five minutes across repeated 429s. A successful complete positions read resets that cooldown.
+- The 429 cooldown applies only to account snapshots. The **500 ms** tracked-order fill poll remains independent and continues during account-read backoff.
 - The 500 ms tracked-order poll is **not** permission to poll the Positions API every 500 ms.
 - Require `accountReady=true` and a healthy live status before submitting new strategy orders. A successful HTTP response with an error payload is not readiness.
 - If the Positions API returns 429, keep the account unready, show the error and next retry, and block new real entries. Never bypass a 429 by using stale account data.
