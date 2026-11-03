@@ -1,11 +1,25 @@
 'use strict';
 
+const cfg=require('./config');
+
+function retryAfterMilliseconds(response,now){
+  const value=response?.headers?.get?.('retry-after');
+  if(value===null||value===undefined||value==='')return 0;
+  const seconds=Number(value);
+  if(Number.isFinite(seconds)&&seconds>=0)return Math.ceil(seconds*1000);
+  const date=Date.parse(value);
+  return Number.isFinite(date)?Math.max(0,date-now):0;
+}
+
 class PolymarketTrader{
-  constructor(privateKey,{sdk=null,actions=null,privateKeyAdapter=null,fetcher=globalThis.fetch}={}){
+  constructor(privateKey,{sdk=null,actions=null,privateKeyAdapter=null,
+    fetcher=globalThis.fetch,clock=()=>Date.now()}={}){
     if(!privateKey)throw new Error('PRIVATE_KEY is required when LIVE_TRADING=true');
     this.privateKey=privateKey.startsWith('0x')?privateKey:`0x${privateKey}`;
     this.sdk=sdk;this.actions=actions;this.privateKeyAdapter=privateKeyAdapter;this.fetcher=fetcher;
+    this.clock=clock;
     this.client=null;this.depositWallet=null;this.activityCache=null;this.activityCacheAt=0;
+    this.positionsNextAllowedAt=0;this.positionsRequest=null;
   }
   async authenticate(){
     this.sdk=this.sdk||await import('@polymarket/client');
@@ -91,6 +105,24 @@ class PolymarketTrader{
     return this.activityCache;
   }
   async getAllPositions(wallet){
+    if(this.positionsRequest)return this.positionsRequest;
+    const now=Number(this.clock());
+    const waitMs=Math.max(0,this.positionsNextAllowedAt-now);
+    if(waitMs>0){
+      const error=new Error('Positions API rate-limit cooldown active; request withheld');
+      error.statusCode=429;
+      error.retryAfterMs=waitMs;
+      error.rateLimited=true;
+      throw error;
+    }
+    this.positionsNextAllowedAt=now+cfg.LIVE_POSITIONS_MIN_INTERVAL_MS;
+    const request=this.fetchAllPositions(wallet);
+    this.positionsRequest=request;
+    try{return await request;}
+    finally{if(this.positionsRequest===request)this.positionsRequest=null;}
+  }
+
+  async fetchAllPositions(wallet){
     const pageSize=500,maxPages=20,all=[];
     let cursor=null;
     for(let page=0;page<maxPages;page++){
@@ -104,7 +136,20 @@ class PolymarketTrader{
       url.searchParams.set('limit',String(pageSize));
       if(cursor)url.searchParams.set('cursor',cursor);
       const response=await this.fetcher(url.toString(),{signal:AbortSignal.timeout(10000)});
-      if(!response.ok)throw new Error(`Positions API ${response.status}`);
+      if(!response.ok){
+        if(response.status===429){
+          const retryAfterMs=Math.max(cfg.LIVE_POSITIONS_MIN_INTERVAL_MS,
+            retryAfterMilliseconds(response,Number(this.clock())));
+          this.positionsNextAllowedAt=Math.max(this.positionsNextAllowedAt,
+            Number(this.clock())+retryAfterMs);
+          const error=new Error(`Positions API 429; retrying after ${Math.ceil(retryAfterMs/1000)}s`);
+          error.statusCode=429;
+          error.retryAfterMs=retryAfterMs;
+          error.rateLimited=true;
+          throw error;
+        }
+        throw new Error(`Positions API ${response.status}`);
+      }
       const payload=await response.json();
       if(!Array.isArray(payload?.data)||!payload.pagination)throw new Error('Positions API returned an invalid response');
       all.push(...payload.data);

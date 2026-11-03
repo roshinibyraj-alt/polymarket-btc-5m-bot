@@ -45,6 +45,7 @@ class LiveOrderMirror{
     this.orderError=null;
     this.fatalError=null;
     this.accountFailures=0;
+    this.accountRetryAfterAt=0;
     this.lastAccountSuccessAt=null;
     this.lastReconciledAt=null;
     this.nextAccountRefreshAt=null;
@@ -353,9 +354,11 @@ class LiveOrderMirror{
     const refresh=async()=>{
       await this.refreshAccountSnapshot();
       if(this.stopped)return;
-      const delay=this.accountFailures
-        ?Math.min(cfg.LIVE_BALANCE_REFRESH_MS,1000*2**Math.min(4,this.accountFailures-1))
+      const backoff=this.accountFailures
+        ?Math.min(cfg.LIVE_BALANCE_RETRY_MAX_MS,1000*2**Math.min(20,this.accountFailures-1))
         :cfg.LIVE_BALANCE_REFRESH_MS;
+      const serverWait=Math.max(0,this.accountRetryAfterAt-this.clock());
+      const delay=Math.max(backoff,serverWait);
       this.nextAccountRefreshAt=this.clock()+delay;
       this.balanceTimer=setTimeout(refresh,delay);
       this.balanceTimer.unref?.();
@@ -390,12 +393,16 @@ class LiveOrderMirror{
       this.accountReady=reconciliation.ok;
       this.lastAccountSuccessAt=this.clock();
       this.accountFailures=0;
+      this.accountRetryAfterAt=0;
       this.updateHealth();
       return this.status==='ready';
     }catch(error){
       this.accountReady=false;
       this.accountFailures++;
       this.accountError=error.message;
+      const retryAfterMs=Number(error.retryAfterMs);
+      this.accountRetryAfterAt=Number.isFinite(retryAfterMs)&&retryAfterMs>0
+        ?this.clock()+retryAfterMs:0;
       this.updateHealth();
       return false;
     }finally{
