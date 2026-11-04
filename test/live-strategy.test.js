@@ -62,22 +62,22 @@ test('the midpoint band includes both endpoints', () => {
   assert.equal(high.eligible, true);
 });
 
-test('the trigger only runs during the final 60 seconds', () => {
+test('the midpoint ladder only runs during the final 120 seconds', () => {
   const result = evaluateWindow({
-    now: 1_238_999,
+    now: 1_179_999,
     market: market(),
-    quotes: { UP: quote(0.50, 1_238_999), DOWN: quote(0.50, 1_238_999) },
+    quotes: { UP: quote(0.50, 1_179_999), DOWN: quote(0.50, 1_179_999) },
     startedAt: 900_000,
   });
   assert.equal(result.eligible, false);
   assert.equal(result.status, 'watching');
 });
 
-test('the final-minute boundary is inclusive and quotes older than five seconds are rejected', () => {
+test('the final-120-second boundary is inclusive and quotes older than five seconds are rejected', () => {
   const atBoundary = evaluateWindow({
-    now: 1_240_000,
+    now: 1_180_000,
     market: market(),
-    quotes: { UP: quote(0.50, 1_240_000), DOWN: quote(0.50, 1_240_000) },
+    quotes: { UP: quote(0.50, 1_180_000), DOWN: quote(0.50, 1_180_000) },
     startedAt: 900_000,
   });
   const stale = evaluateWindow({

@@ -107,6 +107,136 @@ function armFlowTest(bot, armedAt = 0) {
   };
 }
 
+test('a new window submits one $0.30 20-share buy on each outcome exactly once', async () => {
+  const { bot, calls } = setup({ now: 100_000 });
+  await bot.scanTimeframe('5m', 100_000);
+  await bot.scanTimeframe('5m', 100_000);
+
+  const buys = calls.filter(call => call.side === 'BUY');
+  assert.equal(buys.length, 2);
+  assert.deepEqual(buys.map(({ price, shares }) => [price, shares]), [
+    [0.30, 20],
+    [0.30, 20],
+  ]);
+  assert.equal(new Set(buys.map(call => call.tokenId)).size, 2);
+  assert.equal(bot.markets['5m'].windowStartPairStatus, 'orders_submitted');
+});
+
+test('restart recovery recognizes opening-pair buys and $0.99 take-profit sells', () => {
+  const entry = LiveBot.recoveredOrder({
+    id: 'recovered-buy',
+    asset_id: 'token-up',
+    side: 'BUY',
+    price: '0.30',
+    original_size: '20',
+    size_matched: '6',
+    status: 'PARTIALLY_FILLED',
+    market: 'btc-updown-5m-1000',
+  });
+  const exit = LiveBot.recoveredOrder({
+    id: 'recovered-sell',
+    asset_id: 'token-up',
+    side: 'SELL',
+    price: '0.99',
+    original_size: '6',
+    size_matched: '0',
+    status: 'LIVE',
+    market: 'btc-updown-5m-1000',
+  });
+
+  assert.equal(entry.kind, 'ENTRY');
+  assert.equal(entry.entryType, 'WINDOW_START_PAIR');
+  assert.equal(entry.takeProfitPrice, 0.99);
+  assert.equal(entry.matchedShares, 6);
+  assert.equal(exit.kind, 'TAKE_PROFIT');
+});
+
+test('a confirmed opening-pair fill cancels only its counterpart and sells confirmed shares at $0.99', async () => {
+  const { bot, calls, exchangeOrders } = setup({ now: 100_000 });
+  await bot.scanTimeframe('5m', 100_000);
+  const entries = [...bot.ordersById.values()].filter(order => order.entryType === 'WINDOW_START_PAIR');
+  const up = entries.find(order => order.outcome === 'UP');
+  const down = entries.find(order => order.outcome === 'DOWN');
+  exchangeOrders.get(up.id).status = 'MATCHED';
+
+  await bot.reconcileOrders();
+
+  assert.equal(exchangeOrders.get(down.id).status, 'CANCELED');
+  assert.deepEqual(calls.filter(call => call.cancel).map(call => call.cancel), [down.id]);
+  assert.deepEqual(calls.filter(call => call.side === 'SELL').map(({ price, shares }) => [price, shares]), [
+    [0.99, 20],
+  ]);
+  assert.equal(bot.markets['5m'].windowStartPairStatus, 'opposite_order_cancelled');
+});
+
+test('if both opening-pair orders fill before cancellation, both receive matched-share exits', async () => {
+  const { bot, calls, exchangeOrders } = setup({ now: 100_000 });
+  await bot.scanTimeframe('5m', 100_000);
+  const entries = [...bot.ordersById.values()].filter(order => order.entryType === 'WINDOW_START_PAIR');
+  for (const entry of entries) exchangeOrders.get(entry.id).status = 'MATCHED';
+
+  await bot.reconcileOrders();
+
+  assert.equal(calls.filter(call => call.cancel).length, 0);
+  assert.deepEqual(calls.filter(call => call.side === 'SELL').map(({ price, shares }) => [price, shares]), [
+    [0.99, 20],
+    [0.99, 20],
+  ]);
+  assert.equal(bot.markets['5m'].windowStartPairStatus, 'both_sides_filled');
+});
+
+test('a partial opening-pair fill cancels the opposite entry and exits only confirmed shares', async () => {
+  const { bot, calls, exchangeOrders } = setup({ now: 100_000 });
+  await bot.scanTimeframe('5m', 100_000);
+  const entries = [...bot.ordersById.values()].filter(order => order.entryType === 'WINDOW_START_PAIR');
+  const up = entries.find(order => order.outcome === 'UP');
+  const down = entries.find(order => order.outcome === 'DOWN');
+  exchangeOrders.get(up.id).status = 'PARTIALLY_FILLED';
+  exchangeOrders.get(up.id).sizeMatched = 7;
+
+  await bot.reconcileOrders();
+
+  assert.equal(exchangeOrders.get(down.id).status, 'CANCELED');
+  assert.deepEqual(calls.filter(call => call.side === 'SELL').map(({ price, shares }) => [price, shares]), [
+    [0.99, 7],
+  ]);
+});
+
+test('a pending opening-pair intent survives restart and does not duplicate orders', async () => {
+  let ledger = null;
+  const store = {
+    durable: true,
+    load: async () => ledger,
+    save: async document => { ledger = JSON.parse(JSON.stringify(document)); },
+  };
+  const first = setup({ now: 100_000, accountReady: false });
+  first.bot.stateStore = store;
+  first.bot.requirePersistentState = true;
+  await first.bot.scanTimeframe('5m', 100_000);
+  assert.equal(ledger.markets['5m'].windowStartPairPending, true);
+  assert.equal(first.calls.length, 0);
+
+  const second = setup({ now: 101_000 });
+  second.bot.startedAt = 101_000;
+  second.bot.stateStore = store;
+  second.bot.requirePersistentState = true;
+  await second.bot.bootstrapTrading();
+  await second.bot.scanTimeframe('5m', 101_000);
+  await second.bot.scanTimeframe('5m', 101_000);
+
+  assert.equal(second.calls.filter(call => call.side === 'BUY').length, 2);
+  assert.equal(second.bot.markets['5m'].windowStartPairPending, false);
+});
+
+test('an already-open window is skipped for the opening pair after a restart', async () => {
+  const { bot, calls } = setup({ now: 101_000 });
+  bot.startedAt = 100_000;
+  await bot.scanTimeframe('5m', 101_000);
+
+  assert.equal(calls.length, 0);
+  assert.equal(bot.markets['5m'].windowStartPairStatus, 'skipped_restart_window');
+});
+
 test('one qualifying outcome submits exactly four two-sided limit buys once', async () => {
   const { bot, calls } = setup();
   const state = fillableMarket(bot);
@@ -248,7 +378,7 @@ test('a qualifying tick stays latched and submits after prices leave the band', 
   bot.authenticated = true;
   bot.refreshOrderReadiness();
   await bot.scanTimeframe('5m', 251_000);
-  assert.equal(calls.filter(call => call.side === 'BUY').length, 4);
+  assert.equal(calls.filter(call => call.side === 'BUY').length, 6);
 });
 
 test('a latched signal expires rather than submitting after the window ends', async () => {
@@ -290,7 +420,7 @@ test('a latched trigger survives a process restart until its window closes', asy
 
   assert.equal(second.bot.markets['5m'].triggeredAt, 251_000);
   assert.equal(second.bot.markets['5m'].pendingTrigger.observedAt, 250_000);
-  assert.equal(second.calls.filter(call => call.side === 'BUY').length, 4);
+  assert.equal(second.calls.filter(call => call.side === 'BUY').length, 6);
 });
 
 test('an account snapshot 429 does not block an authenticated qualifying entry', async () => {
@@ -303,7 +433,7 @@ test('an account snapshot 429 does not block an authenticated qualifying entry',
   assert.equal(bot.account.accountReady, true);
   assert.match(bot.account.error, /429/);
   await bot.scanTimeframe('5m', 250_000);
-  assert.equal(calls.filter(call => call.side === 'BUY').length, 4);
+  assert.equal(calls.filter(call => call.side === 'BUY').length, 6);
 });
 
 test('an ambiguous entry submission halts new entries instead of retrying blindly', async () => {
@@ -431,7 +561,7 @@ test('unclassified account orders warn but do not block the authenticated order 
   assert.equal(bot.account.untrackedOpenOrders, 1);
   assert.equal(bot.account.accountReady, true);
   await bot.scanTimeframe('5m', 250_000);
-  assert.equal(calls.filter(call => call.side === 'BUY').length, 4);
+  assert.equal(calls.filter(call => call.side === 'BUY').length, 6);
 });
 
 test('dashboard snapshot identifies the live strategy and separate 5m/15m windows', () => {
@@ -439,6 +569,10 @@ test('dashboard snapshot identifies the live strategy and separate 5m/15m window
   const state = bot.snapshot();
   assert.equal(state.mode, 'REAL ORDERS');
   assert.deepEqual(state.strategy.markets, ['BTC 5m', 'BTC 15m']);
+  assert.equal(state.strategy.windowStartPair.buyPrice, 0.30);
+  assert.equal(state.strategy.windowStartPair.sharesPerSide, 20);
+  assert.equal(state.strategy.windowStartPair.takeProfitPrice, 0.99);
+  assert.match(state.strategy.windowRule, /final 120 seconds/);
   assert.ok(state.markets['5m']);
   assert.ok(state.markets['15m']);
   assert.equal(state.strategy.orderPollMs, 500);

@@ -24,7 +24,14 @@ Each quote used for a trigger must be live, valid, and no more than **5 seconds 
 
 ### Entry condition
 
-Evaluate during the **last 60 seconds of the current window**. Trigger while the window is still open when **either** midpoint is within the inclusive band **$0.30 to $0.71**:
+The opening-pair trigger is independent of prices and starts once for each 5-minute or 15-minute window that begins after this process starts:
+
+- Place one UP and one DOWN limit BUY at **$0.30**, **20 shares each**.
+- After any confirmed fill, cancel the opposite entry. The two orders can both fill before the cancellation reaches Polymarket; if that happens, manage both fills.
+- Submit a **$0.99 limit SELL** for each confirmed matched quantity. This price is valid with both 5-minute and 15-minute market tick sizes. Unfilled entry remainders are canceled at window end.
+- An already-open window is skipped after a process restart unless a previously persisted opening-pair intent was waiting for the order path.
+
+Separately, evaluate the existing midpoint-band ladder during the **last 120 seconds of the current window**. Trigger while the window is still open when **either** midpoint is within the inclusive band **$0.30 to $0.71**:
 
 - UP midpoint: $0.30–$0.71, or
 - DOWN midpoint: $0.30–$0.71
@@ -44,12 +51,12 @@ This is a **two-sided strategy**, not a directional chooser. On a valid trigger,
 | DOWN | $0.25 | 10 | $0.75 |
 | DOWN | $0.15 | 10 | $0.85 |
 
-That is four buy orders per eligible window. If all four fill at their limits, the nominal entry notional is $8 before fees. Do not change the 10-share live size without an explicit instruction.
+That is four additional buy orders per eligible window. If all four fill at their limits, the ladder's nominal entry notional is $8 before fees. The opening pair adds up to $12 if both 20-share orders fill at $0.30, for up to $20 per window before fees when both triggers run. Do not change the ladder's 10-share size or the opening pair's 20-share size without an explicit instruction.
 
 - Submit each rung once per market window; do not continuously rebuy, add replacement buys after a take-profit, or flip/reverse the signal.
 - The $0.25 rung always maps to a $0.75 take-profit; the $0.15 rung always maps to a $0.85 take-profit. Each sell is for the **same outcome token** that was bought.
-- Do not add a 30-second delay. The strategy is eligible only in the final 60 seconds.
-- A trade is **not guaranteed every window**. If neither fresh outcome midpoint enters the band in the final minute, there is no trigger.
+- The opening pair is one-shot per window; the midpoint ladder is also one-shot per window. Neither strategy replaces or rearms orders.
+- The midpoint ladder is not guaranteed every window. If neither fresh outcome midpoint enters the band in the final 120 seconds, that ladder does not trigger; the separate opening pair still applies to new windows.
 
 ### Dashboard mode
 
@@ -140,14 +147,16 @@ The dashboard must show, separately for BTC 5m and BTC 15m:
 At minimum, test that:
 
 1. Only BTC 5m and BTC 15m markets are accepted; ETH and malformed/expired markets are rejected.
-2. No signal is produced before the final 60 seconds, after window end, without any fresh quote, or if no fresh midpoint is inside $0.30–$0.71.
-3. An eligible signal produces exactly four 10-share BUY attempts: both outcomes at $0.25 and $0.15, with the correct $0.75/$0.85 take-profit mapping.
-4. Repeated scans of the same window do not duplicate a rung.
-5. Confirmed full and partial fills produce SELL orders only for unsold matched shares; sub-5-share exits are reported as blocked; SELL fills/cancellations/rejections are reconciled.
-6. 429 responses honor `Retry-After` for snapshot retries but do not block an authenticated CLOB order path.
-7. Restart recovery reconciles previous order IDs and partial fills without duplicating BUYs or SELLs.
-8. A restarted process loads the durable ledger, preserves a latched trigger only for its still-open window, and does not duplicate a submitted entry.
-9. Missing/corrupt persistent state and ambiguous order submissions halt live execution; unclassified open orders are visible warnings.
+2. New windows submit exactly two 20-share $0.30 BUYs, one per outcome, once per window; a process restart does not repeat an opening pair.
+3. A confirmed opening-pair fill cancels only its opposite pair order and submits a $0.99 SELL for confirmed shares; if both sides fill before cancellation, both get managed.
+4. The midpoint ladder does not qualify before the final 120 seconds, after window end, without a fresh quote, or if no fresh midpoint is inside $0.30–$0.71.
+5. An eligible midpoint trigger produces four 10-share BUY attempts: both outcomes at $0.25 and $0.15, with the correct $0.75/$0.85 take-profit mapping.
+6. Repeated scans of the same window do not duplicate either trigger's orders.
+7. Confirmed full and partial fills produce SELL orders only for unsold matched shares; sub-5-share exits are reported as blocked; SELL fills/cancellations/rejections are reconciled.
+8. 429 responses honor `Retry-After` for snapshot retries but do not block an authenticated CLOB order path.
+9. Restart recovery reconciles previous order IDs and partial fills without duplicating BUYs or SELLs.
+10. A restarted process loads the durable ledger, preserves a latched midpoint trigger or pending opening-pair intent only for its still-open window, and does not duplicate submitted entries.
+11. Missing/corrupt persistent state and ambiguous order submissions halt live execution; unclassified open orders are visible warnings.
 
 ## 8. Development
 

@@ -51,5 +51,9 @@ test('live server reports unready production account and serves the live dashboa
 
   const page = await fetch(base);
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /BTC Limit Ladder Bot/);
+  const html = await page.text();
+  assert.match(html, /BTC Limit Ladder Bot/);
+  assert.match(html, /Window-start pair/);
+  assert.match(html, /final 120 seconds/);
+  assert.match(html, /\$0\.99 limit sell/);
 });

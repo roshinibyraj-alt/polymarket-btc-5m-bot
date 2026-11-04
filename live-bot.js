@@ -11,9 +11,13 @@ const {
 
 const TIMEFRAMES = Object.keys(WINDOW_CONFIG);
 const TERMINAL = new Set(['MATCHED', 'FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED']);
-const ACTIVE = new Set(['LIVE', 'OPEN', 'PENDING', 'PARTIALLY_FILLED', 'PARTIALLY MATCHED']);
+const ACTIVE = new Set(['LIVE', 'OPEN', 'PENDING', 'PARTIALLY FILLED', 'PARTIALLY MATCHED']);
 const MIN_SELL_SHARES = Number(cfg.LIVE_MIN_SELL_SHARES || 5);
 const SHARES_PER_RUNG = Number(cfg.LIVE_SHARES_PER_RUNG || 10);
+const WINDOW_START_ENTRY_PRICE = Number(cfg.LIVE_WINDOW_START_ENTRY_PRICE || 0.30);
+const WINDOW_START_ENTRY_SHARES = Number(cfg.LIVE_WINDOW_START_ENTRY_SHARES || 20);
+const WINDOW_START_TAKE_PROFIT_PRICE = Number(cfg.LIVE_WINDOW_START_TAKE_PROFIT_PRICE || 0.99);
+const CANCEL_FINAL_FILL_CHECKS = Math.max(1, Number(cfg.LIVE_CANCEL_FINAL_FILL_CHECKS || 3));
 const ORDER_POLL_MS = Number(cfg.LIVE_ORDER_POLL_MS || 500);
 const ACCOUNT_REFRESH_MS = Number(cfg.LIVE_BALANCE_REFRESH_MS || 15_000);
 const FLOW_TEST_BUY_PRICE = Number(cfg.LIVE_FLOW_TEST_BUY_PRICE || 0.70);
@@ -39,8 +43,9 @@ function isTerminalStatus(status) {
 
 function needsFillConfirmation(order) {
   const status = orderStatus(order);
-  return ['MATCHED', 'FILLED'].includes(status)
-    && numeric(order?.matchedShares) < numeric(order?.shares);
+  return (['MATCHED', 'FILLED'].includes(status)
+    && numeric(order?.matchedShares) < numeric(order?.shares))
+    || numeric(order?.pendingFinalFillChecks) > 0;
 }
 
 function resolvedMarketSlugs(orders) {
@@ -94,13 +99,25 @@ function recoveredOrder(raw) {
   const window = windowFromSlug(slug);
   let kind = null;
   let takeProfitPrice = null;
+  let entryType = null;
+  let pairedEntryGroup = null;
   if (side === 'BUY') {
     const rung = ENTRY_RUNGS.find(item => Math.abs(item.price - price) < 0.000001);
-    if (rung) {
+    const openingPair = Math.abs(price - WINDOW_START_ENTRY_PRICE) < 0.000001
+      && Math.abs(size - WINDOW_START_ENTRY_SHARES) < 0.000001;
+    if (openingPair) {
       kind = 'ENTRY';
+      entryType = 'WINDOW_START_PAIR';
+      pairedEntryGroup = `window-start-pair:${slug}`;
+      takeProfitPrice = WINDOW_START_TAKE_PROFIT_PRICE;
+    } else if (rung) {
+      kind = 'ENTRY';
+      entryType = 'MIDPOINT_LADDER';
       takeProfitPrice = rung.takeProfitPrice;
     }
-  } else if (side === 'SELL' && [0.75, 0.85].some(value => Math.abs(value - price) < 0.000001)) {
+  } else if (side === 'SELL'
+    && [0.75, 0.85, WINDOW_START_TAKE_PROFIT_PRICE, 0.999]
+      .some(value => Math.abs(value - price) < 0.000001)) {
     kind = 'TAKE_PROFIT';
   }
   if (!id || !tokenId || !kind || !Number.isFinite(size)) return null;
@@ -108,6 +125,8 @@ function recoveredOrder(raw) {
     id,
     clientKey: `recovered:${id}`,
     kind,
+    entryType,
+    pairedEntryGroup,
     side,
     tokenId: String(tokenId),
     price,
@@ -120,6 +139,7 @@ function recoveredOrder(raw) {
     windowStart: window?.start ?? null,
     windowEnd: window?.end ?? null,
     status: orderStatus(raw),
+    pendingFinalFillChecks: 0,
     recovered: true,
     exits: [],
     exitSubmittingShares: 0,
@@ -255,6 +275,15 @@ class LiveBot {
       restored.slug = typeof saved.slug === 'string' ? saved.slug : null;
       restored.title = typeof saved.title === 'string' ? saved.title : null;
       restored.pendingTrigger = validPendingTrigger;
+      restored.windowStartPairPending = saved.windowStartPairPending === true;
+      restored.windowStartPairStatus = typeof saved.windowStartPairStatus === 'string'
+        ? saved.windowStartPairStatus
+        : restored.windowStartPairPending ? 'pending' : 'waiting_for_window_start';
+      restored.windowStartPairTriggeredAt = saved.windowStartPairTriggeredAt !== null
+        && saved.windowStartPairTriggeredAt !== undefined
+        && Number.isFinite(Number(saved.windowStartPairTriggeredAt))
+        ? Number(saved.windowStartPairTriggeredAt)
+        : null;
       restored.triggeredAt = saved.triggeredAt !== null && saved.triggeredAt !== undefined
         && Number.isFinite(Number(saved.triggeredAt)) ? Number(saved.triggeredAt) : null;
       restored.orderIds = Array.isArray(saved.orderIds) ? saved.orderIds.map(String) : [];
@@ -265,6 +294,7 @@ class LiveBot {
     for (const saved of document.orders || []) {
       const { exitRefs = [], ...fields } = saved;
       const order = { ...fields, exits: [] };
+      order.pendingFinalFillChecks = Math.max(0, numeric(order.pendingFinalFillChecks));
       const reference = order.id || order.clientKey;
       if (!reference) continue;
       this.ordersById.set(String(reference), order);
@@ -313,6 +343,9 @@ class LiveBot {
           title: state.title,
           pendingTrigger: state.pendingTrigger,
           triggeredAt: state.triggeredAt,
+          windowStartPairPending: state.windowStartPairPending,
+          windowStartPairStatus: state.windowStartPairStatus,
+          windowStartPairTriggeredAt: state.windowStartPairTriggeredAt,
           orderIds: state.orderIds,
           signal: state.signal,
         }];
@@ -488,6 +521,9 @@ class LiveBot {
       signal: { eligible: false, status: 'starting', reason: 'Waiting for market data' },
       pendingTrigger: null,
       triggeredAt: null,
+      windowStartPairPending: false,
+      windowStartPairStatus: 'waiting_for_window_start',
+      windowStartPairTriggeredAt: null,
       orderIds: [],
       lastMarketLookupAt: 0,
       lastQuoteAt: null,
@@ -566,6 +602,7 @@ class LiveBot {
           if (order.kind === 'ENTRY'
             && order.matchedShares > 0
             && !resolvedSlugs.has(order.slug)) {
+            if (order.pairedEntryGroup) await this.cancelPairedEntryOrders(order);
             await this.maybeSubmitTakeProfit(order);
           }
         }
@@ -734,6 +771,9 @@ class LiveBot {
       next.windowStart = windowStart;
       next.windowEnd = windowStart + WINDOW_CONFIG[timeframe];
       next.slug = `btc-updown-${timeframe}-${Math.floor(windowStart / 1000)}`;
+      next.windowStartPairStatus = windowStart < this.startedAt
+        ? 'skipped_restart_window'
+        : 'waiting_for_window_start';
       next.signal = {
         eligible: false,
         status: windowStart < this.startedAt ? 'skipped_restart_window' : 'watching',
@@ -746,6 +786,8 @@ class LiveBot {
     }
 
     const current = this.markets[timeframe];
+    await this.queueWindowStartPair(current, now);
+    if (this.halted) return;
     if (!current.market && now - current.lastMarketLookupAt >= 5_000) {
       current.lastMarketLookupAt = now;
       try {
@@ -766,6 +808,14 @@ class LiveBot {
         reason: current.error || 'Waiting for BTC market discovery',
       };
       return;
+    }
+
+    if (current.windowStartPairPending) {
+      if (this.flowTestPausesStrategy()) {
+        current.windowStartPairStatus = 'paused_for_flow_test';
+      } else {
+        await this.fireWindowStartPair(current);
+      }
     }
 
     const results = await Promise.allSettled([
@@ -892,6 +942,169 @@ class LiveBot {
     }
   }
 
+  async queueWindowStartPair(state, now) {
+    if (state.windowStartPairStatus !== 'waiting_for_window_start') return true;
+    if (state.windowStart < this.startedAt) {
+      state.windowStartPairStatus = 'skipped_restart_window';
+      return true;
+    }
+    if (!this.tradingEnabled) {
+      state.windowStartPairStatus = 'live_disabled';
+      return true;
+    }
+    if (now >= state.windowEnd) {
+      state.windowStartPairStatus = 'expired';
+      return true;
+    }
+
+    state.windowStartPairPending = true;
+    state.windowStartPairStatus = 'pending';
+    try {
+      await this.persistState();
+      this.log('SIGNAL', 'Window-start paired entry queued for this BTC window', {
+        slug: state.slug,
+        timeframe: state.timeframe,
+        windowStart: state.windowStart,
+      });
+      return true;
+    } catch (error) {
+      this.halted = true;
+      this.refreshOrderReadiness();
+      this.account.status = 'state_store_error';
+      this.account.error = `Could not persist the window-start entry intent: ${error.message || error}`;
+      state.windowStartPairPending = false;
+      state.windowStartPairStatus = 'state_store_error';
+      this.log('ERROR', 'Window-start orders were not submitted because their intent could not be saved', {
+        slug: state.slug,
+        error: this.account.error,
+      });
+      return false;
+    }
+  }
+
+  async fireWindowStartPair(state) {
+    if (!state.windowStartPairPending || state.windowStartPairTriggeredAt) return;
+    if (this.flowTestPausesStrategy()) {
+      state.windowStartPairStatus = 'paused_for_flow_test';
+      return;
+    }
+    if (!this.tradingEnabled) {
+      state.windowStartPairStatus = 'live_disabled';
+      return;
+    }
+    if (!this.account.accountReady || this.halted) {
+      state.windowStartPairStatus = 'waiting_for_order_path';
+      return;
+    }
+    if (this.clock() >= state.windowEnd) {
+      state.windowStartPairPending = false;
+      state.windowStartPairStatus = 'expired';
+      try {
+        await this.persistState();
+      } catch (error) {
+        this.halted = true;
+        this.refreshOrderReadiness();
+        this.account.status = 'state_store_error';
+        this.account.error = `Could not persist expired window-start intent: ${error.message || error}`;
+        state.windowStartPairStatus = 'state_store_error';
+      }
+      return;
+    }
+
+    const group = `window-start-pair:${state.slug}`;
+    const entries = [];
+    state.windowStartPairPending = false;
+    state.windowStartPairTriggeredAt = this.clock();
+    state.windowStartPairStatus = 'submitting';
+    for (const outcome of ['UP', 'DOWN']) {
+      const clientKey = `${state.slug}:WINDOW_START_PAIR:${outcome}:${WINDOW_START_ENTRY_PRICE.toFixed(2)}`;
+      if (this.entryKeys.has(clientKey)) continue;
+      this.entryKeys.add(clientKey);
+      state.orderIds.push(clientKey);
+      const order = {
+        id: null,
+        clientKey,
+        kind: 'ENTRY',
+        entryType: 'WINDOW_START_PAIR',
+        pairedEntryGroup: group,
+        side: 'BUY',
+        outcome,
+        tokenId: String(state.market.tokens[outcome]),
+        price: WINDOW_START_ENTRY_PRICE,
+        shares: WINDOW_START_ENTRY_SHARES,
+        matchedShares: 0,
+        pendingFinalFillChecks: 0,
+        takeProfitPrice: WINDOW_START_TAKE_PROFIT_PRICE,
+        slug: state.slug,
+        timeframe: state.timeframe,
+        windowStart: state.windowStart,
+        windowEnd: state.windowEnd,
+        status: 'SUBMITTING',
+        recovered: false,
+        exits: [],
+        exitSubmittingShares: 0,
+        retryAt: 0,
+        error: null,
+        createdAt: this.clock(),
+      };
+      this.ordersById.set(clientKey, order);
+      entries.push(order);
+    }
+
+    try {
+      await this.persistState();
+    } catch (error) {
+      this.halted = true;
+      this.account.accountReady = false;
+      this.account.status = 'state_store_error';
+      this.account.error = error.message || String(error);
+      state.windowStartPairStatus = 'state_store_error';
+      this.log('ERROR', 'Window-start buy orders were not sent because the order ledger could not be saved', {
+        slug: state.slug,
+        error: this.account.error,
+      });
+      return;
+    }
+
+    if (!entries.length) {
+      state.windowStartPairStatus = 'already_submitted';
+      try {
+        await this.persistState();
+      } catch (error) {
+        this.halted = true;
+        this.account.accountReady = false;
+        this.account.status = 'state_store_error';
+        this.account.error = `Could not persist the already-submitted window-start pair: ${error.message || error}`;
+        state.windowStartPairStatus = 'state_store_error';
+      }
+      return;
+    }
+    await Promise.all(entries.map(order => this.submitEntry(order)));
+    const uncertain = entries.some(order => order.status === 'SUBMISSION_UNCERTAIN');
+    const rejected = entries.some(order => order.status === 'REJECTED');
+    state.windowStartPairStatus = uncertain
+      ? 'submission_uncertain'
+      : rejected ? 'partially_submitted' : 'orders_submitted';
+    try {
+      await this.persistState();
+    } catch (error) {
+      this.halted = true;
+      this.account.accountReady = false;
+      this.account.status = 'state_store_error';
+      this.account.error = `Could not persist window-start submission results: ${error.message || error}`;
+      state.windowStartPairStatus = 'state_store_error';
+    }
+    this.log('SIGNAL', 'Window-start paired limit buys submitted', {
+      slug: state.slug,
+      timeframe: state.timeframe,
+      buyPrice: WINDOW_START_ENTRY_PRICE,
+      sharesPerSide: WINDOW_START_ENTRY_SHARES,
+      takeProfitPrice: WINDOW_START_TAKE_PROFIT_PRICE,
+      orderIds: entries.map(order => order.id || order.clientKey),
+      status: state.windowStartPairStatus,
+    });
+  }
+
   async fireWindowOrders(state, evaluation) {
     if (this.flowTestPausesStrategy()) return;
     if (state.triggeredAt) return;
@@ -945,6 +1158,7 @@ class LiveBot {
           id: null,
           clientKey,
           kind: 'ENTRY',
+          entryType: 'MIDPOINT_LADDER',
           side: 'BUY',
           outcome: side,
           tokenId: String(state.market.tokens[side]),
@@ -1087,11 +1301,20 @@ class LiveBot {
           continue;
         }
         const previousMatched = order.matchedShares;
+        const previousFinalFillChecks = numeric(order.pendingFinalFillChecks);
         order.matchedShares = Math.max(order.matchedShares, matchedSize(latest));
         const latestStatus = orderStatus(latest);
         const previousStatus = order.status;
-        if (latestStatus !== 'UNKNOWN') order.status = latestStatus;
-        if (order.matchedShares !== previousMatched || order.status !== previousStatus) {
+        if (latestStatus !== 'UNKNOWN'
+          && !(order.cancelledAt && ACTIVE.has(latestStatus))) {
+          order.status = latestStatus;
+        }
+        if (order.pendingFinalFillChecks > 0) {
+          order.pendingFinalFillChecks = Math.max(0, order.pendingFinalFillChecks - 1);
+        }
+        if (order.matchedShares !== previousMatched
+          || order.status !== previousStatus
+          || order.pendingFinalFillChecks !== previousFinalFillChecks) {
           order.updatedAt = now;
           changed = true;
         }
@@ -1103,13 +1326,9 @@ class LiveBot {
             outcome: order.outcome,
             matchedShares: order.matchedShares,
           });
-          await this.maybeSubmitTakeProfit(order);
         }
         if (order.kind === 'ENTRY' && order.windowEnd && now >= order.windowEnd && !isTerminalStatus(order.status)) {
           await this.cancelEntryOrder(order);
-        }
-        if (order.kind === 'ENTRY' && order.matchedShares > 0) {
-          await this.maybeSubmitTakeProfit(order);
         }
         if (order.testOnly && isTerminalStatus(order.status) && order.matchedShares === 0) {
           await this.completeFlowTest(`entry_${order.status.toLowerCase().replaceAll(' ', '_')}`, order.error, order);
@@ -1122,6 +1341,19 @@ class LiveBot {
             price: order.price,
             matchedShares: order.matchedShares,
           });
+        }
+      }
+      const pairedEntriesWithFills = [...this.ordersById.values()].filter(order =>
+        order.kind === 'ENTRY'
+        && order.pairedEntryGroup
+        && order.matchedShares > 0
+        && !resolvedSlugs.has(order.slug));
+      for (const order of pairedEntriesWithFills) {
+        await this.cancelPairedEntryOrders(order);
+      }
+      for (const order of this.ordersById.values()) {
+        if (order.kind === 'ENTRY' && order.matchedShares > 0 && !resolvedSlugs.has(order.slug)) {
+          await this.maybeSubmitTakeProfit(order);
         }
       }
       for (const order of this.ordersById.values()) {
@@ -1299,12 +1531,54 @@ class LiveBot {
     }
   }
 
-  async cancelEntryOrder(order) {
-    if (order.kind !== 'ENTRY' || isTerminalStatus(order.status) || !order.id || !this.trader?.cancelOrder) return;
+  async cancelPairedEntryOrders(filledEntry) {
+    if (!filledEntry?.pairedEntryGroup || numeric(filledEntry.matchedShares) <= 0) return;
+    const groupOrders = [...this.ordersById.values()].filter(order =>
+      order.kind === 'ENTRY' && order.pairedEntryGroup === filledEntry.pairedEntryGroup);
+    const peers = groupOrders.filter(order => order !== filledEntry);
+    for (const peer of peers) {
+      if (peer.matchedShares <= 0 && !isTerminalStatus(peer.status)) {
+        await this.cancelEntryOrder(peer, 'paired_fill');
+      }
+    }
+
+    const filledSides = groupOrders.filter(order => numeric(order.matchedShares) > 0).length;
+    const newStatus = filledSides > 1
+      ? 'both_sides_filled'
+      : !peers.length
+        ? 'counterpart_not_tracked'
+        : peers.every(order => isTerminalStatus(order.status))
+          ? peers.some(order => order.status === 'CANCELED')
+            ? 'opposite_order_cancelled'
+            : 'counterpart_inactive'
+          : 'opposite_cancel_pending';
+    const state = this.markets[filledEntry.timeframe];
+    if (!state || state.slug !== filledEntry.slug || state.windowStartPairStatus === newStatus) return;
+    state.windowStartPairStatus = newStatus;
+    try {
+      await this.persistState();
+    } catch (error) {
+      this.halted = true;
+      this.account.accountReady = false;
+      this.account.status = 'state_store_error';
+      this.account.error = `Could not persist paired-order cancellation state: ${error.message || error}`;
+    }
+  }
+
+  async cancelEntryOrder(order, reason = 'window_end') {
+    if (order.kind !== 'ENTRY'
+      || isTerminalStatus(order.status)
+      || !order.id
+      || !this.trader?.cancelOrder
+      || numeric(order.nextCancelAt) > this.clock()) return false;
     try {
       const result = await this.trader.cancelOrder(order.id);
       order.status = 'CANCELED';
       order.cancelledAt = this.clock();
+      order.nextCancelAt = 0;
+      order.pendingFinalFillChecks = order.matchedShares < order.shares
+        ? CANCEL_FINAL_FILL_CHECKS
+        : 0;
       await this.persistState();
       if (order.testOnly && this.flowTestState.status !== 'complete'
         && this.flowTestState.status === 'awaiting_fill') {
@@ -1317,15 +1591,19 @@ class LiveBot {
           await this.completeFlowTest('entry_canceled_unfilled', null, order);
         }
       }
-      this.log('ORDER', 'Unfilled entry remainder canceled at window end', {
+      this.log('ORDER', reason === 'paired_fill'
+        ? 'Opposite paired entry canceled after a confirmed fill'
+        : 'Unfilled entry remainder canceled at window end', {
         orderId: order.id,
         slug: order.slug,
         matchedShares: order.matchedShares,
         result: result?.status || 'cancel requested',
       });
+      return true;
     } catch (error) {
       order.error = error.message || String(error);
-      order.nextPollAt = this.clock() + Math.max(ORDER_POLL_MS, retryAfterMs(error));
+      order.nextCancelAt = this.clock() + Math.max(ORDER_POLL_MS, retryAfterMs(error));
+      order.nextPollAt = Math.max(order.nextPollAt || 0, order.nextCancelAt);
       try {
         await this.persistState();
       } catch (persistError) {
@@ -1333,7 +1611,10 @@ class LiveBot {
         this.account.accountReady = false;
         this.account.error = `Could not persist entry-cancel state: ${persistError.message || persistError}`;
       }
-      this.log('ERROR', 'Could not cancel the entry order remainder', { orderId: order.id, error: order.error });
+      this.log('ERROR', reason === 'paired_fill'
+        ? 'Could not cancel the opposite paired entry'
+        : 'Could not cancel the entry order remainder', { orderId: order.id, error: order.error });
+      return false;
     }
   }
 
@@ -1364,6 +1645,9 @@ class LiveBot {
         signal: state.signal,
         pendingTrigger: state.pendingTrigger,
         triggeredAt: state.triggeredAt,
+        windowStartPairPending: state.windowStartPairPending,
+        windowStartPairStatus: state.windowStartPairStatus,
+        windowStartPairTriggeredAt: state.windowStartPairTriggeredAt,
         error: state.error,
         orders,
       }];
@@ -1381,15 +1665,22 @@ class LiveBot {
       now: this.clock(),
       strategy: {
         markets: ['BTC 5m', 'BTC 15m'],
-        windowRule: 'Evaluate only during the final 60 seconds',
-        trigger: 'Any one fresh UP or DOWN midpoint in the inclusive $0.30–$0.71 band during the final minute',
-        triggerPersistence: 'First qualifying tick is saved through account delays and process restarts until the window ends',
+        windowRule: 'Submit a two-sided opening pair in each new window; evaluate the existing ladder during the final 120 seconds',
+        trigger: 'At window start, buy 20 UP and 20 DOWN shares at $0.30; in the final 120 seconds, any fresh midpoint in the inclusive $0.30–$0.71 band triggers the existing ladder',
+        triggerPersistence: 'Opening-pair intents and qualifying ladder ticks are saved through account delays and process restarts until the window ends',
+        windowStartPair: {
+          buyPrice: WINDOW_START_ENTRY_PRICE,
+          sharesPerSide: WINDOW_START_ENTRY_SHARES,
+          takeProfitPrice: WINDOW_START_TAKE_PROFIT_PRICE,
+          cancelOppositeOnAnyFill: true,
+          processRestart: 'Only windows that start after this process starts; an already-open window is skipped unless a previously persisted pair intent is pending',
+        },
         orders: ENTRY_RUNGS.map(rung => ({
           buyPrice: rung.price,
           shares: SHARES_PER_RUNG,
           takeProfitPrice: rung.takeProfitPrice,
         })),
-        rearm: 'One entry set per window; no entry replacement',
+        rearm: 'One opening pair and one midpoint ladder per window; no order replacement or re-entry',
         orderPollMs: this.orderPollMs,
         quoteMaxAgeMs: 5_000,
         entriesPausedForSmokeTest: this.flowTestPausesStrategy(),

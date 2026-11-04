@@ -12,7 +12,7 @@ const ENTRY_RUNGS = Object.freeze([
 
 const MIN_MIDPOINT = 0.30;
 const MAX_MIDPOINT = 0.71;
-const FINAL_MINUTE_MS = 60_000;
+const FINAL_ENTRY_WINDOW_MS = 120_000;
 const QUOTE_MAX_AGE_MS = 5_000;
 
 function bestPrice(levels, select) {
@@ -62,12 +62,12 @@ function evaluateWindow({ now = Date.now(), market, quotes, startedAt = null } =
   }
 
   const remainingMs = end - now;
-  if (remainingMs > FINAL_MINUTE_MS) {
+  if (remainingMs > FINAL_ENTRY_WINDOW_MS) {
     return {
       eligible: false,
       status: 'watching',
       remainingMs,
-      reason: 'Waiting for the final 60 seconds',
+      reason: 'Waiting for the final 120 seconds',
     };
   }
 
@@ -133,7 +133,7 @@ module.exports = {
   ENTRY_RUNGS,
   MIN_MIDPOINT,
   MAX_MIDPOINT,
-  FINAL_MINUTE_MS,
+  FINAL_ENTRY_WINDOW_MS,
   QUOTE_MAX_AGE_MS,
   quoteFromBook,
   evaluateWindow,

@@ -73,7 +73,7 @@
     <div class="events" id="events"><div class="empty">Waiting for bot activity…</div></div>
   </section>
 
-  <p class="foot">Trigger: during the final 60 seconds, either fresh outcome midpoint must be in the inclusive $0.30–$0.71 band. The bot then submits UP and DOWN limit buys at $0.25 and $0.15, 10 shares per order. Confirmed fills receive $0.75 and $0.85 limit sells respectively. One entry set per window; no re-entry. Entry orders are canceled at window end; take-profit orders have no explicit expiry.</p>
+  <p class="foot">At each new BTC 5-minute or 15-minute window, the bot submits UP and DOWN limit buys at $0.30 for 20 shares each. Any confirmed fill cancels the opposite entry; confirmed shares receive a $0.99 limit sell. If both entries fill before cancellation completes, both fills receive take-profit orders. Separately, during the final 120 seconds, either fresh midpoint in the inclusive $0.30–$0.71 band triggers the existing ladder: UP and DOWN buys at $0.25 and $0.15, 10 shares each, with take-profit sells at $0.75 and $0.85. Each trigger is one-shot per window. Unfilled entry orders are canceled at window end; take-profit orders have no explicit expiry.</p>
   <div class="error" id="error"></div>
 </main>
 <script>
@@ -108,6 +108,7 @@
         <div class="row"><span>Signal state</span><strong class="status-text ${statusClass(sig.status)}">${esc(sig.status||'waiting')}</strong></div>
         <div class="row"><span>Signal reason</span><strong>${esc(sig.reason||'—')}</strong></div>
         <div class="row"><span>Qualifying side</span><strong>${esc((sig.qualifyingSides||[]).join(' + ')||'—')}</strong></div>
+        <div class="row"><span>Window-start pair</span><strong>${esc(state?.windowStartPairStatus||'waiting')}</strong></div>
         <div class="row"><span>One-shot trigger</span><strong>${state?.triggeredAt?`Triggered ${time(state.triggeredAt)}`:'Not triggered'}</strong></div>
         <div class="row"><span>Orders this window</span><strong>${esc(orders)}</strong></div>
       </div>
