@@ -26,8 +26,8 @@ Each quote used for a trigger must be live, valid, and no more than **5 seconds 
 
 For each BTC 5-minute window that starts after the process starts:
 
-1. Wait **120 seconds after the window opens**.
-2. From then until the window ends, watch fresh UP and DOWN midpoint quotes.
+1. From the moment the window opens, watch fresh UP and DOWN midpoint quotes.
+2. Continue watching until the window ends.
 3. The first fresh midpoint at or above **$0.80** triggers a one-shot entry. If both qualify on the same check, choose the higher midpoint; if equal, choose UP.
 4. Latch and persist the selected side and triggering price so a later quote change or account-data delay does not change the signal. A process restart does not invent a signal; an already-open window is skipped unless it has a persisted qualifying trigger.
 
@@ -37,18 +37,16 @@ Read the market's Gamma `version` before choosing its outcome asset IDs: use `cl
 
 Submit two resting limit BUY orders on the **selected side only**:
 
-| Outcome | Buy limit | Live shares | Source exit |
+| Outcome | Buy limit | Live shares | Exit |
 |---|---:|---:|---:|
-| Selected side | $0.40 | 10 | $0.99 TP / $0.01 SL |
-| Selected side | $0.60 | 20 | $0.99 TP / $0.01 SL |
+| Selected side | $0.40 | 10 | Hold to resolution |
+| Selected side | $0.60 | 20 | Hold to resolution |
 
 At most these two entry orders are submitted per window, for a combined nominal entry notional of **$16** if both fill. No opening pair is submitted. Do not replace orders, rearm, or enter the other side for the same signal.
 
 - A first partial fill completes that buy rung: cancel its unfilled remainder, confirm final matched shares, and manage only the confirmed quantity.
-- During the active window, a fresh own-side best bid at or above $0.99 triggers a resting limit SELL at $0.99.
-- A fresh own-side best bid at or below $0.01 triggers a resting limit SELL at $0.01 only after 295 seconds from window start.
-- Cancel unfilled entry and exit orders at window end. Keep unsold shares pending until the original market is confirmed closed and resolved; map payout from that market's exact outcome token.
-- The source paper bot records threshold exits as idealized $1/$0 payouts with a taker-fee estimate. Real orders use actual confirmed fill quantities and prices; a limit sell can remain unfilled until expiry and resolution.
+- Do not submit strategy take-profit or stop-loss sell orders.
+- Cancel unfilled BUY orders at window end. Hold confirmed shares until the original market is confirmed closed and resolved; map payout from that market's exact outcome token.
 
 ### Dashboard mode
 
@@ -81,20 +79,17 @@ The test is one-shot and restart-safe. A confirmed take-profit submission comple
 - The current client sends the limit price and size with `postOnly:false`; it does not send an explicit expiration timestamp.
 - The bot attempts to cancel still-active entry orders at the window end. This is a local cancellation attempt, not an order-expiration timestamp. Report cancellation failures rather than pretending the order is gone.
 
-### Fill checks and source exits
+### Fill checks and resolution
 
 - The live order polling target is **500 ms**. This is not a guarantee that Polymarket will respond or fill within 500 ms.
-- Poll and reconcile both BUY and SELL orders on the 500 ms target; a dashboard signal is not proof of an exchange fill.
+- Poll and reconcile strategy BUY orders on the 500 ms target; a dashboard signal is not proof of an exchange fill.
 - Use Polymarket's matched-share count as the source of truth. Never infer a real fill from a paper fill, a submitted response, or a quote touching the limit.
-- On the first confirmed partial fill of a new rung, cancel its unfilled BUY remainder. Wait for final fill confirmation before sizing the exit.
-- During the active market, compare a fresh own-side best bid to the source thresholds: TP at $0.99 any time; SL at $0.01 only at or after 295 seconds.
-- When a threshold is reached, submit a resting limit SELL at the selected source exit price ($0.99 TP or $0.01 SL) for the confirmed unsold shares.
-- Handle partial fills without overselling: account for shares already sold or reserved by a pending sell, and place a new sell only for the remaining confirmed quantity.
-- The current minimum live sell size is 5 shares. If a partial fill is below 5, wait for more matched shares; if the total remains below the minimum, report the blocked quantity clearly. Do not mark it as sold.
+- On the first confirmed partial fill of a new rung, cancel its unfilled BUY remainder and track the actual matched quantity.
+- The strategy submits no take-profit or stop-loss sell orders. Hold confirmed shares for the original market resolution.
 - On an uncertain order-submission response, halt additional submissions until the order can be reconciled. Do not retry an uncertain BUY or SELL blindly, because that can create duplicates.
-- Reconcile TP/SL SELL fills, cancellations, and rejections. Do not duplicate an uncertain sell. A confirmed insufficient-balance rejection may retry after a delay; other rejected or canceled exits are not automatically re-armed.
+- Reconcile BUY submissions, fills, cancellations, and rejections. Do not duplicate an uncertain order.
 
-At window end, cancel any still-open exit limits and wait for confirmed resolution of the **original market**. Do not infer settlement from the next window's UP/DOWN tokens. No old $0.75/$0.85 exit mapping or other legacy TP/SL rule applies to new strategy entries. The live $0.99/$0.01 limit orders are not guaranteed to fill merely because the source trigger fired.
+At window end, cancel any still-open BUY limits and wait for confirmed resolution of the **original market**. Do not infer settlement from the next window's UP/DOWN tokens. Strategy entries have no TP or SL sell orders.
 
 ## 4. Account readiness, rate limits, and safety
 
@@ -108,14 +103,14 @@ At window end, cancel any still-open exit limits and wait for confirmed resoluti
 
 ### Restart and duplicate protection
 
-The live bot writes an order ledger atomically to `BOT_STATE_DIR` before submitting orders. In Railway, attach a persistent volume at `/data` and set `BOT_STATE_DIR=/data`. A qualifying midpoint trigger after the 120-second delay is also saved; it can fire once after an authentication delay or process restart, but only before that same window ends. A restart does not invent a trigger for a window with no saved qualifying tick. If the volume is missing or the ledger is invalid, live execution remains blocked.
+The live bot writes an order ledger atomically to `BOT_STATE_DIR` before submitting orders. In Railway, attach a persistent volume at `/data` and set `BOT_STATE_DIR=/data`. A qualifying midpoint trigger is also saved; it can fire once after an authentication delay or process restart, but only before that same window ends. A restart does not invent a trigger for a window with no saved qualifying tick. If the volume is missing or the ledger is invalid, live execution remains blocked.
 
 Persist before/with every live submission:
 
 - Market slug, timeframe, window start/end, side, rung price, requested shares
 - CLOB order ID, order status, matched shares, and last reconciliation time
-- Parent/child relationship between each BUY and its take-profit SELL
-- Submitted, filled, reserved-for-exit, and exited share quantities
+- Confirmed matched shares and original-market resolution state
+- Submitted, matched, cancelled, and settled share quantities
 - Per-window/per-side/per-rung idempotency keys
 
 On startup, load the durable ledger before enabling new entries. Open-order and positions snapshots are useful for recovery and dashboard visibility, but they do not gate authenticated CLOB submissions. If an order's submission result is uncertain, reconcile that specific order before any retry. Do not reset live order state or paper balances as an implicit side effect of deployment.
@@ -131,7 +126,7 @@ The dashboard must show the active BTC 5m market and its current strategy:
 - Quote timestamp/age and an explicit `LIVE`, `STALE`, or `MISSING` state
 - The evaluated midpoint band, signal decision, and skip reason
 - Live trading enabled/paused state, CLOB order-path readiness, snapshot freshness, last successful snapshot, next retry, and any 429/error
-- Each live BUY and SELL order's side, limit price, requested shares, matched shares, status, and linked take-profit
+- Each live strategy BUY order's side, limit price, requested shares, matched shares, and status
 - Live account readiness, tracked BUY/SELL orders, matched shares, and bot events
 
 `/api/state` is the live bot snapshot. `/api/live-balance` reports the last account snapshot and tracked live orders. `/api/healthz` returns 503 until the CLOB client authenticates or while a hard safety halt is active; a stale Positions API snapshot alone does not fail health. Never display private keys or secrets.
@@ -141,11 +136,11 @@ The dashboard must show the active BTC 5m market and its current strategy:
 At minimum, test that:
 
  1. Only BTC 5m markets are actively scanned for new entries; ETH, 15m, and malformed/expired markets are not traded.
-2. No strategy order is submitted before 120 seconds after a window opens; a fresh midpoint at or above $0.80 then selects one outcome.
-3. A trigger produces exactly two BUY attempts on the selected side: 10 shares at $0.40 and 20 shares at $0.60. Source exits are a $0.99 limit sell on a fresh bid trigger, a $0.01 limit sell after the 295-second stop gate, or original-market resolution for unsold shares.
+2. A fresh midpoint at or above $0.80 can select a side from the moment the window opens.
+3. A trigger produces exactly two BUY attempts on the selected side: 10 shares at $0.40 and 20 shares at $0.60. The strategy submits no TP/SL sells; confirmed shares wait for original-market resolution.
 4. Repeated scans do not duplicate either rung or submit a buy on the opposite side.
 6. Repeated scans of the same window do not duplicate either trigger's orders.
-7. Confirmed full and partial fills produce SELL orders only for unsold matched shares; sub-5-share exits are reported as blocked; SELL fills/cancellations/rejections are reconciled.
+7. Confirmed full and partial fills are tracked correctly and held until original-market resolution; no strategy SELL orders are submitted.
 8. 429 responses honor `Retry-After` for snapshot retries but do not block an authenticated CLOB order path.
 9. Restart recovery reconciles previous order IDs and partial fills without duplicating BUYs or SELLs.
 10. A restarted process loads the durable ledger, preserves a qualifying new-strategy trigger only for its still-open window, does not replay retired opening-pair intents, and does not duplicate submitted entries.
