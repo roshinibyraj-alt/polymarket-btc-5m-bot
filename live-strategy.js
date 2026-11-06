@@ -11,12 +11,9 @@ const ENTRY_RUNGS = Object.freeze([
   Object.freeze({ price: 0.60, shares: 20 }),
 ]);
 
-const ENTRY_DELAY_MS = 120_000;
+const ENTRY_DELAY_MS = 0;
 const ENTRY_TRIGGER_MIDPOINT = 0.80;
 const QUOTE_MAX_AGE_MS = 5_000;
-const TAKE_PROFIT_BID = 0.99;
-const STOP_LOSS_BID = 0.01;
-const EXIT_START_SECONDS = 295;
 const STRATEGY_VERSION = 'btc-midpoint-trigger-ladder-v2';
 
 function bestPrice(levels, select) {
@@ -71,7 +68,7 @@ function evaluateWindow({ now = Date.now(), market, quotes, startedAt = null } =
       eligible: false,
       status: 'waiting_for_delay',
       elapsedMs,
-      reason: 'Waiting for 120 seconds after the window starts',
+      reason: 'Waiting for the window to open',
     };
   }
 
@@ -132,31 +129,12 @@ function evaluateWindow({ now = Date.now(), market, quotes, startedAt = null } =
         : 'MIDPOINT_TRIGGER',
     strategyVersion: STRATEGY_VERSION,
     reason: eligible
-      ? `${selectedSide} midpoint reached $${values[selectedSide].toFixed(3)} after the 120-second delay`
+      ? `${selectedSide} midpoint reached ${values[selectedSide].toFixed(3)} during the window`
       : 'Waiting for a fresh UP or DOWN midpoint to reach $0.80 or higher',
   };
 }
 
-function evaluateSourceExit({ now, windowStart, windowEnd, filledAt, quote } = {}) {
-  const bid = Number(quote?.bestBid);
-  const updatedAt = Number(quote?.updatedAt);
-  const fresh = quote?.status === 'LIVE'
-    && quote?.stale !== true
-    && Number.isFinite(updatedAt)
-    && updatedAt <= now
-    && now - updatedAt <= QUOTE_MAX_AGE_MS
-    && Number.isFinite(filledAt)
-    && updatedAt >= filledAt
-    && Number.isFinite(bid)
-    && bid >= 0
-    && bid <= 1;
-  if (!fresh || now < windowStart || now >= windowEnd) return null;
-  if (bid >= TAKE_PROFIT_BID) {
-    return { kind: 'TAKE_PROFIT', triggerBid: bid, limitPrice: TAKE_PROFIT_BID };
-  }
-  if (now >= windowStart + EXIT_START_SECONDS * 1000 && bid <= STOP_LOSS_BID) {
-    return { kind: 'STOP_LOSS', triggerBid: bid, limitPrice: STOP_LOSS_BID };
-  }
+function evaluateSourceExit() {
   return null;
 }
 
@@ -204,9 +182,6 @@ module.exports = {
   ENTRY_DELAY_MS,
   ENTRY_TRIGGER_MIDPOINT,
   QUOTE_MAX_AGE_MS,
-  TAKE_PROFIT_BID,
-  STOP_LOSS_BID,
-  EXIT_START_SECONDS,
   STRATEGY_VERSION,
   quoteFromBook,
   evaluateWindow,
