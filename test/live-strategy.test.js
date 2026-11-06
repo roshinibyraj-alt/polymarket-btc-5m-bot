@@ -6,6 +6,7 @@ const {
   quoteFromBook,
   evaluateWindow,
   windowStartFor,
+  STRATEGY_TIMEFRAMES,
   ENTRY_RUNGS,
 } = require('../live-strategy');
 
@@ -133,4 +134,5 @@ test('entry ladder uses the requested prices and sizes with existing take-profit
 test('window start is aligned independently for 5m and 15m', () => {
   assert.equal(windowStartFor(601_000, '5m'), 600_000);
   assert.equal(windowStartFor(901_000, '15m'), 900_000);
+  assert.deepEqual(STRATEGY_TIMEFRAMES, ['5m']);
 });

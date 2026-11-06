@@ -6,7 +6,7 @@ This document does not authorize a real order or a production deployment. Never 
 
 ## 1. Scope
 
-- Trade Polymarket Bitcoin Up/Down markets for **BTC 5-minute and BTC 15-minute windows only**.
+- Trade Polymarket Bitcoin Up/Down markets for **BTC 5-minute windows only**.
 - Do not trade ETH or other assets.
 - Discover each market and its UP/DOWN token IDs from Polymarket market data. Use the Polymarket CLOB order book for outcome prices.
 - The running app is live-order only. Paper fills and paper balances are not part of this service.
@@ -24,7 +24,7 @@ Each quote used for a trigger must be live, valid, and no more than **5 seconds 
 
 ### Entry condition
 
-For each BTC 5-minute and 15-minute window that starts after the process starts:
+For each BTC 5-minute window that starts after the process starts:
 
 1. Wait **120 seconds after the window opens**.
 2. From then until the window ends, watch fresh UP and DOWN midpoint quotes.
@@ -120,7 +120,7 @@ Run one active trading instance per wallet unless shared durable coordination pr
 
 ## 5. Dashboard and API
 
-The dashboard must show, separately for BTC 5m and BTC 15m:
+The dashboard must show the active BTC 5m market and its current strategy:
 
 - Current market slug and time remaining
 - UP and DOWN best bid, best ask, and midpoint
@@ -136,7 +136,7 @@ The dashboard must show, separately for BTC 5m and BTC 15m:
 
 At minimum, test that:
 
-1. Only BTC 5m and BTC 15m markets are accepted; ETH and malformed/expired markets are rejected.
+ 1. Only BTC 5m markets are actively scanned for new entries; ETH, 15m, and malformed/expired markets are not traded.
 2. No strategy order is submitted before 120 seconds after a window opens; a fresh midpoint at or above $0.80 then selects one outcome.
 3. A trigger produces exactly two BUY attempts on the selected side: 10 shares at $0.40 and 20 shares at $0.60, with $0.75/$0.85 take-profit limits.
 4. Repeated scans do not duplicate either rung or submit a buy on the opposite side.

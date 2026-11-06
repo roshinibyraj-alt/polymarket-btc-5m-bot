@@ -4,6 +4,7 @@ const WINDOW_CONFIG = Object.freeze({
   '5m': 5 * 60 * 1000,
   '15m': 15 * 60 * 1000,
 });
+const STRATEGY_TIMEFRAMES = Object.freeze(['5m']);
 
 const ENTRY_RUNGS = Object.freeze([
   Object.freeze({ price: 0.40, shares: 10, takeProfitPrice: 0.75 }),
@@ -141,6 +142,7 @@ function windowStartFor(now, timeframe) {
 
 module.exports = {
   WINDOW_CONFIG,
+  STRATEGY_TIMEFRAMES,
   ENTRY_RUNGS,
   ENTRY_DELAY_MS,
   ENTRY_TRIGGER_MIDPOINT,

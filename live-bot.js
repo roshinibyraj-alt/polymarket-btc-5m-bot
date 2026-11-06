@@ -3,6 +3,7 @@
 const cfg = require('./config');
 const {
   WINDOW_CONFIG,
+  STRATEGY_TIMEFRAMES,
   ENTRY_RUNGS,
   STRATEGY_VERSION,
   evaluateWindow,
@@ -10,7 +11,7 @@ const {
   windowStartFor,
 } = require('./live-strategy');
 
-const TIMEFRAMES = Object.keys(WINDOW_CONFIG);
+const TIMEFRAMES = STRATEGY_TIMEFRAMES;
 const TERMINAL = new Set(['MATCHED', 'FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED']);
 const ACTIVE = new Set(['LIVE', 'OPEN', 'PENDING', 'PARTIALLY FILLED', 'PARTIALLY MATCHED']);
 const MIN_SELL_SHARES = Number(cfg.LIVE_MIN_SELL_SHARES || 5);
@@ -766,6 +767,7 @@ class LiveBot {
   }
 
   async scanTimeframe(timeframe, now) {
+    if (!TIMEFRAMES.includes(timeframe)) return;
     if (this.tradingEnabled && !this.stateReady) return;
     const state = this.markets[timeframe];
     const windowStart = windowStartFor(now, timeframe);
@@ -1673,7 +1675,7 @@ class LiveBot {
       now: this.clock(),
       strategy: {
         version: STRATEGY_VERSION,
-        markets: ['BTC 5m', 'BTC 15m'],
+        markets: ['BTC 5m'],
         windowRule: 'Wait 120 seconds after each window starts, then monitor fresh UP/DOWN midpoints until the window ends',
         trigger: 'The first fresh midpoint at or above $0.80 selects a side; if both qualify, select the higher midpoint and break ties toward UP',
         triggerPersistence: 'The qualifying side and price are saved through account delays and process restarts until that window ends',

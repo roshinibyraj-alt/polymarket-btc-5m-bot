@@ -42,7 +42,7 @@
 <body>
 <main>
   <header>
-    <div><h1>BTC Limit Ladder Bot</h1><div class="subtitle">Live order execution · BTC 5-minute and 15-minute markets only</div></div>
+    <div><h1>BTC Limit Ladder Bot</h1><div class="subtitle">Live order execution · BTC 5-minute markets only</div></div>
     <div class="badge" id="statusBadge"><i class="dot"></i><span>Connecting</span></div>
   </header>
 
@@ -73,7 +73,7 @@
     <div class="events" id="events"><div class="empty">Waiting for bot activity…</div></div>
   </section>
 
-  <p class="foot">For each BTC 5-minute and 15-minute window, wait 120 seconds after it opens, then watch fresh UP/DOWN midpoints until the window ends. The first midpoint at or above $0.80 selects that side; if both qualify on the same check, the higher midpoint wins and ties select UP. Submit one resting limit BUY for 10 shares at $0.40 and one for 20 shares at $0.60 on the selected side only. After Polymarket confirms fills, submit same-token take-profit limit sells at $0.75 for the $0.40 rung and $0.85 for the $0.60 rung. There is no opening pair and no rearm. Cancel unfilled entry orders at window end; take-profit orders have no explicit expiry.</p>
+  <p class="foot">Trade BTC 5-minute windows only. Wait 120 seconds after each window opens, then watch fresh UP/DOWN midpoints until it ends. The first midpoint at or above $0.80 selects that side; if both qualify on the same check, the higher midpoint wins and ties select UP. Submit one resting limit BUY for 10 shares at $0.40 and one for 20 shares at $0.60 on the selected side only. After Polymarket confirms fills, submit same-token take-profit limit sells at $0.75 for the $0.40 rung and $0.85 for the $0.60 rung. There is no opening pair and no rearm. Cancel unfilled entry orders at window end; take-profit orders have no explicit expiry.</p>
   <div class="error" id="error"></div>
 </main>
 <script>

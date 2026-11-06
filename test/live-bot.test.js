@@ -580,11 +580,11 @@ test('unclassified account orders warn but do not block the authenticated order 
   assert.equal(calls.filter(call => call.side === 'BUY').length, 2);
 });
 
-test('dashboard snapshot identifies the live strategy and separate 5m/15m windows', () => {
+test('dashboard snapshot identifies the live BTC 5m strategy only', () => {
   const { bot } = setup();
   const state = bot.snapshot();
   assert.equal(state.mode, 'REAL ORDERS');
-  assert.deepEqual(state.strategy.markets, ['BTC 5m', 'BTC 15m']);
+  assert.deepEqual(state.strategy.markets, ['BTC 5m']);
   assert.equal(state.strategy.version, 'btc-midpoint-trigger-ladder-v1');
   assert.match(state.strategy.windowRule, /Wait 120 seconds/);
   assert.match(state.strategy.trigger, /at or above \$0\.80/);
@@ -594,7 +594,7 @@ test('dashboard snapshot identifies the live strategy and separate 5m/15m window
   ]);
   assert.match(state.strategy.rearm, /no opening pair/);
   assert.ok(state.markets['5m']);
-  assert.ok(state.markets['15m']);
+  assert.equal(state.markets['15m'], undefined);
   assert.equal(state.strategy.orderPollMs, 500);
 });
 
