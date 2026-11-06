@@ -64,8 +64,8 @@
   </section>
 
   <section class="panel">
-    <div class="panel-head"><h2>Tracked exchange orders</h2><span class="hint" id="orderCount">0 orders</span></div>
-    <div class="scroll" id="orders"><div class="empty">No orders tracked yet.</div></div>
+    <div class="panel-head"><h2>Orders in current BTC 5m window</h2><span class="hint" id="orderCount">0 current-window orders</span></div>
+    <div class="scroll" id="orders"><div class="empty">No orders in this 5m window.</div></div>
   </section>
 
   <section class="panel">
@@ -115,7 +115,7 @@
     </article>`;
   }
   function renderOrders(orders) {
-    if (!orders?.length) return '<div class="empty">No orders tracked yet.</div>';
+    if (!orders?.length) return '<div class="empty">No orders in this 5m window.</div>';
     const rows = orders.map(o => {
       const outcome = o.outcome || '—';
       const exit = o.kind === 'ENTRY'
@@ -166,8 +166,10 @@
         ? `One test BUY: ${Number(flowTest.shares||5)} shares at ${price(flowTest.buyLimitPrice||0.70)} (max ${money(flowTest.maxBuyNotional||3.50)}), then a confirmed-fill limit SELL at ${price(flowTest.takeProfitPrice||0.75)}. ${flowTest.pausesStrategy?'Normal strategy entries are paused during the test.':'The test is finished; normal strategy entries are active.'}${flowWindow}${flowResult}${flowError}`
         : `No new smoke test is armed.${flowWindow}${flowResult}${flowError}`;
       document.querySelector('#markets').innerHTML = renderMarket(state.markets?.['5m']||{});
-      document.querySelector('#orders').innerHTML = renderOrders(state.orders||[]);
-      document.querySelector('#orderCount').textContent = `${(state.orders||[]).length} tracked orders`;
+      const currentWindowOrders = (state.orders||[]).filter(order =>
+        order.slug === state.markets?.['5m']?.slug);
+      document.querySelector('#orders').innerHTML = renderOrders(currentWindowOrders);
+      document.querySelector('#orderCount').textContent = `${currentWindowOrders.length} current-window orders`;
       document.querySelector('#events').innerHTML = renderEvents(state.events||[]);
       document.querySelector('#error').textContent = state.error || '';
       const ages = Object.values(state.markets?.['5m']?.quotes||{}).map(q=>q?.updatedAt).filter(Boolean);
