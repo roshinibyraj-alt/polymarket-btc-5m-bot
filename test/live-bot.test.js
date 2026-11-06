@@ -12,6 +12,7 @@ function setup({ now = 250_000, accountReady = true, fetchStatus = null } = {}) 
     authenticate: async () => true,
     listOpenOrders: async () => [],
     getEquitySnapshot: async () => ({ orders: [], positions: [], collateral: 20, positionValue: 0, equity: 20 }),
+    getMarket: async id => ({ id: String(id), closed: false, umaResolutionStatus: 'proposed' }),
     placeLimitOrder: async (tokenId, side, price, shares) => {
       const order = { id: `order-${++id}`, tokenId, side, price, shares, status: 'LIVE', sizeMatched: 0 };
       calls.push({ ...order });
@@ -69,7 +70,7 @@ function setup({ now = 250_000, accountReady = true, fetchStatus = null } = {}) 
 const eligible = {
   eligible: true,
   status: 'eligible',
-  strategyVersion: 'btc-midpoint-trigger-ladder-v1',
+  strategyVersion: 'btc-midpoint-trigger-ladder-v2',
   selectedSide: 'UP',
   qualifyingSides: ['UP'],
   upMid: 0.81,
@@ -84,7 +85,7 @@ function fillableMarket(bot) {
     windowStart: 0,
     windowEnd: 300_000,
     slug: 'btc-updown-5m-0',
-    market: { tokens: { UP: 'token-up', DOWN: 'token-down' } },
+    market: { id: 'market-0', tokens: { UP: 'token-up', DOWN: 'token-down' } },
     signal: eligible,
   });
   return state;
@@ -173,7 +174,7 @@ test('restart recovery recognizes new entries and still tracks legacy orders', (
 
   assert.equal(newEntry.kind, 'ENTRY');
   assert.equal(newEntry.entryType, 'MIDPOINT_TRIGGER_LADDER');
-  assert.equal(newEntry.takeProfitPrice, 0.85);
+  assert.equal(newEntry.takeProfitPrice, null);
   assert.equal(newEntry.shares, 20);
   assert.equal(newEntry.matchedShares, 6);
   assert.equal(entry.kind, 'ENTRY');
@@ -272,9 +273,10 @@ test('one qualifying signal submits the two limit buys on the selected side once
   assert.equal(state.triggeredAt, 250_000);
 });
 
-test('take-profit sells are submitted only after matched entry shares are confirmed', async () => {
+test('source TP limit sells wait for confirmed fills and the $0.99 bid trigger', async () => {
   const { bot, calls, exchangeOrders } = setup();
   const state = fillableMarket(bot);
+  state.quotes.UP = { status: 'LIVE', bestBid: 0.98, updatedAt: 250_000, stale: false };
   await bot.fireWindowOrders(state, eligible);
 
   await bot.reconcileOrders();
@@ -284,18 +286,24 @@ test('take-profit sells are submitted only after matched entry shares are confir
     if (order.side === 'BUY') order.status = 'MATCHED';
   }
   await bot.reconcileOrders();
+  assert.equal(calls.filter(call => call.side === 'SELL').length, 0);
+
+  bot.clock = () => 250_500;
+  state.quotes.UP = { status: 'LIVE', bestBid: 0.99, updatedAt: 250_500, stale: false };
+  await bot.reconcileOrders();
 
   const sells = calls.filter(call => call.side === 'SELL');
   assert.equal(sells.length, 2);
   assert.deepEqual(sells.map(({ price, shares }) => [price, shares]), [
-    [0.75, 10],
-    [0.85, 20],
+    [0.99, 10],
+    [0.99, 20],
   ]);
 });
 
-test('terminal matched entries retry a take-profit after the exchange releases shares', async () => {
+test('terminal matched entries retry a source TP after the exchange releases shares', async () => {
   const { bot, trader, calls, exchangeOrders } = setup();
   const state = fillableMarket(bot);
+  state.quotes.UP = { status: 'LIVE', bestBid: 0.99, updatedAt: 250_000, stale: false };
   await bot.fireWindowOrders(state, eligible);
   let rejectFirstSell = true;
   const placeLimitOrder = trader.placeLimitOrder;
@@ -319,10 +327,108 @@ test('terminal matched entries retry a take-profit after the exchange releases s
   await bot.reconcileOrders();
   const sells = calls.filter(call => call.side === 'SELL');
   assert.equal(sells.length, 1);
-  assert.equal(sells[0].price, entry.takeProfitPrice);
+  assert.equal(sells[0].price, 0.99);
   assert.equal(sells[0].shares, 10);
   assert.equal(entry.exits.length, 1);
   assert.equal(entry.exitBlockedReason, null);
+});
+
+test('source stop-loss submits a $0.01 limit only from 295 seconds onward', async () => {
+  const { bot, calls } = setup({ now: 294_999 });
+  const state = fillableMarket(bot);
+  const entry = {
+    id: 'matched-stop-entry',
+    kind: 'ENTRY',
+    entryType: 'MIDPOINT_TRIGGER_LADDER',
+    side: 'BUY',
+    outcome: 'UP',
+    tokenId: 'token-up',
+    marketId: 'market-0',
+    price: 0.40,
+    shares: 10,
+    matchedShares: 10,
+    fillConfirmedAt: 294_000,
+    slug: state.slug,
+    timeframe: '5m',
+    windowStart: 0,
+    windowEnd: 300_000,
+    status: 'MATCHED',
+    exitSubmittingShares: 0,
+    exits: [],
+  };
+  bot.ordersById.set(entry.id, entry);
+  state.quotes.UP = { status: 'LIVE', bestBid: 0.01, updatedAt: 294_999, stale: false };
+
+  await bot.maybeSubmitSourceExit(entry, 294_999);
+  assert.equal(calls.filter(call => call.side === 'SELL').length, 0);
+
+  bot.clock = () => 295_000;
+  state.quotes.UP = { status: 'LIVE', bestBid: 0.01, updatedAt: 295_000, stale: false };
+  await bot.maybeSubmitSourceExit(entry, 295_000);
+
+  const sells = calls.filter(call => call.side === 'SELL');
+  assert.equal(sells.length, 1);
+  assert.equal(sells[0].price, 0.01);
+  assert.equal(sells[0].shares, 10);
+});
+
+test('a first partial entry fill cancels the unfilled remainder', async () => {
+  const { bot, calls, exchangeOrders } = setup();
+  const state = fillableMarket(bot);
+  await bot.fireWindowOrders(state, eligible);
+  const entry = [...bot.ordersById.values()].find(order => order.kind === 'ENTRY');
+  const exchangeOrder = exchangeOrders.get(entry.id);
+  exchangeOrder.status = 'PARTIALLY_FILLED';
+  exchangeOrder.sizeMatched = 6;
+
+  await bot.reconcileOrders();
+
+  assert.equal(entry.matchedShares, 6);
+  assert.equal(entry.status, 'CANCELED');
+  assert.equal(entry.pendingFinalFillChecks, 3);
+  assert.ok(calls.some(call => call.cancel === entry.id));
+});
+
+test('expired positions settle only after confirmed original-market resolution', async () => {
+  const { bot, trader } = setup({ now: 300_000 });
+  const state = fillableMarket(bot);
+  const entry = {
+    id: 'resolved-entry',
+    kind: 'ENTRY',
+    entryType: 'MIDPOINT_TRIGGER_LADDER',
+    outcome: 'UP',
+    tokenId: 'token-up',
+    marketId: 'market-0',
+    shares: 10,
+    matchedShares: 10,
+    windowStart: 0,
+    windowEnd: 300_000,
+    timeframe: '5m',
+    slug: state.slug,
+    status: 'MATCHED',
+    exits: [],
+  };
+  bot.ordersById.set(entry.id, entry);
+  const requested = [];
+  trader.getMarket = async id => {
+    requested.push(id);
+    return {
+      id: 'market-0',
+      closed: true,
+      umaResolutionStatus: 'resolved',
+      outcomes: '["Up","Down"]',
+      clobTokenIds: '["token-up","token-down"]',
+      outcomePrices: '["1","0"]',
+    };
+  };
+
+  await bot.reconcileExpiredPositions(300_000);
+
+  assert.deepEqual(requested, ['market-0']);
+  assert.equal(entry.resolutionStatus, 'RESOLVED');
+  assert.equal(entry.resolutionShares, 10);
+  assert.equal(entry.resolutionPayoutPerShare, 1);
+  assert.equal(entry.resolutionGrossPayout, 10);
 });
 
 test('resolved-market orders are terminal and pending sell retries are not repeated', async () => {
@@ -543,23 +649,31 @@ test('stale account snapshots do not change authenticated CLOB readiness', async
   assert.equal(bot.account.error, 'Positions API 429');
 });
 
-test('window close cancels entry buys but leaves take-profit sells resting', async () => {
-  const { bot, calls } = setup({ now: 300_000 });
+test('window close cancels unfilled entries and source exit limits', async () => {
+  const { bot, calls, exchangeOrders } = setup({ now: 300_000 });
   const state = fillableMarket(bot);
   const entry = {
-    id: 'entry-1', clientKey: `${state.slug}:UP:0.25`, kind: 'ENTRY', side: 'BUY',
+    id: 'entry-1', clientKey: `${state.slug}:UP:0.40`, kind: 'ENTRY', side: 'BUY',
     slug: state.slug, windowEnd: 300_000, status: 'LIVE', matchedShares: 0,
+    shares: 10, pendingFinalFillChecks: 0,
   };
   const exit = {
-    id: 'exit-1', clientKey: 'tp:entry-1:1', kind: 'TAKE_PROFIT', side: 'SELL',
+    id: 'exit-1', clientKey: 'source-exit:entry-1:TAKE_PROFIT:1', kind: 'TAKE_PROFIT', side: 'SELL',
     slug: state.slug, windowEnd: 300_000, status: 'LIVE', matchedShares: 0,
+    shares: 10, pendingFinalFillChecks: 0,
   };
   state.orderIds = [entry.clientKey];
   bot.ordersById.set(entry.id, entry);
   bot.ordersById.set(exit.id, exit);
-  await bot.cancelWindowEntryOrders(state);
-  assert.deepEqual(calls, [{ cancel: 'entry-1' }]);
-  assert.equal(exit.status, 'LIVE');
+  exchangeOrders.set(entry.id, { ...entry, tokenId: 'token-up', sizeMatched: 0, price: 0.40 });
+  exchangeOrders.set(exit.id, { ...exit, tokenId: 'token-up', sizeMatched: 0, price: 0.99 });
+  await bot.reconcileOrders();
+  assert.deepEqual(calls.filter(call => call.cancel), [
+    { cancel: 'entry-1' },
+    { cancel: 'exit-1' },
+  ]);
+  assert.equal(entry.status, 'CANCELED');
+  assert.equal(exit.status, 'CANCELED');
 });
 
 test('unclassified account orders warn but do not block the authenticated order path', async () => {
@@ -585,13 +699,22 @@ test('dashboard snapshot identifies the live BTC 5m strategy only', () => {
   const state = bot.snapshot();
   assert.equal(state.mode, 'REAL ORDERS');
   assert.deepEqual(state.strategy.markets, ['BTC 5m']);
-  assert.equal(state.strategy.version, 'btc-midpoint-trigger-ladder-v1');
+  assert.equal(state.strategy.version, 'btc-midpoint-trigger-ladder-v2');
   assert.match(state.strategy.windowRule, /Wait 120 seconds/);
   assert.match(state.strategy.trigger, /at or above \$0\.80/);
-  assert.deepEqual(state.strategy.orders.map(order => [order.buyPrice, order.shares, order.takeProfitPrice]), [
-    [0.40, 10, 0.75],
-    [0.60, 20, 0.85],
+  assert.deepEqual(state.strategy.orders.map(order => [order.buyPrice, order.shares]), [
+    [0.40, 10],
+    [0.60, 20],
   ]);
+  assert.deepEqual(state.strategy.exits, {
+    takeProfitTriggerBid: 0.99,
+    takeProfitLimitSell: 0.99,
+    stopLossTriggerBid: 0.01,
+    stopLossLimitSell: 0.01,
+    stopLossAfterSeconds: 295,
+    exitQuoteMaxAgeMs: 5_000,
+    resolution: 'Cancel unfilled exit orders at window end; hold unsold shares until the original market is confirmed resolved',
+  });
   assert.match(state.strategy.rearm, /no opening pair/);
   assert.ok(state.markets['5m']);
   assert.equal(state.markets['15m'], undefined);

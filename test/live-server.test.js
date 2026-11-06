@@ -53,7 +53,7 @@ test('live server reports unready production account and serves the live dashboa
   assert.equal(page.status, 200);
   const html = await page.text();
   assert.match(html, /BTC Limit Ladder Bot/);
-  assert.match(html, /wait 120 seconds after each window opens/i);
+  assert.match(html, /wait 120 seconds after each opens/i);
   assert.match(html, /midpoint at or above \$0\.80/i);
   assert.match(html, /10 shares at \$0\.40 and one for 20 shares at \$0\.60/i);
 });

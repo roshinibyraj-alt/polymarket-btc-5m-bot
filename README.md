@@ -37,16 +37,18 @@ Read the market's Gamma `version` before choosing its outcome asset IDs: use `cl
 
 Submit two resting limit BUY orders on the **selected side only**:
 
-| Outcome | Buy limit | Live shares | Take-profit sell limit |
+| Outcome | Buy limit | Live shares | Source exit |
 |---|---:|---:|---:|
-| Selected side | $0.40 | 10 | $0.75 |
-| Selected side | $0.60 | 20 | $0.85 |
+| Selected side | $0.40 | 10 | $0.99 TP / $0.01 SL |
+| Selected side | $0.60 | 20 | $0.99 TP / $0.01 SL |
 
 At most these two entry orders are submitted per window, for a combined nominal entry notional of **$16** if both fill. No opening pair is submitted. Do not replace orders, rearm, or enter the other side for the same signal.
 
-- Place each take-profit sell only after Polymarket confirms the corresponding buy fill, and sell only the confirmed shares.
-- The $0.40 rung maps to a $0.75 take-profit; the $0.60 rung maps to a $0.85 take-profit. Each sell uses the same outcome token that was bought.
-- Cancel unfilled entry orders at window end. Existing take-profit orders remain resting without an explicit expiry.
+- A first partial fill completes that buy rung: cancel its unfilled remainder, confirm final matched shares, and manage only the confirmed quantity.
+- During the active window, a fresh own-side best bid at or above $0.99 triggers a resting limit SELL at $0.99.
+- A fresh own-side best bid at or below $0.01 triggers a resting limit SELL at $0.01 only after 295 seconds from window start.
+- Cancel unfilled entry and exit orders at window end. Keep unsold shares pending until the original market is confirmed closed and resolved; map payout from that market's exact outcome token.
+- The source paper bot records threshold exits as idealized $1/$0 payouts with a taker-fee estimate. Real orders use actual confirmed fill quantities and prices; a limit sell can remain unfilled until expiry and resolution.
 
 ### Dashboard mode
 
@@ -74,23 +76,25 @@ The test is one-shot and restart-safe. A confirmed take-profit submission comple
 
 ### Entry order
 
-- Submit a Polymarket **limit BUY** at the configured rung price and the fixed 10-share quantity.
+- Submit a Polymarket **limit BUY** at the configured rung price and rung quantity: 10 shares at $0.40 or 20 shares at $0.60.
 - Do not substitute a market order or raise the limit to force a fill.
 - The current client sends the limit price and size with `postOnly:false`; it does not send an explicit expiration timestamp.
 - The bot attempts to cancel still-active entry orders at the window end. This is a local cancellation attempt, not an order-expiration timestamp. Report cancellation failures rather than pretending the order is gone.
 
-### Fill checks and take-profit
+### Fill checks and source exits
 
 - The live order polling target is **500 ms**. This is not a guarantee that Polymarket will respond or fill within 500 ms.
 - Poll and reconcile both BUY and SELL orders on the 500 ms target; a dashboard signal is not proof of an exchange fill.
 - Use Polymarket's matched-share count as the source of truth. Never infer a real fill from a paper fill, a submitted response, or a quote touching the limit.
-- After a real fill is confirmed, submit a **limit SELL** at the corresponding take-profit price for the confirmed filled shares that have not already been assigned to an exit order.
+- On the first confirmed partial fill of a new rung, cancel its unfilled BUY remainder. Wait for final fill confirmation before sizing the exit.
+- During the active market, compare a fresh own-side best bid to the source thresholds: TP at $0.99 any time; SL at $0.01 only at or after 295 seconds.
+- When a threshold is reached, submit a resting limit SELL at the selected source exit price ($0.99 TP or $0.01 SL) for the confirmed unsold shares.
 - Handle partial fills without overselling: account for shares already sold or reserved by a pending sell, and place a new sell only for the remaining confirmed quantity.
 - The current minimum live sell size is 5 shares. If a partial fill is below 5, wait for more matched shares; if the total remains below the minimum, report the blocked quantity clearly. Do not mark it as sold.
 - On an uncertain order-submission response, halt additional submissions until the order can be reconciled. Do not retry an uncertain BUY or SELL blindly, because that can create duplicates.
-- Reconcile TP SELL fills, cancellations, and rejections. Do not duplicate an uncertain sell. A confirmed insufficient-balance rejection may retry after a delay; other rejected or canceled exits are not automatically re-armed.
+- Reconcile TP/SL SELL fills, cancellations, and rejections. Do not duplicate an uncertain sell. A confirmed insufficient-balance rejection may retry after a delay; other rejected or canceled exits are not automatically re-armed.
 
-There is **no live stop-loss rule** in this strategy. Live exits are the mapped take-profit limit sells; there is no automatic market sell or opposite-side reversal. Take-profit orders have no explicit expiry and are left to Polymarket's market lifecycle. Do not claim a take-profit happened just because the price briefly touched it.
+At window end, cancel any still-open exit limits and wait for confirmed resolution of the **original market**. Do not infer settlement from the next window's UP/DOWN tokens. No old $0.75/$0.85 exit mapping or other legacy TP/SL rule applies to new strategy entries. The live $0.99/$0.01 limit orders are not guaranteed to fill merely because the source trigger fired.
 
 ## 4. Account readiness, rate limits, and safety
 
@@ -138,7 +142,7 @@ At minimum, test that:
 
  1. Only BTC 5m markets are actively scanned for new entries; ETH, 15m, and malformed/expired markets are not traded.
 2. No strategy order is submitted before 120 seconds after a window opens; a fresh midpoint at or above $0.80 then selects one outcome.
-3. A trigger produces exactly two BUY attempts on the selected side: 10 shares at $0.40 and 20 shares at $0.60, with $0.75/$0.85 take-profit limits.
+3. A trigger produces exactly two BUY attempts on the selected side: 10 shares at $0.40 and 20 shares at $0.60. Source exits are a $0.99 limit sell on a fresh bid trigger, a $0.01 limit sell after the 295-second stop gate, or original-market resolution for unsold shares.
 4. Repeated scans do not duplicate either rung or submit a buy on the opposite side.
 6. Repeated scans of the same window do not duplicate either trigger's orders.
 7. Confirmed full and partial fills produce SELL orders only for unsold matched shares; sub-5-share exits are reported as blocked; SELL fills/cancellations/rejections are reconciled.

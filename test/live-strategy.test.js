@@ -5,6 +5,8 @@ const assert = require('node:assert/strict');
 const {
   quoteFromBook,
   evaluateWindow,
+  evaluateSourceExit,
+  resolvedMarketPayout,
   windowStartFor,
   STRATEGY_TIMEFRAMES,
   ENTRY_RUNGS,
@@ -124,11 +126,70 @@ test('book quotes use the best prices and keep the timestamp', () => {
   assert.equal(result.updatedAt, 123);
 });
 
-test('entry ladder uses the requested prices and sizes with existing take-profit mapping', () => {
-  assert.deepEqual(ENTRY_RUNGS.map(rung => [rung.price, rung.takeProfitPrice, rung.shares]), [
-    [0.40, 0.75, 10],
-    [0.60, 0.85, 20],
+test('entry ladder uses the requested prices and sizes without rung take-profits', () => {
+  assert.deepEqual(ENTRY_RUNGS.map(rung => [rung.price, rung.shares]), [
+    [0.40, 10],
+    [0.60, 20],
   ]);
+});
+
+test('source TP is triggered by a fresh post-fill best bid at $0.99', () => {
+  const result = evaluateSourceExit({
+    now: 250_000,
+    windowStart: 0,
+    windowEnd: 300_000,
+    filledAt: 249_000,
+    quote: { status: 'LIVE', bestBid: 0.99, updatedAt: 250_000, stale: false },
+  });
+  assert.deepEqual(result, { kind: 'TAKE_PROFIT', triggerBid: 0.99, limitPrice: 0.99 });
+});
+
+test('source stop is blocked before 295 seconds and triggers at the inclusive boundary', () => {
+  const quoteAt = updatedAt => ({ status: 'LIVE', bestBid: 0.01, updatedAt, stale: false });
+  const before = evaluateSourceExit({
+    now: 294_999, windowStart: 0, windowEnd: 300_000, filledAt: 1_000, quote: quoteAt(294_999),
+  });
+  const boundary = evaluateSourceExit({
+    now: 295_000, windowStart: 0, windowEnd: 300_000, filledAt: 1_000, quote: quoteAt(295_000),
+  });
+  const afterWindow = evaluateSourceExit({
+    now: 300_000, windowStart: 0, windowEnd: 300_000, filledAt: 1_000, quote: quoteAt(300_000),
+  });
+  assert.equal(before, null);
+  assert.deepEqual(boundary, { kind: 'STOP_LOSS', triggerBid: 0.01, limitPrice: 0.01 });
+  assert.equal(afterWindow, null);
+});
+
+test('source exit ignores stale or pre-fill bids', () => {
+  const base = { now: 250_000, windowStart: 0, windowEnd: 300_000, filledAt: 249_000 };
+  assert.equal(evaluateSourceExit({
+    ...base,
+    quote: { status: 'LIVE', bestBid: 0.99, updatedAt: 244_999, stale: false },
+  }), null);
+  assert.equal(evaluateSourceExit({
+    ...base,
+    quote: { status: 'LIVE', bestBid: 0.99, updatedAt: 249_999, stale: true },
+  }), null);
+});
+
+test('confirmed original-market resolution maps the exact token payout', () => {
+  const market = {
+    id: 'original-market',
+    closed: true,
+    umaResolutionStatus: 'resolved',
+    outcomes: '["Up","Down"]',
+    positionIds: '["up-token","down-token"]',
+    outcomePrices: '["1","0"]',
+  };
+  assert.equal(resolvedMarketPayout(market, {
+    marketId: 'original-market', tokenId: 'up-token', outcome: 'UP',
+  }), 1);
+  assert.equal(resolvedMarketPayout(market, {
+    marketId: 'original-market', tokenId: 'down-token', outcome: 'DOWN',
+  }), 0);
+  assert.equal(resolvedMarketPayout(market, {
+    marketId: 'next-market', tokenId: 'up-token', outcome: 'UP',
+  }), null);
 });
 
 test('window start is aligned independently for 5m and 15m', () => {

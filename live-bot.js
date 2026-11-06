@@ -5,8 +5,13 @@ const {
   WINDOW_CONFIG,
   STRATEGY_TIMEFRAMES,
   ENTRY_RUNGS,
+  TAKE_PROFIT_BID,
+  STOP_LOSS_BID,
+  EXIT_START_SECONDS,
   STRATEGY_VERSION,
   evaluateWindow,
+  evaluateSourceExit,
+  resolvedMarketPayout,
   quoteFromBook,
   windowStartFor,
 } = require('./live-strategy');
@@ -26,6 +31,7 @@ const LEGACY_ENTRY_RUNGS = [
 const CANCEL_FINAL_FILL_CHECKS = Math.max(1, Number(cfg.LIVE_CANCEL_FINAL_FILL_CHECKS || 3));
 const ORDER_POLL_MS = Number(cfg.LIVE_ORDER_POLL_MS || 500);
 const ACCOUNT_REFRESH_MS = Number(cfg.LIVE_BALANCE_REFRESH_MS || 15_000);
+const RESOLUTION_RETRY_MS = 10_000;
 const FLOW_TEST_BUY_PRICE = Number(cfg.LIVE_FLOW_TEST_BUY_PRICE || 0.70);
 const FLOW_TEST_TAKE_PROFIT_PRICE = Number(cfg.LIVE_FLOW_TEST_TAKE_PROFIT_PRICE || 0.75);
 const FLOW_TEST_SHARES = Number(cfg.LIVE_FLOW_TEST_SHARES || MIN_SELL_SHARES);
@@ -120,16 +126,18 @@ function recoveredOrder(raw) {
     } else if (rung) {
       kind = 'ENTRY';
       entryType = 'MIDPOINT_TRIGGER_LADDER';
-      takeProfitPrice = rung.takeProfitPrice;
     } else if (legacyRung) {
       kind = 'ENTRY';
       entryType = 'LEGACY_MIDPOINT_LADDER';
       takeProfitPrice = legacyRung.takeProfitPrice;
     }
-  } else if (side === 'SELL'
-    && [0.75, 0.85, LEGACY_WINDOW_START_TAKE_PROFIT_PRICE, 0.999]
+  } else if (side === 'SELL') {
+    if ([TAKE_PROFIT_BID, LEGACY_WINDOW_START_TAKE_PROFIT_PRICE, 0.75, 0.85, 0.999]
       .some(value => Math.abs(value - price) < 0.000001)) {
-    kind = 'TAKE_PROFIT';
+      kind = 'TAKE_PROFIT';
+    } else if (Math.abs(STOP_LOSS_BID - price) < 0.000001) {
+      kind = 'STOP_LOSS';
+    }
   }
   if (!id || !tokenId || !kind || !Number.isFinite(size)) return null;
   return {
@@ -140,9 +148,13 @@ function recoveredOrder(raw) {
     pairedEntryGroup,
     side,
     tokenId: String(tokenId),
+    marketId: raw?.marketId || raw?.market_id || null,
     price,
     shares: size,
     matchedShares: matched,
+    fillConfirmedAt: raw?.fillConfirmedAt === null || raw?.fillConfirmedAt === undefined
+      ? null
+      : numeric(raw.fillConfirmedAt, null),
     takeProfitPrice,
     slug,
     timeframe: window?.timeframe || null,
@@ -243,6 +255,7 @@ class LiveBot {
     this.halted = false;
     this.events = [];
     this.lastError = null;
+    this.resolutionPollAt = new Map();
   }
 
   async restoreState(document) {
@@ -316,6 +329,12 @@ class LiveBot {
       }
     }
     for (const order of this.ordersById.values()) {
+      if (order.kind === 'ENTRY'
+        && order.matchedShares > 0
+        && (order.fillConfirmedAt === null || order.fillConfirmedAt === undefined
+          || !Number.isFinite(Number(order.fillConfirmedAt)))) {
+        order.fillConfirmedAt = this.clock();
+      }
       order.exits = (order._exitRefs || []).map(reference => byReference.get(String(reference))).filter(Boolean);
       delete order._exitRefs;
     }
@@ -607,7 +626,11 @@ class LiveBot {
             && order.matchedShares > 0
             && !resolvedSlugs.has(order.slug)) {
             if (order.pairedEntryGroup) await this.cancelPairedEntryOrders(order);
-            await this.maybeSubmitTakeProfit(order);
+            if (order.entryType === 'MIDPOINT_TRIGGER_LADDER') {
+              await this.maybeSubmitSourceExit(order);
+            } else if (order.testOnly) {
+              await this.maybeSubmitTakeProfit(order);
+            }
           }
         }
       }
@@ -647,6 +670,10 @@ class LiveBot {
           continue;
         }
         this.ordersById.set(String(id), restored);
+        if (restored.kind === 'ENTRY' && restored.matchedShares > 0
+          && (restored.fillConfirmedAt === null || restored.fillConfirmedAt === undefined)) {
+          restored.fillConfirmedAt = this.clock();
+        }
         this.log('RECOVERY', 'Recovered an exchange order after process start', {
           orderId: String(id),
           side: restored.side,
@@ -693,6 +720,10 @@ class LiveBot {
           continue;
         }
         this.ordersById.set(String(id), restored);
+        if (restored.kind === 'ENTRY' && restored.matchedShares > 0
+          && (restored.fillConfirmedAt === null || restored.fillConfirmedAt === undefined)) {
+          restored.fillConfirmedAt = this.clock();
+        }
         this.log('RECOVERY', 'Recovered an exchange order from the account snapshot', {
           orderId: String(id),
           side: restored.side,
@@ -1176,10 +1207,18 @@ class LiveBot {
         side: 'BUY',
         outcome: selectedSide,
         tokenId: String(state.market.tokens[selectedSide]),
+        marketId: String(state.market.id),
         price: rung.price,
         shares: rung.shares,
         matchedShares: 0,
-        takeProfitPrice: rung.takeProfitPrice,
+        fillConfirmedAt: null,
+        sourceExitKind: null,
+        sourceExitLimitPrice: null,
+        sourceExitTriggeredAt: null,
+        sourceExitTriggerBid: null,
+        resolutionStatus: null,
+        resolutionLastCheckedAt: null,
+        resolutionError: null,
         slug: state.slug,
         timeframe: state.timeframe,
         windowStart: state.windowStart,
@@ -1250,7 +1289,6 @@ class LiveBot {
         side: order.outcome,
         price: order.price,
         shares: order.shares,
-        takeProfitPrice: order.takeProfitPrice,
       });
     } catch (error) {
       order.status = error?.submissionUncertain ? 'SUBMISSION_UNCERTAIN' : 'REJECTED';
@@ -1316,6 +1354,9 @@ class LiveBot {
         const previousMatched = order.matchedShares;
         const previousFinalFillChecks = numeric(order.pendingFinalFillChecks);
         order.matchedShares = Math.max(order.matchedShares, matchedSize(latest));
+        if (order.matchedShares > previousMatched) {
+          order.fillConfirmedAt = now;
+        }
         const latestStatus = orderStatus(latest);
         const previousStatus = order.status;
         if (latestStatus !== 'UNKNOWN'
@@ -1340,14 +1381,27 @@ class LiveBot {
             matchedShares: order.matchedShares,
           });
         }
+        if (order.kind === 'ENTRY'
+          && order.entryType === 'MIDPOINT_TRIGGER_LADDER'
+          && order.matchedShares > 0
+          && !isTerminalStatus(order.status)) {
+          await this.cancelEntryOrder(order, 'first_partial_fill');
+        }
         if (order.kind === 'ENTRY' && order.windowEnd && now >= order.windowEnd && !isTerminalStatus(order.status)) {
-          await this.cancelEntryOrder(order);
+          await this.cancelEntryOrder(order, 'window_end');
+        }
+        if (['TAKE_PROFIT', 'STOP_LOSS'].includes(order.kind)
+          && order.windowEnd
+          && now >= order.windowEnd
+          && !isTerminalStatus(order.status)) {
+          await this.cancelExitOrder(order);
         }
         if (order.testOnly && isTerminalStatus(order.status) && order.matchedShares === 0) {
           await this.completeFlowTest(`entry_${order.status.toLowerCase().replaceAll(' ', '_')}`, order.error, order);
         }
-        if (order.kind === 'TAKE_PROFIT' && order.matchedShares > previousMatched) {
-          this.log('FILL', 'Exchange confirmed a take-profit fill', {
+        if (['TAKE_PROFIT', 'STOP_LOSS'].includes(order.kind)
+          && order.matchedShares > previousMatched) {
+          this.log('FILL', `Exchange confirmed a ${order.kind.toLowerCase().replaceAll('_', '-')} fill`, {
             orderId: order.id,
             slug: order.slug,
             outcome: order.outcome,
@@ -1366,7 +1420,11 @@ class LiveBot {
       }
       for (const order of this.ordersById.values()) {
         if (order.kind === 'ENTRY' && order.matchedShares > 0 && !resolvedSlugs.has(order.slug)) {
-          await this.maybeSubmitTakeProfit(order);
+          if (order.entryType === 'MIDPOINT_TRIGGER_LADDER') {
+            await this.maybeSubmitSourceExit(order, now);
+          } else if (order.testOnly) {
+            await this.maybeSubmitTakeProfit(order);
+          }
         }
       }
       for (const order of this.ordersById.values()) {
@@ -1376,9 +1434,14 @@ class LiveBot {
           && order.retryAt > 0
           && now >= order.retryAt
           && !resolvedSlugs.has(order.slug)) {
-          await this.maybeSubmitTakeProfit(order);
+          if (order.entryType === 'MIDPOINT_TRIGGER_LADDER') {
+            await this.maybeSubmitSourceExit(order, now);
+          } else if (order.testOnly) {
+            await this.maybeSubmitTakeProfit(order);
+          }
         }
       }
+      await this.reconcileExpiredPositions(now);
       this.orderError = failures[0] || null;
       if (changed) {
         try {
@@ -1410,6 +1473,287 @@ class LiveBot {
       this.log('ERROR', 'Order reconciliation failed', { error: this.orderError });
     } finally {
       this.orderScanInFlight = false;
+    }
+  }
+
+  async reconcileExpiredPositions(now = this.clock()) {
+    if (!this.trader?.getMarket) return;
+    const expiredEntries = [...this.ordersById.values()].filter(order =>
+      order.kind === 'ENTRY'
+      && order.entryType === 'MIDPOINT_TRIGGER_LADDER'
+      && order.windowEnd
+      && now >= order.windowEnd
+      && order.matchedShares > 0
+      && order.resolutionStatus !== 'RESOLVED'
+      && order.resolutionStatus !== 'CLOSED_BY_EXITS');
+    const groups = new Map();
+    for (const entry of expiredEntries) {
+      const related = [entry, ...(entry.exits || [])];
+      if (related.some(order => !isTerminalStatus(order.status)
+        || numeric(order.pendingFinalFillChecks) > 0)) continue;
+      const soldShares = (entry.exits || [])
+        .reduce((sum, exit) => sum + numeric(exit.matchedShares), 0);
+      const unsoldShares = Math.max(0, numeric(entry.matchedShares) - soldShares);
+      if (unsoldShares <= 0.000001) {
+        entry.resolutionStatus = 'CLOSED_BY_EXITS';
+        entry.resolutionError = null;
+        continue;
+      }
+      if (!entry.marketId && entry.windowStart !== null && entry.windowStart !== undefined) {
+        try {
+          const market = await this.marketData.getBtcMarket(
+            Number(entry.windowStart),
+            WINDOW_CONFIG[entry.timeframe],
+          );
+          if (market?.id) entry.marketId = String(market.id);
+        } catch (error) {
+          entry.resolutionError = error.message || String(error);
+        }
+      }
+      if (!entry.marketId) {
+        entry.resolutionStatus = 'AWAITING_SETTLEMENT';
+        entry.resolutionError ||= 'Could not identify the original market for resolution';
+        continue;
+      }
+      if (!groups.has(String(entry.marketId))) groups.set(String(entry.marketId), []);
+      groups.get(String(entry.marketId)).push(entry);
+    }
+
+    let changed = false;
+    for (const [marketId, entries] of groups) {
+      if (now < numeric(this.resolutionPollAt.get(marketId))) continue;
+      this.resolutionPollAt.set(marketId, now + RESOLUTION_RETRY_MS);
+      let market = null;
+      let error = null;
+      try {
+        market = await this.trader.getMarket(marketId);
+      } catch (cause) {
+        error = cause.message || String(cause);
+      }
+      for (const entry of entries) {
+        const payout = resolvedMarketPayout(market, {
+          marketId,
+          tokenId: entry.tokenId,
+          outcome: entry.outcome,
+        });
+        const checkedAt = this.clock();
+        if (payout !== null) {
+          const soldShares = (entry.exits || [])
+            .reduce((sum, exit) => sum + numeric(exit.matchedShares), 0);
+          const unsoldShares = Math.max(0, numeric(entry.matchedShares) - soldShares);
+          entry.resolutionStatus = 'RESOLVED';
+          entry.resolutionShares = unsoldShares;
+          entry.resolutionPayoutPerShare = payout;
+          entry.resolutionGrossPayout = unsoldShares * payout;
+          entry.resolutionAt = checkedAt;
+          entry.resolutionError = null;
+          this.log('RESOLUTION', 'Original market resolution confirmed for unsold shares', {
+            marketId,
+            slug: entry.slug,
+            outcome: entry.outcome,
+            unsoldShares,
+            payoutPerShare: payout,
+            grossPayout: entry.resolutionGrossPayout,
+          });
+        } else {
+          const wasPending = entry.resolutionStatus === 'AWAITING_SETTLEMENT';
+          entry.resolutionStatus = 'AWAITING_SETTLEMENT';
+          entry.resolutionLastCheckedAt = checkedAt;
+          entry.resolutionError = error || 'Original market is not confirmed resolved yet; retrying.';
+          if (!wasPending) {
+            this.log('RESOLUTION', 'Waiting for confirmed resolution of the original market', {
+              marketId,
+              slug: entry.slug,
+              reason: entry.resolutionError,
+            });
+          }
+        }
+        changed = true;
+      }
+    }
+    if (changed || expiredEntries.some(entry =>
+      entry.resolutionStatus === 'CLOSED_BY_EXITS' || entry.resolutionError)) {
+      try {
+        await this.persistState();
+      } catch (error) {
+        this.halted = true;
+        this.account.accountReady = false;
+        this.account.error = `Could not persist market-resolution state: ${error.message || error}`;
+      }
+    }
+  }
+
+  async maybeSubmitSourceExit(entry, now = this.clock()) {
+    if (entry.kind !== 'ENTRY'
+      || entry.entryType !== 'MIDPOINT_TRIGGER_LADDER'
+      || !entry.matchedShares
+      || !this.trader
+      || this.halted) return;
+
+    if (!entry.sourceExitKind) {
+      const state = this.markets[entry.timeframe];
+      const quote = state?.slug === entry.slug ? state.quotes?.[entry.outcome] : null;
+      const trigger = evaluateSourceExit({
+        now,
+        windowStart: Number(entry.windowStart),
+        windowEnd: Number(entry.windowEnd),
+        filledAt: Number(entry.fillConfirmedAt),
+        quote,
+      });
+      if (!trigger) return;
+      entry.sourceExitKind = trigger.kind;
+      entry.sourceExitLimitPrice = trigger.limitPrice;
+      entry.sourceExitTriggeredAt = now;
+      entry.sourceExitTriggerBid = trigger.triggerBid;
+      entry.sourceExitFailed = false;
+      entry.sourceExitError = null;
+      try {
+        await this.persistState();
+      } catch (error) {
+        this.halted = true;
+        this.account.accountReady = false;
+        this.account.status = 'state_store_error';
+        this.account.error = `Could not persist the source exit trigger: ${error.message || error}`;
+        return;
+      }
+      this.log('SIGNAL', `Source ${trigger.kind.toLowerCase().replaceAll('_', '-')} trigger latched`, {
+        slug: entry.slug,
+        outcome: entry.outcome,
+        bestBid: trigger.triggerBid,
+        limitSellPrice: trigger.limitPrice,
+        triggeredAt: now,
+      });
+    }
+
+    if (now >= Number(entry.windowEnd)
+      || now < numeric(entry.retryAt)
+      || entry.sourceExitFailed
+      || !isTerminalStatus(entry.status)
+      || numeric(entry.pendingFinalFillChecks) > 0) return;
+    if ((entry.exits || []).some(exit =>
+      !isTerminalStatus(exit.status) || numeric(exit.pendingFinalFillChecks) > 0)) return;
+
+    const soldShares = (entry.exits || [])
+      .reduce((sum, exit) => sum + numeric(exit.matchedShares), 0);
+    const available = Math.floor((
+      numeric(entry.matchedShares) - soldShares - numeric(entry.exitSubmittingShares)
+    ) * 100) / 100;
+    if (available <= 0) return;
+    if (available < MIN_SELL_SHARES) {
+      entry.exitBlockedReason = `Only ${available.toFixed(2)} confirmed shares remain; minimum sell is ${MIN_SELL_SHARES}`;
+      return;
+    }
+
+    const exit = {
+      id: null,
+      clientKey: `source-exit:${entry.id}:${entry.sourceExitKind}:${(entry.exits || []).length + 1}`,
+      kind: entry.sourceExitKind,
+      side: 'SELL',
+      outcome: entry.outcome,
+      tokenId: entry.tokenId,
+      price: entry.sourceExitLimitPrice,
+      shares: available,
+      matchedShares: 0,
+      slug: entry.slug,
+      timeframe: entry.timeframe,
+      marketId: entry.marketId || null,
+      windowStart: entry.windowStart,
+      windowEnd: entry.windowEnd,
+      triggerBid: entry.sourceExitTriggerBid,
+      status: 'SUBMITTING',
+      recovered: false,
+      exits: [],
+      pendingFinalFillChecks: 0,
+      retryAt: 0,
+      error: null,
+      createdAt: now,
+    };
+    entry.exitSubmittingShares = numeric(entry.exitSubmittingShares) + available;
+    entry.exitBlockedReason = null;
+    entry.exits ||= [];
+    entry.exits.push(exit);
+    this.ordersById.set(exit.clientKey, exit);
+    try {
+      await this.persistState();
+      const response = await this.trader.placeLimitOrder(
+        entry.tokenId,
+        'SELL',
+        entry.sourceExitLimitPrice,
+        available,
+      );
+      const id = orderId(response);
+      if (!id) {
+        exit.status = 'SUBMISSION_UNCERTAIN';
+        exit.error = 'Exchange response did not include an order ID';
+        this.halted = true;
+        this.account.accountReady = false;
+        this.account.error = exit.error;
+        this.log('ERROR', 'Source exit submission is uncertain; new entries halted', {
+          entryOrderId: entry.id,
+          exitKind: exit.kind,
+        });
+        return;
+      }
+      exit.id = String(id);
+      this.ordersById.delete(exit.clientKey);
+      exit.status = orderStatus(response);
+      this.ordersById.set(exit.id, exit);
+      entry.retryAt = 0;
+      try {
+        await this.persistState();
+      } catch (error) {
+        this.halted = true;
+        this.account.accountReady = false;
+        this.account.error = `Source exit was accepted but its ledger update failed: ${error.message || error}`;
+      }
+      this.log('ORDER', `Source ${exit.kind.toLowerCase().replaceAll('_', '-')} limit sell submitted`, {
+        entryOrderId: entry.id,
+        orderId: exit.id,
+        slug: exit.slug,
+        outcome: exit.outcome,
+        price: exit.price,
+        shares: exit.shares,
+        triggerBid: exit.triggerBid,
+      });
+    } catch (error) {
+      exit.status = 'REJECTED';
+      exit.error = error.message || String(error);
+      if (isInsufficientBalance(error)) {
+        entry.retryAt = this.clock() + Math.max(1_000, retryAfterMs(error));
+        this.ordersById.delete(exit.clientKey);
+        entry.exits.pop();
+        this.log('WARNING', 'Exchange has not released the confirmed shares; source exit will retry', {
+          entryOrderId: entry.id,
+          retryAt: entry.retryAt,
+          error: exit.error,
+        });
+      } else if (error?.submissionUncertain) {
+        this.halted = true;
+        this.account.accountReady = false;
+        this.account.error = 'A source exit order may have reached the exchange; reconciliation is required';
+      } else {
+        entry.retryAt = 0;
+        entry.sourceExitFailed = true;
+        entry.sourceExitError = exit.error;
+        entry.exitBlockedReason = exit.error;
+        this.log('ERROR', 'Source exit limit sell was rejected', {
+          entryOrderId: entry.id,
+          price: exit.price,
+          shares: exit.shares,
+          exitKind: exit.kind,
+          error: exit.error,
+        });
+      }
+      this.lastError = exit.error;
+      try {
+        await this.persistState();
+      } catch (persistError) {
+        this.halted = true;
+        this.account.accountReady = false;
+        this.account.error = `Could not persist source exit result: ${persistError.message || persistError}`;
+      }
+    } finally {
+      entry.exitSubmittingShares = Math.max(0, numeric(entry.exitSubmittingShares) - available);
     }
   }
 
@@ -1604,9 +1948,12 @@ class LiveBot {
           await this.completeFlowTest('entry_canceled_unfilled', null, order);
         }
       }
-      this.log('ORDER', reason === 'paired_fill'
+      const message = reason === 'paired_fill'
         ? 'Opposite paired entry canceled after a confirmed fill'
-        : 'Unfilled entry remainder canceled at window end', {
+        : reason === 'first_partial_fill'
+          ? 'Unfilled entry remainder canceled after its first partial fill'
+          : 'Unfilled entry remainder canceled at window end';
+      this.log('ORDER', message, {
         orderId: order.id,
         slug: order.slug,
         matchedShares: order.matchedShares,
@@ -1627,6 +1974,48 @@ class LiveBot {
       this.log('ERROR', reason === 'paired_fill'
         ? 'Could not cancel the opposite paired entry'
         : 'Could not cancel the entry order remainder', { orderId: order.id, error: order.error });
+      return false;
+    }
+  }
+
+  async cancelExitOrder(order, reason = 'window_end') {
+    if (!['TAKE_PROFIT', 'STOP_LOSS'].includes(order.kind)
+      || isTerminalStatus(order.status)
+      || !order.id
+      || !this.trader?.cancelOrder
+      || numeric(order.nextCancelAt) > this.clock()) return false;
+    try {
+      const result = await this.trader.cancelOrder(order.id);
+      order.status = 'CANCELED';
+      order.cancelledAt = this.clock();
+      order.nextCancelAt = 0;
+      order.pendingFinalFillChecks = order.matchedShares < order.shares
+        ? CANCEL_FINAL_FILL_CHECKS
+        : 0;
+      await this.persistState();
+      this.log('ORDER', `Unfilled ${order.kind.toLowerCase().replaceAll('_', '-')} limit sell cancelled at window end`, {
+        orderId: order.id,
+        slug: order.slug,
+        matchedShares: order.matchedShares,
+        reason,
+        result: result?.status || 'cancel requested',
+      });
+      return true;
+    } catch (error) {
+      order.error = error.message || String(error);
+      order.nextCancelAt = this.clock() + Math.max(ORDER_POLL_MS, retryAfterMs(error));
+      order.nextPollAt = Math.max(order.nextPollAt || 0, order.nextCancelAt);
+      try {
+        await this.persistState();
+      } catch (persistError) {
+        this.halted = true;
+        this.account.accountReady = false;
+        this.account.error = `Could not persist exit-cancel state: ${persistError.message || persistError}`;
+      }
+      this.log('ERROR', 'Could not cancel the resting exit before source-market resolution', {
+        orderId: order.id,
+        error: order.error,
+      });
       return false;
     }
   }
@@ -1683,8 +2072,16 @@ class LiveBot {
         orders: ENTRY_RUNGS.map(rung => ({
           buyPrice: rung.price,
           shares: rung.shares,
-          takeProfitPrice: rung.takeProfitPrice,
         })),
+        exits: {
+          takeProfitTriggerBid: TAKE_PROFIT_BID,
+          takeProfitLimitSell: TAKE_PROFIT_BID,
+          stopLossTriggerBid: STOP_LOSS_BID,
+          stopLossLimitSell: STOP_LOSS_BID,
+          stopLossAfterSeconds: EXIT_START_SECONDS,
+          exitQuoteMaxAgeMs: 5_000,
+          resolution: 'Cancel unfilled exit orders at window end; hold unsold shares until the original market is confirmed resolved',
+        },
         rearm: 'One selected-side two-rung ladder per window; no opening pair, order replacement, or re-entry',
         orderPollMs: this.orderPollMs,
         quoteMaxAgeMs: 5_000,
