@@ -186,6 +186,26 @@ test('restart recovery recognizes new entries and still tracks legacy orders', (
   assert.equal(exit.kind, 'TAKE_PROFIT');
 });
 
+test('recovered matched entry records its confirmation time for source exits', async () => {
+  const { bot, trader } = setup({ now: 250_000 });
+  trader.listOpenOrders = async () => [{
+    id: 'recovered-partial-buy',
+    assetId: 'token-down',
+    side: 'BUY',
+    price: '0.60',
+    originalSize: '20',
+    sizeMatched: '6',
+    status: 'PARTIALLY_FILLED',
+    market: 'btc-updown-5m-1000',
+  }];
+
+  await bot.recoverOpenOrders();
+
+  const recovered = bot.ordersById.get('recovered-partial-buy');
+  assert.equal(recovered.kind, 'ENTRY');
+  assert.equal(recovered.fillConfirmedAt, 250_000);
+});
+
 test('a legacy paired order fill still cancels its peer after strategy replacement', async () => {
   const { bot, calls } = setup();
   const state = bot.markets['5m'];
