@@ -4,13 +4,21 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   quoteFromBook,
-  evaluateWindow,
+  evaluateWindow: evaluateWindowRaw,
+  previousCandleFilter,
   evaluateSourceExit,
   resolvedMarketPayout,
   windowStartFor,
   STRATEGY_TIMEFRAMES,
   ENTRY_RUNGS,
 } = require('../live-strategy');
+
+function evaluateWindow(options = {}) {
+  return evaluateWindowRaw({
+    candleFilter: { status: 'ready', color: 'DOJI', allowedSide: null },
+    ...options,
+  });
+}
 
 function market(start = 1_000_000, duration = 300_000) {
   return { start, end: start + duration };
@@ -105,6 +113,73 @@ test('one fresh qualifying outcome triggers even if the other quote is stale', (
   assert.equal(result.selectedSide, 'UP');
 });
 
+test('a green previous candle permits only UP even when DOWN has the higher midpoint', () => {
+  const result = evaluateWindow({
+    now: 1_299_000,
+    market: market(),
+    quotes: { UP: quote(0.82, 1_299_000), DOWN: quote(0.91, 1_299_000) },
+    candleFilter: { status: 'ready', color: 'GREEN', allowedSide: 'UP' },
+    startedAt: 900_000,
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.selectedSide, 'UP');
+  assert.equal(result.selectionReason, 'PREVIOUS_CANDLE_DIRECTION');
+});
+
+test('a red previous candle blocks a qualifying UP trigger until DOWN qualifies', () => {
+  const blocked = evaluateWindow({
+    now: 1_299_000,
+    market: market(),
+    quotes: { UP: quote(0.90, 1_299_000), DOWN: quote(0.20, 1_299_000) },
+    candleFilter: { status: 'ready', color: 'RED', allowedSide: 'DOWN' },
+    startedAt: 900_000,
+  });
+  const allowed = evaluateWindow({
+    now: 1_299_000,
+    market: market(),
+    quotes: { UP: quote(0.20, 1_299_000), DOWN: quote(0.82, 1_299_000) },
+    candleFilter: { status: 'ready', color: 'RED', allowedSide: 'DOWN' },
+    startedAt: 900_000,
+  });
+  assert.equal(blocked.eligible, false);
+  assert.equal(blocked.status, 'waiting_for_candle_side_trigger');
+  assert.equal(allowed.eligible, true);
+  assert.equal(allowed.selectedSide, 'DOWN');
+});
+
+test('missing previous candle data fails closed instead of bypassing the direction filter', () => {
+  const result = evaluateWindow({
+    now: 1_299_000,
+    market: market(),
+    quotes: { UP: quote(0.90, 1_299_000), DOWN: quote(0.20, 1_299_000) },
+    candleFilter: { status: 'unavailable', reason: 'Waiting for closed bars' },
+    startedAt: 900_000,
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.status, 'waiting_for_previous_candle');
+});
+
+test('previousCandleFilter aggregates only the immediately previous five complete minute bars', () => {
+  const windowStart = 1_200_000;
+  const bars = Array.from({ length: 5 }, (_, index) => ({
+    t: windowStart - 300_000 + index * 60_000,
+    o: 100 + index,
+    h: 102 + index,
+    l: 99 + index,
+    c: 101 + index,
+  }));
+  const green = previousCandleFilter(bars, windowStart);
+  assert.equal(green.status, 'ready');
+  assert.equal(green.color, 'GREEN');
+  assert.equal(green.allowedSide, 'UP');
+  assert.equal(green.previous.start, 900_000);
+  assert.equal(green.previous.end, windowStart);
+
+  const incomplete = previousCandleFilter(bars.slice(1), windowStart);
+  assert.equal(incomplete.status, 'unavailable');
+  assert.equal(incomplete.allowedSide, null);
+});
+
 test('windows that began before process startup are skipped after restart', () => {
   const result = evaluateWindow({
     now: 1_299_000,
@@ -135,8 +210,20 @@ test('entry ladder uses the requested prices and sizes without rung take-profits
 });
 
 test('source TP and SL exit signals are disabled', () => {
-  assert.equal(evaluateSourceExit({ now: 250_000, windowStart: 0, windowEnd: 300_000, filledAt: 249_000, quote: { status: 'LIVE', bestBid: 0.99, updatedAt: 250_000, stale: false } }), null);
-  assert.equal(evaluateSourceExit({ now: 295_000, windowStart: 0, windowEnd: 300_000, filledAt: 1_000, quote: { status: 'LIVE', bestBid: 0.01, updatedAt: 295_000, stale: false } }), null);
+  assert.equal(evaluateSourceExit({
+    now: 250_000,
+    windowStart: 0,
+    windowEnd: 300_000,
+    filledAt: 249_000,
+    quote: { status: 'LIVE', bestBid: 0.99, updatedAt: 250_000, stale: false },
+  }), null);
+  assert.equal(evaluateSourceExit({
+    now: 295_000,
+    windowStart: 0,
+    windowEnd: 300_000,
+    filledAt: 1_000,
+    quote: { status: 'LIVE', bestBid: 0.01, updatedAt: 295_000, stale: false },
+  }), null);
 });
 
 test('confirmed original-market resolution maps the exact token payout', () => {

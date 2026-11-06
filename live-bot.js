@@ -7,6 +7,7 @@ const {
   ENTRY_RUNGS,
   STRATEGY_VERSION,
   evaluateWindow,
+  previousCandleFilter,
   evaluateSourceExit,
   resolvedMarketPayout,
   quoteFromBook,
@@ -176,6 +177,7 @@ class LiveBot {
   constructor({
     trader = null,
     marketData,
+    priceFeed = null,
     stateStore = null,
     requirePersistentState = false,
     tradingEnabled = false,
@@ -194,6 +196,7 @@ class LiveBot {
     }
     this.trader = trader;
     this.marketData = marketData;
+    this.priceFeed = priceFeed;
     this.stateStore = stateStore;
     this.requirePersistentState = requirePersistentState === true;
     this.tradingEnabled = tradingEnabled === true;
@@ -543,6 +546,13 @@ class LiveBot {
       title: null,
       market: null,
       quotes: { UP: null, DOWN: null },
+      candleFilter: {
+        status: 'unavailable',
+        color: null,
+        allowedSide: null,
+        previous: null,
+        reason: 'Waiting for the previous closed BTC 5-minute candle',
+      },
       signal: { eligible: false, status: 'starting', reason: 'Waiting for market data' },
       pendingTrigger: null,
       triggeredAt: null,
@@ -863,10 +873,24 @@ class LiveBot {
     }
     current.lastQuoteAt = now;
     current.error = null;
+    let candleFilter;
+    try {
+      candleFilter = previousCandleFilter(this.priceFeed?.getMinuteCandles?.(), current.windowStart);
+    } catch (error) {
+      candleFilter = {
+        status: 'unavailable',
+        color: null,
+        allowedSide: null,
+        previous: null,
+        reason: error.message || String(error),
+      };
+    }
+    current.candleFilter = candleFilter;
     const evaluation = evaluateWindow({
       now,
       market: current.market,
       quotes: current.quotes,
+      candleFilter,
       startedAt: current.pendingTrigger ? null : this.startedAt,
     });
     if (this.flowTestPausesStrategy()) {
@@ -2045,6 +2069,7 @@ class LiveBot {
         slug: state.slug,
         title: state.title,
         quotes: state.quotes,
+        candleFilter: state.candleFilter,
         signal: state.signal,
         pendingTrigger: state.pendingTrigger,
         triggeredAt: state.triggeredAt,
@@ -2067,7 +2092,9 @@ class LiveBot {
         version: STRATEGY_VERSION,
         markets: ['BTC 5m'],
         windowRule: 'Monitor fresh UP/DOWN midpoints from window start until the window ends',
-        trigger: 'The first fresh midpoint at or above $0.80 selects a side; if both qualify, select the higher midpoint and break ties toward UP',
+        trigger: 'A fresh midpoint at or above $0.80 triggers only on the side permitted by the previous closed BTC 5-minute candle; doji leaves side selection unrestricted',
+        directionFilter: 'Previous green candle permits UP only; previous red permits DOWN only; doji applies no directional restriction',
+        candleSource: 'Polymarket RTDS Chainlink BTC/USD minute bars aggregated into the immediately previous closed 5-minute candle',
         triggerPersistence: 'The qualifying side and price are saved through account delays and process restarts until that window ends',
         selectedSideOnly: true,
         orders: ENTRY_RUNGS.map(rung => ({

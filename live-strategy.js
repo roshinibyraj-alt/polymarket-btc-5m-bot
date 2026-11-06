@@ -5,6 +5,8 @@ const WINDOW_CONFIG = Object.freeze({
   '15m': 15 * 60 * 1000,
 });
 const STRATEGY_TIMEFRAMES = Object.freeze(['5m']);
+const CANDLE_WINDOW_MS = 5 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
 
 const ENTRY_RUNGS = Object.freeze([
   Object.freeze({ price: 0.40, shares: 10 }),
@@ -14,7 +16,8 @@ const ENTRY_RUNGS = Object.freeze([
 const ENTRY_DELAY_MS = 0;
 const ENTRY_TRIGGER_MIDPOINT = 0.80;
 const QUOTE_MAX_AGE_MS = 5_000;
-const STRATEGY_VERSION = 'btc-midpoint-trigger-ladder-v2';
+const STRATEGY_VERSION = 'btc-midpoint-trigger-ladder-v3';
+const { candleColor } = require('./candle-strategy');
 
 function bestPrice(levels, select) {
   if (!Array.isArray(levels)) return null;
@@ -41,7 +44,54 @@ function quoteFromBook(book, now = Date.now()) {
   };
 }
 
-function evaluateWindow({ now = Date.now(), market, quotes, startedAt = null } = {}) {
+function previousCandleFilter(minuteCandles, windowStart) {
+  const candleStart = Number(windowStart) - CANDLE_WINDOW_MS;
+  const byStart = new Map((Array.isArray(minuteCandles) ? minuteCandles : [])
+    .map(row => [Number(row?.t), row]));
+  const rows = [];
+  for (let index = 0; index < CANDLE_WINDOW_MS / MINUTE_MS; index++) {
+    const row = byStart.get(candleStart + index * MINUTE_MS);
+    if (!row) {
+      return {
+        status: 'unavailable',
+        color: null,
+        allowedSide: null,
+        previous: null,
+        reason: 'Waiting for all five Chainlink BTC/USD minute bars from the previous 5-minute candle',
+      };
+    }
+    rows.push(row);
+  }
+
+  const open = Number(rows[0].o);
+  const close = Number(rows.at(-1).c);
+  const highs = rows.map(row => Number(row.h));
+  const lows = rows.map(row => Number(row.l));
+  if (![open, close, ...highs, ...lows].every(Number.isFinite)) {
+    return {
+      status: 'unavailable',
+      color: null,
+      allowedSide: null,
+      previous: null,
+      reason: 'Previous BTC 5-minute candle has invalid OHLC data',
+    };
+  }
+  const high = Math.max(...highs);
+  const low = Math.min(...lows);
+  const color = candleColor(open, close, high, low);
+  const allowedSide = color === 'GREEN' ? 'UP' : color === 'RED' ? 'DOWN' : null;
+  return {
+    status: 'ready',
+    color,
+    allowedSide,
+    previous: { start: candleStart, end: Number(windowStart), open, close, high, low, color },
+    reason: color === 'DOJI'
+      ? 'Previous BTC 5-minute candle is a doji; no directional restriction'
+      : `Previous BTC 5-minute candle was ${color.toLowerCase()}; only ${allowedSide} entries are allowed`,
+  };
+}
+
+function evaluateWindow({ now = Date.now(), market, quotes, startedAt = null, candleFilter } = {}) {
   if (!market || !Number.isFinite(Number(market.start)) || !Number.isFinite(Number(market.end))) {
     return { eligible: false, status: 'waiting_for_market', reason: 'Waiting for BTC market discovery' };
   }
@@ -106,31 +156,59 @@ function evaluateWindow({ now = Date.now(), market, quotes, startedAt = null } =
       upMid: values.UP,
       downMid: values.DOWN,
       freshSides,
+      candleFilter: candleFilter || null,
       reason: 'Waiting for at least one fresh UP or DOWN midpoint quote',
     };
   }
-  const selectedSide = qualifyingSides[0] || null;
+  if (candleFilter?.status !== 'ready') {
+    return {
+      eligible: false,
+      status: 'waiting_for_previous_candle',
+      elapsedMs,
+      upMid: values.UP,
+      downMid: values.DOWN,
+      freshSides,
+      qualifyingSides,
+      selectedSide: null,
+      candleFilter: candleFilter || null,
+      reason: candleFilter?.reason || 'Waiting for the previous closed BTC 5-minute candle',
+    };
+  }
+  const permittedSides = candleFilter.allowedSide
+    ? [candleFilter.allowedSide]
+    : ['UP', 'DOWN'];
+  const permittedQualifyingSides = qualifyingSides.filter(side => permittedSides.includes(side));
+  const selectedSide = permittedQualifyingSides[0] || null;
   const eligible = selectedSide !== null;
+  const oppositeSideQualified = qualifyingSides.length > 0 && !eligible;
   return {
     eligible,
-    status: eligible ? 'eligible' : 'watching_for_trigger',
+    status: eligible ? 'eligible' : oppositeSideQualified ? 'waiting_for_candle_side_trigger' : 'watching_for_trigger',
     elapsedMs,
     upMid: values.UP,
     downMid: values.DOWN,
     freshSides,
     qualifyingSides,
+    permittedQualifyingSides,
     selectedSide,
     triggeringPrice: selectedSide ? values[selectedSide] : null,
     triggerPrice: ENTRY_TRIGGER_MIDPOINT,
+    candleFilter,
     selectionReason: !selectedSide
       ? null
-      : qualifyingSides.length > 1
+      : candleFilter.allowedSide
+        ? 'PREVIOUS_CANDLE_DIRECTION'
+        : qualifyingSides.length > 1
         ? 'HIGHEST_QUALIFYING_MIDPOINT'
         : 'MIDPOINT_TRIGGER',
     strategyVersion: STRATEGY_VERSION,
     reason: eligible
-      ? `${selectedSide} midpoint reached ${values[selectedSide].toFixed(3)} during the window`
-      : 'Waiting for a fresh UP or DOWN midpoint to reach $0.80 or higher',
+      ? `${selectedSide} midpoint reached $${values[selectedSide].toFixed(3)}; previous candle filter allows ${selectedSide}`
+      : oppositeSideQualified
+        ? `Price trigger reached ${qualifyingSides.join(' and ')}, but previous ${candleFilter.color.toLowerCase()} candle allows only ${candleFilter.allowedSide}; waiting for ${candleFilter.allowedSide} midpoint to reach $0.80`
+        : candleFilter.allowedSide
+          ? `Previous ${candleFilter.color.toLowerCase()} candle allows only ${candleFilter.allowedSide}; waiting for a fresh midpoint to reach $0.80`
+          : 'Previous candle is a doji; waiting for a fresh UP or DOWN midpoint to reach $0.80 or higher',
   };
 }
 
@@ -184,6 +262,7 @@ module.exports = {
   QUOTE_MAX_AGE_MS,
   STRATEGY_VERSION,
   quoteFromBook,
+  previousCandleFilter,
   evaluateWindow,
   evaluateSourceExit,
   resolvedMarketPayout,

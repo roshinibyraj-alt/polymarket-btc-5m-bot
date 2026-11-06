@@ -10,7 +10,7 @@ This document does not authorize a real order or a production deployment. Never 
 - Do not trade ETH or other assets.
 - Discover each market and its UP/DOWN token IDs from Polymarket market data. Use the Polymarket CLOB order book for outcome prices.
 - The running app is live-order only. Paper fills and paper balances are not part of this service.
-- The live signal is based on the two Polymarket outcome prices. It does **not** use BTC candle direction, RSI, MACD, trendlines, a probability model, or an ML classifier.
+- The live signal uses the two Polymarket outcome prices plus the immediately previous closed BTC 5-minute candle from the Polymarket RTDS Chainlink BTC/USD feed. It does **not** use RSI, MACD, trendlines, a probability model, or an ML classifier.
 
 ## 2. Current strategy
 
@@ -20,7 +20,7 @@ For the current BTC window, obtain valid best bid and best ask quotes for UP and
 
 `midpoint = (best bid + best ask) / 2`
 
-Each quote used for a trigger must be live, valid, and no more than **5 seconds old**. Either outcome can trigger independently; a stale or missing quote on the other side does not cancel a qualifying fresh tick.
+Each quote used for a trigger must be live, valid, and no more than **5 seconds old**. Either outcome can trigger independently; a stale or missing quote on the other side does not cancel a qualifying fresh tick. The immediately previous five-minute candle must be available from five contiguous Chainlink BTC/USD minute bars.
 
 ### Entry condition
 
@@ -28,8 +28,13 @@ For each BTC 5-minute window that starts after the process starts:
 
 1. From the moment the window opens, watch fresh UP and DOWN midpoint quotes.
 2. Continue watching until the window ends.
-3. The first fresh midpoint at or above **$0.80** triggers a one-shot entry. If both qualify on the same check, choose the higher midpoint; if equal, choose UP.
-4. Latch and persist the selected side and triggering price so a later quote change or account-data delay does not change the signal. A process restart does not invent a signal; an already-open window is skipped unless it has a persisted qualifying trigger.
+3. A green previous candle permits UP entries only; a red previous candle permits DOWN entries only. A doji imposes no directional restriction.
+4. The first fresh midpoint at or above **$0.80** on a permitted side triggers a one-shot entry. If both qualify on the same check and the candle is a doji, choose the higher midpoint; if equal, choose UP.
+5. Latch and persist the candle direction, selected side, and triggering price so later quote changes or account-data delays do not change the signal. A process restart does not invent a signal; an already-open window is skipped unless it has a persisted qualifying trigger.
+
+The bot classifies a candle as a doji when its body is no more than 10% of its full high-to-low range, using the existing candle-color rule.
+
+If the previous candle cannot be reconstructed from all five closed Chainlink minute bars, the bot waits and does not enter on that window until the candle data is available. This avoids silently bypassing the added directional filter.
 
 Read the market's Gamma `version` before choosing its outcome asset IDs: use `clobTokenIds` for `v1` and `positionIds` for `v2`, aligned with the decoded `outcomes` array. Do not substitute one ID type for the other.
 

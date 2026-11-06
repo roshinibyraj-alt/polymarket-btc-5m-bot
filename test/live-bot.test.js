@@ -4,7 +4,14 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const LiveBot = require('../live-bot');
 
-function setup({ now = 250_000, accountReady = true, fetchStatus = null } = {}) {
+function setup({
+  now = 250_000,
+  accountReady = true,
+  fetchStatus = null,
+  previousColor = 'DOJI',
+  quotes = { UP: 0.81, DOWN: 0.19 },
+  missingCandleData = false,
+} = {}) {
   let id = 0;
   const calls = [];
   const exchangeOrders = new Map();
@@ -42,13 +49,34 @@ function setup({ now = 250_000, accountReady = true, fetchStatus = null } = {}) 
       tokens: { UP: 'token-up', DOWN: 'token-down' },
     }),
     getBook: async tokenId => ({
-      bids: [{ price: tokenId === 'token-up' ? '0.80' : '0.18', size: '10' }],
-      asks: [{ price: tokenId === 'token-up' ? '0.82' : '0.20', size: '10' }],
+      bids: [{ price: (quotes[tokenId === 'token-up' ? 'UP' : 'DOWN'] - 0.01).toFixed(2), size: '10' }],
+      asks: [{ price: (quotes[tokenId === 'token-up' ? 'UP' : 'DOWN'] + 0.01).toFixed(2), size: '10' }],
     }),
+  };
+  const priceFeed = {
+    getMinuteCandles: () => {
+      if (missingCandleData) throw new Error('Test feed has no candle history');
+      const windowStart = Math.floor(now / 300_000) * 300_000;
+      const start = windowStart - 300_000;
+      return Array.from({ length: 5 }, (_, index) => {
+        const open = previousColor === 'GREEN' ? 100 + index : 100;
+        const close = previousColor === 'GREEN' ? open + 1
+          : previousColor === 'RED' ? open - 1
+            : open;
+        return {
+          t: start + index * 60_000,
+          o: open,
+          h: Math.max(open, close) + (previousColor === 'DOJI' ? 1 : 0.2),
+          l: Math.min(open, close) - (previousColor === 'DOJI' ? 1 : 0.2),
+          c: close,
+        };
+      });
+    },
   };
   const bot = new LiveBot({
     trader,
     marketData,
+    priceFeed,
     tradingEnabled: true,
     clock: () => now,
     marketPollMs: 1_000,
@@ -64,13 +92,13 @@ function setup({ now = 250_000, accountReady = true, fetchStatus = null } = {}) 
   bot.authenticated = true;
   bot.stateReady = true;
   bot.account.accountReady = accountReady;
-  return { bot, trader, calls, exchangeOrders, marketData };
+  return { bot, trader, calls, exchangeOrders, marketData, priceFeed };
 }
 
 const eligible = {
   eligible: true,
   status: 'eligible',
-  strategyVersion: 'btc-midpoint-trigger-ladder-v2',
+  strategyVersion: 'btc-midpoint-trigger-ladder-v3',
   selectedSide: 'UP',
   qualifyingSides: ['UP'],
   upMid: 0.81,
@@ -114,9 +142,13 @@ test('the new strategy submits from window start and only once on the selected s
   const { bot, calls } = setup({ now: 100_000 });
   await bot.scanTimeframe('5m', 100_000);
   await bot.scanTimeframe('5m', 100_000);
+
   const buys = calls.filter(call => call.side === 'BUY');
   assert.equal(buys.length, 2);
-  assert.deepEqual(buys.map(({ price, shares }) => [price, shares]), [[0.40, 10], [0.60, 20]]);
+  assert.deepEqual(buys.map(({ price, shares }) => [price, shares]), [
+    [0.40, 10],
+    [0.60, 20],
+  ]);
   assert.ok(buys.every(call => call.tokenId === 'token-up'));
   assert.equal(bot.markets['5m'].signal.status, 'triggered_once');
 });
@@ -284,19 +316,80 @@ test('one qualifying signal submits the two limit buys on the selected side once
   assert.equal(state.triggeredAt, 250_000);
 });
 
+test('a green BTC candle filters live entries to UP without changing the rung orders', async () => {
+  const { bot, calls } = setup({ previousColor: 'GREEN' });
+  await bot.scanMarkets();
+  assert.deepEqual(calls.map(({ tokenId, price, shares }) => [tokenId, price, shares]), [
+    ['token-up', 0.40, 10],
+    ['token-up', 0.60, 20],
+  ]);
+  assert.equal(bot.markets['5m'].signal.candleFilter.color, 'GREEN');
+});
+
+test('a red BTC candle filters live entries to DOWN', async () => {
+  const { bot, calls } = setup({
+    previousColor: 'RED',
+    quotes: { UP: 0.19, DOWN: 0.81 },
+  });
+  await bot.scanMarkets();
+  assert.ok(calls.length > 0);
+  assert.ok(calls.every(call => call.tokenId === 'token-down'));
+  assert.equal(bot.markets['5m'].signal.selectedSide, 'DOWN');
+});
+
+test('a qualifying price on the candle-opposite side waits rather than bypassing the filter', async () => {
+  const { bot, calls } = setup({ previousColor: 'RED' });
+  await bot.scanMarkets();
+  assert.equal(calls.length, 0);
+  assert.equal(bot.markets['5m'].signal.status, 'waiting_for_candle_side_trigger');
+});
+
+test('unavailable closed-candle data prevents new entries and is shown in bot state', async () => {
+  const { bot, calls } = setup({ missingCandleData: true });
+  await bot.scanMarkets();
+  assert.equal(calls.length, 0);
+  assert.equal(bot.markets['5m'].signal.status, 'waiting_for_previous_candle');
+  assert.match(bot.snapshot().markets['5m'].candleFilter.reason, /Test feed has no candle history/);
+});
+
 test('matched strategy entries never submit TP or SL sells', async () => {
   const { bot, calls, exchangeOrders } = setup();
   const state = fillableMarket(bot);
   state.quotes.UP = { status: 'LIVE', bestBid: 0.99, updatedAt: 250_000, stale: false };
   await bot.fireWindowOrders(state, eligible);
-  for (const order of exchangeOrders.values()) if (order.side === 'BUY') order.status = 'MATCHED';
+
+  for (const order of exchangeOrders.values()) {
+    if (order.side === 'BUY') order.status = 'MATCHED';
+  }
   await bot.reconcileOrders();
+  assert.equal(calls.filter(call => call.side === 'SELL').length, 0);
+
   bot.clock = () => 295_000;
   state.quotes.UP = { status: 'LIVE', bestBid: 0.01, updatedAt: 295_000, stale: false };
   await bot.reconcileOrders();
-  const entry = [...bot.ordersById.values()].find(order => order.kind === 'ENTRY');
+  const entry = {
+    id: 'matched-stop-entry',
+    kind: 'ENTRY',
+    entryType: 'MIDPOINT_TRIGGER_LADDER',
+    side: 'BUY',
+    outcome: 'UP',
+    tokenId: 'token-up',
+    marketId: 'market-0',
+    price: 0.40,
+    shares: 10,
+    matchedShares: 10,
+    fillConfirmedAt: 294_000,
+    slug: state.slug,
+    timeframe: '5m',
+    windowStart: 0,
+    windowEnd: 300_000,
+    status: 'MATCHED',
+    exitSubmittingShares: 0,
+    exits: [],
+  };
   entry.sourceExitKind = 'STOP_LOSS';
   entry.sourceExitLimitPrice = 0.01;
+  bot.ordersById.set(entry.id, entry);
   await bot.maybeSubmitSourceExit(entry, 295_000);
   assert.equal(calls.filter(call => call.side === 'SELL').length, 0);
 });
@@ -628,7 +721,7 @@ test('dashboard snapshot identifies the live BTC 5m strategy only', () => {
   const state = bot.snapshot();
   assert.equal(state.mode, 'REAL ORDERS');
   assert.deepEqual(state.strategy.markets, ['BTC 5m']);
-  assert.equal(state.strategy.version, 'btc-midpoint-trigger-ladder-v2');
+  assert.equal(state.strategy.version, 'btc-midpoint-trigger-ladder-v3');
   assert.match(state.strategy.windowRule, /from window start/);
   assert.match(state.strategy.trigger, /at or above \$0\.80/);
   assert.deepEqual(state.strategy.orders.map(order => [order.buyPrice, order.shares]), [

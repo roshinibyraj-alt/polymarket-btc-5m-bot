@@ -5,6 +5,7 @@ const startLiveServer = require('./live-server');
 const marketData = require('./wick-market-data');
 const PolymarketTrader = require('./polymarket-trader');
 const { JsonStateStore } = require('./state-store');
+const { feed: chainlinkFeed } = require('./chainlink-feed');
 
 function startApplication({
   env = process.env,
@@ -19,6 +20,7 @@ function startApplication({
   const bot = new LiveBot({
     trader: exchange,
     marketData: dataProvider,
+    priceFeed: chainlinkFeed,
     stateStore,
     requirePersistentState: tradingEnabled,
     tradingEnabled,

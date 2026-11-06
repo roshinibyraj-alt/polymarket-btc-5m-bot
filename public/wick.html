@@ -107,6 +107,7 @@
       <div class="rows">
         <div class="row"><span>Signal state</span><strong class="status-text ${statusClass(sig.status)}">${esc(sig.status||'waiting')}</strong></div>
         <div class="row"><span>Signal reason</span><strong>${esc(sig.reason||'—')}</strong></div>
+        <div class="row"><span>Previous BTC 5m candle</span><strong>${esc(state?.candleFilter?.status==='ready' ? `${state.candleFilter.color}${state.candleFilter.allowedSide ? ` · allows ${state.candleFilter.allowedSide}` : ' · no side filter'}` : state?.candleFilter?.reason || 'Waiting for candle data')}</strong></div>
         <div class="row"><span>Selected side</span><strong>${esc(sig.selectedSide||'—')}</strong></div>
         <div class="row"><span>Trigger midpoint</span><strong>${price(sig.triggeringPrice)}</strong></div>
         <div class="row"><span>One-shot trigger</span><strong>${state?.triggeredAt?`Triggered ${time(state.triggeredAt)}`:'Not triggered'}</strong></div>
