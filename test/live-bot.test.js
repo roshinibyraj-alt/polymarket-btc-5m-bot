@@ -76,7 +76,7 @@ const eligible = {
   upMid: 0.81,
   downMid: 0.19,
   triggeringPrice: 0.81,
-  reason: 'UP midpoint reached $0.810 after the 120-second delay',
+  reason: 'UP midpoint reached $0.810 during the window',
 };
 
 function fillableMarket(bot) {
@@ -110,22 +110,13 @@ function armFlowTest(bot, armedAt = 0) {
   };
 }
 
-test('the new strategy waits 120 seconds, then submits only the selected-side ladder once', async () => {
+test('the new strategy submits from window start and only once on the selected side', async () => {
   const { bot, calls } = setup({ now: 100_000 });
   await bot.scanTimeframe('5m', 100_000);
   await bot.scanTimeframe('5m', 100_000);
-  assert.equal(calls.length, 0);
-
-  bot.clock = () => 120_000;
-  await bot.scanTimeframe('5m', 120_000);
-  await bot.scanTimeframe('5m', 120_000);
-
   const buys = calls.filter(call => call.side === 'BUY');
   assert.equal(buys.length, 2);
-  assert.deepEqual(buys.map(({ price, shares }) => [price, shares]), [
-    [0.40, 10],
-    [0.60, 20],
-  ]);
+  assert.deepEqual(buys.map(({ price, shares }) => [price, shares]), [[0.40, 10], [0.60, 20]]);
   assert.ok(buys.every(call => call.tokenId === 'token-up'));
   assert.equal(bot.markets['5m'].signal.status, 'triggered_once');
 });
@@ -293,103 +284,21 @@ test('one qualifying signal submits the two limit buys on the selected side once
   assert.equal(state.triggeredAt, 250_000);
 });
 
-test('source TP limit sells wait for confirmed fills and the $0.99 bid trigger', async () => {
+test('matched strategy entries never submit TP or SL sells', async () => {
   const { bot, calls, exchangeOrders } = setup();
-  const state = fillableMarket(bot);
-  state.quotes.UP = { status: 'LIVE', bestBid: 0.98, updatedAt: 250_000, stale: false };
-  await bot.fireWindowOrders(state, eligible);
-
-  await bot.reconcileOrders();
-  assert.equal(calls.filter(call => call.side === 'SELL').length, 0);
-
-  for (const order of exchangeOrders.values()) {
-    if (order.side === 'BUY') order.status = 'MATCHED';
-  }
-  await bot.reconcileOrders();
-  assert.equal(calls.filter(call => call.side === 'SELL').length, 0);
-
-  bot.clock = () => 250_500;
-  state.quotes.UP = { status: 'LIVE', bestBid: 0.99, updatedAt: 250_500, stale: false };
-  await bot.reconcileOrders();
-
-  const sells = calls.filter(call => call.side === 'SELL');
-  assert.equal(sells.length, 2);
-  assert.deepEqual(sells.map(({ price, shares }) => [price, shares]), [
-    [0.99, 10],
-    [0.99, 20],
-  ]);
-});
-
-test('terminal matched entries retry a source TP after the exchange releases shares', async () => {
-  const { bot, trader, calls, exchangeOrders } = setup();
   const state = fillableMarket(bot);
   state.quotes.UP = { status: 'LIVE', bestBid: 0.99, updatedAt: 250_000, stale: false };
   await bot.fireWindowOrders(state, eligible);
-  let rejectFirstSell = true;
-  const placeLimitOrder = trader.placeLimitOrder;
-  trader.placeLimitOrder = async (tokenId, side, price, shares) => {
-    if (side === 'SELL' && rejectFirstSell) {
-      rejectFirstSell = false;
-      const error = new Error('not enough balance / allowance: balance: 0');
-      error.submissionUncertain = false;
-      throw error;
-    }
-    return placeLimitOrder(tokenId, side, price, shares);
-  };
-
-  const entry = [...bot.ordersById.values()].find(order => order.kind === 'ENTRY');
-  exchangeOrders.get(entry.id).status = 'MATCHED';
+  for (const order of exchangeOrders.values()) if (order.side === 'BUY') order.status = 'MATCHED';
   await bot.reconcileOrders();
-  assert.equal(calls.filter(call => call.side === 'SELL').length, 0);
-  assert.ok(entry.retryAt > bot.clock());
-
-  entry.retryAt = bot.clock() - 1;
-  await bot.reconcileOrders();
-  const sells = calls.filter(call => call.side === 'SELL');
-  assert.equal(sells.length, 1);
-  assert.equal(sells[0].price, 0.99);
-  assert.equal(sells[0].shares, 10);
-  assert.equal(entry.exits.length, 1);
-  assert.equal(entry.exitBlockedReason, null);
-});
-
-test('source stop-loss submits a $0.01 limit only from 295 seconds onward', async () => {
-  const { bot, calls } = setup({ now: 294_999 });
-  const state = fillableMarket(bot);
-  const entry = {
-    id: 'matched-stop-entry',
-    kind: 'ENTRY',
-    entryType: 'MIDPOINT_TRIGGER_LADDER',
-    side: 'BUY',
-    outcome: 'UP',
-    tokenId: 'token-up',
-    marketId: 'market-0',
-    price: 0.40,
-    shares: 10,
-    matchedShares: 10,
-    fillConfirmedAt: 294_000,
-    slug: state.slug,
-    timeframe: '5m',
-    windowStart: 0,
-    windowEnd: 300_000,
-    status: 'MATCHED',
-    exitSubmittingShares: 0,
-    exits: [],
-  };
-  bot.ordersById.set(entry.id, entry);
-  state.quotes.UP = { status: 'LIVE', bestBid: 0.01, updatedAt: 294_999, stale: false };
-
-  await bot.maybeSubmitSourceExit(entry, 294_999);
-  assert.equal(calls.filter(call => call.side === 'SELL').length, 0);
-
   bot.clock = () => 295_000;
   state.quotes.UP = { status: 'LIVE', bestBid: 0.01, updatedAt: 295_000, stale: false };
+  await bot.reconcileOrders();
+  const entry = [...bot.ordersById.values()].find(order => order.kind === 'ENTRY');
+  entry.sourceExitKind = 'STOP_LOSS';
+  entry.sourceExitLimitPrice = 0.01;
   await bot.maybeSubmitSourceExit(entry, 295_000);
-
-  const sells = calls.filter(call => call.side === 'SELL');
-  assert.equal(sells.length, 1);
-  assert.equal(sells[0].price, 0.01);
-  assert.equal(sells[0].shares, 10);
+  assert.equal(calls.filter(call => call.side === 'SELL').length, 0);
 });
 
 test('a first partial entry fill cancels the unfilled remainder', async () => {
@@ -720,20 +629,16 @@ test('dashboard snapshot identifies the live BTC 5m strategy only', () => {
   assert.equal(state.mode, 'REAL ORDERS');
   assert.deepEqual(state.strategy.markets, ['BTC 5m']);
   assert.equal(state.strategy.version, 'btc-midpoint-trigger-ladder-v2');
-  assert.match(state.strategy.windowRule, /Wait 120 seconds/);
+  assert.match(state.strategy.windowRule, /from window start/);
   assert.match(state.strategy.trigger, /at or above \$0\.80/);
   assert.deepEqual(state.strategy.orders.map(order => [order.buyPrice, order.shares]), [
     [0.40, 10],
     [0.60, 20],
   ]);
   assert.deepEqual(state.strategy.exits, {
-    takeProfitTriggerBid: 0.99,
-    takeProfitLimitSell: 0.99,
-    stopLossTriggerBid: 0.01,
-    stopLossLimitSell: 0.01,
-    stopLossAfterSeconds: 295,
-    exitQuoteMaxAgeMs: 5_000,
-    resolution: 'Cancel unfilled exit orders at window end; hold unsold shares until the original market is confirmed resolved',
+    takeProfitEnabled: false,
+    stopLossEnabled: false,
+    resolution: 'Hold confirmed shares until the original market is confirmed resolved; submit no strategy sell orders',
   });
   assert.match(state.strategy.rearm, /no opening pair/);
   assert.ok(state.markets['5m']);
