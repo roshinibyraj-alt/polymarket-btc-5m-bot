@@ -19,8 +19,8 @@
     .panel,.stat,.market{background:linear-gradient(150deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:16px}
     .stat{padding:15px;min-height:88px}.label{color:var(--muted);font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.value{font-size:22px;font-weight:850;letter-spacing:-.035em;margin-top:5px;font-variant-numeric:tabular-nums}.note{display:block;color:var(--muted);font-size:11px;margin-top:3px}
     .panel{padding:17px;margin-top:14px}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.panel h2{font-size:15px;margin:0}.hint{color:var(--muted);font-size:11px}
-    .markets{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
-    .market{padding:16px;min-width:0}.market.m15{border-top:3px solid #a98cff}.market.m5{border-top:3px solid var(--cyan)}
+    .markets{display:grid;grid-template-columns:1fr;gap:12px}
+    .market{padding:16px;min-width:0;border-top:3px solid var(--cyan)}
     .market-title{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.market-title h3{font-size:15px;margin:0}.slug{color:var(--muted);font-size:11px;overflow-wrap:anywhere;margin-top:3px}
     .countdown{font-variant-numeric:tabular-nums;color:var(--cyan);font-weight:850;font-size:13px;white-space:nowrap}
     .prices{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:15px 0}
@@ -91,7 +91,7 @@
     if (s.includes('error') || s.includes('halt') || s.includes('blocked') || s.includes('reject')) return 'bad';
     return 'warn';
   };
-  function renderMarket(tf, state) {
+  function renderMarket(state) {
     const q = state?.quotes || {};
     const sig = state?.signal || {};
     const title = state?.title || state?.slug || 'Waiting for market discovery';
@@ -101,8 +101,8 @@
       const live = v.status === 'LIVE' && !v.stale;
       return `<div class="price-box"><div class="price-head"><span class="side ${cls}">${side}</span><span class="pill ${live?'live':'wait'}">${esc(live?'LIVE':v.status||'WAITING')}${v.stale?' · STALE':''}</span></div><div class="mid ${cls}">${price(v.mid)}</div><div class="quote-detail">Bid ${price(v.bestBid)} · Ask ${price(v.bestAsk)}</div></div>`;
     };
-    return `<article class="market ${tf==='15m'?'m15':'m5'}">
-      <div class="market-title"><div><h3>BTC ${esc(tf)}</h3><div class="slug">${esc(title)}</div></div><div class="countdown">${remaining(state?.windowEnd)}</div></div>
+    return `<article class="market">
+      <div class="market-title"><div><h3>BTC 5m</h3><div class="slug">${esc(title)}</div></div><div class="countdown">${remaining(state?.windowEnd)}</div></div>
       <div class="prices">${quoteBox('UP','up')}${quoteBox('DOWN','down')}</div>
       <div class="rows">
         <div class="row"><span>Signal state</span><strong class="status-text ${statusClass(sig.status)}">${esc(sig.status||'waiting')}</strong></div>
@@ -165,12 +165,12 @@
       document.querySelector('#flowTestNote').textContent = flowTest.enabled
         ? `One test BUY: ${Number(flowTest.shares||5)} shares at ${price(flowTest.buyLimitPrice||0.70)} (max ${money(flowTest.maxBuyNotional||3.50)}), then a confirmed-fill limit SELL at ${price(flowTest.takeProfitPrice||0.75)}. ${flowTest.pausesStrategy?'Normal strategy entries are paused during the test.':'The test is finished; normal strategy entries are active.'}${flowWindow}${flowResult}${flowError}`
         : `No new smoke test is armed.${flowWindow}${flowResult}${flowError}`;
-      document.querySelector('#markets').innerHTML = ['5m','15m'].map(tf=>renderMarket(tf,state.markets?.[tf]||{})).join('');
+      document.querySelector('#markets').innerHTML = renderMarket(state.markets?.['5m']||{});
       document.querySelector('#orders').innerHTML = renderOrders(state.orders||[]);
       document.querySelector('#orderCount').textContent = `${(state.orders||[]).length} tracked orders`;
       document.querySelector('#events').innerHTML = renderEvents(state.events||[]);
       document.querySelector('#error').textContent = state.error || '';
-      const ages = ['5m','15m'].flatMap(tf=>Object.values(state.markets?.[tf]?.quotes||{}).map(q=>q?.updatedAt).filter(Boolean));
+      const ages = Object.values(state.markets?.['5m']?.quotes||{}).map(q=>q?.updatedAt).filter(Boolean);
       document.querySelector('#quoteAge').textContent = ages.length ? `Latest quote ${Math.max(0,Math.round((Date.now()-Math.max(...ages))/1000))}s ago · refreshes every second` : 'Waiting for fresh quotes';
     } catch (error) {
       document.querySelector('#error').textContent = error.message || String(error);
