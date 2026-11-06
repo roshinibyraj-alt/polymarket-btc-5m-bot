@@ -4,6 +4,7 @@ const cfg = require('./config');
 const {
   WINDOW_CONFIG,
   ENTRY_RUNGS,
+  STRATEGY_VERSION,
   evaluateWindow,
   quoteFromBook,
   windowStartFor,
@@ -13,10 +14,14 @@ const TIMEFRAMES = Object.keys(WINDOW_CONFIG);
 const TERMINAL = new Set(['MATCHED', 'FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED']);
 const ACTIVE = new Set(['LIVE', 'OPEN', 'PENDING', 'PARTIALLY FILLED', 'PARTIALLY MATCHED']);
 const MIN_SELL_SHARES = Number(cfg.LIVE_MIN_SELL_SHARES || 5);
-const SHARES_PER_RUNG = Number(cfg.LIVE_SHARES_PER_RUNG || 10);
-const WINDOW_START_ENTRY_PRICE = Number(cfg.LIVE_WINDOW_START_ENTRY_PRICE || 0.30);
-const WINDOW_START_ENTRY_SHARES = Number(cfg.LIVE_WINDOW_START_ENTRY_SHARES || 20);
-const WINDOW_START_TAKE_PROFIT_PRICE = Number(cfg.LIVE_WINDOW_START_TAKE_PROFIT_PRICE || 0.99);
+// Continue managing already-open orders from the retired two-sided strategy.
+const LEGACY_WINDOW_START_ENTRY_PRICE = Number(cfg.LIVE_WINDOW_START_ENTRY_PRICE || 0.30);
+const LEGACY_WINDOW_START_ENTRY_SHARES = Number(cfg.LIVE_WINDOW_START_ENTRY_SHARES || 20);
+const LEGACY_WINDOW_START_TAKE_PROFIT_PRICE = Number(cfg.LIVE_WINDOW_START_TAKE_PROFIT_PRICE || 0.99);
+const LEGACY_ENTRY_RUNGS = [
+  { price: 0.25, takeProfitPrice: 0.75 },
+  { price: 0.15, takeProfitPrice: 0.85 },
+];
 const CANCEL_FINAL_FILL_CHECKS = Math.max(1, Number(cfg.LIVE_CANCEL_FINAL_FILL_CHECKS || 3));
 const ORDER_POLL_MS = Number(cfg.LIVE_ORDER_POLL_MS || 500);
 const ACCOUNT_REFRESH_MS = Number(cfg.LIVE_BALANCE_REFRESH_MS || 15_000);
@@ -103,20 +108,25 @@ function recoveredOrder(raw) {
   let pairedEntryGroup = null;
   if (side === 'BUY') {
     const rung = ENTRY_RUNGS.find(item => Math.abs(item.price - price) < 0.000001);
-    const openingPair = Math.abs(price - WINDOW_START_ENTRY_PRICE) < 0.000001
-      && Math.abs(size - WINDOW_START_ENTRY_SHARES) < 0.000001;
+    const legacyRung = LEGACY_ENTRY_RUNGS.find(item => Math.abs(item.price - price) < 0.000001);
+    const openingPair = Math.abs(price - LEGACY_WINDOW_START_ENTRY_PRICE) < 0.000001
+      && Math.abs(size - LEGACY_WINDOW_START_ENTRY_SHARES) < 0.000001;
     if (openingPair) {
       kind = 'ENTRY';
       entryType = 'WINDOW_START_PAIR';
       pairedEntryGroup = `window-start-pair:${slug}`;
-      takeProfitPrice = WINDOW_START_TAKE_PROFIT_PRICE;
+      takeProfitPrice = LEGACY_WINDOW_START_TAKE_PROFIT_PRICE;
     } else if (rung) {
       kind = 'ENTRY';
-      entryType = 'MIDPOINT_LADDER';
+      entryType = 'MIDPOINT_TRIGGER_LADDER';
       takeProfitPrice = rung.takeProfitPrice;
+    } else if (legacyRung) {
+      kind = 'ENTRY';
+      entryType = 'LEGACY_MIDPOINT_LADDER';
+      takeProfitPrice = legacyRung.takeProfitPrice;
     }
   } else if (side === 'SELL'
-    && [0.75, 0.85, WINDOW_START_TAKE_PROFIT_PRICE, 0.999]
+    && [0.75, 0.85, LEGACY_WINDOW_START_TAKE_PROFIT_PRICE, 0.999]
       .some(value => Math.abs(value - price) < 0.000001)) {
     kind = 'TAKE_PROFIT';
   }
@@ -263,6 +273,7 @@ class LiveBot {
         || !Number.isFinite(Number(saved.windowEnd)) || Number(saved.windowEnd) <= this.clock()) continue;
       const pendingTrigger = saved.pendingTrigger;
       const validPendingTrigger = pendingTrigger?.evaluation?.eligible === true
+        && pendingTrigger.evaluation.strategyVersion === STRATEGY_VERSION
         && pendingTrigger.windowStart !== null && pendingTrigger.windowStart !== undefined
         && pendingTrigger.windowEnd !== null && pendingTrigger.windowEnd !== undefined
         && Number(pendingTrigger.windowStart) === Number(saved.windowStart)
@@ -275,15 +286,11 @@ class LiveBot {
       restored.slug = typeof saved.slug === 'string' ? saved.slug : null;
       restored.title = typeof saved.title === 'string' ? saved.title : null;
       restored.pendingTrigger = validPendingTrigger;
-      restored.windowStartPairPending = saved.windowStartPairPending === true;
-      restored.windowStartPairStatus = typeof saved.windowStartPairStatus === 'string'
-        ? saved.windowStartPairStatus
-        : restored.windowStartPairPending ? 'pending' : 'waiting_for_window_start';
-      restored.windowStartPairTriggeredAt = saved.windowStartPairTriggeredAt !== null
-        && saved.windowStartPairTriggeredAt !== undefined
-        && Number.isFinite(Number(saved.windowStartPairTriggeredAt))
-        ? Number(saved.windowStartPairTriggeredAt)
-        : null;
+      restored.legacyWindowStartPairStatus = saved.windowStartPairPending === true
+        ? 'retired_by_strategy'
+        : typeof saved.windowStartPairStatus === 'string'
+          ? saved.windowStartPairStatus
+          : 'not_applicable';
       restored.triggeredAt = saved.triggeredAt !== null && saved.triggeredAt !== undefined
         && Number.isFinite(Number(saved.triggeredAt)) ? Number(saved.triggeredAt) : null;
       restored.orderIds = Array.isArray(saved.orderIds) ? saved.orderIds.map(String) : [];
@@ -343,9 +350,7 @@ class LiveBot {
           title: state.title,
           pendingTrigger: state.pendingTrigger,
           triggeredAt: state.triggeredAt,
-          windowStartPairPending: state.windowStartPairPending,
-          windowStartPairStatus: state.windowStartPairStatus,
-          windowStartPairTriggeredAt: state.windowStartPairTriggeredAt,
+          legacyWindowStartPairStatus: state.legacyWindowStartPairStatus,
           orderIds: state.orderIds,
           signal: state.signal,
         }];
@@ -521,9 +526,7 @@ class LiveBot {
       signal: { eligible: false, status: 'starting', reason: 'Waiting for market data' },
       pendingTrigger: null,
       triggeredAt: null,
-      windowStartPairPending: false,
-      windowStartPairStatus: 'waiting_for_window_start',
-      windowStartPairTriggeredAt: null,
+      legacyWindowStartPairStatus: 'not_applicable',
       orderIds: [],
       lastMarketLookupAt: 0,
       lastQuoteAt: null,
@@ -771,9 +774,6 @@ class LiveBot {
       next.windowStart = windowStart;
       next.windowEnd = windowStart + WINDOW_CONFIG[timeframe];
       next.slug = `btc-updown-${timeframe}-${Math.floor(windowStart / 1000)}`;
-      next.windowStartPairStatus = windowStart < this.startedAt
-        ? 'skipped_restart_window'
-        : 'waiting_for_window_start';
       next.signal = {
         eligible: false,
         status: windowStart < this.startedAt ? 'skipped_restart_window' : 'watching',
@@ -786,8 +786,6 @@ class LiveBot {
     }
 
     const current = this.markets[timeframe];
-    await this.queueWindowStartPair(current, now);
-    if (this.halted) return;
     if (!current.market && now - current.lastMarketLookupAt >= 5_000) {
       current.lastMarketLookupAt = now;
       try {
@@ -808,14 +806,6 @@ class LiveBot {
         reason: current.error || 'Waiting for BTC market discovery',
       };
       return;
-    }
-
-    if (current.windowStartPairPending) {
-      if (this.flowTestPausesStrategy()) {
-        current.windowStartPairStatus = 'paused_for_flow_test';
-      } else {
-        await this.fireWindowStartPair(current);
-      }
     }
 
     const results = await Promise.allSettled([
@@ -943,6 +933,7 @@ class LiveBot {
   }
 
   async queueWindowStartPair(state, now) {
+    return true;
     if (state.windowStartPairStatus !== 'waiting_for_window_start') return true;
     if (state.windowStart < this.startedAt) {
       state.windowStartPairStatus = 'skipped_restart_window';
@@ -983,6 +974,7 @@ class LiveBot {
   }
 
   async fireWindowStartPair(state) {
+    return;
     if (!state.windowStartPairPending || state.windowStartPairTriggeredAt) return;
     if (this.flowTestPausesStrategy()) {
       state.windowStartPairStatus = 'paused_for_flow_test';
@@ -1108,6 +1100,25 @@ class LiveBot {
   async fireWindowOrders(state, evaluation) {
     if (this.flowTestPausesStrategy()) return;
     if (state.triggeredAt) return;
+    if (evaluation?.strategyVersion !== STRATEGY_VERSION) {
+      state.signal = {
+        ...evaluation,
+        eligible: false,
+        status: 'stale_strategy_signal',
+        reason: 'The saved signal was produced by a different strategy version',
+      };
+      return;
+    }
+    const selectedSide = evaluation?.selectedSide;
+    if (!['UP', 'DOWN'].includes(selectedSide)) {
+      state.signal = {
+        ...evaluation,
+        eligible: false,
+        status: 'invalid_signal',
+        reason: 'The trigger did not identify a valid outcome side',
+      };
+      return;
+    }
     if (!state.pendingTrigger) {
       state.pendingTrigger = {
         observedAt: this.clock(),
@@ -1141,47 +1152,47 @@ class LiveBot {
     }
     state.triggeredAt = this.clock();
     state.signal = { ...evaluation, status: 'orders_submitting' };
-    this.log('SIGNAL', 'Midpoint-band trigger fired; submitting the four limit buys once', {
+    this.log('SIGNAL', 'Midpoint threshold trigger fired; submitting the selected-side limit ladder once', {
       slug: state.slug,
+      selectedSide,
+      triggeringPrice: evaluation.triggeringPrice,
       qualifyingSides: evaluation.qualifyingSides,
       upMid: evaluation.upMid,
       downMid: evaluation.downMid,
     });
 
     const entries = [];
-    for (const side of ['UP', 'DOWN']) {
-      for (const rung of ENTRY_RUNGS) {
-        const clientKey = `${state.slug}:${side}:${rung.price.toFixed(2)}`;
-        if (this.entryKeys.has(clientKey)) continue;
-        this.entryKeys.add(clientKey);
-        const order = {
-          id: null,
-          clientKey,
-          kind: 'ENTRY',
-          entryType: 'MIDPOINT_LADDER',
-          side: 'BUY',
-          outcome: side,
-          tokenId: String(state.market.tokens[side]),
-          price: rung.price,
-          shares: SHARES_PER_RUNG,
-          matchedShares: 0,
-          takeProfitPrice: rung.takeProfitPrice,
-          slug: state.slug,
-          timeframe: state.timeframe,
-          windowStart: state.windowStart,
-          windowEnd: state.windowEnd,
-          status: 'SUBMITTING',
-          recovered: false,
-          exits: [],
-          exitSubmittingShares: 0,
-          retryAt: 0,
-          error: null,
-          createdAt: this.clock(),
-        };
-        state.orderIds.push(clientKey);
-        this.ordersById.set(clientKey, order);
-        entries.push(order);
-      }
+    for (const rung of ENTRY_RUNGS) {
+      const clientKey = `${state.slug}:${selectedSide}:${rung.price.toFixed(2)}`;
+      if (this.entryKeys.has(clientKey)) continue;
+      this.entryKeys.add(clientKey);
+      const order = {
+        id: null,
+        clientKey,
+        kind: 'ENTRY',
+        entryType: 'MIDPOINT_TRIGGER_LADDER',
+        side: 'BUY',
+        outcome: selectedSide,
+        tokenId: String(state.market.tokens[selectedSide]),
+        price: rung.price,
+        shares: rung.shares,
+        matchedShares: 0,
+        takeProfitPrice: rung.takeProfitPrice,
+        slug: state.slug,
+        timeframe: state.timeframe,
+        windowStart: state.windowStart,
+        windowEnd: state.windowEnd,
+        status: 'SUBMITTING',
+        recovered: false,
+        exits: [],
+        exitSubmittingShares: 0,
+        retryAt: 0,
+        error: null,
+        createdAt: this.clock(),
+      };
+      state.orderIds.push(clientKey);
+      this.ordersById.set(clientKey, order);
+      entries.push(order);
     }
     try {
       await this.persistState();
@@ -1198,7 +1209,7 @@ class LiveBot {
     state.signal = {
       ...evaluation,
       status: 'orders_submitted',
-      reason: 'One-shot order set submitted; no entry rearm for this window',
+      reason: `One-shot ${selectedSide} ladder submitted; no entry rearm for this window`,
     };
   }
 
@@ -1553,8 +1564,8 @@ class LiveBot {
             : 'counterpart_inactive'
           : 'opposite_cancel_pending';
     const state = this.markets[filledEntry.timeframe];
-    if (!state || state.slug !== filledEntry.slug || state.windowStartPairStatus === newStatus) return;
-    state.windowStartPairStatus = newStatus;
+    if (!state || state.slug !== filledEntry.slug || state.legacyWindowStartPairStatus === newStatus) return;
+    state.legacyWindowStartPairStatus = newStatus;
     try {
       await this.persistState();
     } catch (error) {
@@ -1645,9 +1656,6 @@ class LiveBot {
         signal: state.signal,
         pendingTrigger: state.pendingTrigger,
         triggeredAt: state.triggeredAt,
-        windowStartPairPending: state.windowStartPairPending,
-        windowStartPairStatus: state.windowStartPairStatus,
-        windowStartPairTriggeredAt: state.windowStartPairTriggeredAt,
         error: state.error,
         orders,
       }];
@@ -1664,23 +1672,18 @@ class LiveBot {
       startedAt: this.startedAt,
       now: this.clock(),
       strategy: {
+        version: STRATEGY_VERSION,
         markets: ['BTC 5m', 'BTC 15m'],
-        windowRule: 'Submit a two-sided opening pair in each new window; evaluate the existing ladder during the final 120 seconds',
-        trigger: 'At window start, buy 20 UP and 20 DOWN shares at $0.30; in the final 120 seconds, any fresh midpoint in the inclusive $0.30–$0.71 band triggers the existing ladder',
-        triggerPersistence: 'Opening-pair intents and qualifying ladder ticks are saved through account delays and process restarts until the window ends',
-        windowStartPair: {
-          buyPrice: WINDOW_START_ENTRY_PRICE,
-          sharesPerSide: WINDOW_START_ENTRY_SHARES,
-          takeProfitPrice: WINDOW_START_TAKE_PROFIT_PRICE,
-          cancelOppositeOnAnyFill: true,
-          processRestart: 'Only windows that start after this process starts; an already-open window is skipped unless a previously persisted pair intent is pending',
-        },
+        windowRule: 'Wait 120 seconds after each window starts, then monitor fresh UP/DOWN midpoints until the window ends',
+        trigger: 'The first fresh midpoint at or above $0.80 selects a side; if both qualify, select the higher midpoint and break ties toward UP',
+        triggerPersistence: 'The qualifying side and price are saved through account delays and process restarts until that window ends',
+        selectedSideOnly: true,
         orders: ENTRY_RUNGS.map(rung => ({
           buyPrice: rung.price,
-          shares: SHARES_PER_RUNG,
+          shares: rung.shares,
           takeProfitPrice: rung.takeProfitPrice,
         })),
-        rearm: 'One opening pair and one midpoint ladder per window; no order replacement or re-entry',
+        rearm: 'One selected-side two-rung ladder per window; no opening pair, order replacement, or re-entry',
         orderPollMs: this.orderPollMs,
         quoteMaxAgeMs: 5_000,
         entriesPausedForSmokeTest: this.flowTestPausesStrategy(),

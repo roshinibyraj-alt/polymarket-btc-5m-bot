@@ -73,7 +73,7 @@
     <div class="events" id="events"><div class="empty">Waiting for bot activity…</div></div>
   </section>
 
-  <p class="foot">At each new BTC 5-minute or 15-minute window, the bot submits UP and DOWN limit buys at $0.30 for 20 shares each. Any confirmed fill cancels the opposite entry; confirmed shares receive a $0.99 limit sell. If both entries fill before cancellation completes, both fills receive take-profit orders. Separately, during the final 120 seconds, either fresh midpoint in the inclusive $0.30–$0.71 band triggers the existing ladder: UP and DOWN buys at $0.25 and $0.15, 10 shares each, with take-profit sells at $0.75 and $0.85. Each trigger is one-shot per window. Unfilled entry orders are canceled at window end; take-profit orders have no explicit expiry.</p>
+  <p class="foot">For each BTC 5-minute and 15-minute window, wait 120 seconds after it opens, then watch fresh UP/DOWN midpoints until the window ends. The first midpoint at or above $0.80 selects that side; if both qualify on the same check, the higher midpoint wins and ties select UP. Submit one resting limit BUY for 10 shares at $0.40 and one for 20 shares at $0.60 on the selected side only. After Polymarket confirms fills, submit same-token take-profit limit sells at $0.75 for the $0.40 rung and $0.85 for the $0.60 rung. There is no opening pair and no rearm. Cancel unfilled entry orders at window end; take-profit orders have no explicit expiry.</p>
   <div class="error" id="error"></div>
 </main>
 <script>
@@ -107,8 +107,8 @@
       <div class="rows">
         <div class="row"><span>Signal state</span><strong class="status-text ${statusClass(sig.status)}">${esc(sig.status||'waiting')}</strong></div>
         <div class="row"><span>Signal reason</span><strong>${esc(sig.reason||'—')}</strong></div>
-        <div class="row"><span>Qualifying side</span><strong>${esc((sig.qualifyingSides||[]).join(' + ')||'—')}</strong></div>
-        <div class="row"><span>Window-start pair</span><strong>${esc(state?.windowStartPairStatus||'waiting')}</strong></div>
+        <div class="row"><span>Selected side</span><strong>${esc(sig.selectedSide||'—')}</strong></div>
+        <div class="row"><span>Trigger midpoint</span><strong>${price(sig.triggeringPrice)}</strong></div>
         <div class="row"><span>One-shot trigger</span><strong>${state?.triggeredAt?`Triggered ${time(state.triggeredAt)}`:'Not triggered'}</strong></div>
         <div class="row"><span>Orders this window</span><strong>${esc(orders)}</strong></div>
       </div>

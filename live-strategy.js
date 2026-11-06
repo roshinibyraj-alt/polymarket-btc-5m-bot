@@ -6,14 +6,14 @@ const WINDOW_CONFIG = Object.freeze({
 });
 
 const ENTRY_RUNGS = Object.freeze([
-  Object.freeze({ price: 0.25, shares: 10, takeProfitPrice: 0.75 }),
-  Object.freeze({ price: 0.15, shares: 10, takeProfitPrice: 0.85 }),
+  Object.freeze({ price: 0.40, shares: 10, takeProfitPrice: 0.75 }),
+  Object.freeze({ price: 0.60, shares: 20, takeProfitPrice: 0.85 }),
 ]);
 
-const MIN_MIDPOINT = 0.30;
-const MAX_MIDPOINT = 0.71;
-const FINAL_ENTRY_WINDOW_MS = 120_000;
+const ENTRY_DELAY_MS = 120_000;
+const ENTRY_TRIGGER_MIDPOINT = 0.80;
 const QUOTE_MAX_AGE_MS = 5_000;
+const STRATEGY_VERSION = 'btc-midpoint-trigger-ladder-v1';
 
 function bestPrice(levels, select) {
   if (!Array.isArray(levels)) return null;
@@ -61,13 +61,13 @@ function evaluateWindow({ now = Date.now(), market, quotes, startedAt = null } =
     };
   }
 
-  const remainingMs = end - now;
-  if (remainingMs > FINAL_ENTRY_WINDOW_MS) {
+  const elapsedMs = now - start;
+  if (elapsedMs < ENTRY_DELAY_MS) {
     return {
       eligible: false,
-      status: 'watching',
-      remainingMs,
-      reason: 'Waiting for the final 120 seconds',
+      status: 'waiting_for_delay',
+      elapsedMs,
+      reason: 'Waiting for 120 seconds after the window starts',
     };
   }
 
@@ -94,31 +94,42 @@ function evaluateWindow({ now = Date.now(), market, quotes, startedAt = null } =
     freshSides.push(side);
   }
 
-  const inBand = price => price >= MIN_MIDPOINT && price <= MAX_MIDPOINT;
-  const qualifyingSides = ['UP', 'DOWN'].filter(side => inBand(values[side]));
+  const qualifyingSides = ['UP', 'DOWN']
+    .filter(side => Number.isFinite(values[side]) && values[side] >= ENTRY_TRIGGER_MIDPOINT)
+    .sort((a, b) => values[b] - values[a] || (a === 'UP' ? -1 : 1));
   if (freshSides.length === 0) {
     return {
       eligible: false,
       status: 'waiting_for_fresh_quotes',
-      remainingMs,
+      elapsedMs,
       upMid: values.UP,
       downMid: values.DOWN,
       freshSides,
-      reason: 'Waiting for at least one fresh UP or DOWN bid/ask quote',
+      reason: 'Waiting for at least one fresh UP or DOWN midpoint quote',
     };
   }
-  const eligible = qualifyingSides.length > 0;
+  const selectedSide = qualifyingSides[0] || null;
+  const eligible = selectedSide !== null;
   return {
     eligible,
-    status: eligible ? 'eligible' : 'outside_midpoint_band',
-    remainingMs,
+    status: eligible ? 'eligible' : 'watching_for_trigger',
+    elapsedMs,
     upMid: values.UP,
     downMid: values.DOWN,
     freshSides,
     qualifyingSides,
+    selectedSide,
+    triggeringPrice: selectedSide ? values[selectedSide] : null,
+    triggerPrice: ENTRY_TRIGGER_MIDPOINT,
+    selectionReason: !selectedSide
+      ? null
+      : qualifyingSides.length > 1
+        ? 'HIGHEST_QUALIFYING_MIDPOINT'
+        : 'MIDPOINT_TRIGGER',
+    strategyVersion: STRATEGY_VERSION,
     reason: eligible
-      ? `${qualifyingSides.join(' and ')} midpoint is in the $0.30–$0.71 band`
-      : 'No fresh outcome midpoint is in the $0.30–$0.71 band',
+      ? `${selectedSide} midpoint reached $${values[selectedSide].toFixed(3)} after the 120-second delay`
+      : 'Waiting for a fresh UP or DOWN midpoint to reach $0.80 or higher',
   };
 }
 
@@ -131,10 +142,10 @@ function windowStartFor(now, timeframe) {
 module.exports = {
   WINDOW_CONFIG,
   ENTRY_RUNGS,
-  MIN_MIDPOINT,
-  MAX_MIDPOINT,
-  FINAL_ENTRY_WINDOW_MS,
+  ENTRY_DELAY_MS,
+  ENTRY_TRIGGER_MIDPOINT,
   QUOTE_MAX_AGE_MS,
+  STRATEGY_VERSION,
   quoteFromBook,
   evaluateWindow,
   windowStartFor,
