@@ -5,7 +5,10 @@ const assert = require('node:assert/strict');
 const {
   quoteFromBook,
   evaluateWindow,
+  evaluateSourceExit,
+  resolvedMarketPayout,
   windowStartFor,
+  STRATEGY_TIMEFRAMES,
   ENTRY_RUNGS,
 } = require('../live-strategy');
 
@@ -23,67 +26,64 @@ function quote(mid, updatedAt, status = 'LIVE') {
   };
 }
 
-test('either outcome midpoint inside the band qualifies the window', () => {
+test('a fresh midpoint at or above $0.80 triggers the higher-priced qualifying side', () => {
   const result = evaluateWindow({
     now: 1_299_000,
     market: market(),
-    quotes: { UP: quote(0.74, 1_299_000), DOWN: quote(0.30, 1_299_000) },
+    quotes: { UP: quote(0.83, 1_299_000), DOWN: quote(0.86, 1_299_000) },
     startedAt: 900_000,
   });
   assert.equal(result.eligible, true);
-  assert.deepEqual(result.qualifyingSides, ['DOWN']);
+  assert.deepEqual(result.qualifyingSides, ['DOWN', 'UP']);
+  assert.equal(result.selectedSide, 'DOWN');
+  assert.equal(result.triggeringPrice, 0.86);
 });
 
-test('both midpoints outside the inclusive band do not qualify', () => {
+test('equal qualifying midpoints choose UP deterministically', () => {
   const result = evaluateWindow({
     now: 1_299_000,
     market: market(),
-    quotes: { UP: quote(0.80, 1_299_000), DOWN: quote(0.20, 1_299_000) },
+    quotes: { UP: quote(0.84, 1_299_000), DOWN: quote(0.84, 1_299_000) },
     startedAt: 900_000,
   });
-  assert.equal(result.eligible, false);
-  assert.equal(result.status, 'outside_midpoint_band');
+  assert.equal(result.eligible, true);
+  assert.equal(result.selectedSide, 'UP');
+  assert.equal(result.selectionReason, 'HIGHEST_QUALIFYING_MIDPOINT');
 });
 
-test('the midpoint band includes both endpoints', () => {
-  const low = evaluateWindow({
-    now: 1_299_000,
-    market: market(),
-    quotes: { UP: quote(0.30, 1_299_000), DOWN: quote(0.80, 1_299_000) },
-    startedAt: 900_000,
-  });
-  const high = evaluateWindow({
-    now: 1_299_000,
-    market: market(),
-    quotes: { UP: quote(0.71, 1_299_000), DOWN: quote(0.80, 1_299_000) },
-    startedAt: 900_000,
-  });
-  assert.equal(low.eligible, true);
-  assert.equal(high.eligible, true);
-});
-
-test('the midpoint ladder only runs during the final 120 seconds', () => {
+test('midpoints below $0.80 do not qualify', () => {
   const result = evaluateWindow({
-    now: 1_179_999,
+    now: 1_299_000,
     market: market(),
-    quotes: { UP: quote(0.50, 1_179_999), DOWN: quote(0.50, 1_179_999) },
+    quotes: { UP: quote(0.79, 1_299_000), DOWN: quote(0.20, 1_299_000) },
     startedAt: 900_000,
   });
   assert.equal(result.eligible, false);
-  assert.equal(result.status, 'watching');
+  assert.equal(result.status, 'watching_for_trigger');
 });
 
-test('the final-120-second boundary is inclusive and quotes older than five seconds are rejected', () => {
+test('the strategy waits until 120 seconds after window start', () => {
+  const result = evaluateWindow({
+    now: 1_119_999,
+    market: market(),
+    quotes: { UP: quote(0.90, 1_119_999), DOWN: quote(0.10, 1_119_999) },
+    startedAt: 900_000,
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.status, 'waiting_for_delay');
+});
+
+test('the 120-second delay boundary is inclusive and stale quotes are rejected', () => {
   const atBoundary = evaluateWindow({
-    now: 1_180_000,
+    now: 1_120_000,
     market: market(),
-    quotes: { UP: quote(0.50, 1_180_000), DOWN: quote(0.50, 1_180_000) },
+    quotes: { UP: quote(0.80, 1_120_000), DOWN: quote(0.20, 1_120_000) },
     startedAt: 900_000,
   });
   const stale = evaluateWindow({
     now: 1_299_000,
     market: market(),
-    quotes: { UP: quote(0.50, 1_293_999), DOWN: quote(0.50, 1_293_999) },
+    quotes: { UP: quote(0.80, 1_293_999), DOWN: quote(0.20, 1_293_999) },
     startedAt: 900_000,
   });
   assert.equal(atBoundary.eligible, true);
@@ -95,12 +95,13 @@ test('one fresh qualifying outcome triggers even if the other quote is stale', (
   const result = evaluateWindow({
     now: 1_299_000,
     market: market(),
-    quotes: { UP: quote(0.50, 1_299_000), DOWN: quote(0.50, 1_293_999) },
+    quotes: { UP: quote(0.82, 1_299_000), DOWN: quote(0.85, 1_293_999) },
     startedAt: 900_000,
   });
   assert.equal(result.eligible, true);
   assert.deepEqual(result.freshSides, ['UP']);
   assert.deepEqual(result.qualifyingSides, ['UP']);
+  assert.equal(result.selectedSide, 'UP');
 });
 
 test('windows that began before process startup are skipped after restart', () => {
@@ -125,14 +126,74 @@ test('book quotes use the best prices and keep the timestamp', () => {
   assert.equal(result.updatedAt, 123);
 });
 
-test('entry ladder maps 25-cent buys to 75-cent TP and 15-cent buys to 85-cent TP', () => {
-  assert.deepEqual(ENTRY_RUNGS.map(rung => [rung.price, rung.takeProfitPrice, rung.shares]), [
-    [0.25, 0.75, 10],
-    [0.15, 0.85, 10],
+test('entry ladder uses the requested prices and sizes without rung take-profits', () => {
+  assert.deepEqual(ENTRY_RUNGS.map(rung => [rung.price, rung.shares]), [
+    [0.40, 10],
+    [0.60, 20],
   ]);
+});
+
+test('source TP is triggered by a fresh post-fill best bid at $0.99', () => {
+  const result = evaluateSourceExit({
+    now: 250_000,
+    windowStart: 0,
+    windowEnd: 300_000,
+    filledAt: 249_000,
+    quote: { status: 'LIVE', bestBid: 0.99, updatedAt: 250_000, stale: false },
+  });
+  assert.deepEqual(result, { kind: 'TAKE_PROFIT', triggerBid: 0.99, limitPrice: 0.99 });
+});
+
+test('source stop is blocked before 295 seconds and triggers at the inclusive boundary', () => {
+  const quoteAt = updatedAt => ({ status: 'LIVE', bestBid: 0.01, updatedAt, stale: false });
+  const before = evaluateSourceExit({
+    now: 294_999, windowStart: 0, windowEnd: 300_000, filledAt: 1_000, quote: quoteAt(294_999),
+  });
+  const boundary = evaluateSourceExit({
+    now: 295_000, windowStart: 0, windowEnd: 300_000, filledAt: 1_000, quote: quoteAt(295_000),
+  });
+  const afterWindow = evaluateSourceExit({
+    now: 300_000, windowStart: 0, windowEnd: 300_000, filledAt: 1_000, quote: quoteAt(300_000),
+  });
+  assert.equal(before, null);
+  assert.deepEqual(boundary, { kind: 'STOP_LOSS', triggerBid: 0.01, limitPrice: 0.01 });
+  assert.equal(afterWindow, null);
+});
+
+test('source exit ignores stale or pre-fill bids', () => {
+  const base = { now: 250_000, windowStart: 0, windowEnd: 300_000, filledAt: 249_000 };
+  assert.equal(evaluateSourceExit({
+    ...base,
+    quote: { status: 'LIVE', bestBid: 0.99, updatedAt: 244_999, stale: false },
+  }), null);
+  assert.equal(evaluateSourceExit({
+    ...base,
+    quote: { status: 'LIVE', bestBid: 0.99, updatedAt: 249_999, stale: true },
+  }), null);
+});
+
+test('confirmed original-market resolution maps the exact token payout', () => {
+  const market = {
+    id: 'original-market',
+    closed: true,
+    umaResolutionStatus: 'resolved',
+    outcomes: '["Up","Down"]',
+    positionIds: '["up-token","down-token"]',
+    outcomePrices: '["1","0"]',
+  };
+  assert.equal(resolvedMarketPayout(market, {
+    marketId: 'original-market', tokenId: 'up-token', outcome: 'UP',
+  }), 1);
+  assert.equal(resolvedMarketPayout(market, {
+    marketId: 'original-market', tokenId: 'down-token', outcome: 'DOWN',
+  }), 0);
+  assert.equal(resolvedMarketPayout(market, {
+    marketId: 'next-market', tokenId: 'up-token', outcome: 'UP',
+  }), null);
 });
 
 test('window start is aligned independently for 5m and 15m', () => {
   assert.equal(windowStartFor(601_000, '5m'), 600_000);
   assert.equal(windowStartFor(901_000, '15m'), 900_000);
+  assert.deepEqual(STRATEGY_TIMEFRAMES, ['5m']);
 });

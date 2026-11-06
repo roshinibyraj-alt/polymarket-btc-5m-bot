@@ -42,7 +42,7 @@
 <body>
 <main>
   <header>
-    <div><h1>BTC Limit Ladder Bot</h1><div class="subtitle">Live order execution · BTC 5-minute and 15-minute markets only</div></div>
+    <div><h1>BTC Limit Ladder Bot</h1><div class="subtitle">Live order execution · BTC 5-minute markets only</div></div>
     <div class="badge" id="statusBadge"><i class="dot"></i><span>Connecting</span></div>
   </header>
 
@@ -73,7 +73,7 @@
     <div class="events" id="events"><div class="empty">Waiting for bot activity…</div></div>
   </section>
 
-  <p class="foot">At each new BTC 5-minute or 15-minute window, the bot submits UP and DOWN limit buys at $0.30 for 20 shares each. Any confirmed fill cancels the opposite entry; confirmed shares receive a $0.99 limit sell. If both entries fill before cancellation completes, both fills receive take-profit orders. Separately, during the final 120 seconds, either fresh midpoint in the inclusive $0.30–$0.71 band triggers the existing ladder: UP and DOWN buys at $0.25 and $0.15, 10 shares each, with take-profit sells at $0.75 and $0.85. Each trigger is one-shot per window. Unfilled entry orders are canceled at window end; take-profit orders have no explicit expiry.</p>
+  <p class="foot">Trade BTC 5-minute windows only. Wait 120 seconds after each opens, then watch fresh UP/DOWN midpoints until it ends. The first midpoint at or above $0.80 selects the side; if both qualify, choose the higher midpoint, with ties to UP. Submit one resting limit BUY for 10 shares at $0.40 and one for 20 shares at $0.60 on that side only. A first partial fill completes the rung, so cancel its unfilled remainder. During the active window, a fresh own-side best bid at or above $0.99 triggers a resting $0.99 limit SELL; at or below $0.01 triggers a resting $0.01 limit SELL only after 295 seconds. Cancel unfilled buys and sells at window end and wait for confirmed resolution of that original market. Live limit sells may remain unfilled; only confirmed sells close shares.</p>
   <div class="error" id="error"></div>
 </main>
 <script>
@@ -107,8 +107,8 @@
       <div class="rows">
         <div class="row"><span>Signal state</span><strong class="status-text ${statusClass(sig.status)}">${esc(sig.status||'waiting')}</strong></div>
         <div class="row"><span>Signal reason</span><strong>${esc(sig.reason||'—')}</strong></div>
-        <div class="row"><span>Qualifying side</span><strong>${esc((sig.qualifyingSides||[]).join(' + ')||'—')}</strong></div>
-        <div class="row"><span>Window-start pair</span><strong>${esc(state?.windowStartPairStatus||'waiting')}</strong></div>
+        <div class="row"><span>Selected side</span><strong>${esc(sig.selectedSide||'—')}</strong></div>
+        <div class="row"><span>Trigger midpoint</span><strong>${price(sig.triggeringPrice)}</strong></div>
         <div class="row"><span>One-shot trigger</span><strong>${state?.triggeredAt?`Triggered ${time(state.triggeredAt)}`:'Not triggered'}</strong></div>
         <div class="row"><span>Orders this window</span><strong>${esc(orders)}</strong></div>
       </div>
@@ -118,11 +118,13 @@
     if (!orders?.length) return '<div class="empty">No orders tracked yet.</div>';
     const rows = orders.map(o => {
       const outcome = o.outcome || '—';
-      const tp = o.kind === 'ENTRY' ? price(o.takeProfitPrice) : '—';
+      const exit = o.kind === 'ENTRY'
+        ? (o.sourceExitKind ? `${esc(o.sourceExitKind)} ${price(o.sourceExitLimitPrice)}` : 'TP ≥$0.99 · SL ≤$0.01 after 295s')
+        : '—';
       const status = String(o.status || 'unknown');
-      return `<tr><td>${esc(o.timeframe||'—')}</td><td>${esc(o.kind||'—')}${o.testOnly?' · SMOKE TEST':''}</td><td class="${outcome==='UP'?'up':'down'}">${esc(outcome)}</td><td>${price(o.price)}</td><td>${Number(o.shares||0).toFixed(2)}</td><td>${Number(o.matchedShares||0).toFixed(2)}</td><td>${tp}</td><td><span class="pill ${statusClass(status)==='good'?'live':statusClass(status)==='bad'?'fail':'wait'}">${esc(status)}</span></td><td>${esc(o.error||o.exitBlockedReason||'—')}</td></tr>`;
+      return `<tr><td>${esc(o.timeframe||'—')}</td><td>${esc(o.kind||'—')}${o.testOnly?' · SMOKE TEST':''}</td><td class="${outcome==='UP'?'up':'down'}">${esc(outcome)}</td><td>${price(o.price)}</td><td>${Number(o.shares||0).toFixed(2)}</td><td>${Number(o.matchedShares||0).toFixed(2)}</td><td>${exit}</td><td><span class="pill ${statusClass(status)==='good'?'live':statusClass(status)==='bad'?'fail':'wait'}">${esc(status)}</span></td><td>${esc(o.error||o.exitBlockedReason||o.resolutionError||'—')}</td></tr>`;
     }).join('');
-    return `<table><thead><tr><th>Window</th><th>Order</th><th>Outcome</th><th>Limit</th><th>Shares</th><th>Matched</th><th>TP</th><th>Status</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>`;
+    return `<table><thead><tr><th>Window</th><th>Order</th><th>Outcome</th><th>Limit</th><th>Shares</th><th>Matched</th><th>Exit rule</th><th>Status</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
   function renderEvents(events) {
     if (!events?.length) return '<div class="empty">Waiting for bot activity…</div>';

@@ -12,6 +12,7 @@ function setup({ now = 250_000, accountReady = true, fetchStatus = null } = {}) 
     authenticate: async () => true,
     listOpenOrders: async () => [],
     getEquitySnapshot: async () => ({ orders: [], positions: [], collateral: 20, positionValue: 0, equity: 20 }),
+    getMarket: async id => ({ id: String(id), closed: false, umaResolutionStatus: 'proposed' }),
     placeLimitOrder: async (tokenId, side, price, shares) => {
       const order = { id: `order-${++id}`, tokenId, side, price, shares, status: 'LIVE', sizeMatched: 0 };
       calls.push({ ...order });
@@ -41,8 +42,8 @@ function setup({ now = 250_000, accountReady = true, fetchStatus = null } = {}) 
       tokens: { UP: 'token-up', DOWN: 'token-down' },
     }),
     getBook: async tokenId => ({
-      bids: [{ price: tokenId === 'token-up' ? '0.49' : '0.29', size: '10' }],
-      asks: [{ price: tokenId === 'token-up' ? '0.51' : '0.31', size: '10' }],
+      bids: [{ price: tokenId === 'token-up' ? '0.80' : '0.18', size: '10' }],
+      asks: [{ price: tokenId === 'token-up' ? '0.82' : '0.20', size: '10' }],
     }),
   };
   const bot = new LiveBot({
@@ -69,11 +70,13 @@ function setup({ now = 250_000, accountReady = true, fetchStatus = null } = {}) 
 const eligible = {
   eligible: true,
   status: 'eligible',
+  strategyVersion: 'btc-midpoint-trigger-ladder-v2',
+  selectedSide: 'UP',
   qualifyingSides: ['UP'],
-  upMid: 0.50,
-  downMid: 0.30,
-  remainingMs: 50_000,
-  reason: 'UP midpoint is in range',
+  upMid: 0.81,
+  downMid: 0.19,
+  triggeringPrice: 0.81,
+  reason: 'UP midpoint reached $0.810 after the 120-second delay',
 };
 
 function fillableMarket(bot) {
@@ -82,7 +85,7 @@ function fillableMarket(bot) {
     windowStart: 0,
     windowEnd: 300_000,
     slug: 'btc-updown-5m-0',
-    market: { tokens: { UP: 'token-up', DOWN: 'token-down' } },
+    market: { id: 'market-0', tokens: { UP: 'token-up', DOWN: 'token-down' } },
     signal: eligible,
   });
   return state;
@@ -107,22 +110,37 @@ function armFlowTest(bot, armedAt = 0) {
   };
 }
 
-test('a new window submits one $0.30 20-share buy on each outcome exactly once', async () => {
+test('the new strategy waits 120 seconds, then submits only the selected-side ladder once', async () => {
   const { bot, calls } = setup({ now: 100_000 });
   await bot.scanTimeframe('5m', 100_000);
   await bot.scanTimeframe('5m', 100_000);
+  assert.equal(calls.length, 0);
+
+  bot.clock = () => 120_000;
+  await bot.scanTimeframe('5m', 120_000);
+  await bot.scanTimeframe('5m', 120_000);
 
   const buys = calls.filter(call => call.side === 'BUY');
   assert.equal(buys.length, 2);
   assert.deepEqual(buys.map(({ price, shares }) => [price, shares]), [
-    [0.30, 20],
-    [0.30, 20],
+    [0.40, 10],
+    [0.60, 20],
   ]);
-  assert.equal(new Set(buys.map(call => call.tokenId)).size, 2);
-  assert.equal(bot.markets['5m'].windowStartPairStatus, 'orders_submitted');
+  assert.ok(buys.every(call => call.tokenId === 'token-up'));
+  assert.equal(bot.markets['5m'].signal.status, 'triggered_once');
 });
 
-test('restart recovery recognizes opening-pair buys and $0.99 take-profit sells', () => {
+test('restart recovery recognizes new entries and still tracks legacy orders', () => {
+  const newEntry = LiveBot.recoveredOrder({
+    id: 'new-rung-buy',
+    asset_id: 'token-down',
+    side: 'BUY',
+    price: '0.60',
+    original_size: '20',
+    size_matched: '6',
+    status: 'PARTIALLY_FILLED',
+    market: 'btc-updown-5m-1000',
+  });
   const entry = LiveBot.recoveredOrder({
     id: 'recovered-buy',
     asset_id: 'token-up',
@@ -131,6 +149,16 @@ test('restart recovery recognizes opening-pair buys and $0.99 take-profit sells'
     original_size: '20',
     size_matched: '6',
     status: 'PARTIALLY_FILLED',
+    market: 'btc-updown-5m-1000',
+  });
+  const oldLadderEntry = LiveBot.recoveredOrder({
+    id: 'legacy-ladder-buy',
+    asset_id: 'token-up',
+    side: 'BUY',
+    price: '0.25',
+    original_size: '10',
+    size_matched: '0',
+    status: 'LIVE',
     market: 'btc-updown-5m-1000',
   });
   const exit = LiveBot.recoveredOrder({
@@ -144,119 +172,131 @@ test('restart recovery recognizes opening-pair buys and $0.99 take-profit sells'
     market: 'btc-updown-5m-1000',
   });
 
+  assert.equal(newEntry.kind, 'ENTRY');
+  assert.equal(newEntry.entryType, 'MIDPOINT_TRIGGER_LADDER');
+  assert.equal(newEntry.takeProfitPrice, null);
+  assert.equal(newEntry.shares, 20);
+  assert.equal(newEntry.matchedShares, 6);
   assert.equal(entry.kind, 'ENTRY');
   assert.equal(entry.entryType, 'WINDOW_START_PAIR');
   assert.equal(entry.takeProfitPrice, 0.99);
   assert.equal(entry.matchedShares, 6);
+  assert.equal(oldLadderEntry.entryType, 'LEGACY_MIDPOINT_LADDER');
+  assert.equal(oldLadderEntry.takeProfitPrice, 0.75);
   assert.equal(exit.kind, 'TAKE_PROFIT');
 });
 
-test('a confirmed opening-pair fill cancels only its counterpart and sells confirmed shares at $0.99', async () => {
-  const { bot, calls, exchangeOrders } = setup({ now: 100_000 });
-  await bot.scanTimeframe('5m', 100_000);
-  const entries = [...bot.ordersById.values()].filter(order => order.entryType === 'WINDOW_START_PAIR');
-  const up = entries.find(order => order.outcome === 'UP');
-  const down = entries.find(order => order.outcome === 'DOWN');
-  exchangeOrders.get(up.id).status = 'MATCHED';
+test('recovered matched entry records its confirmation time for source exits', async () => {
+  const { bot, trader } = setup({ now: 250_000 });
+  trader.listOpenOrders = async () => [{
+    id: 'recovered-partial-buy',
+    assetId: 'token-down',
+    side: 'BUY',
+    price: '0.60',
+    originalSize: '20',
+    sizeMatched: '6',
+    status: 'PARTIALLY_FILLED',
+    market: 'btc-updown-5m-1000',
+  }];
 
-  await bot.reconcileOrders();
+  await bot.recoverOpenOrders();
 
-  assert.equal(exchangeOrders.get(down.id).status, 'CANCELED');
-  assert.deepEqual(calls.filter(call => call.cancel).map(call => call.cancel), [down.id]);
-  assert.deepEqual(calls.filter(call => call.side === 'SELL').map(({ price, shares }) => [price, shares]), [
-    [0.99, 20],
-  ]);
-  assert.equal(bot.markets['5m'].windowStartPairStatus, 'opposite_order_cancelled');
+  const recovered = bot.ordersById.get('recovered-partial-buy');
+  assert.equal(recovered.kind, 'ENTRY');
+  assert.equal(recovered.fillConfirmedAt, 250_000);
 });
 
-test('if both opening-pair orders fill before cancellation, both receive matched-share exits', async () => {
-  const { bot, calls, exchangeOrders } = setup({ now: 100_000 });
-  await bot.scanTimeframe('5m', 100_000);
-  const entries = [...bot.ordersById.values()].filter(order => order.entryType === 'WINDOW_START_PAIR');
-  for (const entry of entries) exchangeOrders.get(entry.id).status = 'MATCHED';
+test('a legacy paired order fill still cancels its peer after strategy replacement', async () => {
+  const { bot, calls } = setup();
+  const state = bot.markets['5m'];
+  Object.assign(state, { slug: 'btc-updown-5m-0', timeframe: '5m' });
+  const group = 'window-start-pair:btc-updown-5m-0';
+  const first = {
+    id: 'legacy-up', clientKey: 'legacy-up', kind: 'ENTRY', side: 'BUY',
+    outcome: 'UP', pairedEntryGroup: group, tokenId: 'token-up', price: 0.30,
+    shares: 20, matchedShares: 1, slug: state.slug, timeframe: '5m',
+    windowEnd: 300_000, status: 'PARTIALLY FILLED', exits: [],
+  };
+  const peer = {
+    id: 'legacy-down', clientKey: 'legacy-down', kind: 'ENTRY', side: 'BUY',
+    outcome: 'DOWN', pairedEntryGroup: group, tokenId: 'token-down', price: 0.30,
+    shares: 20, matchedShares: 0, slug: state.slug, timeframe: '5m',
+    windowEnd: 300_000, status: 'LIVE', exits: [],
+  };
+  bot.ordersById.set(first.id, first);
+  bot.ordersById.set(peer.id, peer);
 
-  await bot.reconcileOrders();
+  await bot.cancelPairedEntryOrders(first);
 
-  assert.equal(calls.filter(call => call.cancel).length, 0);
-  assert.deepEqual(calls.filter(call => call.side === 'SELL').map(({ price, shares }) => [price, shares]), [
-    [0.99, 20],
-    [0.99, 20],
-  ]);
-  assert.equal(bot.markets['5m'].windowStartPairStatus, 'both_sides_filled');
+  assert.deepEqual(calls.filter(call => call.cancel).map(call => call.cancel), ['legacy-down']);
 });
 
-test('a partial opening-pair fill cancels the opposite entry and exits only confirmed shares', async () => {
-  const { bot, calls, exchangeOrders } = setup({ now: 100_000 });
-  await bot.scanTimeframe('5m', 100_000);
-  const entries = [...bot.ordersById.values()].filter(order => order.entryType === 'WINDOW_START_PAIR');
-  const up = entries.find(order => order.outcome === 'UP');
-  const down = entries.find(order => order.outcome === 'DOWN');
-  exchangeOrders.get(up.id).status = 'PARTIALLY_FILLED';
-  exchangeOrders.get(up.id).sizeMatched = 7;
-
-  await bot.reconcileOrders();
-
-  assert.equal(exchangeOrders.get(down.id).status, 'CANCELED');
-  assert.deepEqual(calls.filter(call => call.side === 'SELL').map(({ price, shares }) => [price, shares]), [
-    [0.99, 7],
-  ]);
-});
-
-test('a pending opening-pair intent survives restart and does not duplicate orders', async () => {
+test('old pending pair and old-strategy trigger intents are not re-fired after restart', async () => {
   let ledger = null;
   const store = {
     durable: true,
     load: async () => ledger,
     save: async document => { ledger = JSON.parse(JSON.stringify(document)); },
   };
-  const first = setup({ now: 100_000, accountReady: false });
-  first.bot.stateStore = store;
-  first.bot.requirePersistentState = true;
-  await first.bot.scanTimeframe('5m', 100_000);
-  assert.equal(ledger.markets['5m'].windowStartPairPending, true);
-  assert.equal(first.calls.length, 0);
-
-  const second = setup({ now: 101_000 });
-  second.bot.startedAt = 101_000;
+  ledger = {
+    version: 1,
+    entryKeys: [],
+    orders: [],
+    markets: {
+      '5m': {
+        windowStart: 0,
+        windowEnd: 300_000,
+        slug: 'btc-updown-5m-0',
+        windowStartPairPending: true,
+        pendingTrigger: {
+          observedAt: 110_000,
+          windowStart: 0,
+          windowEnd: 300_000,
+          evaluation: { eligible: true, qualifyingSides: ['UP'] },
+        },
+      },
+    },
+  };
+  const second = setup({ now: 121_000 });
+  second.bot.startedAt = 121_000;
   second.bot.stateStore = store;
   second.bot.requirePersistentState = true;
   await second.bot.bootstrapTrading();
-  await second.bot.scanTimeframe('5m', 101_000);
-  await second.bot.scanTimeframe('5m', 101_000);
+  await second.bot.scanTimeframe('5m', 121_000);
 
-  assert.equal(second.calls.filter(call => call.side === 'BUY').length, 2);
-  assert.equal(second.bot.markets['5m'].windowStartPairPending, false);
+  assert.equal(second.calls.filter(call => call.side === 'BUY').length, 0);
+  assert.equal(second.bot.markets['5m'].pendingTrigger, null);
+  assert.equal(second.bot.markets['5m'].legacyWindowStartPairStatus, 'retired_by_strategy');
 });
 
-test('an already-open window is skipped for the opening pair after a restart', async () => {
+test('an already-open window is skipped after a restart', async () => {
   const { bot, calls } = setup({ now: 101_000 });
   bot.startedAt = 100_000;
   await bot.scanTimeframe('5m', 101_000);
 
   assert.equal(calls.length, 0);
-  assert.equal(bot.markets['5m'].windowStartPairStatus, 'skipped_restart_window');
+  assert.equal(bot.markets['5m'].signal.status, 'skipped_restart_window');
 });
 
-test('one qualifying outcome submits exactly four two-sided limit buys once', async () => {
+test('one qualifying signal submits the two limit buys on the selected side once', async () => {
   const { bot, calls } = setup();
   const state = fillableMarket(bot);
   await bot.fireWindowOrders(state, eligible);
   await bot.fireWindowOrders(state, eligible);
 
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 2);
   assert.deepEqual(calls.map(({ side, price, shares }) => [side, price, shares]), [
-    ['BUY', 0.25, 10],
-    ['BUY', 0.15, 10],
-    ['BUY', 0.25, 10],
-    ['BUY', 0.15, 10],
+    ['BUY', 0.40, 10],
+    ['BUY', 0.60, 20],
   ]);
-  assert.equal(new Set(calls.map(call => call.tokenId)).size, 2);
+  assert.ok(calls.every(call => call.tokenId === 'token-up'));
   assert.equal(state.triggeredAt, 250_000);
 });
 
-test('take-profit sells are submitted only after matched entry shares are confirmed', async () => {
+test('source TP limit sells wait for confirmed fills and the $0.99 bid trigger', async () => {
   const { bot, calls, exchangeOrders } = setup();
   const state = fillableMarket(bot);
+  state.quotes.UP = { status: 'LIVE', bestBid: 0.98, updatedAt: 250_000, stale: false };
   await bot.fireWindowOrders(state, eligible);
 
   await bot.reconcileOrders();
@@ -266,20 +306,24 @@ test('take-profit sells are submitted only after matched entry shares are confir
     if (order.side === 'BUY') order.status = 'MATCHED';
   }
   await bot.reconcileOrders();
+  assert.equal(calls.filter(call => call.side === 'SELL').length, 0);
+
+  bot.clock = () => 250_500;
+  state.quotes.UP = { status: 'LIVE', bestBid: 0.99, updatedAt: 250_500, stale: false };
+  await bot.reconcileOrders();
 
   const sells = calls.filter(call => call.side === 'SELL');
-  assert.equal(sells.length, 4);
+  assert.equal(sells.length, 2);
   assert.deepEqual(sells.map(({ price, shares }) => [price, shares]), [
-    [0.75, 10],
-    [0.85, 10],
-    [0.75, 10],
-    [0.85, 10],
+    [0.99, 10],
+    [0.99, 20],
   ]);
 });
 
-test('terminal matched entries retry a take-profit after the exchange releases shares', async () => {
+test('terminal matched entries retry a source TP after the exchange releases shares', async () => {
   const { bot, trader, calls, exchangeOrders } = setup();
   const state = fillableMarket(bot);
+  state.quotes.UP = { status: 'LIVE', bestBid: 0.99, updatedAt: 250_000, stale: false };
   await bot.fireWindowOrders(state, eligible);
   let rejectFirstSell = true;
   const placeLimitOrder = trader.placeLimitOrder;
@@ -303,10 +347,108 @@ test('terminal matched entries retry a take-profit after the exchange releases s
   await bot.reconcileOrders();
   const sells = calls.filter(call => call.side === 'SELL');
   assert.equal(sells.length, 1);
-  assert.equal(sells[0].price, entry.takeProfitPrice);
+  assert.equal(sells[0].price, 0.99);
   assert.equal(sells[0].shares, 10);
   assert.equal(entry.exits.length, 1);
   assert.equal(entry.exitBlockedReason, null);
+});
+
+test('source stop-loss submits a $0.01 limit only from 295 seconds onward', async () => {
+  const { bot, calls } = setup({ now: 294_999 });
+  const state = fillableMarket(bot);
+  const entry = {
+    id: 'matched-stop-entry',
+    kind: 'ENTRY',
+    entryType: 'MIDPOINT_TRIGGER_LADDER',
+    side: 'BUY',
+    outcome: 'UP',
+    tokenId: 'token-up',
+    marketId: 'market-0',
+    price: 0.40,
+    shares: 10,
+    matchedShares: 10,
+    fillConfirmedAt: 294_000,
+    slug: state.slug,
+    timeframe: '5m',
+    windowStart: 0,
+    windowEnd: 300_000,
+    status: 'MATCHED',
+    exitSubmittingShares: 0,
+    exits: [],
+  };
+  bot.ordersById.set(entry.id, entry);
+  state.quotes.UP = { status: 'LIVE', bestBid: 0.01, updatedAt: 294_999, stale: false };
+
+  await bot.maybeSubmitSourceExit(entry, 294_999);
+  assert.equal(calls.filter(call => call.side === 'SELL').length, 0);
+
+  bot.clock = () => 295_000;
+  state.quotes.UP = { status: 'LIVE', bestBid: 0.01, updatedAt: 295_000, stale: false };
+  await bot.maybeSubmitSourceExit(entry, 295_000);
+
+  const sells = calls.filter(call => call.side === 'SELL');
+  assert.equal(sells.length, 1);
+  assert.equal(sells[0].price, 0.01);
+  assert.equal(sells[0].shares, 10);
+});
+
+test('a first partial entry fill cancels the unfilled remainder', async () => {
+  const { bot, calls, exchangeOrders } = setup();
+  const state = fillableMarket(bot);
+  await bot.fireWindowOrders(state, eligible);
+  const entry = [...bot.ordersById.values()].find(order => order.kind === 'ENTRY');
+  const exchangeOrder = exchangeOrders.get(entry.id);
+  exchangeOrder.status = 'PARTIALLY_FILLED';
+  exchangeOrder.sizeMatched = 6;
+
+  await bot.reconcileOrders();
+
+  assert.equal(entry.matchedShares, 6);
+  assert.equal(entry.status, 'CANCELED');
+  assert.equal(entry.pendingFinalFillChecks, 3);
+  assert.ok(calls.some(call => call.cancel === entry.id));
+});
+
+test('expired positions settle only after confirmed original-market resolution', async () => {
+  const { bot, trader } = setup({ now: 300_000 });
+  const state = fillableMarket(bot);
+  const entry = {
+    id: 'resolved-entry',
+    kind: 'ENTRY',
+    entryType: 'MIDPOINT_TRIGGER_LADDER',
+    outcome: 'UP',
+    tokenId: 'token-up',
+    marketId: 'market-0',
+    shares: 10,
+    matchedShares: 10,
+    windowStart: 0,
+    windowEnd: 300_000,
+    timeframe: '5m',
+    slug: state.slug,
+    status: 'MATCHED',
+    exits: [],
+  };
+  bot.ordersById.set(entry.id, entry);
+  const requested = [];
+  trader.getMarket = async id => {
+    requested.push(id);
+    return {
+      id: 'market-0',
+      closed: true,
+      umaResolutionStatus: 'resolved',
+      outcomes: '["Up","Down"]',
+      clobTokenIds: '["token-up","token-down"]',
+      outcomePrices: '["1","0"]',
+    };
+  };
+
+  await bot.reconcileExpiredPositions(300_000);
+
+  assert.deepEqual(requested, ['market-0']);
+  assert.equal(entry.resolutionStatus, 'RESOLVED');
+  assert.equal(entry.resolutionShares, 10);
+  assert.equal(entry.resolutionPayoutPerShare, 1);
+  assert.equal(entry.resolutionGrossPayout, 10);
 });
 
 test('resolved-market orders are terminal and pending sell retries are not repeated', async () => {
@@ -361,7 +503,7 @@ test('startup does not submit take-profit orders for a resolved market', async (
   assert.deepEqual(calls, []);
 });
 
-test('a qualifying tick stays latched and submits after prices leave the band', async () => {
+test('a qualifying tick stays latched and submits after prices fall below the threshold', async () => {
   const { bot, calls, marketData } = setup();
   bot.authenticated = false;
   bot.account.accountReady = false;
@@ -372,13 +514,13 @@ test('a qualifying tick stays latched and submits after prices leave the band', 
   assert.ok(bot.markets['5m'].pendingTrigger);
 
   marketData.getBook = async tokenId => ({
-    bids: [{ price: tokenId === 'token-up' ? '0.79' : '0.19', size: '10' }],
-    asks: [{ price: tokenId === 'token-up' ? '0.81' : '0.21', size: '10' }],
+    bids: [{ price: tokenId === 'token-up' ? '0.49' : '0.19', size: '10' }],
+    asks: [{ price: tokenId === 'token-up' ? '0.51' : '0.21', size: '10' }],
   });
   bot.authenticated = true;
   bot.refreshOrderReadiness();
   await bot.scanTimeframe('5m', 251_000);
-  assert.equal(calls.filter(call => call.side === 'BUY').length, 6);
+  assert.equal(calls.filter(call => call.side === 'BUY').length, 2);
 });
 
 test('a latched signal expires rather than submitting after the window ends', async () => {
@@ -412,15 +554,15 @@ test('a latched trigger survives a process restart until its window closes', asy
   second.bot.stateStore = store;
   second.bot.requirePersistentState = true;
   second.marketData.getBook = async tokenId => ({
-    bids: [{ price: tokenId === 'token-up' ? '0.79' : '0.19', size: '10' }],
-    asks: [{ price: tokenId === 'token-up' ? '0.81' : '0.21', size: '10' }],
+    bids: [{ price: tokenId === 'token-up' ? '0.80' : '0.18', size: '10' }],
+    asks: [{ price: tokenId === 'token-up' ? '0.82' : '0.20', size: '10' }],
   });
   await second.bot.bootstrapTrading();
   await second.bot.scanTimeframe('5m', 251_000);
 
   assert.equal(second.bot.markets['5m'].triggeredAt, 251_000);
   assert.equal(second.bot.markets['5m'].pendingTrigger.observedAt, 250_000);
-  assert.equal(second.calls.filter(call => call.side === 'BUY').length, 6);
+  assert.equal(second.calls.filter(call => call.side === 'BUY').length, 2);
 });
 
 test('an account snapshot 429 does not block an authenticated qualifying entry', async () => {
@@ -433,7 +575,7 @@ test('an account snapshot 429 does not block an authenticated qualifying entry',
   assert.equal(bot.account.accountReady, true);
   assert.match(bot.account.error, /429/);
   await bot.scanTimeframe('5m', 250_000);
-  assert.equal(calls.filter(call => call.side === 'BUY').length, 6);
+  assert.equal(calls.filter(call => call.side === 'BUY').length, 2);
 });
 
 test('an ambiguous entry submission halts new entries instead of retrying blindly', async () => {
@@ -464,9 +606,9 @@ test('live entry placeholders are persisted before the first exchange submission
   const state = fillableMarket(bot);
   await bot.fireWindowOrders(state, eligible);
 
-  assert.equal(writes[0].orders.length, 4);
+  assert.equal(writes[0].orders.length, 2);
   assert.ok(writes[0].orders.every(order => order.status === 'SUBMITTING'));
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 2);
 });
 
 test('live trading bootstrap refuses to authenticate without durable order storage', async () => {
@@ -527,23 +669,31 @@ test('stale account snapshots do not change authenticated CLOB readiness', async
   assert.equal(bot.account.error, 'Positions API 429');
 });
 
-test('window close cancels entry buys but leaves take-profit sells resting', async () => {
-  const { bot, calls } = setup({ now: 300_000 });
+test('window close cancels unfilled entries and source exit limits', async () => {
+  const { bot, calls, exchangeOrders } = setup({ now: 300_000 });
   const state = fillableMarket(bot);
   const entry = {
-    id: 'entry-1', clientKey: `${state.slug}:UP:0.25`, kind: 'ENTRY', side: 'BUY',
+    id: 'entry-1', clientKey: `${state.slug}:UP:0.40`, kind: 'ENTRY', side: 'BUY',
     slug: state.slug, windowEnd: 300_000, status: 'LIVE', matchedShares: 0,
+    shares: 10, pendingFinalFillChecks: 0,
   };
   const exit = {
-    id: 'exit-1', clientKey: 'tp:entry-1:1', kind: 'TAKE_PROFIT', side: 'SELL',
+    id: 'exit-1', clientKey: 'source-exit:entry-1:TAKE_PROFIT:1', kind: 'TAKE_PROFIT', side: 'SELL',
     slug: state.slug, windowEnd: 300_000, status: 'LIVE', matchedShares: 0,
+    shares: 10, pendingFinalFillChecks: 0,
   };
   state.orderIds = [entry.clientKey];
   bot.ordersById.set(entry.id, entry);
   bot.ordersById.set(exit.id, exit);
-  await bot.cancelWindowEntryOrders(state);
-  assert.deepEqual(calls, [{ cancel: 'entry-1' }]);
-  assert.equal(exit.status, 'LIVE');
+  exchangeOrders.set(entry.id, { ...entry, tokenId: 'token-up', sizeMatched: 0, price: 0.40 });
+  exchangeOrders.set(exit.id, { ...exit, tokenId: 'token-up', sizeMatched: 0, price: 0.99 });
+  await bot.reconcileOrders();
+  assert.deepEqual(calls.filter(call => call.cancel), [
+    { cancel: 'entry-1' },
+    { cancel: 'exit-1' },
+  ]);
+  assert.equal(entry.status, 'CANCELED');
+  assert.equal(exit.status, 'CANCELED');
 });
 
 test('unclassified account orders warn but do not block the authenticated order path', async () => {
@@ -561,20 +711,33 @@ test('unclassified account orders warn but do not block the authenticated order 
   assert.equal(bot.account.untrackedOpenOrders, 1);
   assert.equal(bot.account.accountReady, true);
   await bot.scanTimeframe('5m', 250_000);
-  assert.equal(calls.filter(call => call.side === 'BUY').length, 6);
+  assert.equal(calls.filter(call => call.side === 'BUY').length, 2);
 });
 
-test('dashboard snapshot identifies the live strategy and separate 5m/15m windows', () => {
+test('dashboard snapshot identifies the live BTC 5m strategy only', () => {
   const { bot } = setup();
   const state = bot.snapshot();
   assert.equal(state.mode, 'REAL ORDERS');
-  assert.deepEqual(state.strategy.markets, ['BTC 5m', 'BTC 15m']);
-  assert.equal(state.strategy.windowStartPair.buyPrice, 0.30);
-  assert.equal(state.strategy.windowStartPair.sharesPerSide, 20);
-  assert.equal(state.strategy.windowStartPair.takeProfitPrice, 0.99);
-  assert.match(state.strategy.windowRule, /final 120 seconds/);
+  assert.deepEqual(state.strategy.markets, ['BTC 5m']);
+  assert.equal(state.strategy.version, 'btc-midpoint-trigger-ladder-v2');
+  assert.match(state.strategy.windowRule, /Wait 120 seconds/);
+  assert.match(state.strategy.trigger, /at or above \$0\.80/);
+  assert.deepEqual(state.strategy.orders.map(order => [order.buyPrice, order.shares]), [
+    [0.40, 10],
+    [0.60, 20],
+  ]);
+  assert.deepEqual(state.strategy.exits, {
+    takeProfitTriggerBid: 0.99,
+    takeProfitLimitSell: 0.99,
+    stopLossTriggerBid: 0.01,
+    stopLossLimitSell: 0.01,
+    stopLossAfterSeconds: 295,
+    exitQuoteMaxAgeMs: 5_000,
+    resolution: 'Cancel unfilled exit orders at window end; hold unsold shares until the original market is confirmed resolved',
+  });
+  assert.match(state.strategy.rearm, /no opening pair/);
   assert.ok(state.markets['5m']);
-  assert.ok(state.markets['15m']);
+  assert.equal(state.markets['15m'], undefined);
   assert.equal(state.strategy.orderPollMs, 500);
 });
 
@@ -590,7 +753,7 @@ test('one-shot smoke test submits one five-share buy and pauses strategy entries
     ['BUY', 0.70, 5],
   ]);
   assert.equal(bot.flowTestState.status, 'awaiting_fill');
-  assert.equal(bot.flowTestState.side, 'UP');
+  assert.equal(bot.flowTestState.side, 'DOWN');
   assert.equal(bot.flowTestPausesStrategy(), true);
   assert.equal(state.triggeredAt, 250_000);
   assert.equal(bot.snapshot().flowTest.maxBuyNotional, 3.5);
