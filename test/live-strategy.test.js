@@ -62,18 +62,19 @@ test('midpoints below $0.80 do not qualify', () => {
   assert.equal(result.status, 'watching_for_trigger');
 });
 
-test('the strategy waits until 120 seconds after window start', () => {
+test('the midpoint trigger is active from the moment the window opens', () => {
   const result = evaluateWindow({
-    now: 1_119_999,
+    now: 1_000_000,
     market: market(),
-    quotes: { UP: quote(0.90, 1_119_999), DOWN: quote(0.10, 1_119_999) },
+    quotes: { UP: quote(0.90, 1_000_000), DOWN: quote(0.10, 1_000_000) },
     startedAt: 900_000,
   });
-  assert.equal(result.eligible, false);
-  assert.equal(result.status, 'waiting_for_delay');
+  assert.equal(result.eligible, true);
+  assert.equal(result.elapsedMs, 0);
+  assert.equal(result.selectedSide, 'UP');
 });
 
-test('the 120-second delay boundary is inclusive and stale quotes are rejected', () => {
+test('the $0.80 trigger threshold is inclusive and stale quotes are rejected', () => {
   const atBoundary = evaluateWindow({
     now: 1_120_000,
     market: market(),
@@ -133,43 +134,9 @@ test('entry ladder uses the requested prices and sizes without rung take-profits
   ]);
 });
 
-test('source TP is triggered by a fresh post-fill best bid at $0.99', () => {
-  const result = evaluateSourceExit({
-    now: 250_000,
-    windowStart: 0,
-    windowEnd: 300_000,
-    filledAt: 249_000,
-    quote: { status: 'LIVE', bestBid: 0.99, updatedAt: 250_000, stale: false },
-  });
-  assert.deepEqual(result, { kind: 'TAKE_PROFIT', triggerBid: 0.99, limitPrice: 0.99 });
-});
-
-test('source stop is blocked before 295 seconds and triggers at the inclusive boundary', () => {
-  const quoteAt = updatedAt => ({ status: 'LIVE', bestBid: 0.01, updatedAt, stale: false });
-  const before = evaluateSourceExit({
-    now: 294_999, windowStart: 0, windowEnd: 300_000, filledAt: 1_000, quote: quoteAt(294_999),
-  });
-  const boundary = evaluateSourceExit({
-    now: 295_000, windowStart: 0, windowEnd: 300_000, filledAt: 1_000, quote: quoteAt(295_000),
-  });
-  const afterWindow = evaluateSourceExit({
-    now: 300_000, windowStart: 0, windowEnd: 300_000, filledAt: 1_000, quote: quoteAt(300_000),
-  });
-  assert.equal(before, null);
-  assert.deepEqual(boundary, { kind: 'STOP_LOSS', triggerBid: 0.01, limitPrice: 0.01 });
-  assert.equal(afterWindow, null);
-});
-
-test('source exit ignores stale or pre-fill bids', () => {
-  const base = { now: 250_000, windowStart: 0, windowEnd: 300_000, filledAt: 249_000 };
-  assert.equal(evaluateSourceExit({
-    ...base,
-    quote: { status: 'LIVE', bestBid: 0.99, updatedAt: 244_999, stale: false },
-  }), null);
-  assert.equal(evaluateSourceExit({
-    ...base,
-    quote: { status: 'LIVE', bestBid: 0.99, updatedAt: 249_999, stale: true },
-  }), null);
+test('source TP and SL exit signals are disabled', () => {
+  assert.equal(evaluateSourceExit({ now: 250_000, windowStart: 0, windowEnd: 300_000, filledAt: 249_000, quote: { status: 'LIVE', bestBid: 0.99, updatedAt: 250_000, stale: false } }), null);
+  assert.equal(evaluateSourceExit({ now: 295_000, windowStart: 0, windowEnd: 300_000, filledAt: 1_000, quote: { status: 'LIVE', bestBid: 0.01, updatedAt: 295_000, stale: false } }), null);
 });
 
 test('confirmed original-market resolution maps the exact token payout', () => {
