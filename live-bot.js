@@ -5,6 +5,8 @@ const {
   WINDOW_CONFIG,
   STRATEGY_TIMEFRAMES,
   ENTRY_RUNGS,
+  ENTRY_TRIGGER_MIDPOINT,
+  WINDOW_OPEN_CANDLE_ENTRY,
   STRATEGY_VERSION,
   evaluateWindow,
   previousCandleFilter,
@@ -29,6 +31,12 @@ const LEGACY_ENTRY_RUNGS = [
   { price: 0.25, takeProfitPrice: 0.75 },
   { price: 0.15, takeProfitPrice: 0.85 },
 ];
+const LEGACY_TRIGGER_RUNG = { price: 0.60, shares: 20 };
+const MANAGED_STRATEGY_ENTRY_TYPES = new Set([
+  'CANDLE_OPEN_ENTRY',
+  'MIDPOINT_TRIGGER_LADDER',
+  'LEGACY_MIDPOINT_TRIGGER_LADDER',
+]);
 const CANCEL_FINAL_FILL_CHECKS = Math.max(1, Number(cfg.LIVE_CANCEL_FINAL_FILL_CHECKS || 3));
 const ORDER_POLL_MS = Number(cfg.LIVE_ORDER_POLL_MS || 500);
 const ACCOUNT_REFRESH_MS = Number(cfg.LIVE_BALANCE_REFRESH_MS || 15_000);
@@ -117,9 +125,14 @@ function recoveredOrder(raw) {
   if (side === 'BUY') {
     const rung = ENTRY_RUNGS.find(item => Math.abs(item.price - price) < 0.000001);
     const legacyRung = LEGACY_ENTRY_RUNGS.find(item => Math.abs(item.price - price) < 0.000001);
+    const candleOpenEntry = Math.abs(price - WINDOW_OPEN_CANDLE_ENTRY.price) < 0.000001
+      && Math.abs(size - WINDOW_OPEN_CANDLE_ENTRY.shares) < 0.000001;
     const openingPair = Math.abs(price - LEGACY_WINDOW_START_ENTRY_PRICE) < 0.000001
       && Math.abs(size - LEGACY_WINDOW_START_ENTRY_SHARES) < 0.000001;
-    if (openingPair) {
+    if (candleOpenEntry) {
+      kind = 'ENTRY';
+      entryType = 'CANDLE_OPEN_ENTRY';
+    } else if (openingPair) {
       kind = 'ENTRY';
       entryType = 'WINDOW_START_PAIR';
       pairedEntryGroup = `window-start-pair:${slug}`;
@@ -127,6 +140,10 @@ function recoveredOrder(raw) {
     } else if (rung) {
       kind = 'ENTRY';
       entryType = 'MIDPOINT_TRIGGER_LADDER';
+    } else if (Math.abs(price - LEGACY_TRIGGER_RUNG.price) < 0.000001
+      && Math.abs(size - LEGACY_TRIGGER_RUNG.shares) < 0.000001) {
+      kind = 'ENTRY';
+      entryType = 'LEGACY_MIDPOINT_TRIGGER_LADDER';
     } else if (legacyRung) {
       kind = 'ENTRY';
       entryType = 'LEGACY_MIDPOINT_LADDER';
@@ -303,6 +320,15 @@ class LiveBot {
       restored.slug = typeof saved.slug === 'string' ? saved.slug : null;
       restored.title = typeof saved.title === 'string' ? saved.title : null;
       restored.pendingTrigger = validPendingTrigger;
+      const windowOpenEntry = saved.windowOpenEntry;
+      if (windowOpenEntry
+        && typeof windowOpenEntry === 'object'
+        && typeof windowOpenEntry.status === 'string'
+        && Number(windowOpenEntry.windowStart) === Number(saved.windowStart)
+        && Number(windowOpenEntry.windowEnd) === Number(saved.windowEnd)
+        && (!windowOpenEntry.side || ['UP', 'DOWN'].includes(windowOpenEntry.side))) {
+        restored.windowOpenEntry = { ...windowOpenEntry };
+      }
       restored.legacyWindowStartPairStatus = saved.windowStartPairPending === true
         ? 'retired_by_strategy'
         : typeof saved.windowStartPairStatus === 'string'
@@ -373,6 +399,7 @@ class LiveBot {
           title: state.title,
           pendingTrigger: state.pendingTrigger,
           triggeredAt: state.triggeredAt,
+          windowOpenEntry: state.windowOpenEntry,
           legacyWindowStartPairStatus: state.legacyWindowStartPairStatus,
           orderIds: state.orderIds,
           signal: state.signal,
@@ -556,6 +583,7 @@ class LiveBot {
       signal: { eligible: false, status: 'starting', reason: 'Waiting for market data' },
       pendingTrigger: null,
       triggeredAt: null,
+      windowOpenEntry: null,
       legacyWindowStartPairStatus: 'not_applicable',
       orderIds: [],
       lastMarketLookupAt: 0,
@@ -851,10 +879,25 @@ class LiveBot {
       return;
     }
 
+    let candleFilter;
+    try {
+      candleFilter = previousCandleFilter(this.priceFeed?.getMinuteCandles?.(), current.windowStart);
+    } catch (error) {
+      candleFilter = {
+        status: 'unavailable',
+        color: null,
+        allowedSide: null,
+        previous: null,
+        reason: error.message || String(error),
+      };
+    }
+    current.candleFilter = candleFilter;
+    const openingEntryPromise = this.maybeSubmitWindowOpenEntry(current, candleFilter, now);
     const results = await Promise.allSettled([
       this.marketData.getBook(current.market.tokens.UP),
       this.marketData.getBook(current.market.tokens.DOWN),
     ]);
+    await openingEntryPromise;
     for (let i = 0; i < 2; i++) {
       const side = i === 0 ? 'UP' : 'DOWN';
       const result = results[i];
@@ -873,19 +916,6 @@ class LiveBot {
     }
     current.lastQuoteAt = now;
     current.error = null;
-    let candleFilter;
-    try {
-      candleFilter = previousCandleFilter(this.priceFeed?.getMinuteCandles?.(), current.windowStart);
-    } catch (error) {
-      candleFilter = {
-        status: 'unavailable',
-        color: null,
-        allowedSide: null,
-        previous: null,
-        reason: error.message || String(error),
-      };
-    }
-    current.candleFilter = candleFilter;
     const evaluation = evaluateWindow({
       now,
       market: current.market,
@@ -987,6 +1017,200 @@ class LiveBot {
     if (now >= current.windowEnd) {
       await this.cancelWindowEntryOrders(current);
     }
+  }
+
+  async maybeSubmitWindowOpenEntry(state, candleFilter, now = this.clock()) {
+    if (state.timeframe !== '5m' || now < state.windowStart || now >= state.windowEnd) return;
+
+    let intent = state.windowOpenEntry;
+    if (!intent && state.windowStart < this.startedAt) {
+      state.windowOpenEntry = {
+        status: 'skipped_restart_window',
+        side: null,
+        windowStart: state.windowStart,
+        windowEnd: state.windowEnd,
+        slug: state.slug,
+        reason: 'Window was already open when this process started',
+      };
+      return;
+    }
+
+    if (!intent || intent.status === 'waiting_for_candle') {
+      if (state.windowStart < this.startedAt) {
+        state.windowOpenEntry = {
+          status: 'skipped_restart_window',
+          side: null,
+          windowStart: state.windowStart,
+          windowEnd: state.windowEnd,
+          slug: state.slug,
+          reason: 'Window was already open when this process started',
+        };
+        return;
+      }
+      if (candleFilter?.status !== 'ready') {
+        state.windowOpenEntry = {
+          status: 'waiting_for_candle',
+          side: null,
+          windowStart: state.windowStart,
+          windowEnd: state.windowEnd,
+          slug: state.slug,
+          reason: candleFilter?.reason || 'Waiting for the previous closed BTC 5-minute candle',
+        };
+        return;
+      }
+      if (candleFilter.color === 'DOJI' || !candleFilter.allowedSide) {
+        state.windowOpenEntry = {
+          status: 'skipped_doji',
+          side: null,
+          windowStart: state.windowStart,
+          windowEnd: state.windowEnd,
+          slug: state.slug,
+          candleColor: candleFilter.color,
+          reason: 'Doji has no candle-color-selected side; no $0.30 opening order',
+        };
+        return;
+      }
+
+      intent = {
+        status: 'waiting_for_order_path',
+        side: candleFilter.allowedSide,
+        candleColor: candleFilter.color,
+        windowStart: state.windowStart,
+        windowEnd: state.windowEnd,
+        slug: state.slug,
+        price: WINDOW_OPEN_CANDLE_ENTRY.price,
+        shares: WINDOW_OPEN_CANDLE_ENTRY.shares,
+        observedAt: now,
+        reason: `${candleFilter.color} previous candle selected ${candleFilter.allowedSide}`,
+      };
+      state.windowOpenEntry = intent;
+      try {
+        await this.persistState();
+      } catch (error) {
+        this.halted = true;
+        this.refreshOrderReadiness();
+        this.account.status = 'state_store_error';
+        this.account.error = `Could not persist the candle-only opening entry: ${error.message || error}`;
+        intent.status = 'state_store_error';
+        intent.reason = this.account.error;
+        this.log('ERROR', 'Candle-only opening order was not sent because its intent could not be saved', {
+          slug: state.slug,
+          error: this.account.error,
+        });
+        return;
+      }
+    }
+
+    if (intent.windowStart !== state.windowStart
+      || intent.windowEnd !== state.windowEnd
+      || intent.slug !== state.slug
+      || !['UP', 'DOWN'].includes(intent.side)
+      || !['waiting_for_order_path', 'live_disabled', 'paused_for_flow_test'].includes(intent.status)) return;
+
+    if (this.flowTestPausesStrategy()) {
+      intent.status = 'paused_for_flow_test';
+      intent.reason = 'Waiting for the one-shot live order-flow test to finish';
+      return;
+    }
+    if (!this.tradingEnabled) {
+      intent.status = 'live_disabled';
+      intent.reason = 'Candle selected a side, but real order execution is disabled';
+      return;
+    }
+    if (!this.account.accountReady || this.halted || !this.trader) {
+      intent.status = 'waiting_for_order_path';
+      intent.reason = this.account.error || 'Waiting for authenticated order placement';
+      return;
+    }
+
+    const clientKey = `${state.slug}:CANDLE_OPEN:${intent.side}:${WINDOW_OPEN_CANDLE_ENTRY.price.toFixed(2)}`;
+    if (this.entryKeys.has(clientKey) || this.ordersById.has(clientKey)) {
+      const existing = [...this.ordersById.values()].find(order => order.clientKey === clientKey);
+      intent.status = existing?.status === 'SUBMISSION_UNCERTAIN'
+        ? 'submission_uncertain'
+        : existing?.status === 'REJECTED' ? 'rejected' : 'submitted';
+      intent.orderId = existing?.id || null;
+      intent.orderClientKey = clientKey;
+      return;
+    }
+
+    const order = {
+      id: null,
+      clientKey,
+      kind: 'ENTRY',
+      entryType: 'CANDLE_OPEN_ENTRY',
+      side: 'BUY',
+      outcome: intent.side,
+      tokenId: String(state.market.tokens[intent.side]),
+      marketId: String(state.market.id),
+      price: WINDOW_OPEN_CANDLE_ENTRY.price,
+      shares: WINDOW_OPEN_CANDLE_ENTRY.shares,
+      matchedShares: 0,
+      fillConfirmedAt: null,
+      resolutionStatus: null,
+      resolutionLastCheckedAt: null,
+      resolutionError: null,
+      slug: state.slug,
+      timeframe: state.timeframe,
+      windowStart: state.windowStart,
+      windowEnd: state.windowEnd,
+      status: 'SUBMITTING',
+      recovered: false,
+      exits: [],
+      exitSubmittingShares: 0,
+      retryAt: 0,
+      error: null,
+      createdAt: now,
+    };
+    intent.status = 'submitting';
+    intent.orderClientKey = clientKey;
+    intent.reason = `Submitting ${intent.side} limit BUY at $${WINDOW_OPEN_CANDLE_ENTRY.price.toFixed(2)} from candle color`;
+    this.entryKeys.add(clientKey);
+    state.orderIds.push(clientKey);
+    this.ordersById.set(clientKey, order);
+    try {
+      await this.persistState();
+    } catch (error) {
+      this.halted = true;
+      this.refreshOrderReadiness();
+      this.account.status = 'state_store_error';
+      this.account.error = `Could not persist the candle-only order before submission: ${error.message || error}`;
+      intent.status = 'state_store_error';
+      intent.reason = this.account.error;
+      this.log('ERROR', 'Candle-only order was not submitted because the durable order ledger could not be saved', {
+        slug: state.slug,
+        error: this.account.error,
+      });
+      return;
+    }
+
+    await this.submitEntry(order);
+    intent.orderId = order.id || null;
+    intent.status = order.status === 'SUBMISSION_UNCERTAIN'
+      ? 'submission_uncertain'
+      : order.status === 'REJECTED' ? 'rejected' : 'submitted';
+    intent.reason = order.error
+      ? `Candle-only opening order ${intent.status}: ${order.error}`
+      : `${intent.side} $0.30 opening order submitted; no price trigger applies`;
+    try {
+      await this.persistState();
+    } catch (error) {
+      this.halted = true;
+      this.refreshOrderReadiness();
+      this.account.status = 'state_store_error';
+      this.account.error = `Could not persist the candle-only order result: ${error.message || error}`;
+      intent.status = 'state_store_error';
+      intent.reason = this.account.error;
+    }
+    this.log('SIGNAL', 'Previous candle color selected the one-shot window-open entry side', {
+      slug: state.slug,
+      side: intent.side,
+      candleColor: intent.candleColor,
+      buyPrice: order.price,
+      shares: order.shares,
+      orderId: order.id,
+      status: order.status,
+    });
   }
 
   async queueWindowStartPair(state, now) {
@@ -1406,7 +1630,7 @@ class LiveBot {
           });
         }
         if (order.kind === 'ENTRY'
-          && order.entryType === 'MIDPOINT_TRIGGER_LADDER'
+          && MANAGED_STRATEGY_ENTRY_TYPES.has(order.entryType)
           && order.matchedShares > 0
           && !isTerminalStatus(order.status)) {
           await this.cancelEntryOrder(order, 'first_partial_fill');
@@ -1504,7 +1728,7 @@ class LiveBot {
     if (!this.trader?.getMarket) return;
     const expiredEntries = [...this.ordersById.values()].filter(order =>
       order.kind === 'ENTRY'
-      && order.entryType === 'MIDPOINT_TRIGGER_LADDER'
+      && MANAGED_STRATEGY_ENTRY_TYPES.has(order.entryType)
       && order.windowEnd
       && now >= order.windowEnd
       && order.matchedShares > 0
@@ -2073,6 +2297,7 @@ class LiveBot {
         signal: state.signal,
         pendingTrigger: state.pendingTrigger,
         triggeredAt: state.triggeredAt,
+        windowOpenEntry: state.windowOpenEntry,
         error: state.error,
         orders,
       }];
@@ -2092,11 +2317,23 @@ class LiveBot {
         version: STRATEGY_VERSION,
         markets: ['BTC 5m'],
         windowRule: 'Monitor fresh UP/DOWN midpoints from window start until the window ends',
-        trigger: 'A fresh midpoint at or above $0.80 triggers only on the side permitted by the previous closed BTC 5-minute candle; doji leaves side selection unrestricted',
+        openingEntry: {
+          when: 'Immediately after a new BTC 5m window opens',
+          candleRule: 'Green previous candle selects UP; red selects DOWN; doji skips the opening order',
+          buyPrice: WINDOW_OPEN_CANDLE_ENTRY.price,
+          shares: WINDOW_OPEN_CANDLE_ENTRY.shares,
+          otherFilters: 'None beyond candle color and normal order-path safety',
+        },
+        trigger: `A fresh midpoint at or above $${ENTRY_TRIGGER_MIDPOINT.toFixed(2)} triggers only on the side permitted by the previous closed BTC 5-minute candle; doji leaves side selection unrestricted`,
         directionFilter: 'Previous green candle permits UP only; previous red permits DOWN only; doji applies no directional restriction',
         candleSource: 'Polymarket RTDS Chainlink BTC/USD minute bars aggregated into the immediately previous closed 5-minute candle',
         triggerPersistence: 'The qualifying side and price are saved through account delays and process restarts until that window ends',
         selectedSideOnly: true,
+        openingOrder: {
+          buyPrice: WINDOW_OPEN_CANDLE_ENTRY.price,
+          shares: WINDOW_OPEN_CANDLE_ENTRY.shares,
+          sideRule: 'Previous green candle: UP; previous red candle: DOWN; doji: no opening order',
+        },
         orders: ENTRY_RUNGS.map(rung => ({
           buyPrice: rung.price,
           shares: rung.shares,
@@ -2106,7 +2343,7 @@ class LiveBot {
           stopLossEnabled: false,
           resolution: 'Hold confirmed shares until the original market is confirmed resolved; submit no strategy sell orders',
         },
-        rearm: 'One selected-side two-rung ladder per window; no opening pair, order replacement, or re-entry',
+        rearm: 'One candle-selected opening order and one selected-side two-rung trigger ladder per window; no order replacement or re-entry',
         orderPollMs: this.orderPollMs,
         quoteMaxAgeMs: 5_000,
         entriesPausedForSmokeTest: this.flowTestPausesStrategy(),

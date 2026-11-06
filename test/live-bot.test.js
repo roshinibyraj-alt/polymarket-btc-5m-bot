@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const LiveBot = require('../live-bot');
+const { STRATEGY_VERSION } = require('../live-strategy');
 
 function setup({
   now = 250_000,
@@ -98,7 +99,7 @@ function setup({
 const eligible = {
   eligible: true,
   status: 'eligible',
-  strategyVersion: 'btc-midpoint-trigger-ladder-v3',
+  strategyVersion: STRATEGY_VERSION,
   selectedSide: 'UP',
   qualifyingSides: ['UP'],
   upMid: 0.81,
@@ -147,10 +148,40 @@ test('the new strategy submits from window start and only once on the selected s
   assert.equal(buys.length, 2);
   assert.deepEqual(buys.map(({ price, shares }) => [price, shares]), [
     [0.40, 10],
-    [0.60, 20],
+    [0.45, 20],
   ]);
   assert.ok(buys.every(call => call.tokenId === 'token-up'));
   assert.equal(bot.markets['5m'].signal.status, 'triggered_once');
+});
+
+test('the candle-only opening order submits at $0.30 on the candle-selected side without a price trigger', async () => {
+  const { bot, calls } = setup({
+    now: 100_000,
+    previousColor: 'GREEN',
+    quotes: { UP: 0.52, DOWN: 0.48 },
+  });
+  await bot.scanTimeframe('5m', 100_000);
+  await bot.scanTimeframe('5m', 100_000);
+
+  const buys = calls.filter(call => call.side === 'BUY');
+  assert.deepEqual(buys.map(({ tokenId, price, shares }) => [tokenId, price, shares]), [
+    ['token-up', 0.30, 10],
+  ]);
+  assert.equal(bot.markets['5m'].windowOpenEntry.status, 'submitted');
+  assert.equal(bot.markets['5m'].windowOpenEntry.candleColor, 'GREEN');
+  assert.equal(bot.markets['5m'].signal.status, 'watching_for_trigger');
+});
+
+test('the candle-only opening order skips a doji and does not buy both sides', async () => {
+  const { bot, calls } = setup({
+    now: 100_000,
+    previousColor: 'DOJI',
+    quotes: { UP: 0.52, DOWN: 0.48 },
+  });
+  await bot.scanTimeframe('5m', 100_000);
+
+  assert.equal(calls.length, 0);
+  assert.equal(bot.markets['5m'].windowOpenEntry.status, 'skipped_doji');
 });
 
 test('restart recovery recognizes new entries and still tracks legacy orders', () => {
@@ -158,10 +189,30 @@ test('restart recovery recognizes new entries and still tracks legacy orders', (
     id: 'new-rung-buy',
     asset_id: 'token-down',
     side: 'BUY',
-    price: '0.60',
+    price: '0.45',
     original_size: '20',
     size_matched: '6',
     status: 'PARTIALLY_FILLED',
+    market: 'btc-updown-5m-1000',
+  });
+  const openingEntry = LiveBot.recoveredOrder({
+    id: 'candle-open-buy',
+    asset_id: 'token-up',
+    side: 'BUY',
+    price: '0.30',
+    original_size: '10',
+    size_matched: '0',
+    status: 'LIVE',
+    market: 'btc-updown-5m-1000',
+  });
+  const priorTriggerRung = LiveBot.recoveredOrder({
+    id: 'prior-trigger-rung',
+    asset_id: 'token-down',
+    side: 'BUY',
+    price: '0.60',
+    original_size: '20',
+    size_matched: '0',
+    status: 'LIVE',
     market: 'btc-updown-5m-1000',
   });
   const entry = LiveBot.recoveredOrder({
@@ -200,6 +251,11 @@ test('restart recovery recognizes new entries and still tracks legacy orders', (
   assert.equal(newEntry.takeProfitPrice, null);
   assert.equal(newEntry.shares, 20);
   assert.equal(newEntry.matchedShares, 6);
+  assert.equal(openingEntry.entryType, 'CANDLE_OPEN_ENTRY');
+  assert.equal(openingEntry.takeProfitPrice, null);
+  assert.equal(openingEntry.shares, 10);
+  assert.equal(priorTriggerRung.entryType, 'LEGACY_MIDPOINT_TRIGGER_LADDER');
+  assert.equal(priorTriggerRung.takeProfitPrice, null);
   assert.equal(entry.kind, 'ENTRY');
   assert.equal(entry.entryType, 'WINDOW_START_PAIR');
   assert.equal(entry.takeProfitPrice, 0.99);
@@ -310,7 +366,7 @@ test('one qualifying signal submits the two limit buys on the selected side once
   assert.equal(calls.length, 2);
   assert.deepEqual(calls.map(({ side, price, shares }) => [side, price, shares]), [
     ['BUY', 0.40, 10],
-    ['BUY', 0.60, 20],
+    ['BUY', 0.45, 20],
   ]);
   assert.ok(calls.every(call => call.tokenId === 'token-up'));
   assert.equal(state.triggeredAt, 250_000);
@@ -320,8 +376,9 @@ test('a green BTC candle filters live entries to UP without changing the rung or
   const { bot, calls } = setup({ previousColor: 'GREEN' });
   await bot.scanMarkets();
   assert.deepEqual(calls.map(({ tokenId, price, shares }) => [tokenId, price, shares]), [
+    ['token-up', 0.30, 10],
     ['token-up', 0.40, 10],
-    ['token-up', 0.60, 20],
+    ['token-up', 0.45, 20],
   ]);
   assert.equal(bot.markets['5m'].signal.candleFilter.color, 'GREEN');
 });
@@ -334,13 +391,16 @@ test('a red BTC candle filters live entries to DOWN', async () => {
   await bot.scanMarkets();
   assert.ok(calls.length > 0);
   assert.ok(calls.every(call => call.tokenId === 'token-down'));
+  assert.ok(calls.some(call => call.price === 0.30 && call.shares === 10));
   assert.equal(bot.markets['5m'].signal.selectedSide, 'DOWN');
 });
 
 test('a qualifying price on the candle-opposite side waits rather than bypassing the filter', async () => {
   const { bot, calls } = setup({ previousColor: 'RED' });
   await bot.scanMarkets();
-  assert.equal(calls.length, 0);
+  assert.deepEqual(calls.map(({ tokenId, price, shares }) => [tokenId, price, shares]), [
+    ['token-down', 0.30, 10],
+  ]);
   assert.equal(bot.markets['5m'].signal.status, 'waiting_for_candle_side_trigger');
 });
 
@@ -411,13 +471,32 @@ test('a first partial entry fill cancels the unfilled remainder', async () => {
   assert.ok(calls.some(call => call.cancel === entry.id));
 });
 
+test('a first partial fill of the candle-only opening order cancels its unfilled remainder', async () => {
+  const { bot, calls, exchangeOrders } = setup({
+    now: 100_000,
+    previousColor: 'GREEN',
+    quotes: { UP: 0.52, DOWN: 0.48 },
+  });
+  await bot.scanTimeframe('5m', 100_000);
+  const entry = [...bot.ordersById.values()].find(order => order.entryType === 'CANDLE_OPEN_ENTRY');
+  const exchangeOrder = exchangeOrders.get(entry.id);
+  exchangeOrder.status = 'PARTIALLY_FILLED';
+  exchangeOrder.sizeMatched = 6;
+
+  await bot.reconcileOrders();
+
+  assert.equal(entry.matchedShares, 6);
+  assert.equal(entry.status, 'CANCELED');
+  assert.ok(calls.some(call => call.cancel === entry.id));
+});
+
 test('expired positions settle only after confirmed original-market resolution', async () => {
   const { bot, trader } = setup({ now: 300_000 });
   const state = fillableMarket(bot);
   const entry = {
     id: 'resolved-entry',
     kind: 'ENTRY',
-    entryType: 'MIDPOINT_TRIGGER_LADDER',
+    entryType: 'CANDLE_OPEN_ENTRY',
     outcome: 'UP',
     tokenId: 'token-up',
     marketId: 'market-0',
@@ -721,19 +800,25 @@ test('dashboard snapshot identifies the live BTC 5m strategy only', () => {
   const state = bot.snapshot();
   assert.equal(state.mode, 'REAL ORDERS');
   assert.deepEqual(state.strategy.markets, ['BTC 5m']);
-  assert.equal(state.strategy.version, 'btc-midpoint-trigger-ladder-v3');
+  assert.equal(state.strategy.version, STRATEGY_VERSION);
   assert.match(state.strategy.windowRule, /from window start/);
-  assert.match(state.strategy.trigger, /at or above \$0\.80/);
+  assert.match(state.strategy.trigger, /at or above \$0\.70/);
+  assert.deepEqual(state.strategy.openingOrder, {
+    buyPrice: 0.30,
+    shares: 10,
+    sideRule: 'Previous green candle: UP; previous red candle: DOWN; doji: no opening order',
+  });
   assert.deepEqual(state.strategy.orders.map(order => [order.buyPrice, order.shares]), [
     [0.40, 10],
-    [0.60, 20],
+    [0.45, 20],
   ]);
   assert.deepEqual(state.strategy.exits, {
     takeProfitEnabled: false,
     stopLossEnabled: false,
     resolution: 'Hold confirmed shares until the original market is confirmed resolved; submit no strategy sell orders',
   });
-  assert.match(state.strategy.rearm, /no opening pair/);
+  assert.match(state.strategy.rearm, /One candle-selected opening order/);
+  assert.match(state.strategy.rearm, /one selected-side two-rung trigger ladder per window/);
   assert.ok(state.markets['5m']);
   assert.equal(state.markets['15m'], undefined);
   assert.equal(state.strategy.orderPollMs, 500);

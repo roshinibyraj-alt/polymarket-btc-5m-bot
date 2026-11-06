@@ -26,11 +26,11 @@ Each quote used for a trigger must be live, valid, and no more than **5 seconds 
 
 For each BTC 5-minute window that starts after the process starts:
 
-1. From the moment the window opens, watch fresh UP and DOWN midpoint quotes.
-2. Continue watching until the window ends.
-3. A green previous candle permits UP entries only; a red previous candle permits DOWN entries only. A doji imposes no directional restriction.
-4. The first fresh midpoint at or above **$0.80** on a permitted side triggers a one-shot entry. If both qualify on the same check and the candle is a doji, choose the higher midpoint; if equal, choose UP.
-5. Latch and persist the candle direction, selected side, and triggering price so later quote changes or account-data delays do not change the signal. A process restart does not invent a signal; an already-open window is skipped unless it has a persisted qualifying trigger.
+1. At window open, use the previous closed candle color to submit one 10-share limit BUY at $0.30: green selects UP, red selects DOWN, and doji skips this order. The opening order has no midpoint or price trigger.
+2. From window open until window end, watch fresh UP and DOWN midpoint quotes for the separate trigger ladder.
+3. A green previous candle permits UP trigger-ladder entries only; a red previous candle permits DOWN only. A doji leaves the trigger ladder unrestricted.
+4. The first fresh midpoint at or above **$0.70** on a permitted side triggers the ladder once. If both qualify on the same check and the candle is a doji, choose the higher midpoint; if equal, choose UP.
+5. Latch and persist the candle direction, selected side, and triggering price so later quote changes or account-data delays do not change the trigger signal. An already-open window is skipped unless it has a persisted qualifying entry intent.
 
 The bot classifies a candle as a doji when its body is no more than 10% of its full high-to-low range, using the existing candle-color rule.
 
@@ -40,14 +40,14 @@ Read the market's Gamma `version` before choosing its outcome asset IDs: use `cl
 
 ### Orders after a trigger
 
-Submit two resting limit BUY orders on the **selected side only**:
+At the $0.70 trigger, submit two resting limit BUY orders on the **selected side only**:
 
 | Outcome | Buy limit | Live shares | Exit |
 |---|---:|---:|---:|
 | Selected side | $0.40 | 10 | Hold to resolution |
-| Selected side | $0.60 | 20 | Hold to resolution |
+| Selected side | $0.45 | 20 | Hold to resolution |
 
-At most these two entry orders are submitted per window, for a combined nominal entry notional of **$16** if both fill. No opening pair is submitted. Do not replace orders, rearm, or enter the other side for the same signal.
+A separate $0.30 window-open order buys 10 shares on the candle-selected side. If all three orders fill, total nominal entry notional is **$16** per window. Do not replace orders or re-enter after an order set has been submitted.
 
 - A first partial fill completes that buy rung: cancel its unfilled remainder, confirm final matched shares, and manage only the confirmed quantity.
 - Do not submit strategy take-profit or stop-loss sell orders.
@@ -79,7 +79,7 @@ The test is one-shot and restart-safe. A confirmed take-profit submission comple
 
 ### Entry order
 
-- Submit a Polymarket **limit BUY** at the configured rung price and rung quantity: 10 shares at $0.40 or 20 shares at $0.60.
+- Submit Polymarket **limit BUY** orders: the candle-selected opening order is 10 shares at $0.30; the trigger ladder is 10 shares at $0.40 and 20 shares at $0.45.
 - Do not substitute a market order or raise the limit to force a fill.
 - The current client sends the limit price and size with `postOnly:false`; it does not send an explicit expiration timestamp.
 - The bot attempts to cancel still-active entry orders at the window end. This is a local cancellation attempt, not an order-expiration timestamp. Report cancellation failures rather than pretending the order is gone.
@@ -141,14 +141,14 @@ The dashboard must show the active BTC 5m market and its current strategy:
 At minimum, test that:
 
  1. Only BTC 5m markets are actively scanned for new entries; ETH, 15m, and malformed/expired markets are not traded.
-2. A fresh midpoint at or above $0.80 can select a side from the moment the window opens.
-3. A trigger produces exactly two BUY attempts on the selected side: 10 shares at $0.40 and 20 shares at $0.60. The strategy submits no TP/SL sells; confirmed shares wait for original-market resolution.
-4. Repeated scans do not duplicate either rung or submit a buy on the opposite side.
+2. At window open, green selects UP or red selects DOWN for one 10-share limit BUY at $0.30; a doji skips this opening order.
+3. A fresh midpoint at or above $0.70 triggers the separate two-order ladder: 10 shares at $0.40 and 20 shares at $0.45 on the candle-permitted side. Confirmed shares wait for original-market resolution, with no strategy TP/SL sells.
+4. Repeated scans do not duplicate the opening order or either trigger rung, and do not buy on the opposite side.
 6. Repeated scans of the same window do not duplicate either trigger's orders.
 7. Confirmed full and partial fills are tracked correctly and held until original-market resolution; no strategy SELL orders are submitted.
 8. 429 responses honor `Retry-After` for snapshot retries but do not block an authenticated CLOB order path.
 9. Restart recovery reconciles previous order IDs and partial fills without duplicating BUYs or SELLs.
-10. A restarted process loads the durable ledger, preserves a qualifying new-strategy trigger only for its still-open window, does not replay retired opening-pair intents, and does not duplicate submitted entries.
+10. A restarted process loads the durable ledger, resumes only persisted entry intents for an open window, does not replay retired opening-pair orders, and does not duplicate submitted entries.
 11. Missing/corrupt persistent state and ambiguous order submissions halt live execution; unclassified open orders are visible warnings.
 
 ## 8. Development

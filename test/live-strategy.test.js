@@ -11,6 +11,9 @@ const {
   windowStartFor,
   STRATEGY_TIMEFRAMES,
   ENTRY_RUNGS,
+  ENTRY_TRIGGER_MIDPOINT,
+  WINDOW_OPEN_CANDLE_ENTRY,
+  STRATEGY_VERSION,
 } = require('../live-strategy');
 
 function evaluateWindow(options = {}) {
@@ -34,7 +37,7 @@ function quote(mid, updatedAt, status = 'LIVE') {
   };
 }
 
-test('a fresh midpoint at or above $0.80 triggers the higher-priced qualifying side', () => {
+test('a fresh midpoint at or above $0.70 triggers the higher-priced qualifying side', () => {
   const result = evaluateWindow({
     now: 1_299_000,
     market: market(),
@@ -59,11 +62,11 @@ test('equal qualifying midpoints choose UP deterministically', () => {
   assert.equal(result.selectionReason, 'HIGHEST_QUALIFYING_MIDPOINT');
 });
 
-test('midpoints below $0.80 do not qualify', () => {
+test('midpoints below $0.70 do not qualify', () => {
   const result = evaluateWindow({
     now: 1_299_000,
     market: market(),
-    quotes: { UP: quote(0.79, 1_299_000), DOWN: quote(0.20, 1_299_000) },
+    quotes: { UP: quote(0.69, 1_299_000), DOWN: quote(0.20, 1_299_000) },
     startedAt: 900_000,
   });
   assert.equal(result.eligible, false);
@@ -82,17 +85,17 @@ test('the midpoint trigger is active from the moment the window opens', () => {
   assert.equal(result.selectedSide, 'UP');
 });
 
-test('the $0.80 trigger threshold is inclusive and stale quotes are rejected', () => {
+test('the $0.70 trigger threshold is inclusive and stale quotes are rejected', () => {
   const atBoundary = evaluateWindow({
     now: 1_120_000,
     market: market(),
-    quotes: { UP: quote(0.80, 1_120_000), DOWN: quote(0.20, 1_120_000) },
+    quotes: { UP: quote(0.70, 1_120_000), DOWN: quote(0.20, 1_120_000) },
     startedAt: 900_000,
   });
   const stale = evaluateWindow({
     now: 1_299_000,
     market: market(),
-    quotes: { UP: quote(0.80, 1_293_999), DOWN: quote(0.20, 1_293_999) },
+    quotes: { UP: quote(0.70, 1_293_999), DOWN: quote(0.20, 1_293_999) },
     startedAt: 900_000,
   });
   assert.equal(atBoundary.eligible, true);
@@ -202,10 +205,13 @@ test('book quotes use the best prices and keep the timestamp', () => {
   assert.equal(result.updatedAt, 123);
 });
 
-test('entry ladder uses the requested prices and sizes without rung take-profits', () => {
+test('entry ladder and candle-only opening rung use their requested prices and sizes', () => {
+  assert.equal(ENTRY_TRIGGER_MIDPOINT, 0.70);
+  assert.equal(STRATEGY_VERSION, 'btc-candle-open-midpoint-trigger-ladder-v4');
+  assert.deepEqual(WINDOW_OPEN_CANDLE_ENTRY, { price: 0.30, shares: 10 });
   assert.deepEqual(ENTRY_RUNGS.map(rung => [rung.price, rung.shares]), [
     [0.40, 10],
-    [0.60, 20],
+    [0.45, 20],
   ]);
 });
 

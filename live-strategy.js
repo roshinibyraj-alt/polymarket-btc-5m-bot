@@ -10,13 +10,14 @@ const MINUTE_MS = 60 * 1000;
 
 const ENTRY_RUNGS = Object.freeze([
   Object.freeze({ price: 0.40, shares: 10 }),
-  Object.freeze({ price: 0.60, shares: 20 }),
+  Object.freeze({ price: 0.45, shares: 20 }),
 ]);
+const WINDOW_OPEN_CANDLE_ENTRY = Object.freeze({ price: 0.30, shares: 10 });
 
 const ENTRY_DELAY_MS = 0;
-const ENTRY_TRIGGER_MIDPOINT = 0.80;
+const ENTRY_TRIGGER_MIDPOINT = 0.70;
 const QUOTE_MAX_AGE_MS = 5_000;
-const STRATEGY_VERSION = 'btc-midpoint-trigger-ladder-v3';
+const STRATEGY_VERSION = 'btc-candle-open-midpoint-trigger-ladder-v4';
 const { candleColor } = require('./candle-strategy');
 
 function bestPrice(levels, select) {
@@ -205,10 +206,10 @@ function evaluateWindow({ now = Date.now(), market, quotes, startedAt = null, ca
     reason: eligible
       ? `${selectedSide} midpoint reached $${values[selectedSide].toFixed(3)}; previous candle filter allows ${selectedSide}`
       : oppositeSideQualified
-        ? `Price trigger reached ${qualifyingSides.join(' and ')}, but previous ${candleFilter.color.toLowerCase()} candle allows only ${candleFilter.allowedSide}; waiting for ${candleFilter.allowedSide} midpoint to reach $0.80`
+        ? `Price trigger reached ${qualifyingSides.join(' and ')}, but previous ${candleFilter.color.toLowerCase()} candle allows only ${candleFilter.allowedSide}; waiting for ${candleFilter.allowedSide} midpoint to reach $${ENTRY_TRIGGER_MIDPOINT.toFixed(2)}`
         : candleFilter.allowedSide
-          ? `Previous ${candleFilter.color.toLowerCase()} candle allows only ${candleFilter.allowedSide}; waiting for a fresh midpoint to reach $0.80`
-          : 'Previous candle is a doji; waiting for a fresh UP or DOWN midpoint to reach $0.80 or higher',
+          ? `Previous ${candleFilter.color.toLowerCase()} candle allows only ${candleFilter.allowedSide}; waiting for a fresh midpoint to reach $${ENTRY_TRIGGER_MIDPOINT.toFixed(2)}`
+          : `Previous candle is a doji; waiting for a fresh UP or DOWN midpoint to reach $${ENTRY_TRIGGER_MIDPOINT.toFixed(2)} or higher`,
   };
 }
 
@@ -257,6 +258,7 @@ module.exports = {
   WINDOW_CONFIG,
   STRATEGY_TIMEFRAMES,
   ENTRY_RUNGS,
+  WINDOW_OPEN_CANDLE_ENTRY,
   ENTRY_DELAY_MS,
   ENTRY_TRIGGER_MIDPOINT,
   QUOTE_MAX_AGE_MS,
