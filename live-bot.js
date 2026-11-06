@@ -5,9 +5,6 @@ const {
   WINDOW_CONFIG,
   STRATEGY_TIMEFRAMES,
   ENTRY_RUNGS,
-  TAKE_PROFIT_BID,
-  STOP_LOSS_BID,
-  EXIT_START_SECONDS,
   STRATEGY_VERSION,
   evaluateWindow,
   evaluateSourceExit,
@@ -20,6 +17,9 @@ const TIMEFRAMES = STRATEGY_TIMEFRAMES;
 const TERMINAL = new Set(['MATCHED', 'FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED']);
 const ACTIVE = new Set(['LIVE', 'OPEN', 'PENDING', 'PARTIALLY FILLED', 'PARTIALLY MATCHED']);
 const MIN_SELL_SHARES = Number(cfg.LIVE_MIN_SELL_SHARES || 5);
+const SOURCE_EXITS_ENABLED = false;
+const LEGACY_SOURCE_TAKE_PROFIT_BID = 0.99;
+const LEGACY_SOURCE_STOP_LOSS_BID = 0.01;
 // Continue managing already-open orders from the retired two-sided strategy.
 const LEGACY_WINDOW_START_ENTRY_PRICE = Number(cfg.LIVE_WINDOW_START_ENTRY_PRICE || 0.30);
 const LEGACY_WINDOW_START_ENTRY_SHARES = Number(cfg.LIVE_WINDOW_START_ENTRY_SHARES || 20);
@@ -132,10 +132,10 @@ function recoveredOrder(raw) {
       takeProfitPrice = legacyRung.takeProfitPrice;
     }
   } else if (side === 'SELL') {
-    if ([TAKE_PROFIT_BID, LEGACY_WINDOW_START_TAKE_PROFIT_PRICE, 0.75, 0.85, 0.999]
+    if ([LEGACY_SOURCE_TAKE_PROFIT_BID, LEGACY_WINDOW_START_TAKE_PROFIT_PRICE, 0.75, 0.85, 0.999]
       .some(value => Math.abs(value - price) < 0.000001)) {
       kind = 'TAKE_PROFIT';
-    } else if (Math.abs(STOP_LOSS_BID - price) < 0.000001) {
+    } else if (Math.abs(LEGACY_SOURCE_STOP_LOSS_BID - price) < 0.000001) {
       kind = 'STOP_LOSS';
     }
   }
@@ -1584,6 +1584,7 @@ class LiveBot {
   }
 
   async maybeSubmitSourceExit(entry, now = this.clock()) {
+    if (!SOURCE_EXITS_ENABLED) return;
     if (entry.kind !== 'ENTRY'
       || entry.entryType !== 'MIDPOINT_TRIGGER_LADDER'
       || !entry.matchedShares
@@ -2065,7 +2066,7 @@ class LiveBot {
       strategy: {
         version: STRATEGY_VERSION,
         markets: ['BTC 5m'],
-        windowRule: 'Wait 120 seconds after each window starts, then monitor fresh UP/DOWN midpoints until the window ends',
+        windowRule: 'Monitor fresh UP/DOWN midpoints from window start until the window ends',
         trigger: 'The first fresh midpoint at or above $0.80 selects a side; if both qualify, select the higher midpoint and break ties toward UP',
         triggerPersistence: 'The qualifying side and price are saved through account delays and process restarts until that window ends',
         selectedSideOnly: true,
@@ -2074,13 +2075,9 @@ class LiveBot {
           shares: rung.shares,
         })),
         exits: {
-          takeProfitTriggerBid: TAKE_PROFIT_BID,
-          takeProfitLimitSell: TAKE_PROFIT_BID,
-          stopLossTriggerBid: STOP_LOSS_BID,
-          stopLossLimitSell: STOP_LOSS_BID,
-          stopLossAfterSeconds: EXIT_START_SECONDS,
-          exitQuoteMaxAgeMs: 5_000,
-          resolution: 'Cancel unfilled exit orders at window end; hold unsold shares until the original market is confirmed resolved',
+          takeProfitEnabled: false,
+          stopLossEnabled: false,
+          resolution: 'Hold confirmed shares until the original market is confirmed resolved; submit no strategy sell orders',
         },
         rearm: 'One selected-side two-rung ladder per window; no opening pair, order replacement, or re-entry',
         orderPollMs: this.orderPollMs,
