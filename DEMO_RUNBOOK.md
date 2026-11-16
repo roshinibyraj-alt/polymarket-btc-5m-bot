@@ -20,6 +20,15 @@ The active app is paper-only. Its startup file loads the demo strategy and does 
 - A $0.99 bid is counted as a $1 payout per share; a $0.01 bid or lower is counted as $0. Otherwise hold the position until the original Polymarket market confirms resolution.
 - When visible depth is insufficient to complete the requested sweep within the cap/floor, skip the action rather than simulate a partial position.
 
+## Adaptive-sample shadow comparison
+
+- Keep the active trading signal on ten one-second samples throughout each window.
+- In parallel, calculate a shadow-only forecast using 10 samples through the first minute, then 9, 8, 7, and 6 samples at the 60-, 120-, 180-, and 240-second marks.
+- Simulate an independent paper portfolio with the same 100-share entries, signal filters, 15-second cooldown, visible ask-sweep cap, taker-fee estimate, $0.99/$0.01 threshold exits, and official-market resolution.
+- Shadow entries never create orders, consume the trading portfolio's cash, or influence the selected trading side.
+- Compare settled and floating P&L, entry counts, wins/losses, and unresolved positions. Floating P&L marks open shares at the latest bid; unresolved positions are excluded until the official result arrives.
+- The comparison is an experimental fill simulation, not a live execution guarantee. Its in-memory portfolio resets when the process restarts.
+
 ## Running and checking
 
 Run `npm test`, then `npm start`. The dashboard is available at `/`; `/api/state` reports the forecast, candidate sides, paper orders, positions, and resolutions. Paper account history is held in memory and resets when the process restarts.

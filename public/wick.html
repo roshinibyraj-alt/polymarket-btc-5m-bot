@@ -73,6 +73,17 @@
     .candidate-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
     .candidate-title{font:700 10px var(--mono);letter-spacing:.08em}
     .candidate .row{font-size:10px;padding:5px 0}.candidate .row strong{font:600 10px var(--mono)}
+    .shadow-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:10px}
+    .shadow-card{border:1px solid var(--line);border-left:3px solid var(--teal);border-radius:11px;padding:11px;background:#fffefa;min-width:0}
+    .shadow-card.adaptive{border-left-color:#b28a3d}
+    .shadow-head{font:700 11px var(--display);margin-bottom:9px}
+    .shadow-total{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid var(--line)}
+    .shadow-total strong{font:700 20px var(--mono);font-variant-numeric:tabular-nums}
+    .shadow-total span{font-size:9px;color:var(--muted)}
+    .shadow-row{display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid #e8eeea;font-size:10px}
+    .shadow-row:last-child{border-bottom:0}.shadow-row span{color:var(--muted)}
+    .shadow-row strong{text-align:right;font:600 10px var(--mono);font-variant-numeric:tabular-nums}
+    .shadow-note{margin-top:9px;color:var(--muted);font-size:10px;line-height:1.55}
     .scroll{overflow:auto;overscroll-behavior-x:contain}table{width:100%;border-collapse:collapse;min-width:760px}th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);font-size:10px;white-space:nowrap}th{color:var(--muted);font:700 9px var(--mono);text-transform:uppercase;letter-spacing:.08em}td.muted{color:var(--muted)}
     .empty{padding:17px;color:var(--muted);text-align:center;font-size:11px;background:#f7f9f6;border-radius:10px}
     .events{display:grid;gap:0}.event{display:grid;grid-template-columns:145px 105px 1fr;gap:12px;padding:9px 0;border-bottom:1px solid var(--line);font-size:10px}.event:last-child{border:0}.event time,.event-type{color:var(--muted)}.event-type{font:700 9px var(--mono);letter-spacing:.06em}
@@ -89,9 +100,10 @@
       .estimate-grid{gap:6px}.estimate{padding:9px;border-radius:9px}.estimate .prob{font-size:18px}.estimate .implied{font-size:9px}.estimate-foot{font-size:8px}
       .metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px 10px}.metric{padding-top:7px}.metric span{font-size:8px}.metric strong{font-size:12px}
       .candidates{gap:6px}.candidate{padding:8px}.candidate-title{font-size:9px}.candidate .row{font-size:9px}.candidate .row strong{font-size:9px}
+       .shadow-grid{gap:6px}.shadow-card{padding:8px}.shadow-head{font-size:10px}.shadow-total strong{font-size:17px}.shadow-row{font-size:9px}.shadow-row strong{font-size:9px}.shadow-note{font-size:9px}
       .row{font-size:10px;padding:7px 0}.event{grid-template-columns:1fr;gap:1px;padding:8px 0}.event time{font-size:9px}.event-type{font-size:9px}
     }
-    @media(max-width:360px){.grid{grid-template-columns:1fr 1fr}.estimate-foot{flex-direction:column;gap:2px}.candidates{grid-template-columns:1fr}}
+    @media(max-width:360px){.grid{grid-template-columns:1fr 1fr}.estimate-foot{flex-direction:column;gap:2px}.candidates,.shadow-grid{grid-template-columns:1fr}}
     @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
   </style>
 </head>
@@ -122,6 +134,12 @@
   <section class="panel">
     <div class="panel-head"><h2>Live BTC market &amp; pressure read</h2><span class="hint" id="marketStatus">Waiting for market data</span></div>
     <div id="markets"><div class="empty">Waiting for BTC market data…</div></div>
+  </section>
+
+  <section class="panel" aria-label="Adaptive sample shadow comparison">
+    <div class="panel-head"><h2>Adaptive-sample shadow P&amp;L</h2><span class="pill wait" id="shadowStatus">Shadow only</span></div>
+    <div id="shadowComparison"><div class="empty">Waiting for pressure data. This comparison never submits orders.</div></div>
+    <div class="shadow-note">The trading model stays at 10 samples. The adaptive shadow changes to 9, 8, 7, then 6 samples at each minute mark. Both use the same entry filters, 100-share size, 15-second cooldown, visible ask prices and estimated taker fees. P&amp;L includes settled results and open-position marks; unresolved positions are shown separately. Comparison totals reset when the bot restarts.</div>
   </section>
 
   <section class="panel">
@@ -246,6 +264,31 @@
     if (!events?.length) return '<div class="empty">Waiting for activity…</div>';
     return events.slice(0,24).map(e => `<div class="event"><time>${esc(new Date(e.at).toLocaleString())}</time><span class="event-type">${esc(e.type)}</span><span>${esc(e.message)}${e.error?` · ${esc(e.error)}`:''}</span></div>`).join('');
   }
+  function renderShadowComparison(comparison) {
+    if (!comparison) return '<div class="empty">Shadow comparison is unavailable.</div>';
+    const current = comparison.currentForecast || {};
+    const renderPortfolio = (title, portfolio, adaptive = false) => {
+      const value = portfolio || {};
+      const signClass = Number(value.totalPnl) > 0 ? 'good' : Number(value.totalPnl) < 0 ? 'bad' : '';
+      const winLoss = `${Number(value.wins || 0)} / ${Number(value.losses || 0)}`;
+      return `<article class="shadow-card ${adaptive ? 'adaptive' : ''}">
+        <div class="shadow-head">${esc(title)}</div>
+        <div class="shadow-total"><strong class="${signClass}">${money(value.totalPnl)}</strong><span>net P&amp;L</span></div>
+        <div class="shadow-row"><span>Realized</span><strong>${money(value.realizedPnl)}</strong></div>
+        <div class="shadow-row"><span>Floating</span><strong>${money(value.floatingPnl)}</strong></div>
+        <div class="shadow-row"><span>Entries / settled</span><strong>${Number(value.entries || 0)} / ${Number(value.settledEntries || 0)}</strong></div>
+        <div class="shadow-row"><span>Settled wins / losses</span><strong>${winLoss}</strong></div>
+        <div class="shadow-row"><span>Open / awaiting resolution</span><strong>${Number(value.openPositions || 0)} / ${Number(value.awaitingResolution || 0)}</strong></div>
+        <div class="shadow-row"><span>Available paper cash</span><strong>${money(value.cash)}</strong></div>
+      </article>`;
+    };
+    const activeCount = Number(comparison.activeSampleCount || current.requiredSamples || 10);
+    return `<div class="shadow-grid">
+      ${renderPortfolio('Current trading model · 10 samples', comparison.baseline)}
+      ${renderPortfolio(`Adaptive shadow · ${activeCount} samples`, comparison.adaptive, true)}
+    </div>
+    <div class="shadow-note">Adaptive forecast: ${esc(current.status || 'waiting')} · ${esc(current.selectedSide || 'no selected side')} · ${Number(current.sampleCount || 0)}/${Number(current.requiredSamples || activeCount)} samples. Hypothetical entries use the same visible-book fill model; this result is a paper simulation, not a live fill guarantee.</div>`;
+  }
   async function refresh() {
     try {
       const response = await fetch('/api/state?t='+Date.now(), {cache:'no-store'});
@@ -275,6 +318,11 @@
       document.querySelector('#marketStatus').textContent = marketView.forecast
         ? `${marketView.forecast.ready ? 'Forecast ready' : 'Forecast not ready'} · uncalibrated`
         : 'Quotes live · forecast pending';
+      const shadow = state.shadowComparison;
+      document.querySelector('#shadowStatus').textContent = shadow
+        ? `NO ORDERS · ${Number(shadow.activeSampleCount || 0)}/${Number(shadow.baseSampleCount || 10)} samples`
+        : 'Shadow only';
+      document.querySelector('#shadowComparison').innerHTML = renderShadowComparison(shadow);
       const currentWindowOrders = (state.orders||[]).filter(order => !market.slug || order.slug === market.slug);
       document.querySelector('#orders').innerHTML = renderOrders(currentWindowOrders);
       document.querySelector('#orderCount').textContent = `${currentWindowOrders.length} current-window orders`;

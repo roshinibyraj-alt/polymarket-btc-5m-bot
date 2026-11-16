@@ -88,6 +88,23 @@ test('ten one-second pressure samples expose direction, persistence, and acceler
   assert.ok(result.pressureImpulse > 0);
 });
 
+test('adaptive shadow sample count steps down once per minute and floors at six', () => {
+  for (const [elapsed, expected] of [
+    [0, 10],
+    [59_999, 10],
+    [60_000, 9],
+    [120_000, 8],
+    [180_000, 7],
+    [240_000, 6],
+    [299_000, 6],
+  ]) {
+    assert.equal(
+      PressureForecastBot._test.adaptiveShadowSampleCount(WINDOW_START, WINDOW_START + elapsed),
+      expected,
+    );
+  }
+});
+
 test('taker sweep observes the buy ceiling, sell floor, and per-level fees', () => {
   const market = { feesEnabled: true, feeSchedule: { rate: 0.07, exponent: 1 } };
   const buy = PressureForecastBot._test.sweepBook([
@@ -243,6 +260,130 @@ test('same-side entries are blocked until the 15-second cooldown elapses', () =>
   assert.equal(bot.lastEntryAt, NOW + 1000);
 });
 
+test('shadow entries use separate fee-aware paper cash and never add main orders', () => {
+  const bot = makeBot();
+  setQuote(bot, 'UP', 0.30, 0.32);
+  setQuote(bot, 'DOWN', 0.68, 0.70);
+  addSamples(bot, 1);
+  bot.market.feesEnabled = true;
+  bot.market.feeSchedule = { rate: 0.07, exponent: 1 };
+
+  const changed = bot.processPressureStrategy(WINDOW_START, NOW);
+
+  assert.equal(changed, true);
+  assert.equal(bot.forecast.requiredSamples, 10);
+  assert.equal(bot.shadowForecast.requiredSamples, 10);
+  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 1);
+  assert.equal(bot.shadowPositions.filter((position) => position.status === 'OPEN').length, 1);
+  assert.equal(bot.orders.length, 1);
+  assert.equal(bot.orders[0].kind, 'BUY_ENTRY');
+  assert.ok(bot.positions[0].fees > 0);
+  assert.ok(bot.shadowPositions[0].fees > 0);
+  assert.equal(bot.cash, 10_000 - bot.positions[0].totalCost);
+  assert.equal(bot.shadowCash, 10_000 - bot.shadowPositions[0].totalCost);
+  assert.notStrictEqual(bot.positions, bot.shadowPositions);
+});
+
+test('shadow-only entry leaves the trading portfolio completely untouched', () => {
+  const bot = makeBot();
+  setQuote(bot, 'UP', 0.30, 0.32);
+  setQuote(bot, 'DOWN', 0.68, 0.70);
+  addSamples(bot, 1);
+  const read = bot.buildPressureRead(NOW);
+  const forecast = bot.createForecast(read, NOW, WINDOW_START);
+
+  const simulated = bot.processShadowEntry(WINDOW_START, NOW, read, forecast);
+
+  assert.equal(simulated, true);
+  assert.equal(bot.cash, 10_000);
+  assert.equal(bot.orders.length, 0);
+  assert.equal(bot.positions.length, 0);
+  assert.equal(bot.shadowPositions.length, 1);
+  assert.ok(bot.shadowCash < 10_000);
+});
+
+test('baseline and shadow P&L settle independently at the existing take-profit threshold', () => {
+  const bot = makeBot();
+  setQuote(bot, 'UP', 0.30, 0.32);
+  setQuote(bot, 'DOWN', 0.68, 0.70);
+  addSamples(bot, 1);
+  bot.market.feesEnabled = false;
+
+  bot.processPressureStrategy(WINDOW_START, NOW);
+  setQuote(bot, 'UP', 0.99, 0.99, 1000, NOW + 1000);
+  bot.processThresholdExits(WINDOW_START, NOW + 1000);
+
+  assert.equal(bot.positions[0].status, 'SETTLED_EXIT');
+  assert.equal(bot.shadowPositions[0].status, 'SETTLED_EXIT');
+  const comparison = bot.snapshot().shadowComparison;
+  assert.equal(comparison.baseline.entries, 1);
+  assert.equal(comparison.adaptive.entries, 1);
+  assert.equal(comparison.baseline.realizedPnl, comparison.adaptive.realizedPnl);
+  assert.equal(bot.orders.filter((order) => order.kind === 'SELL_TAKE_PROFIT').length, 1);
+});
+
+test('shadow stop loss counts a $0.01 bid as a zero payout', () => {
+  const bot = makeBot();
+  setQuote(bot, 'UP', 0.01, 0.02, 1000);
+  const position = {
+    id: 'shadow-stop-up',
+    shadowOnly: true,
+    side: 'UP',
+    shares: 100,
+    totalCost: 40,
+    windowStart: WINDOW_START,
+    status: 'OPEN',
+    markBid: 0.01,
+  };
+  bot.shadowPositions.push(position);
+  bot.shadowCash = 9960;
+
+  bot.processThresholdExits(WINDOW_START, NOW);
+
+  assert.equal(position.status, 'SETTLED_EXIT');
+  assert.equal(position.exitPrice, 0);
+  assert.equal(position.realizedPnl, -40);
+  assert.equal(bot.shadowCash, 9960);
+  assert.equal(bot.orders.length, 0);
+});
+
+test('shadow-only positions roll over and settle from official market resolution', async () => {
+  const bot = makeBot({
+    marketData: {
+      getMarket: async () => ({
+        closed: true,
+        outcomes: '["Up","Down"]',
+        outcomePrices: '["1","0"]',
+        clobTokenIds: '["up-token","down-token"]',
+      }),
+    },
+  });
+  const position = {
+    id: 'shadow-pending-up',
+    shadowOnly: true,
+    side: 'UP',
+    shares: 100,
+    totalCost: 40,
+    windowStart: WINDOW_START,
+    marketId: 'condition',
+    tokenId: 'up-token',
+    slug: bot.market.slug,
+    status: 'OPEN',
+  };
+  bot.shadowPositions.push(position);
+  bot.shadowCash = 9960;
+
+  await bot.closePreviousWindows(WINDOW_START + config.WINDOW_MS_5M, NOW + 1000);
+  assert.equal(position.status, 'PENDING_CLOB_RESULT');
+  assert.equal(bot.positions.length, 0);
+
+  await bot.resolvePendingPositions(NOW + 60_000);
+  assert.equal(position.status, 'SETTLED_WIN');
+  assert.equal(position.realizedPnl, 60);
+  assert.equal(bot.shadowCash, 10_060);
+  assert.equal(bot.resolutions.length, 0);
+});
+
 test('paper snapshot identifies only the uncalibrated BTC 5-minute demo strategy', () => {
   const bot = makeBot();
   const state = bot.snapshot();
@@ -256,6 +397,11 @@ test('paper snapshot identifies only the uncalibrated BTC 5-minute demo strategy
   assert.match(state.strategy.repeatEntryRule, /independent 100-share position/i);
   assert.equal(state.strategy.signalState.calibrated, false);
   assert.equal(state.strategy.priceFeed.source, 'Binance BTCUSDT aggregate trades');
+  assert.equal(state.shadowComparison.mode, 'SHADOW_ONLY');
+  assert.equal(state.shadowComparison.baseSampleCount, 10);
+  assert.equal(state.shadowComparison.activeSampleCount, 10);
+  assert.equal(state.shadowComparison.baseline.initialCapital, 10_000);
+  assert.equal(state.shadowComparison.adaptive.initialCapital, 10_000);
   assert.equal(state.markets['5m'].forecast.calibrated, false);
 });
 

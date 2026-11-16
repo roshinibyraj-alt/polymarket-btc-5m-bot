@@ -27,10 +27,10 @@ function mean(values) {
   return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
 }
 
-function pressureTrend(samples) {
+function pressureTrend(samples, sampleLimit = config.PRESSURE_SAMPLE_COUNT) {
   const values = samples.map((sample) => Number(sample.score))
     .filter(Number.isFinite)
-    .slice(-config.PRESSURE_SAMPLE_COUNT);
+    .slice(-sampleLimit);
   if (values.length < 2) {
     return {
       sampleCount: values.length,
@@ -74,8 +74,8 @@ function pressureTrend(samples) {
   };
 }
 
-function volatilityPerSecond(samples) {
-  const prices = samples.slice(-config.PRESSURE_SAMPLE_COUNT)
+function volatilityPerSecond(samples, sampleLimit = config.PRESSURE_SAMPLE_COUNT) {
+  const prices = samples.slice(-sampleLimit)
     .map((sample) => Number(sample.price))
     .filter((price) => price > 0);
   if (prices.length < 3) return null;
@@ -84,6 +84,43 @@ function volatilityPerSecond(samples) {
     returns.push(Math.log(prices[index] / prices[index - 1]));
   }
   return Math.sqrt(returns.reduce((sum, value) => sum + value ** 2, 0) / returns.length);
+}
+
+function adaptiveShadowSampleCount(start, now) {
+  const elapsed = Math.max(0, Number(now) - Number(start));
+  const reductions = Math.floor(elapsed / config.PRESSURE_SHADOW_STEP_MS);
+  return Math.max(
+    config.PRESSURE_SHADOW_MIN_SAMPLE_COUNT,
+    config.PRESSURE_SAMPLE_COUNT - reductions,
+  );
+}
+
+function summarizePortfolio(positions, cash, initialCapital) {
+  const open = positions.filter((position) => position.status === 'OPEN');
+  const pending = positions.filter((position) => position.status === 'PENDING_CLOB_RESULT');
+  const settled = positions.filter((position) => position.realizedPnl != null
+    && Number.isFinite(Number(position.realizedPnl))
+    && !['OPEN', 'PENDING_CLOB_RESULT'].includes(position.status));
+  const realizedPnl = settled.reduce((total, position) => total + Number(position.realizedPnl), 0);
+  const floatingPnl = open.reduce((total, position) => {
+    if (position.markBid == null) return total;
+    const bid = Number(position.markBid);
+    if (!Number.isFinite(bid) || bid < 0) return total;
+    return total + (bid * Number(position.shares)) - Number(position.totalCost || 0);
+  }, 0);
+  return {
+    initialCapital,
+    cash,
+    entries: positions.length,
+    settledEntries: settled.length,
+    wins: settled.filter((position) => Number(position.realizedPnl) > 0).length,
+    losses: settled.filter((position) => Number(position.realizedPnl) < 0).length,
+    openPositions: open.length,
+    awaitingResolution: pending.length,
+    realizedPnl,
+    floatingPnl,
+    totalPnl: realizedPnl + floatingPnl,
+  };
 }
 
 function bookPressure(quote) {
@@ -221,12 +258,19 @@ class PressureForecastBot extends WickBot {
     });
     this.now = now;
     this.marketData = marketData;
+    this.initialCapital = initialCapital;
     this.strategyName = 'BTC 5-minute pressure and price forecast paper bot';
     this.strategyMode = 'pressure-forecast';
     this.pressureSamples = [];
     this.lastSampleAt = null;
     this.forecast = this.emptyForecast('Waiting for Binance and Polymarket data.');
     this.lastEntryAt = null;
+    this.shadowCash = initialCapital;
+    this.shadowPositions = [];
+    this.shadowLastEntryAt = null;
+    this.shadowSequence = 0;
+    this.shadowSamplesRequired = config.PRESSURE_SAMPLE_COUNT;
+    this.shadowForecast = this.emptyForecast('Waiting for live data for the adaptive shadow comparison.');
     this.lastResolutionCheckAt = new Map();
     this.actionSequence = 0;
     this.resolutions = [];
@@ -284,6 +328,12 @@ class PressureForecastBot extends WickBot {
     this.pressureSamples = [];
     this.lastSampleAt = null;
     this.lastEntryAt = null;
+    this.shadowLastEntryAt = null;
+    this.shadowSamplesRequired = config.PRESSURE_SAMPLE_COUNT;
+    this.shadowForecast = this.emptyForecast(
+      'Collecting ten fresh one-second samples for the adaptive shadow comparison.',
+      'COLLECTING_SAMPLES',
+    );
     this.signal = null;
     this.forecast = this.emptyForecast('Collecting ten fresh one-second pressure samples.', 'COLLECTING_SAMPLES');
     this.log('PAPER_PRESSURE_WINDOW_STARTED', {
@@ -353,6 +403,13 @@ class PressureForecastBot extends WickBot {
       }
     });
     for (const position of this.positions) {
+      if (position.windowStart !== this.market.start || position.status !== 'OPEN') continue;
+      const quote = this.liveQuotes[position.side];
+      position.markBid = quote?.bestBid ?? null;
+      position.markUpdatedAt = quote?.updatedAt || now;
+      position.markStatus = quote?.bestBid == null ? 'MISSING' : 'LIVE';
+    }
+    for (const position of this.shadowPositions) {
       if (position.windowStart !== this.market.start || position.status !== 'OPEN') continue;
       const quote = this.liveQuotes[position.side];
       position.markBid = quote?.bestBid ?? null;
@@ -435,6 +492,14 @@ class PressureForecastBot extends WickBot {
         sampleCount: this.freshSamples(now).length,
         secondsRemaining: Math.max(0, (start + this.windowMs - now) / 1000),
       };
+      this.shadowSamplesRequired = adaptiveShadowSampleCount(start, now);
+      this.shadowForecast = {
+        ...this.emptyForecast(read.reason),
+        status: read.status,
+        sampleCount: this.freshSamples(now, this.shadowSamplesRequired).length,
+        requiredSamples: this.shadowSamplesRequired,
+        secondsRemaining: Math.max(0, (start + this.windowMs - now) / 1000),
+      };
       return false;
     }
 
@@ -457,6 +522,16 @@ class PressureForecastBot extends WickBot {
 
     const forecast = this.createForecast(read, now, start);
     this.forecast = forecast;
+    this.shadowSamplesRequired = adaptiveShadowSampleCount(start, now);
+    this.shadowForecast = this.createForecast(
+      read,
+      now,
+      start,
+      this.shadowSamplesRequired,
+    );
+    if (evaluationDue && this.shadowForecast.ready) {
+      this.processShadowEntry(start, now, read, this.shadowForecast);
+    }
     if (!evaluationDue || !forecast.ready || !forecast.selectedSide) return false;
 
     const cooldownRemaining = config.PRESSURE_ENTRY_COOLDOWN_MS
@@ -483,28 +558,104 @@ class PressureForecastBot extends WickBot {
     return false;
   }
 
-  freshSamples(now) {
-    return this.pressureSamples
-      .filter((sample) => now - Number(sample.at) <= config.PRESSURE_SAMPLE_INTERVAL_MS
-        * config.PRESSURE_SAMPLE_COUNT + 500)
-      .slice(-config.PRESSURE_SAMPLE_COUNT);
+  processShadowEntry(start, now, read, forecast) {
+    const side = forecast.selectedSide;
+    if (!forecast.ready || !side || !forecast.candidateBySide[side]?.qualifies) return false;
+
+    const cooldownRemaining = config.PRESSURE_ENTRY_COOLDOWN_MS
+      - (now - Number(this.shadowLastEntryAt || 0));
+    if (this.shadowLastEntryAt != null && cooldownRemaining > 0) {
+      forecast.status = 'ENTRY_COOLDOWN';
+      forecast.reason = `Shadow signal qualifies; another simulated entry is available in ${Math.ceil(cooldownRemaining / 1000)} seconds.`;
+      return false;
+    }
+
+    const execution = sweepBook(
+      read.quotes[side]?.askLevels,
+      config.PRESSURE_ENTRY_SHARES,
+      'BUY',
+      this.market,
+      { maximumPrice: config.PRESSURE_MAX_BUY_PRICE },
+    );
+    if (!execution.complete) {
+      forecast.status = 'SHADOW_SKIPPED_DEPTH';
+      forecast.reason = 'Shadow entry skipped because the full 100 shares were not available below the $0.90 cap.';
+      return false;
+    }
+    if (execution.totalCost > this.shadowCash + EPSILON) {
+      forecast.status = 'SHADOW_INSUFFICIENT_CASH';
+      forecast.reason = 'Shadow entry skipped because its independent paper cash cannot cover the full order and fees.';
+      return false;
+    }
+
+    const candidate = forecast.candidateBySide[side];
+    const position = {
+      id: `shadow-${this.market?.start || start}-${side.toLowerCase()}-${++this.shadowSequence}`,
+      shadowOnly: true,
+      asset: 'BTC',
+      timeframe: '5m',
+      windowMs: this.windowMs,
+      windowStart: this.market?.start ?? start,
+      marketId: this.market?.id ?? null,
+      slug: this.market?.slug ?? null,
+      title: this.market?.title ?? null,
+      side,
+      outcome: side,
+      tokenId: this.market?.tokens?.[side] ?? null,
+      shares: execution.filledShares,
+      initialShares: execution.filledShares,
+      avgEntry: execution.averagePrice,
+      averagePrice: execution.averagePrice,
+      cost: execution.gross,
+      totalCost: execution.totalCost,
+      fees: execution.fees,
+      entryFees: execution.fees,
+      exitFees: 0,
+      status: 'OPEN',
+      submittedAt: now,
+      openedAt: now,
+      filledAt: now,
+      markBid: read.quotes[side]?.bestBid ?? null,
+      markUpdatedAt: read.quotes[side]?.updatedAt || now,
+      markStatus: 'LIVE',
+      takeProfitPrice: config.PRESSURE_TAKE_PROFIT_TRIGGER,
+      stopLossPrice: config.PRESSURE_STOP_LOSS_TRIGGER,
+      entryFills: execution.fills.map((fill) => ({ ...fill, at: now })),
+      expectedProbability: candidate.estimatedProbability,
+      expectedNetEdgePerShare: candidate.expectedNetEdgePerShare,
+      signalScore: read.combinedScore,
+      settlementBasis: 'ADAPTIVE_SAMPLE_SHADOW',
+    };
+    this.shadowCash -= execution.totalCost;
+    this.shadowPositions.unshift(position);
+    this.shadowLastEntryAt = now;
+    forecast.status = 'SHADOW_ENTRY';
+    forecast.reason = `Shadow only: simulated a 100-share ${side} entry; the trading portfolio was not changed.`;
+    return true;
   }
 
-  createForecast(read, now, start) {
-    const samples = this.freshSamples(now);
+  freshSamples(now, sampleLimit = config.PRESSURE_SAMPLE_COUNT) {
+    return this.pressureSamples
+      .filter((sample) => now - Number(sample.at)
+        <= config.PRESSURE_SAMPLE_INTERVAL_MS * sampleLimit + 500)
+      .slice(-sampleLimit);
+  }
+
+  createForecast(read, now, start, requiredSamples = config.PRESSURE_SAMPLE_COUNT) {
+    const samples = this.freshSamples(now, requiredSamples);
     const secondsRemaining = Math.max(0, (start + this.windowMs - now) / 1000);
     const marketImpliedUp = Number(read.quotes.UP.mid);
     const marketImpliedDown = Number(read.quotes.DOWN.mid);
     const candidateBySide = { UP: this.emptyCandidate('Waiting for enough fresh pressure samples.'), DOWN: this.emptyCandidate('Waiting for enough fresh pressure samples.') };
-    const trend = pressureTrend(samples);
+    const trend = pressureTrend(samples, requiredSamples);
     const currentPrice = Number(read.feed.price);
     const candle = read.feed.currentCandle;
     const windowOpenPrice = Number(candle?.start) === start ? Number(candle.open) : null;
     const btcMoveFromOpenPct = currentPrice > 0 && windowOpenPrice > 0
       ? ((currentPrice - windowOpenPrice) / windowOpenPrice) * 100
       : null;
-    const volatility = volatilityPerSecond(samples);
-    const ready = samples.length >= config.PRESSURE_SAMPLE_COUNT
+    const volatility = volatilityPerSecond(samples, requiredSamples);
+    const ready = samples.length >= requiredSamples
       && marketImpliedUp > 0 && marketImpliedUp < 1
       && marketImpliedDown > 0 && marketImpliedDown < 1
       && windowOpenPrice > 0
@@ -514,10 +665,11 @@ class PressureForecastBot extends WickBot {
     if (!ready) {
       return {
         ...this.emptyForecast(
-          `Collecting ten fresh one-second samples (${samples.length}/${config.PRESSURE_SAMPLE_COUNT}); no forecast is used yet.`,
+          `Collecting ${requiredSamples} fresh one-second samples (${samples.length}/${requiredSamples}); no forecast is used yet.`,
           'COLLECTING_SAMPLES',
         ),
         sampleCount: samples.length,
+        requiredSamples,
         marketImpliedUp,
         marketImpliedDown,
         btcMoveFromOpenPct,
@@ -605,7 +757,7 @@ class PressureForecastBot extends WickBot {
         : null,
       minRequiredEdgePerShare: config.PRESSURE_MIN_NET_EDGE_PER_SHARE,
       sampleCount: samples.length,
-      requiredSamples: config.PRESSURE_SAMPLE_COUNT,
+      requiredSamples,
       pressureTrendSlope: trend.pressureTrendSlope,
       pressurePersistence: trend.pressurePersistence,
       pressureAcceleration: trend.pressureAcceleration,
@@ -757,6 +909,49 @@ class PressureForecastBot extends WickBot {
         this.recordThresholdOrder(position, now, 'SELL_STOP_LOSS', config.PRESSURE_STOP_LOSS_PAYOUT);
       }
     }
+    for (const position of this.shadowPositions) {
+      if (position.status !== 'OPEN' || Number(position.windowStart) !== Number(start)) continue;
+      const quote = this.freshQuote(position.side, now);
+      if (!quote) continue;
+      if (Number(quote.bestBid) >= config.PRESSURE_TAKE_PROFIT_TRIGGER) {
+        this.finalizeShadowPosition(
+          position,
+          config.PRESSURE_TAKE_PROFIT_PAYOUT,
+          'TAKE_PROFIT_0_99_COUNTS_AS_1',
+          now,
+        );
+      } else if (Number(quote.bestBid) <= config.PRESSURE_STOP_LOSS_TRIGGER) {
+        this.finalizeShadowPosition(
+          position,
+          config.PRESSURE_STOP_LOSS_PAYOUT,
+          'STOP_LOSS_0_01_COUNTS_AS_0',
+          now,
+        );
+      }
+    }
+  }
+
+  finalizeShadowPosition(position, payout, reason, now, resolved = false) {
+    if (!['OPEN', 'PENDING_CLOB_RESULT'].includes(position.status)) return;
+    const grossPayout = Number(payout) * Number(position.shares);
+    position.exitPrice = Number(payout);
+    position.exitProceeds = grossPayout;
+    position.proceeds = grossPayout;
+    position.realizedPnl = grossPayout - Number(position.totalCost || 0);
+    position.status = resolved
+      ? (Number(payout) === 1 ? 'SETTLED_WIN' : 'SETTLED_LOSS')
+      : 'SETTLED_EXIT';
+    position.exitReason = reason;
+    position.settlementBasis = resolved ? 'POLYMARKET_RESOLUTION' : reason;
+    position.closedAt = now;
+    position.settledAt = now;
+    if (resolved) {
+      position.resolvedAt = now;
+      position.resolvedOutcome = Number(payout) === 1
+        ? position.side
+        : (position.side === 'UP' ? 'DOWN' : 'UP');
+    }
+    this.shadowCash += grossPayout;
   }
 
   recordThresholdOrder(position, now, kind, payout) {
@@ -790,54 +985,96 @@ class PressureForecastBot extends WickBot {
       position.exitReason = 'WAITING_FOR_OFFICIAL_RESOLUTION';
       position.settlementBasis = 'POLYMARKET_RESOLUTION_PENDING';
     }
+    const shadowPositions = this.shadowPositions.filter((position) =>
+      position.windowStart === windowStart && position.status === 'OPEN');
+    for (const position of shadowPositions) {
+      position.status = 'PENDING_CLOB_RESULT';
+      position.markStatus = 'PENDING_CLOB_RESULT';
+      position.pendingResolutionAt = now;
+      position.exitReason = 'WAITING_FOR_OFFICIAL_RESOLUTION';
+      position.settlementBasis = 'POLYMARKET_RESOLUTION_PENDING';
+    }
     this.log('PAPER_PRESSURE_WINDOW_ENDED', {
       windowStart,
       pendingResolutionCount: positions.length,
+      shadowPendingResolutionCount: shadowPositions.length,
       triggerReason,
     });
   }
 
+  async closePreviousWindows(currentStart, now) {
+    await super.closePreviousWindows(currentStart, now);
+    const shadowWindows = new Set(this.shadowPositions
+      .filter((position) => position.windowStart < currentStart && position.status === 'OPEN')
+      .map((position) => position.windowStart));
+    for (const windowStart of shadowWindows) {
+      if (!this.completedWindows.has(windowStart)) {
+        await this.completeWindow(windowStart, null, 'WINDOW_ROLLOVER', now);
+      }
+    }
+  }
+
   async resolvePendingPositions(now) {
-    for (const position of this.positions) {
+    const pendingByMarket = new Map();
+    for (const position of [...this.positions, ...this.shadowPositions]) {
       if (position.status !== 'PENDING_CLOB_RESULT'
         || !position.marketId
         || now - Number(this.lastResolutionCheckAt.get(position.id) || 0) < config.RESOLUTION_POLL_MS) continue;
       this.lastResolutionCheckAt.set(position.id, now);
+      if (!pendingByMarket.has(position.marketId)) pendingByMarket.set(position.marketId, []);
+      pendingByMarket.get(position.marketId).push(position);
+    }
+
+    for (const [marketId, positions] of pendingByMarket) {
       try {
-        const market = await this.marketData.getMarket(position.marketId);
-        const payout = resolvedPayout(market, position);
-        if (payout == null) continue;
-        const grossPayout = payout * Number(position.shares);
-        position.resolvedOutcome = payout === 1 ? position.side : (position.side === 'UP' ? 'DOWN' : 'UP');
-        position.exitPrice = payout;
-        position.exitProceeds = grossPayout;
-        position.proceeds = grossPayout;
-        position.realizedPnl = grossPayout - Number(position.totalCost || 0);
-        position.status = payout === 1 ? 'SETTLED_WIN' : 'SETTLED_LOSS';
-        position.exitReason = 'OFFICIAL_POLYMARKET_RESOLUTION';
-        position.settlementBasis = 'POLYMARKET_RESOLUTION';
-        position.resolvedAt = now;
-        position.settledAt = now;
-        position.closedAt = now;
-        this.cash += grossPayout;
-        this.resolutions.unshift({
-          slug: position.slug,
-          outcome: position.resolvedOutcome,
-          status: 'RESOLVED',
-          pnl: position.realizedPnl,
-          resolvedAt: now,
-          marketId: position.marketId,
-        });
-        this.log('PAPER_PRESSURE_RESOLVED', {
-          positionId: position.id,
-          side: position.side,
-          winningSide: position.resolvedOutcome,
-          payout,
-          shares: position.shares,
-          realizedPnl: position.realizedPnl,
-        });
+        const market = await this.marketData.getMarket(marketId);
+        for (const position of positions) {
+          const payout = resolvedPayout(market, position);
+          if (payout == null) continue;
+          if (position.shadowOnly) {
+            this.finalizeShadowPosition(
+              position,
+              payout,
+              'OFFICIAL_POLYMARKET_RESOLUTION',
+              now,
+              true,
+            );
+            continue;
+          }
+          const grossPayout = payout * Number(position.shares);
+          position.resolvedOutcome = payout === 1 ? position.side : (position.side === 'UP' ? 'DOWN' : 'UP');
+          position.exitPrice = payout;
+          position.exitProceeds = grossPayout;
+          position.proceeds = grossPayout;
+          position.realizedPnl = grossPayout - Number(position.totalCost || 0);
+          position.status = payout === 1 ? 'SETTLED_WIN' : 'SETTLED_LOSS';
+          position.exitReason = 'OFFICIAL_POLYMARKET_RESOLUTION';
+          position.settlementBasis = 'POLYMARKET_RESOLUTION';
+          position.resolvedAt = now;
+          position.settledAt = now;
+          position.closedAt = now;
+          this.cash += grossPayout;
+          this.resolutions.unshift({
+            slug: position.slug,
+            outcome: position.resolvedOutcome,
+            status: 'RESOLVED',
+            pnl: position.realizedPnl,
+            resolvedAt: now,
+            marketId: position.marketId,
+          });
+          this.log('PAPER_PRESSURE_RESOLVED', {
+            positionId: position.id,
+            side: position.side,
+            winningSide: position.resolvedOutcome,
+            payout,
+            shares: position.shares,
+            realizedPnl: position.realizedPnl,
+          });
+        }
       } catch (error) {
-        position.resolutionError = error.message || String(error);
+        for (const position of positions) {
+          position.resolutionError = error.message || String(error);
+        }
       }
     }
   }
@@ -936,6 +1173,18 @@ class PressureForecastBot extends WickBot {
         start: windowStart,
         end: windowEnd,
       } : null,
+      shadowComparison: {
+        mode: 'SHADOW_ONLY',
+        updatedAt: now,
+        activeSampleCount: this.shadowSamplesRequired,
+        baseSampleCount: config.PRESSURE_SAMPLE_COUNT,
+        minimumSampleCount: config.PRESSURE_SHADOW_MIN_SAMPLE_COUNT,
+        stepMs: config.PRESSURE_SHADOW_STEP_MS,
+        currentForecast: this.shadowForecast,
+        baseline: summarizePortfolio(this.positions, this.cash, this.capital),
+        adaptive: summarizePortfolio(this.shadowPositions, this.shadowCash, this.capital),
+        assumptions: 'Separate paper cash; same 100-share entry filters, 15-second cooldown, visible ask sweep, taker fees, $0.99/$0.01 exits, and official resolution.',
+      },
       quotes,
       account: {
         ...state.account,
@@ -973,6 +1222,8 @@ PressureForecastBot._test = {
   normalCdf,
   pressureTrend,
   volatilityPerSecond,
+  adaptiveShadowSampleCount,
+  summarizePortfolio,
   bookPressure,
   sweepBook,
   resolvedPayout,
