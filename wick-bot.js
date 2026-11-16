@@ -16,6 +16,7 @@ function quoteFromBook(book,updatedAt){
   const bestBid=bid?.price??null,bestAsk=ask?.price??null;
   return {status:bid||ask?'LIVE':'MISSING',bestBid,bidSize:bid?.size??0,
     bestAsk,askSize:ask?.size??0,mid:bestBid!=null&&bestAsk!=null?(bestBid+bestAsk)/2:null,
+    bidLevels:bids.map(level=>({...level})),askLevels:asks.map(level=>({...level})),
     updatedAt,stale:false,error:null};
 }
 function simulateAtBestAsk(asks,qty,maxPrice,minPrice=cfg.MIN_ENTRY_ASK){

@@ -1,61 +1,21 @@
-# Polymarket BTC 5m/15m Bot — Strategy and Live-Trading Handoff
+# Polymarket BTC 5-minute pressure forecast — paper demo
 
-This README documents the standalone real-order bot. Older descriptions of paper candle strategies, RSI, MACD, trendlines, and probability models are obsolete for this app.
+The active production entrypoint is now a paper-only BTC 5-minute pressure-forecast demo. It loads `pressure-forecast-bot.js` and does not import or start the real-order bot or Polymarket trading adapter. The detailed live-order sections later in this file are dormant reference material and are not part of the active runtime.
 
 This document does not authorize a real order or a production deployment. Never put a private key or other secret in source control, this README, prompts, logs, or the dashboard.
 
 ## 1. Scope
 
-- Trade Polymarket Bitcoin Up/Down markets for **BTC 5-minute windows only**.
-- Do not trade ETH or other assets.
-- Discover each market and its UP/DOWN token IDs from Polymarket market data. Use the Polymarket CLOB order book for outcome prices.
-- The running app is live-order only. Paper fills and paper balances are not part of this service.
-- The live signal uses the two Polymarket outcome prices plus the immediately previous closed BTC 5-minute candle from the Polymarket RTDS Chainlink BTC/USD feed. It does **not** use RSI, MACD, trendlines, a probability model, or an ML classifier.
+- Monitor only BTC 5-minute UP/DOWN markets.
+- Use Binance BTCUSDT aggregate trades and Polymarket CLOB order books.
+- The running app is demo-only. No real order adapters are loaded at startup, regardless of the `LIVE_TRADING` variable.
+- The new signal is an experimental, uncalibrated estimate; it does not claim validated predictive accuracy.
 
 ## 2. Current strategy
 
-### Price inputs
+The full active rules are in `DEMO_RUNBOOK.md`. In short, the strategy waits for ten one-second Binance/Polymarket pressure samples, estimates a resolution probability from price, volatility, Polymarket odds, and pressure, and buys the under-$0.50 lagging side only when expected net edge clears $0.10/share. It requests 100 shares, caps ask sweeps at $0.90, and permits a same-size opposite-side flip only when the current position can be sold profitably after taker fees. The $0.99/$0.01 terminal rules remain; otherwise positions wait for confirmed original-market resolution.
 
-For the current BTC window, obtain valid best bid and best ask quotes for UP and DOWN when available. Calculate each midpoint as:
-
-`midpoint = (best bid + best ask) / 2`
-
-Each quote used for a trigger must be live, valid, and no more than **5 seconds old**. Either outcome can trigger independently; a stale or missing quote on the other side does not cancel a qualifying fresh tick. The immediately previous five-minute candle must be available from five contiguous Chainlink BTC/USD minute bars.
-
-### Entry condition
-
-For each BTC 5-minute window that starts after the process starts:
-
-1. At window open, use the previous closed candle color to submit one 10-share limit BUY at $0.30: green selects UP, red selects DOWN, and doji skips this order. The opening order has no midpoint or price trigger.
-2. From window open until window end, watch fresh UP and DOWN midpoint quotes for the separate trigger ladder.
-3. A green previous candle permits UP trigger-ladder entries only; a red previous candle permits DOWN only. A doji leaves the trigger ladder unrestricted.
-4. The first fresh midpoint at or above **$0.70** on a permitted side triggers the ladder once. If both qualify on the same check and the candle is a doji, choose the higher midpoint; if equal, choose UP.
-5. Latch and persist the candle direction, selected side, and triggering price so later quote changes or account-data delays do not change the trigger signal. An already-open window is skipped unless it has a persisted qualifying entry intent.
-
-The bot classifies a candle as a doji when its body is no more than 10% of its full high-to-low range, using the existing candle-color rule.
-
-If the previous candle cannot be reconstructed from all five closed Chainlink minute bars, the bot waits and does not enter on that window until the candle data is available. This avoids silently bypassing the added directional filter.
-
-Read the market's Gamma `version` before choosing its outcome asset IDs: use `clobTokenIds` for `v1` and `positionIds` for `v2`, aligned with the decoded `outcomes` array. Do not substitute one ID type for the other.
-
-### Orders after a trigger
-
-At the $0.70 trigger, submit two resting limit BUY orders on the **selected side only**:
-
-| Outcome | Buy limit | Live shares | Exit |
-|---|---:|---:|---:|
-| Selected side | $0.40 | 10 | Hold to resolution |
-| Selected side | $0.45 | 20 | Hold to resolution |
-
-A separate $0.30 window-open order buys 10 shares on the candle-selected side. If all three orders fill, total nominal entry notional is **$16** per window. Do not replace orders or re-enter after an order set has been submitted.
-
-- A first partial fill completes that buy rung: cancel its unfilled remainder, confirm final matched shares, and manage only the confirmed quantity.
-- Do not submit strategy take-profit or stop-loss sell orders.
-- Cancel unfilled BUY orders at window end. Hold confirmed shares until the original market is confirmed closed and resolved; map payout from that market's exact outcome token.
-
-### Dashboard mode
-
-The dashboard reports live account and exchange-order state only. It does not simulate fills or display a separate paper ledger.
+The dashboard shows the experimental forecast and explicitly labels it uncalibrated. Paper cash and history reset on process restart.
 
 ## 3. Real order lifecycle
 

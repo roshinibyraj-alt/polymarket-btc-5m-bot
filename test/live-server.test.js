@@ -39,7 +39,7 @@ test('live server exposes the bot state and health status', async t => {
   assert.equal((await healthResponse.json()).ok, true);
 });
 
-test('live server reports unready production account and serves the live dashboard', async t => {
+test('legacy live server serves the current pressure dashboard without implying active real trading', async t => {
   const server = startLiveServer(mockBot('error'), 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -52,13 +52,11 @@ test('live server reports unready production account and serves the live dashboa
   const page = await fetch(base);
   assert.equal(page.status, 200);
   const html = await page.text();
-  assert.match(html, /BTC Limit Ladder Bot/);
-  assert.match(html, /BTC 5m/);
+  assert.match(html, /Five Minute \| BTC Paper Monitor/);
+  assert.match(html, /Real-order modules/);
+  assert.match(html, /Uncalibrated/);
   assert.doesNotMatch(html, /15m/i);
-  assert.match(html, /currentWindowOrders/);
-  assert.doesNotMatch(html, /renderOrders\(state\.orders\|\|\[\]\)/);
-  assert.match(html, /At window open/i);
-  assert.match(html, /There are no strategy TP\/SL sells/i);
-  assert.match(html, /midpoint at or above \$0\.70/i);
-  assert.match(html, /10 shares at \$0\.40 and 20 shares at \$0\.45/i);
+  assert.match(html, /Paper only/i);
+  assert.match(html, /sampleCount/);
+  assert.match(html, /expected net edge/i);
 });

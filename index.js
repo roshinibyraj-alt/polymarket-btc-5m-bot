@@ -1,32 +1,26 @@
 'use strict';
 
-const LiveBot = require('./live-bot');
-const startLiveServer = require('./live-server');
+const PressureForecastBot = require('./pressure-forecast-bot');
+const startServer = require('./server');
 const marketData = require('./wick-market-data');
-const PolymarketTrader = require('./polymarket-trader');
-const { JsonStateStore } = require('./state-store');
-const { feed: chainlinkFeed } = require('./chainlink-feed');
+const BinanceTickFeed = require('./binance-tick-feed');
 
 function startApplication({
   env = process.env,
   port = Number(env.PORT || 8080),
-  trader = null,
+  bot: suppliedBot = null,
   dataProvider = marketData,
+  priceFeed = null,
 } = {}) {
-  const tradingEnabled = String(env.LIVE_TRADING || '').toLowerCase() === 'true';
-  const flowTestEnabled = String(env.LIVE_ORDER_FLOW_TEST || '').toLowerCase() === 'true';
-  const exchange = trader || (tradingEnabled && env.PRIVATE_KEY ? new PolymarketTrader(env.PRIVATE_KEY) : null);
-  const stateStore = env.BOT_STATE_DIR ? new JsonStateStore(env.BOT_STATE_DIR) : null;
-  const bot = new LiveBot({
-    trader: exchange,
+  if (String(env.LIVE_TRADING || '').toLowerCase() === 'true') {
+    console.warn('[safety] LIVE_TRADING=true is ignored; this entrypoint is hardwired to paper mode.');
+  }
+  const feed = priceFeed || new BinanceTickFeed();
+  const bot = suppliedBot || new PressureForecastBot({
     marketData: dataProvider,
-    priceFeed: chainlinkFeed,
-    stateStore,
-    requirePersistentState: tradingEnabled,
-    tradingEnabled,
-    flowTestEnabled,
+    priceFeed: feed,
   });
-  const server = startLiveServer(bot, port);
+  const server = startServer(bot, port);
   bot.start();
 
   const shutdown = () => {

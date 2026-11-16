@@ -3,83 +3,157 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#08111f">
-  <title>BTC Limit Ladder Bot</title>
+  <meta name="theme-color" content="#f2f5f2">
+  <title>Five Minute | BTC Paper Monitor</title>
   <style>
-    :root{color-scheme:dark;--bg:#08111f;--panel:#101d30;--panel2:#14243a;--line:#243650;--text:#edf4ff;--muted:#8fa3bd;--cyan:#67d8ff;--green:#4ee19b;--red:#ff778b;--amber:#ffd071}
+    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+    :root{
+      color-scheme:light;
+      --bg:#edf2ef;--paper:#f8faf7;--panel:#fffefa;--ink:#172b2b;--muted:#667978;
+      --line:#d9e2dd;--teal:#087f75;--teal-soft:#e1f2ed;--coral:#bd5548;--coral-soft:#f8e9e5;
+      --gold:#b27b24;--gold-soft:#f7efd9;--navy:#173b45;--shadow:0 8px 24px rgba(23,59,69,.055);
+      --display:"Space Grotesk",ui-sans-serif,system-ui,sans-serif;--body:"DM Sans",ui-sans-serif,system-ui,sans-serif;--mono:"IBM Plex Mono",ui-monospace,monospace;
+    }
     *{box-sizing:border-box}
-    body{margin:0;background:radial-gradient(ellipse at 14% -8%,#1a3657 0,transparent 40%),var(--bg);color:var(--text);font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
-    main{max-width:1240px;margin:auto;padding:24px}
-    header{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:20px}
-    h1{margin:0;font-size:25px;letter-spacing:-.035em}.subtitle{margin-top:5px;color:var(--muted)}
-    .badge{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:999px;padding:8px 12px;color:var(--amber);font-size:11px;font-weight:850;letter-spacing:.1em;text-transform:uppercase;white-space:nowrap}
-    .dot{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 14px currentColor}
-    .badge.good{color:var(--green);border-color:#24634b}.badge.bad{color:var(--red);border-color:#663343}
-    .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
-    .panel,.stat,.market{background:linear-gradient(150deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:16px}
-    .stat{padding:15px;min-height:88px}.label{color:var(--muted);font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.value{font-size:22px;font-weight:850;letter-spacing:-.035em;margin-top:5px;font-variant-numeric:tabular-nums}.note{display:block;color:var(--muted);font-size:11px;margin-top:3px}
-    .panel{padding:17px;margin-top:14px}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.panel h2{font-size:15px;margin:0}.hint{color:var(--muted);font-size:11px}
-    .markets{display:grid;grid-template-columns:1fr;gap:12px}
-    .market{padding:16px;min-width:0;border-top:3px solid var(--cyan)}
-    .market-title{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.market-title h3{font-size:15px;margin:0}.slug{color:var(--muted);font-size:11px;overflow-wrap:anywhere;margin-top:3px}
-    .countdown{font-variant-numeric:tabular-nums;color:var(--cyan);font-weight:850;font-size:13px;white-space:nowrap}
-    .prices{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:15px 0}
-    .price-box{background:#0b1728;border:1px solid var(--line);border-radius:12px;padding:13px}
-    .price-head{display:flex;justify-content:space-between;align-items:center}
-    .side{font-size:11px;font-weight:900;letter-spacing:.12em}.up{color:var(--green)}.down{color:var(--red)}
-    .mid{font-size:30px;font-weight:900;letter-spacing:-.05em;margin:4px 0;font-variant-numeric:tabular-nums}
-    .quote-detail{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
-    .rows{border-top:1px solid var(--line);margin-top:8px}.row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #1e3049;font-size:12px}.row:last-child{border-bottom:0}.row span{color:var(--muted)}.row strong{text-align:right}
-    .status-text{font-weight:800}.good{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}
-    .scroll{overflow:auto}table{width:100%;border-collapse:collapse;min-width:760px}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid var(--line);font-size:12px;white-space:nowrap}th{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.09em}td.muted{color:var(--muted)}.empty{padding:18px;color:var(--muted);text-align:center}
-    .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:3px 8px;font-size:10px;font-weight:800;color:var(--muted)}.pill.live{color:var(--green);border-color:#24634b}.pill.fail{color:var(--red);border-color:#663343}.pill.wait{color:var(--amber);border-color:#67512a}
-    .events{display:grid;gap:0}.event{display:grid;grid-template-columns:145px 90px 1fr;gap:12px;padding:9px 0;border-bottom:1px solid var(--line);font-size:12px}.event:last-child{border:0}.event time,.event-type{color:var(--muted)}.event-type{font-weight:850;letter-spacing:.06em}
-    .foot{color:var(--muted);font-size:11px;margin:14px 2px 0;line-height:1.6}.error{color:var(--red);font-size:12px;margin-top:10px}
-    @media(max-width:760px){main{padding:14px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.markets{grid-template-columns:1fr}header{align-items:flex-start;flex-direction:column}h1{font-size:21px}.event{grid-template-columns:1fr;gap:2px}.mid{font-size:27px}}
-    @media(max-width:420px){.grid{grid-template-columns:1fr 1fr}.stat{padding:12px}.value{font-size:19px}.market{padding:12px}.prices{gap:7px}.price-box{padding:10px}.countdown{font-size:12px}}
+    body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 var(--body);font-feature-settings:"ss01" on}
+    body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.16;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.12'/%3E%3C/svg%3E");z-index:5}
+    main{max-width:1280px;margin:0 auto;padding:28px 30px 38px}
+    header{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:22px}
+    .brand{display:flex;align-items:center;gap:13px}.mark{display:grid;place-items:center;width:42px;height:42px;background:var(--navy);color:#e8f5ed;border-radius:13px;font:700 15px var(--mono);letter-spacing:-.08em;box-shadow:var(--shadow)}
+    h1{font:700 25px/1.1 var(--display);letter-spacing:-.055em;margin:0}.subtitle{color:var(--muted);font-size:12px;margin-top:5px}
+    .header-right{display:flex;align-items:center;gap:10px}.refresh-label{font:11px var(--mono);color:var(--muted)}
+    .badge{display:inline-flex;align-items:center;gap:8px;border:1px solid #d8c797;background:var(--gold-soft);color:#79571c;border-radius:999px;padding:8px 12px;font-size:10px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;white-space:nowrap}
+    .dot{width:7px;height:7px;border-radius:50%;background:currentColor;animation:pulse 2.2s infinite}
+    @keyframes pulse{50%{opacity:.38;transform:scale(.78)}}
+    .hero{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:20px;align-items:stretch;margin-bottom:14px}
+    .intro{padding:18px 20px;background:var(--navy);color:#f5f7f0;border-radius:18px;position:relative;overflow:hidden;box-shadow:var(--shadow)}
+    .intro:after{content:"";position:absolute;width:210px;height:210px;border:1px solid rgba(183,222,204,.18);border-radius:50%;right:-45px;top:-100px;box-shadow:0 0 0 23px rgba(183,222,204,.035),0 0 0 48px rgba(183,222,204,.03)}
+    .eyebrow{font:600 10px var(--mono);text-transform:uppercase;letter-spacing:.14em;color:#a7d4c5}
+    .intro h2{font:600 clamp(20px,2.4vw,28px)/1.12 var(--display);letter-spacing:-.045em;margin:8px 0 5px;max-width:700px}
+    .intro p{margin:0;color:#c2d4ce;font-size:12px;max-width:690px}
+    .notice{display:flex;flex-direction:column;justify-content:center;border:1px solid #e2d4ad;background:var(--gold-soft);border-radius:18px;padding:15px 17px}
+    .notice strong{font:700 12px var(--display);color:#735318;text-transform:uppercase;letter-spacing:.08em}
+    .notice span{font-size:11px;color:#745f37;margin-top:5px}
+    .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+    .stat,.panel,.market{background:var(--panel);border:1px solid var(--line);border-radius:15px;box-shadow:var(--shadow)}
+    .stat{padding:13px 15px;min-height:84px}.label{color:var(--muted);font:700 9px var(--mono);letter-spacing:.11em;text-transform:uppercase}
+    .value{font:700 21px/1.15 var(--display);letter-spacing:-.04em;margin-top:7px;font-variant-numeric:tabular-nums}
+    .note{display:block;color:var(--muted);font-size:10px;margin-top:4px;line-height:1.35}
+    .panel{padding:17px;margin-top:13px}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:13px}
+    .panel h2{font:700 14px var(--display);letter-spacing:-.02em;margin:0}.hint{color:var(--muted);font-size:10px}
+    .market{padding:17px;border-top:3px solid var(--teal);min-width:0}
+    .market-title{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.market-title h3{font:700 15px var(--display);margin:0}
+    .slug{color:var(--muted);font:10px var(--mono);overflow-wrap:anywhere;margin-top:3px}
+    .countdown{font:700 15px var(--mono);color:var(--navy);white-space:nowrap;background:#edf4f0;border-radius:9px;padding:5px 8px}
+    .prices{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0}
+    .price-box{background:#f3f7f4;border:1px solid var(--line);border-radius:12px;padding:12px;min-width:0}
+    .price-head{display:flex;justify-content:space-between;align-items:center;gap:6px}.side{font:700 10px var(--mono);letter-spacing:.1em}.up{color:var(--teal)}.down{color:var(--coral)}
+    .mid{font:700 28px/1 var(--display);letter-spacing:-.06em;margin:9px 0 5px;font-variant-numeric:tabular-nums}
+    .quote-detail{font:10px var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
+    .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:3px 7px;font:700 9px var(--mono);color:var(--muted);white-space:nowrap}
+    .pill.live{color:var(--teal);border-color:#a4d0c2;background:#e7f4ef}.pill.fail{color:var(--coral);border-color:#e7b8af;background:#fbefeb}.pill.wait{color:#87631e;border-color:#e5d3a7;background:#faf4e4}
+    .forecast{margin-top:15px;padding:15px;background:#f4f7f4;border:1px solid var(--line);border-radius:14px}
+    .forecast-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px}
+    .forecast-title{font:700 13px var(--display)}.forecast-caption{font-size:10px;color:var(--muted);margin-top:2px}
+    .uncal{padding:5px 8px;border-radius:999px;background:var(--gold-soft);color:#79571c;font:700 9px var(--mono);letter-spacing:.06em;white-space:nowrap}
+    .estimate-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .estimate{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:10px 11px}
+    .estimate-top{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+    .estimate .prob{font:700 20px var(--display);font-variant-numeric:tabular-nums}
+    .estimate .implied{font:10px var(--mono);color:var(--muted)}
+    .bar{height:4px;background:#e4eae6;border-radius:9px;overflow:hidden;margin:7px 0}
+    .bar i{display:block;height:100%;border-radius:9px;background:var(--teal);transition:width .35s ease}.estimate.downside .bar i{background:var(--coral)}
+    .estimate-foot{display:flex;justify-content:space-between;gap:8px;font:9px var(--mono);color:var(--muted)}
+    .metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:9px}
+    .metric{border-top:1px solid var(--line);padding:9px 2px 0;min-width:0}.metric span{display:block;color:var(--muted);font:9px var(--mono);text-transform:uppercase;letter-spacing:.05em}.metric strong{display:block;margin-top:4px;font:600 13px var(--mono);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+    .rows{border-top:1px solid var(--line);margin-top:13px}.row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #e8eeea;font-size:11px}.row:last-child{border-bottom:0}.row span{color:var(--muted)}.row strong{text-align:right;overflow-wrap:anywhere;max-width:65%}
+    .status-text{font-weight:700}.good{color:var(--teal)}.bad{color:var(--coral)}.warn{color:#9a6c1c}
+    .candidates{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:10px}
+    .candidate{border:1px solid var(--line);border-radius:11px;padding:11px;background:#fffefa}.candidate.up-card{border-left:3px solid var(--teal)}.candidate.down-card{border-left:3px solid var(--coral)}
+    .candidate-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+    .candidate-title{font:700 10px var(--mono);letter-spacing:.08em}
+    .candidate .row{font-size:10px;padding:5px 0}.candidate .row strong{font:600 10px var(--mono)}
+    .scroll{overflow:auto;overscroll-behavior-x:contain}table{width:100%;border-collapse:collapse;min-width:760px}th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);font-size:10px;white-space:nowrap}th{color:var(--muted);font:700 9px var(--mono);text-transform:uppercase;letter-spacing:.08em}td.muted{color:var(--muted)}
+    .empty{padding:17px;color:var(--muted);text-align:center;font-size:11px;background:#f7f9f6;border-radius:10px}
+    .events{display:grid;gap:0}.event{display:grid;grid-template-columns:145px 105px 1fr;gap:12px;padding:9px 0;border-bottom:1px solid var(--line);font-size:10px}.event:last-child{border:0}.event time,.event-type{color:var(--muted)}.event-type{font:700 9px var(--mono);letter-spacing:.06em}
+    .foot{color:var(--muted);font-size:10px;margin:14px 2px 0;line-height:1.65;max-width:940px}.error{color:var(--coral);font:11px var(--mono);margin-top:10px}
+    [hidden]{display:none!important}
+    @media(max-width:800px){main{padding:20px}.hero{grid-template-columns:1fr 220px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:600px){main{padding:14px 12px 25px}header{align-items:flex-start;margin-bottom:14px}.brand{align-items:flex-start;gap:10px}.mark{width:36px;height:36px;border-radius:11px;font-size:13px}h1{font-size:21px}.subtitle{font-size:10px;max-width:225px}.header-right{align-items:flex-end;flex-direction:column-reverse;gap:5px}.refresh-label{font-size:9px}.badge{font-size:9px;padding:7px 9px}
+      .hero{grid-template-columns:1fr;gap:8px}.intro{padding:15px 15px 16px;border-radius:15px}.intro h2{font-size:22px}.intro p{font-size:11px;max-width:90%}.notice{padding:10px 13px;border-radius:13px}.notice span{font-size:10px}
+      .grid{gap:7px}.stat{min-height:73px;padding:10px 11px;border-radius:12px}.value{font-size:18px;margin-top:5px}.label{font-size:8px}.note{font-size:9px}
+      .panel{padding:13px;margin-top:10px;border-radius:13px}.panel-head{align-items:flex-start;margin-bottom:10px}.panel h2{font-size:13px}.hint{font-size:9px;text-align:right}
+      .market{padding:12px;border-radius:13px}.market-title h3{font-size:14px}.slug{max-width:245px;font-size:9px}.countdown{font-size:13px;padding:5px 7px}
+      .prices{gap:7px;margin:11px 0}.price-box{padding:10px 9px;border-radius:10px}.mid{font-size:25px;margin:8px 0 4px}.quote-detail{font-size:9px}
+      .forecast{padding:11px;margin-top:12px}.forecast-head{margin-bottom:9px}.forecast-title{font-size:12px}.forecast-caption{font-size:9px}.uncal{font-size:8px;padding:5px 6px}
+      .estimate-grid{gap:6px}.estimate{padding:9px;border-radius:9px}.estimate .prob{font-size:18px}.estimate .implied{font-size:9px}.estimate-foot{font-size:8px}
+      .metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px 10px}.metric{padding-top:7px}.metric span{font-size:8px}.metric strong{font-size:12px}
+      .candidates{gap:6px}.candidate{padding:8px}.candidate-title{font-size:9px}.candidate .row{font-size:9px}.candidate .row strong{font-size:9px}
+      .row{font-size:10px;padding:7px 0}.event{grid-template-columns:1fr;gap:1px;padding:8px 0}.event time{font-size:9px}.event-type{font-size:9px}
+    }
+    @media(max-width:360px){.grid{grid-template-columns:1fr 1fr}.estimate-foot{flex-direction:column;gap:2px}.candidates{grid-template-columns:1fr}}
+    @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
   </style>
 </head>
 <body>
 <main>
   <header>
-    <div><h1>BTC Limit Ladder Bot</h1><div class="subtitle">Live order execution · BTC 5-minute markets only</div></div>
-    <div class="badge" id="statusBadge"><i class="dot"></i><span>Connecting</span></div>
+    <div class="brand"><div class="mark" aria-hidden="true">5m</div><div><h1>BTC pressure monitor</h1><div class="subtitle">Five-minute paper strategy · Binance pressure × Polymarket odds</div></div></div>
+    <div class="header-right"><span class="refresh-label" id="quoteAge">Connecting to live state…</span><div class="badge"><i class="dot"></i><span>Paper only</span></div></div>
   </header>
 
-  <section class="grid" aria-label="Execution status">
-    <div class="stat"><div class="label">Live orders</div><div class="value" id="tradingState">—</div><span class="note" id="modeNote">Checking configuration</span></div>
-    <div class="stat"><div class="label">Live order access</div><div class="value" id="accountReady">—</div><span class="note" id="accountNote">Waiting for Polymarket authentication</span></div>
-    <div class="stat"><div class="label">USDC collateral</div><div class="value" id="collateral">—</div><span class="note">Most recent complete account snapshot</span></div>
-    <div class="stat"><div class="label">Equity</div><div class="value" id="equity">—</div><span class="note" id="snapshotTime">Not yet synchronized</span></div>
+  <section class="hero" aria-label="Strategy status">
+    <div class="intro"><div class="eyebrow">Experimental forecast · BTC 5-minute market</div><h2>Pressure first. Price as the hurdle.</h2><p>Compare a transparent pressure-based estimate with the market-implied probability, then paper only when the expected net edge clears its required minimum.</p></div>
+    <div class="notice"><strong>Uncalibrated · not a probability claim</strong><span>Estimates are experimental and uncalibrated. Paper actions only. Real-order modules are inactive.</span></div>
+  </section>
+
+  <section class="grid" aria-label="Paper strategy and account snapshot">
+    <div class="stat"><div class="label">Strategy mode</div><div class="value good" id="tradingState">PAPER</div><span class="note" id="modeNote">No real orders are enabled</span></div>
+    <div class="stat"><div class="label">Real-order modules</div><div class="value good" id="accountReady">INACTIVE</div><span class="note" id="accountNote">Not loaded by the demo runner</span></div>
+    <div class="stat"><div class="label">Paper cash</div><div class="value" id="collateral">—</div><span class="note">Available for simulated positions</span></div>
+    <div class="stat"><div class="label">Paper equity</div><div class="value" id="equity">—</div><span class="note" id="snapshotTime">Demo account value</span></div>
   </section>
 
   <section class="panel" id="flowTestPanel" hidden>
-    <div class="panel-head"><h2>Live order-flow smoke test</h2><span class="pill wait" id="flowTestStatus">Armed</span></div>
-    <div class="hint" id="flowTestNote">Waiting for test status…</div>
+    <div class="panel-head"><h2>Real-order module status</h2><span class="pill wait" id="flowTestStatus">Inactive</span></div>
+    <div class="hint" id="flowTestNote">Real-order modules are inactive.</div>
   </section>
 
   <section class="panel">
-    <div class="panel-head"><h2>Current BTC windows</h2><span class="hint" id="quoteAge">Quotes refresh continuously</span></div>
-    <div class="markets" id="markets"><div class="empty">Waiting for live BTC market data…</div></div>
+    <div class="panel-head"><h2>Live BTC market &amp; pressure read</h2><span class="hint" id="marketStatus">Waiting for market data</span></div>
+    <div id="markets"><div class="empty">Waiting for BTC market data…</div></div>
   </section>
 
   <section class="panel">
-    <div class="panel-head"><h2>Orders in current BTC 5m window</h2><span class="hint" id="orderCount">0 current-window orders</span></div>
-    <div class="scroll" id="orders"><div class="empty">No orders in this 5m window.</div></div>
+    <div class="panel-head"><h2>Paper actions &amp; orders</h2><span class="hint" id="orderCount">0 current-window orders</span></div>
+    <div class="scroll" id="orders"><div class="empty">No paper orders in this 5m window.</div></div>
   </section>
 
   <section class="panel">
-    <div class="panel-head"><h2>Recent bot activity</h2><span class="hint">Newest first</span></div>
-    <div class="events" id="events"><div class="empty">Waiting for bot activity…</div></div>
+    <div class="panel-head"><h2>Open positions</h2><span class="hint" id="positionCount">Account position snapshot</span></div>
+    <div class="scroll" id="positions"><div class="empty">No position data in the latest state.</div></div>
   </section>
 
-  <p class="foot">BTC 5-minute only. At window open, a green previous candle selects UP and a red candle selects DOWN for one 10-share limit BUY at $0.30; a doji skips this opening order. Separately, the first fresh midpoint at or above $0.70 on a candle-permitted side triggers limit BUYS on that side: 10 shares at $0.40 and 20 shares at $0.45. The opening order uses no price trigger. There are no strategy TP/SL sells: confirmed shares are held for original-market resolution, and unfilled buys are canceled at window end.</p>
-  <div class="error" id="error"></div>
+  <section class="panel">
+    <div class="panel-head"><h2>Window resolutions</h2><span class="hint">Resolved outcomes when available</span></div>
+    <div class="scroll" id="resolutions"><div class="empty">No resolution records in the latest state.</div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Recent strategy activity</h2><span class="hint">Newest first</span></div>
+    <div class="events" id="events"><div class="empty">Waiting for activity…</div></div>
+  </section>
+
+  <p class="foot">Paper strategy parameters: 100-share initial size; opposite-side flips are allowed only when profitable. Paper BUY ask cap $0.90 · paper SELL bid floor $0.01 · take-profit $0.99 counts as $1 and stop-loss $0.01 counts as $0. The demo runner does not load real-order modules. Forecasts are uncalibrated experimental estimates; no predictive accuracy or backtest performance is implied.</p>
+  <div class="error" id="error" role="status"></div>
 </main>
 <script>
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const price = value => value == null || !Number.isFinite(Number(value)) ? '—' : '$' + Number(value).toFixed(3);
-  const money = value => value == null || !Number.isFinite(Number(value)) ? '—' : '$' + Number(value).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+  const num = value => value == null || !Number.isFinite(Number(value)) ? null : Number(value);
+  const money = value => num(value) == null ? '—' : '$' + Number(value).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+  const price = value => num(value) == null ? '—' : '$' + Number(value).toFixed(3);
+  const pct = value => num(value) == null ? '—' : `${Number(value).toFixed(2)}%`;
+  const prob = value => num(value) == null ? '—' : `${(Number(value) * 100).toFixed(1)}%`;
   const time = value => value ? new Date(value).toLocaleTimeString() : '—';
   const remaining = end => {
     const secs = Math.max(0, Math.floor((Number(end || 0) - Date.now()) / 1000));
@@ -87,56 +161,89 @@
   };
   const statusClass = status => {
     const s = String(status || '').toLowerCase();
-    if (s === 'ready' || s === 'live' || s === 'matched' || s === 'filled') return 'good';
+    if (s === 'ready' || s === 'live' || s === 'matched' || s === 'filled' || s === 'qualifies') return 'good';
     if (s.includes('error') || s.includes('halt') || s.includes('blocked') || s.includes('reject')) return 'bad';
     return 'warn';
   };
+  const escStatus = v => esc(String(v ?? '—').replaceAll('_',' '));
+  function renderCandidate(side, item={}) {
+    const up = side === 'UP';
+    const cls = up ? 'up-card' : 'down-card';
+    const p = num(item.estimatedProbability);
+    const edge = item.expectedNetEdgePerShare;
+    return `<div class="candidate ${cls}">
+      <div class="candidate-head"><span class="candidate-title ${up?'up':'down'}">${side} PAPER CANDIDATE</span><span class="pill ${item.qualifies?'live':'wait'}">${item.qualifies?'QUALIFIES':'NO ACTION'}</span></div>
+      <div class="row"><span>Estimated probability</span><strong>${prob(p)}</strong></div>
+      <div class="row"><span>Best ask / all-in</span><strong>${price(item.bestAsk)} / ${price(item.allInCostPerShare)}</strong></div>
+      <div class="row"><span>Expected net edge / share</span><strong class="${num(edge)>0?'good':''}">${price(edge)}</strong></div>
+      <div class="row"><span>Candidate note</span><strong>${esc(item.reason||'—')}</strong></div>
+    </div>`;
+  }
   function renderMarket(state) {
     const q = state?.quotes || {};
-    const sig = state?.signal || {};
-    const opening = state?.windowOpenEntry || {};
+    const f = state?.forecast || state?.marketForecast;
     const title = state?.title || state?.slug || 'Waiting for market discovery';
     const orders = (state?.orders || []).map(o => `${o.side} ${price(o.price)} ${o.status}`).join(' · ') || 'None';
-    const openingStatus = opening.side
-      ? `${opening.side} · ${price(opening.price ?? 0.30)} × ${Number(opening.shares ?? 10)} · ${String(opening.status||'pending').replaceAll('_',' ')}`
-      : String(opening.status||'waiting for candle').replaceAll('_',' ');
     const quoteBox = (side, cls) => {
       const v = q[side] || {};
       const live = v.status === 'LIVE' && !v.stale;
       return `<div class="price-box"><div class="price-head"><span class="side ${cls}">${side}</span><span class="pill ${live?'live':'wait'}">${esc(live?'LIVE':v.status||'WAITING')}${v.stale?' · STALE':''}</span></div><div class="mid ${cls}">${price(v.mid)}</div><div class="quote-detail">Bid ${price(v.bestBid)} · Ask ${price(v.bestAsk)}</div></div>`;
     };
+    const forecast = f ? `<section class="forecast" aria-label="Uncalibrated forecast">
+      <div class="forecast-head"><div><div class="forecast-title">Pressure estimate vs. market odds</div><div class="forecast-caption">${esc(f.reason || f.status || 'Experimental estimate')} · ${Number(f.sampleCount||0)} / ${Number(f.requiredSamples||10)} samples</div></div><span class="uncal">UNCALIBRATED</span></div>
+      <div class="estimate-grid">
+        <div class="estimate"><div class="estimate-top"><span class="side up">EST. UP</span><strong class="prob up">${prob(f.estimateUp)}</strong></div><div class="bar"><i style="width:${Math.max(0,Math.min(100,(num(f.estimateUp)??0)*100))}%"></i></div><div class="estimate-foot"><span>Market ${prob(f.marketImpliedUp)}</span><span>Lagging ${esc(f.laggingSide||'—')}</span></div></div>
+        <div class="estimate downside"><div class="estimate-top"><span class="side down">EST. DOWN</span><strong class="prob down">${prob(f.estimateDown)}</strong></div><div class="bar"><i style="width:${Math.max(0,Math.min(100,(num(f.estimateDown)??0)*100))}%"></i></div><div class="estimate-foot"><span>Market ${prob(f.marketImpliedDown)}</span><span>Selected ${esc(f.selectedSide||'—')}</span></div></div>
+      </div>
+      <div class="metrics">
+        <div class="metric"><span>Net edge / share</span><strong>${price(f.expectedNetEdgePerShare)}</strong></div>
+        <div class="metric"><span>Required edge</span><strong>${price(f.minRequiredEdgePerShare)}</strong></div>
+        <div class="metric"><span>BTC from open</span><strong>${pct(f.btcMoveFromOpenPct)}</strong></div>
+        <div class="metric"><span>Time left</span><strong>${num(f.secondsRemaining)==null?'—':`${Math.max(0,Math.floor(Number(f.secondsRemaining)))}s`}</strong></div>
+        <div class="metric"><span>Pressure slope</span><strong>${num(f.pressureTrendSlope)?.toFixed(4) ?? '—'}</strong></div>
+        <div class="metric"><span>Persistence</span><strong>${num(f.pressurePersistence)?.toFixed(3) ?? '—'}</strong></div>
+        <div class="metric"><span>Acceleration</span><strong>${num(f.pressureAcceleration)?.toFixed(4) ?? '—'}</strong></div>
+        <div class="metric"><span>Volatility / sec</span><strong>${num(f.volatilityPerSecond)?.toFixed(5) ?? '—'}</strong></div>
+      </div>
+      <div class="candidates">${renderCandidate('UP',f.candidateBySide?.UP)}${renderCandidate('DOWN',f.candidateBySide?.DOWN)}</div>
+    </section>` : `<section class="forecast"><div class="forecast-head"><div><div class="forecast-title">Pressure estimate vs. market odds</div><div class="forecast-caption">Forecast unavailable in the latest state; market quotes and account data continue to update.</div></div><span class="uncal">UNCALIBRATED</span></div><div class="empty">Waiting for forecast data. No estimates or paper action inferred.</div></section>`;
+    const selectedSide = f?.selectedSide || '—';
+    const status = f?.status || 'forecast unavailable';
     return `<article class="market">
-      <div class="market-title"><div><h3>BTC 5m</h3><div class="slug">${esc(title)}</div></div><div class="countdown">${remaining(state?.windowEnd)}</div></div>
+      <div class="market-title"><div><h3>BTC · 5 minute</h3><div class="slug">${esc(title)}</div></div><div class="countdown">${remaining(state?.windowEnd)}</div></div>
       <div class="prices">${quoteBox('UP','up')}${quoteBox('DOWN','down')}</div>
+      ${forecast}
       <div class="rows">
-        <div class="row"><span>Signal state</span><strong class="status-text ${statusClass(sig.status)}">${esc(sig.status||'waiting')}</strong></div>
-        <div class="row"><span>Signal reason</span><strong>${esc(sig.reason||'—')}</strong></div>
-        <div class="row"><span>Previous BTC 5m candle</span><strong>${esc(state?.candleFilter?.status==='ready' ? `${state.candleFilter.color}${state.candleFilter.allowedSide ? ` · allows ${state.candleFilter.allowedSide}` : ' · no side filter'}` : state?.candleFilter?.reason || 'Waiting for candle data')}</strong></div>
-        <div class="row"><span>Opening candle-only order</span><strong>${esc(openingStatus)}</strong></div>
-        <div class="row"><span>Selected side</span><strong>${esc(sig.selectedSide||'—')}</strong></div>
-        <div class="row"><span>Trigger midpoint</span><strong>${price(sig.triggeringPrice)}</strong></div>
-        <div class="row"><span>One-shot trigger</span><strong>${state?.triggeredAt?`Triggered ${time(state.triggeredAt)}`:'Not triggered'}</strong></div>
-        <div class="row"><span>Orders this window</span><strong>${esc(orders)}</strong></div>
+        <div class="row"><span>Forecast state</span><strong class="status-text ${statusClass(status)}">${escStatus(status)}</strong></div>
+        <div class="row"><span>Forecast reason</span><strong>${esc(f?.reason || 'Waiting for forecast state')}</strong></div>
+        <div class="row"><span>Selected paper side</span><strong>${esc(selectedSide)}</strong></div>
+        <div class="row"><span>Paper orders this window</span><strong>${esc(orders)}</strong></div>
       </div>
     </article>`;
   }
   function renderOrders(orders) {
-    if (!orders?.length) return '<div class="empty">No orders in this 5m window.</div>';
+    if (!orders?.length) return '<div class="empty">No paper orders in this 5m window.</div>';
     const rows = orders.map(o => {
-      const outcome = o.outcome || '—';
-      const entryLabel = o.entryType === 'CANDLE_OPEN_ENTRY' ? ' · OPEN CANDLE'
-        : o.entryType === 'MIDPOINT_TRIGGER_LADDER' ? ' · MIDPOINT LADDER'
-          : o.entryType === 'LEGACY_MIDPOINT_TRIGGER_LADDER' ? ' · LEGACY LADDER' : '';
+      const outcome = o.outcome || o.side || '—';
       const exit = o.kind === 'ENTRY'
-        ? (o.sourceExitKind ? `${esc(o.sourceExitKind)} ${price(o.sourceExitLimitPrice)}` : o.takeProfitPrice ? `TP ${price(o.takeProfitPrice)}` : 'Hold to resolution')
+        ? (o.sourceExitKind ? `${esc(o.sourceExitKind)} ${price(o.sourceExitLimitPrice)}` : o.takeProfitPrice ? `TP ${price(o.takeProfitPrice)} / SL ${price(o.stopLossPrice)}` : 'Paper hold / resolution')
         : '—';
       const status = String(o.status || 'unknown');
-      return `<tr><td>${esc(o.timeframe||'—')}</td><td>${esc(o.kind||'—')}${esc(entryLabel)}${o.testOnly?' · SMOKE TEST':''}</td><td class="${outcome==='UP'?'up':'down'}">${esc(outcome)}</td><td>${price(o.price)}</td><td>${Number(o.shares||0).toFixed(2)}</td><td>${Number(o.matchedShares||0).toFixed(2)}</td><td>${exit}</td><td><span class="pill ${statusClass(status)==='good'?'live':statusClass(status)==='bad'?'fail':'wait'}">${esc(status)}</span></td><td>${esc(o.error||o.exitBlockedReason||o.resolutionError||'—')}</td></tr>`;
+      return `<tr><td>${esc(o.timeframe||'—')}</td><td>${esc(o.kind||'—')}${o.testOnly?' · TEST':''}</td><td class="${outcome==='UP'?'up':'down'}">${esc(outcome)}</td><td>${price(o.price)}</td><td>${Number(o.shares||0).toFixed(2)}</td><td>${Number(o.matchedShares||0).toFixed(2)}</td><td>${exit}</td><td><span class="pill ${statusClass(status)==='good'?'live':statusClass(status)==='bad'?'fail':'wait'}">${esc(status)}</span></td><td>${esc(o.error||o.exitBlockedReason||o.resolutionError||'—')}</td></tr>`;
     }).join('');
-    return `<table><thead><tr><th>Window</th><th>Order</th><th>Outcome</th><th>Limit</th><th>Shares</th><th>Matched</th><th>Exit rule</th><th>Status</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>`;
+    return `<table><thead><tr><th>Window</th><th>Action</th><th>Side</th><th>Price</th><th>Shares</th><th>Matched</th><th>Exit rule</th><th>Status</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  function renderTable(items, kind) {
+    if (!Array.isArray(items) || !items.length) return `<div class="empty">No ${kind} records in the latest state.</div>`;
+    if (kind === 'position') {
+      const rows = items.map(p => `<tr><td>${esc(p.slug||p.market||p.title||'—')}</td><td>${esc(p.outcome||p.side||'—')}</td><td>${Number(p.shares??p.size??0).toFixed(2)}</td><td>${price(p.avgPrice??p.averagePrice)}</td><td>${money(p.currentValue??p.value)}</td><td>${esc(p.status||'Open')}</td></tr>`).join('');
+      return `<table><thead><tr><th>Market</th><th>Side</th><th>Shares</th><th>Avg. price</th><th>Value</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }
+    const rows = items.map(r => `<tr><td>${esc(r.slug||r.market||r.title||'—')}</td><td>${esc(r.outcome||r.winningSide||r.result||'—')}</td><td>${esc(r.status||'resolved')}</td><td>${money(r.pnl??r.realizedPnl??r.profit)}</td><td>${esc(r.resolvedAt?time(r.resolvedAt):r.error||'—')}</td></tr>`).join('');
+    return `<table><thead><tr><th>Market</th><th>Outcome</th><th>Status</th><th>Realized P&amp;L</th><th>Resolution</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
   function renderEvents(events) {
-    if (!events?.length) return '<div class="empty">Waiting for bot activity…</div>';
+    if (!events?.length) return '<div class="empty">Waiting for activity…</div>';
     return events.slice(0,24).map(e => `<div class="event"><time>${esc(new Date(e.at).toLocaleString())}</time><span class="event-type">${esc(e.type)}</span><span>${esc(e.message)}${e.error?` · ${esc(e.error)}`:''}</span></div>`).join('');
   }
   async function refresh() {
@@ -145,44 +252,41 @@
       if (!response.ok) throw new Error(`Dashboard API returned ${response.status}`);
       const state = await response.json();
       const account = state.account || {};
-      const flowTest = state.flowTest || {};
-      const badge = document.querySelector('#statusBadge');
-      const good = state.status === 'ready';
-      badge.className = `badge ${good?'good':state.status==='live_disabled'?'':'bad'}`;
-      badge.innerHTML = `<i class="dot"></i><span>${esc(state.status||'unknown')}</span>`;
-      document.querySelector('#tradingState').textContent = state.tradingEnabled ? 'ENABLED' : 'PAUSED';
-      document.querySelector('#modeNote').textContent = state.tradingEnabled ? 'Real limit orders configured' : 'Live order switch is off';
-      document.querySelector('#accountReady').textContent = account.accountReady ? 'READY' : 'BLOCKED';
-      document.querySelector('#accountReady').className = `value ${account.accountReady?'good':'bad'}`;
-      document.querySelector('#accountNote').textContent = account.accountReady
-        ? (account.snapshotHealthy
-          ? (account.error ? `CLOB ready; snapshot/order warning: ${account.error}` : 'CLOB authenticated; Polymarket checks each order')
-          : `CLOB ready; account snapshot unavailable${account.error ? `: ${account.error}` : ''}`)
-        : (account.error || 'Waiting for Polymarket authentication or safety recovery');
-      document.querySelector('#collateral').textContent = money(account.collateral);
+      document.querySelector('#accountReady').textContent = 'INACTIVE';
+      document.querySelector('#accountReady').className = 'value good';
+      document.querySelector('#accountNote').textContent = 'Real-order modules are not loaded by this demo runner.';
+      document.querySelector('#collateral').textContent = money(account.cash);
       document.querySelector('#equity').textContent = money(account.equity);
-      document.querySelector('#snapshotTime').textContent = account.asOf ? `Snapshot ${new Date(account.asOf).toLocaleTimeString()}` : 'Not yet synchronized';
+      document.querySelector('#snapshotTime').textContent = account.asOf ? `Updated ${new Date(account.asOf).toLocaleTimeString()}` : 'Demo account value';
+      const flowTest = state.flowTest || {};
       const flowPanel = document.querySelector('#flowTestPanel');
-      flowPanel.hidden = !flowTest.enabled && flowTest.status === 'disabled';
-      const flowStatus = flowTest.enabled ? flowTest.status : (flowTest.status === 'complete' ? 'complete' : 'disabled');
+      flowPanel.hidden = !flowTest.enabled && (!flowTest.status || flowTest.status === 'disabled');
+      const flowStatus = flowTest.enabled ? flowTest.status : (flowTest.status || 'inactive');
       const flowPill = document.querySelector('#flowTestStatus');
-      flowPill.textContent = flowStatus.replaceAll('_',' ');
-      flowPill.className = `pill ${flowStatus === 'complete' ? 'live' : flowStatus.includes('error') || flowStatus.includes('reject') || flowStatus.includes('uncertain') || flowStatus.includes('partial') ? 'fail' : 'wait'}`;
+      flowPill.textContent = String(flowStatus).replaceAll('_',' ');
+      flowPill.className = `pill ${flowStatus === 'complete' ? 'live' : String(flowStatus).includes('error') || String(flowStatus).includes('reject') ? 'fail' : 'wait'}`;
       const flowWindow = flowTest.slug ? ` · ${flowTest.slug}${flowTest.side ? ` · ${flowTest.side}` : ''}` : '';
-      const flowResult = flowTest.result ? ` · Result: ${flowTest.result.replaceAll('_',' ')}` : '';
-      const flowError = flowTest.error ? ` · ${flowTest.error}` : '';
       document.querySelector('#flowTestNote').textContent = flowTest.enabled
-        ? `One test BUY: ${Number(flowTest.shares||5)} shares at ${price(flowTest.buyLimitPrice||0.70)} (max ${money(flowTest.maxBuyNotional||3.50)}), then a confirmed-fill limit SELL at ${price(flowTest.takeProfitPrice||0.75)}. ${flowTest.pausesStrategy?'Normal strategy entries are paused during the test.':'The test is finished; normal strategy entries are active.'}${flowWindow}${flowResult}${flowError}`
-        : `No new smoke test is armed.${flowWindow}${flowResult}${flowError}`;
-      document.querySelector('#markets').innerHTML = renderMarket(state.markets?.['5m']||{});
-      const currentWindowOrders = (state.orders||[]).filter(order =>
-        order.slug === state.markets?.['5m']?.slug);
+        ? `Real-order smoke test is configured (${flowStatus}); this monitor's strategy remains paper-only.${flowWindow}${flowTest.error ? ` · ${flowTest.error}` : ''}`
+        : `Real-order modules are inactive.${flowWindow}`;
+      const market = state.markets?.['5m'] || {};
+      const marketView = {...market, forecast: market.forecast || state.forecast || state.marketForecast};
+      document.querySelector('#markets').innerHTML = renderMarket(marketView);
+      document.querySelector('#marketStatus').textContent = marketView.forecast
+        ? `${marketView.forecast.ready ? 'Forecast ready' : 'Forecast not ready'} · uncalibrated`
+        : 'Quotes live · forecast pending';
+      const currentWindowOrders = (state.orders||[]).filter(order => !market.slug || order.slug === market.slug);
       document.querySelector('#orders').innerHTML = renderOrders(currentWindowOrders);
       document.querySelector('#orderCount').textContent = `${currentWindowOrders.length} current-window orders`;
+      const positions = state.positions || account.positions || [];
+      document.querySelector('#positions').innerHTML = renderTable(positions, 'position');
+      document.querySelector('#positionCount').textContent = `${Array.isArray(positions)?positions.length:0} positions`;
+      const resolutions = state.resolutions || state.resolutionHistory || [];
+      document.querySelector('#resolutions').innerHTML = renderTable(resolutions, 'resolution');
       document.querySelector('#events').innerHTML = renderEvents(state.events||[]);
       document.querySelector('#error').textContent = state.error || '';
-      const ages = Object.values(state.markets?.['5m']?.quotes||{}).map(q=>q?.updatedAt).filter(Boolean);
-      document.querySelector('#quoteAge').textContent = ages.length ? `Latest quote ${Math.max(0,Math.round((Date.now()-Math.max(...ages))/1000))}s ago · refreshes every second` : 'Waiting for fresh quotes';
+      const ages = Object.values(market.quotes||{}).map(q=>q?.updatedAt).filter(Boolean);
+      document.querySelector('#quoteAge').textContent = ages.length ? `Quotes ${Math.max(0,Math.round((Date.now()-Math.max(...ages))/1000))}s ago · refresh 1s` : 'Waiting for live state';
     } catch (error) {
       document.querySelector('#error').textContent = error.message || String(error);
     }
