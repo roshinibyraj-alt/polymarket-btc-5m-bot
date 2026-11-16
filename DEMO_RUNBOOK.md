@@ -14,7 +14,7 @@ The active app is paper-only. Its startup file loads the demo strategy and does 
 ## Entry and flip rules
 
 - Consider only the cheaper outcome when its best ask is below $0.50.
-- Enter 100 shares only when that side's experimental estimate is above 50%, the full visible ask sweep stays at or below $0.90, paper cash covers it, and expected net edge after the market's taker fees is at least $0.10 per share.
+- Enter 100 shares only when that side's experimental estimate is above 50%, the full visible ask sweep stays at or below $0.90, paper cash covers it, and expected net edge after the market's taker fees is at least $0.05 per share.
 - Allow only one initial position per window. Do not add to a same-side position.
 - An opposite-side signal can flip only while the open position can be sold for positive net proceeds after taker fees and visible book depth. Sell the full position down to a $0.01 bid floor, then buy the opposite side for the same filled share count under the $0.90 ask cap. The opposite buy must still clear the net-edge filter at that size.
 - A $0.99 bid is counted as a $1 payout per share; a $0.01 bid or lower is counted as $0. Otherwise hold the position until the original Polymarket market confirms resolution.

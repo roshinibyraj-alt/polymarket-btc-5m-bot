@@ -13,7 +13,7 @@ This document does not authorize a real order or a production deployment. Never 
 
 ## 2. Current strategy
 
-The full active rules are in `DEMO_RUNBOOK.md`. In short, the strategy waits for ten one-second Binance/Polymarket pressure samples, estimates a resolution probability from price, volatility, Polymarket odds, and pressure, and buys the under-$0.50 lagging side only when expected net edge clears $0.10/share. It requests 100 shares, caps ask sweeps at $0.90, and permits a same-size opposite-side flip only when the current position can be sold profitably after taker fees. The $0.99/$0.01 terminal rules remain; otherwise positions wait for confirmed original-market resolution.
+The full active rules are in `DEMO_RUNBOOK.md`. In short, the strategy waits for ten one-second Binance/Polymarket pressure samples, estimates a resolution probability from price, volatility, Polymarket odds, and pressure, and buys the under-$0.50 lagging side only when expected net edge clears $0.05/share. It requests 100 shares, caps ask sweeps at $0.90, and permits a same-size opposite-side flip only when the current position can be sold profitably after taker fees. The $0.99/$0.01 terminal rules remain; otherwise positions wait for confirmed original-market resolution.
 
 The dashboard shows the experimental forecast and explicitly labels it uncalibrated. Paper cash and history reset on process restart.
 
