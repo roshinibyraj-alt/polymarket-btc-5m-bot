@@ -167,19 +167,20 @@ test('entry uses a 100-share taker sweep and records its fees and all-in cost', 
   assert.ok(read.ready);
 });
 
-test('opposite qualifying signal flips only when sell proceeds are net profitable', () => {
+test('opposite qualifying signal adds a position without selling the existing one', () => {
   const bot = makeBot({ price: 99.7 });
   setQuote(bot, 'UP', 0.50, 0.52);
   setQuote(bot, 'DOWN', 0.34, 0.36);
   addSamples(bot, -1);
   bot.market.feesEnabled = false;
+  bot.lastEntryAt = NOW - config.PRESSURE_ENTRY_COOLDOWN_MS;
   const open = {
     id: 'open-up',
     side: 'UP',
     outcome: 'UP',
     shares: 100,
     initialShares: 100,
-    totalCost: 40,
+    totalCost: 60,
     fees: 0,
     windowStart: WINDOW_START,
     marketId: bot.market.id,
@@ -189,34 +190,32 @@ test('opposite qualifying signal flips only when sell proceeds are net profitabl
     markBid: 0.50,
   };
   bot.positions.unshift(open);
-  bot.cash = 9960;
+  bot.cash = 9940;
 
-  const flipped = bot.processPressureStrategy(WINDOW_START, NOW);
+  const added = bot.processPressureStrategy(WINDOW_START, NOW);
 
-  assert.equal(flipped, true);
-  assert.equal(open.status, 'SETTLED_EXIT');
-  assert.equal(open.exitReason, 'PROFITABLE_OPPOSITE_SIGNAL');
-  const next = bot.positions.find((position) => position.status === 'OPEN');
-  assert.equal(next.side, 'DOWN');
-  assert.equal(next.shares, 100);
-  assert.deepEqual(bot.orders.slice(0, 2).map((order) => order.kind), ['BUY_FLIP', 'SELL_FLIP']);
+  assert.equal(added, true);
+  assert.equal(open.status, 'OPEN');
+  const openPositions = bot.positions.filter((position) => position.status === 'OPEN');
+  assert.equal(openPositions.length, 2);
+  assert.deepEqual(openPositions.map((position) => position.side).sort(), ['DOWN', 'UP']);
+  assert.deepEqual(bot.orders.map((order) => order.kind), ['BUY_ENTRY']);
   assert.equal(bot.orders[0].maxPrice, 0.90);
-  assert.equal(bot.orders[1].minPrice, 0.01);
 });
 
-test('opposite signal does not sell a losing position', () => {
-  const bot = makeBot({ price: 99.7 });
-  setQuote(bot, 'UP', 0.30, 0.60);
-  setQuote(bot, 'DOWN', 0.34, 0.36);
-  addSamples(bot, -1);
+test('same-side entries are blocked until the 15-second cooldown elapses', () => {
+  const bot = makeBot();
+  setQuote(bot, 'UP', 0.30, 0.32);
+  setQuote(bot, 'DOWN', 0.68, 0.70);
+  addSamples(bot, 1);
   bot.market.feesEnabled = false;
   const open = {
-    id: 'open-up',
+    id: 'existing-up',
     side: 'UP',
     outcome: 'UP',
     shares: 100,
     initialShares: 100,
-    totalCost: 40,
+    totalCost: 32,
     fees: 0,
     windowStart: WINDOW_START,
     marketId: bot.market.id,
@@ -226,14 +225,22 @@ test('opposite signal does not sell a losing position', () => {
     markBid: 0.30,
   };
   bot.positions.unshift(open);
+  bot.cash = 9968;
+  bot.lastEntryAt = NOW - config.PRESSURE_ENTRY_COOLDOWN_MS + 1000;
 
-  const flipped = bot.processPressureStrategy(WINDOW_START, NOW);
-
-  assert.equal(flipped, false);
-  assert.equal(open.status, 'OPEN');
-  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 1);
+  const duringCooldown = bot.processPressureStrategy(WINDOW_START, NOW);
+  assert.equal(duringCooldown, false);
+  assert.equal(bot.forecast.status, 'ENTRY_COOLDOWN');
   assert.equal(bot.orders.length, 0);
-  assert.equal(bot.forecast.status, 'FLIP_WAITING_FOR_PROFIT');
+  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 1);
+
+  const afterCooldown = bot.processPressureStrategy(WINDOW_START, NOW + 1000);
+  assert.equal(afterCooldown, true);
+  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 2);
+  assert.deepEqual(bot.positions.filter((position) => position.status === 'OPEN')
+    .map((position) => position.side), ['UP', 'UP']);
+  assert.equal(bot.orders[0].kind, 'BUY_ENTRY');
+  assert.equal(bot.lastEntryAt, NOW + 1000);
 });
 
 test('paper snapshot identifies only the uncalibrated BTC 5-minute demo strategy', () => {
@@ -245,6 +252,8 @@ test('paper snapshot identifies only the uncalibrated BTC 5-minute demo strategy
   assert.equal(state.strategy.liveTradingEnabled, false);
   assert.equal(state.strategy.realOrderModulesLoaded, false);
   assert.equal(state.strategy.orders.type, 'Visible-book taker-style paper sweeps');
+  assert.equal(state.strategy.orders.entryCooldownMs, 15_000);
+  assert.match(state.strategy.repeatEntryRule, /independent 100-share position/i);
   assert.equal(state.strategy.signalState.calibrated, false);
   assert.equal(state.strategy.priceFeed.source, 'Binance BTCUSDT aggregate trades');
   assert.equal(state.markets['5m'].forecast.calibrated, false);

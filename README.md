@@ -12,8 +12,7 @@ This document does not authorize a real order or a production deployment. Never 
 - The new signal is an experimental, uncalibrated estimate; it does not claim validated predictive accuracy.
 
 ## 2. Current strategy
-
-The full active rules are in `DEMO_RUNBOOK.md`. In short, the strategy waits for ten one-second Binance/Polymarket pressure samples, estimates a resolution probability from price, volatility, Polymarket odds, and pressure, and buys the under-$0.50 lagging side only when expected net edge clears $0.05/share. It requests 100 shares, caps ask sweeps at $0.90, and permits a same-size opposite-side flip only when the current position can be sold profitably after taker fees. The $0.99/$0.01 terminal rules remain; otherwise positions wait for confirmed original-market resolution.
+The full active rules are in `DEMO_RUNBOOK.md`. In short, the strategy waits for ten one-second Binance/Polymarket pressure samples, estimates a resolution probability from price, volatility, Polymarket odds, and pressure, and buys the under-$0.50 lagging side only when expected net edge clears $0.05/share. Each qualifying entry buys 100 shares, with a 15-second cooldown between successful entries. Any side may qualify for a new, independent position; a signal reversal does not sell existing positions. Ask sweeps remain capped at $0.90. Each open position keeps its own $0.99/$0.01 threshold exits; otherwise it waits for confirmed original-market resolution.
 
 The dashboard shows the experimental forecast and explicitly labels it uncalibrated. Paper cash and history reset on process restart.
 

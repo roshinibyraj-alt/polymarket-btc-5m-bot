@@ -11,12 +11,12 @@ The active app is paper-only. Its startup file loads the demo strategy and does 
 - Blend the experimental price/volatility estimate, current Polymarket midpoint odds, and the recent pressure trend into an estimated UP/DOWN resolution probability.
 - The estimate is uncalibrated. It is not a validated probability or guarantee of direction.
 
-## Entry and flip rules
+## Repeat-entry and exit rules
 
 - Consider only the cheaper outcome when its best ask is below $0.50.
 - Enter 100 shares only when that side's experimental estimate is above 50%, the full visible ask sweep stays at or below $0.90, paper cash covers it, and expected net edge after the market's taker fees is at least $0.05 per share.
-- Allow only one initial position per window. Do not add to a same-side position.
-- An opposite-side signal can flip only while the open position can be sold for positive net proceeds after taker fees and visible book depth. Sell the full position down to a $0.01 bid floor, then buy the opposite side for the same filled share count under the $0.90 ask cap. The opposite buy must still clear the net-edge filter at that size.
+- After each successful entry, wait 15 seconds before another entry can be made. Once the cooldown ends, any newly qualifying UP or DOWN signal may add another independent 100-share position; there is no fixed per-window entry cap beyond available paper cash and qualifying signals.
+- Do not sell an existing position just because a signal points to the opposite side. Each position remains open independently and exits at its own $0.99/$0.01 threshold, or waits for confirmed resolution of its original market.
 - A $0.99 bid is counted as a $1 payout per share; a $0.01 bid or lower is counted as $0. Otherwise hold the position until the original Polymarket market confirms resolution.
 - When visible depth is insufficient to complete the requested sweep within the cap/floor, skip the action rather than simulate a partial position.
 

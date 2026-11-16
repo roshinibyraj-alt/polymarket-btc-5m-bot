@@ -226,7 +226,7 @@ class PressureForecastBot extends WickBot {
     this.pressureSamples = [];
     this.lastSampleAt = null;
     this.forecast = this.emptyForecast('Waiting for Binance and Polymarket data.');
-    this.entryOccurredThisWindow = false;
+    this.lastEntryAt = null;
     this.lastResolutionCheckAt = new Map();
     this.actionSequence = 0;
     this.resolutions = [];
@@ -283,7 +283,7 @@ class PressureForecastBot extends WickBot {
     this.liveQuotes = { UP: { status: 'MISSING' }, DOWN: { status: 'MISSING' } };
     this.pressureSamples = [];
     this.lastSampleAt = null;
-    this.entryOccurredThisWindow = false;
+    this.lastEntryAt = null;
     this.signal = null;
     this.forecast = this.emptyForecast('Collecting ten fresh one-second pressure samples.', 'COLLECTING_SAMPLES');
     this.log('PAPER_PRESSURE_WINDOW_STARTED', {
@@ -459,87 +459,28 @@ class PressureForecastBot extends WickBot {
     this.forecast = forecast;
     if (!evaluationDue || !forecast.ready || !forecast.selectedSide) return false;
 
-    const current = this.positions.find((position) =>
-      position.status === 'OPEN' && Number(position.windowStart) === Number(start));
-    if (!current) {
-      if (this.entryOccurredThisWindow) return false;
-      const candidate = forecast.candidateBySide[forecast.selectedSide];
-      const opened = this.executeBuy(forecast.selectedSide, config.PRESSURE_ENTRY_SHARES, now, {
-        kind: 'BUY_ENTRY',
-        candidate,
-        signal: read,
-      });
-      if (opened) {
-        this.entryOccurredThisWindow = true;
-        this.forecast.status = 'ENTRY_FILLED';
-        this.forecast.reason = `Bought the lagging ${forecast.selectedSide} side; waiting for resolution, a threshold, or a profitable opposite signal.`;
-        this.signal = { side: forecast.selectedSide, action: 'BUY_ENTRY', reason: this.forecast.reason };
-        return true;
-      }
-      return false;
-    }
-
-    if (current.side === forecast.selectedSide) {
-      this.forecast.status = 'HOLDING';
-      this.forecast.reason = `Holding ${current.side}; no same-side add is allowed.`;
+    const cooldownRemaining = config.PRESSURE_ENTRY_COOLDOWN_MS
+      - (now - Number(this.lastEntryAt || 0));
+    if (this.lastEntryAt != null && cooldownRemaining > 0) {
+      this.forecast.status = 'ENTRY_COOLDOWN';
+      this.forecast.reason = `${forecast.selectedSide} signal qualifies; next entry is available in ${Math.ceil(cooldownRemaining / 1000)} seconds.`;
       return false;
     }
 
     const candidate = forecast.candidateBySide[forecast.selectedSide];
-    const sellPreview = sweepBook(
-      this.freshQuote(current.side, now)?.bidLevels,
-      current.shares,
-      'SELL',
-      this.market,
-      { minimumPrice: config.PRESSURE_MIN_SELL_PRICE },
-    );
-    const netSellPnl = sellPreview.complete
-      ? sellPreview.netProceeds - Number(current.totalCost || 0)
-      : null;
-    if (!(netSellPnl > EPSILON)) {
-      this.forecast.status = 'FLIP_WAITING_FOR_PROFIT';
-      this.forecast.reason = `Opposite ${forecast.selectedSide} signal is active, but the current ${current.side} position is not net profitable after taker fees.`;
-      return false;
-    }
-    if (!candidate?.qualifies) return false;
-
-    const buyPreview = sweepBook(
-      this.freshQuote(forecast.selectedSide, now)?.askLevels,
-      current.shares,
-      'BUY',
-      this.market,
-      { maximumPrice: config.PRESSURE_MAX_BUY_PRICE },
-    );
-    if (!buyPreview.complete || buyPreview.totalCost > this.cash + sellPreview.netProceeds + EPSILON) {
-      this.forecast.status = 'FLIP_NOT_EXECUTABLE';
-      this.forecast.reason = 'Profitable flip skipped: the opposite taker buy cannot complete within the $0.90 ask cap and available paper cash.';
-      return false;
-    }
-    const flipEdge = Number(candidate.estimatedProbability)
-      - buyPreview.totalCost / Number(current.shares);
-    if (!(Number(candidate.estimatedProbability) > 0.5)
-      || flipEdge < config.PRESSURE_MIN_NET_EDGE_PER_SHARE) {
-      this.forecast.status = 'FLIP_NO_EDGE';
-      this.forecast.reason = 'The opposite side does not clear the minimum net edge at the full flip size after taker fees.';
-      return false;
-    }
-
-    const sold = this.executeSell(current, now, 'SELL_FLIP', sellPreview);
-    if (!sold) return false;
-    const opened = this.executeBuy(forecast.selectedSide, sold.shares, now, {
-      kind: 'BUY_FLIP',
-      candidate: { ...candidate, expectedNetEdgePerShare: flipEdge },
+    const opened = this.executeBuy(forecast.selectedSide, config.PRESSURE_ENTRY_SHARES, now, {
+      kind: 'BUY_ENTRY',
+      candidate,
       signal: read,
     });
-    if (!opened) {
-      this.forecast.status = 'FLIP_BUY_FAILED';
-      this.forecast.reason = 'The profitable sell filled, but the opposite buy could not be completed; no position is currently open.';
-      return false;
+    if (opened) {
+      this.lastEntryAt = now;
+      this.forecast.status = 'ENTRY_FILLED';
+      this.forecast.reason = `Bought another 100-share ${forecast.selectedSide} position; existing positions remain open. The next entry can occur after the 15-second cooldown if a signal qualifies.`;
+      this.signal = { side: forecast.selectedSide, action: 'BUY_ENTRY', reason: this.forecast.reason };
+      return true;
     }
-    this.forecast.status = 'FLIPPED';
-    this.forecast.reason = `Sold profitable ${current.side} shares and bought ${forecast.selectedSide} with the same ${sold.shares} shares.`;
-    this.signal = { side: forecast.selectedSide, action: 'PROFITABLE_FLIP', reason: this.forecast.reason };
-    return true;
+    return false;
   }
 
   freshSamples(now) {
@@ -642,16 +583,10 @@ class PressureForecastBot extends WickBot {
       .sort((a, b) => candidateBySide[b].expectedNetEdgePerShare
         - candidateBySide[a].expectedNetEdgePerShare);
     const selectedSide = qualifying[0] || null;
-    const activePosition = this.positions.find((position) =>
-      position.status === 'OPEN' && Number(position.windowStart) === Number(start));
-    let status = selectedSide ? 'QUALIFIED' : 'NO_EDGE';
-    let reason = selectedSide
+    const status = selectedSide ? 'QUALIFIED' : 'NO_EDGE';
+    const reason = selectedSide
       ? `${selectedSide} is the lagging side; its experimental estimate clears $${config.PRESSURE_MIN_NET_EDGE_PER_SHARE.toFixed(2)} net edge per share.`
       : 'No lagging side currently clears the 50% estimate and net-edge filters.';
-    if (activePosition && activePosition.side === selectedSide) {
-      status = 'HOLDING';
-      reason = `Holding ${activePosition.side}; same-side additions are disabled.`;
-    }
     return {
       ready: true,
       calibrated: false,
@@ -730,8 +665,8 @@ class PressureForecastBot extends WickBot {
       outcome: side,
       tokenId: this.market.tokens[side],
       entryKey: order.id,
-      entryLabel: `${kind === 'BUY_FLIP' ? 'Profitable flip' : 'Pressure entry'} · ${side}`,
-      entryType: kind === 'BUY_FLIP' ? 'PAPER_TAKER_FLIP' : 'PAPER_TAKER_PRESSURE',
+      entryLabel: `Pressure entry · ${side}`,
+      entryType: 'PAPER_TAKER_PRESSURE',
       orderType: 'PAPER_TAKER_MARKET',
       fillModel: 'VISIBLE_ASK_SWEEP_TO_0_90',
       shares: execution.filledShares,
@@ -768,7 +703,7 @@ class PressureForecastBot extends WickBot {
     order.totalCost = execution.totalCost;
     order.fills = execution.fills;
     order.maxPrice = config.PRESSURE_MAX_BUY_PRICE;
-    this.log(kind === 'BUY_FLIP' ? 'PAPER_PRESSURE_FLIP_BUY_FILLED' : 'PAPER_PRESSURE_ENTRY_FILLED', {
+    this.log('PAPER_PRESSURE_ENTRY_FILLED', {
       orderId: order.id,
       positionId: position.id,
       side,
@@ -779,71 +714,6 @@ class PressureForecastBot extends WickBot {
       signalScore: position.signalScore,
     });
     return position;
-  }
-
-  executeSell(position, now, kind, preview = null) {
-    const quote = this.freshQuote(position.side, now);
-    if (!quote) return null;
-    const sellCheck = sweepBook(
-      quote.bidLevels,
-      position.shares,
-      'SELL',
-      this.market,
-      { minimumPrice: config.PRESSURE_MIN_SELL_PRICE },
-    );
-    const order = this.createOrder(kind, position.side, position.shares, now, sellCheck);
-    if (!sellCheck.complete) {
-      order.status = 'SKIPPED_PRICE_FLOOR_OR_DEPTH';
-      order.error = 'Full position was not available at or above the $0.01 bid floor.';
-      return null;
-    }
-    if (preview && Math.abs(preview.filledShares - sellCheck.filledShares) > EPSILON) {
-      order.status = 'CANCELLED_BOOK_CHANGED';
-      order.error = 'Visible bids changed between flip check and paper execution.';
-      return null;
-    }
-    const execution = sweepBook(
-      quote.bidLevels,
-      position.shares,
-      'SELL',
-      this.market,
-      { minimumPrice: config.PRESSURE_MIN_SELL_PRICE, consume: true },
-    );
-    if (!execution.complete) {
-      order.status = 'CANCELLED_BOOK_CHANGED';
-      order.error = 'Visible bids changed between the paper check and fill.';
-      return null;
-    }
-    position.exitPrice = execution.averagePrice;
-    position.exitFees = execution.fees;
-    position.exitProceeds = execution.netProceeds;
-    position.proceeds = execution.netProceeds;
-    position.realizedPnl = execution.netProceeds - Number(position.totalCost || 0);
-    position.exitReason = 'PROFITABLE_OPPOSITE_SIGNAL';
-    position.settlementBasis = 'PAPER_TAKER_FLIP';
-    position.status = 'SETTLED_EXIT';
-    position.closedAt = now;
-    position.settledAt = now;
-    position.exitFills = execution.fills.map((fill) => ({ ...fill, at: now }));
-    this.cash += execution.netProceeds;
-    order.status = 'FILLED';
-    order.filledAt = now;
-    order.positionId = position.id;
-    order.fee = execution.fees;
-    order.grossProceeds = execution.gross;
-    order.netProceeds = execution.netProceeds;
-    order.fills = execution.fills;
-    order.minimumPrice = config.PRESSURE_MIN_SELL_PRICE;
-    this.log('PAPER_PRESSURE_FLIP_SELL_FILLED', {
-      orderId: order.id,
-      positionId: position.id,
-      side: position.side,
-      shares: position.shares,
-      averagePrice: execution.averagePrice,
-      fees: execution.fees,
-      realizedPnl: position.realizedPnl,
-    });
-    return { shares: execution.filledShares, netProceeds: execution.netProceeds };
   }
 
   createOrder(kind, side, shares, now, execution) {
@@ -1046,9 +916,10 @@ class PressureForecastBot extends WickBot {
           initialShares: config.PRESSURE_ENTRY_SHARES,
           maxBuyPrice: config.PRESSURE_MAX_BUY_PRICE,
           minSellPrice: config.PRESSURE_MIN_SELL_PRICE,
-          maxInitialEntriesPerWindow: 1,
+          entryCooldownMs: config.PRESSURE_ENTRY_COOLDOWN_MS,
+          maxEntriesPerWindow: 'No fixed cap; limited by qualifying signals and available cash.',
         },
-        flipRule: 'Sell the current position and buy the opposite side for the same filled share count only when the current position is net profitable after visible-book taker fees.',
+        repeatEntryRule: 'After each successful entry, wait 15 seconds. A new qualifying signal on either side opens another independent 100-share position; existing positions are not sold on signal reversals.',
         priceFeed: this.priceFeed?.snapshot?.() || null,
         exits: {
           takeProfit: `${config.PRESSURE_TAKE_PROFIT_TRIGGER} best bid counts as $${config.PRESSURE_TAKE_PROFIT_PAYOUT} per share`,
