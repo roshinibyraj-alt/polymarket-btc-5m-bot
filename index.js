@@ -5,8 +5,17 @@ const startServer = require('./server');
 const marketData = require('./wick-market-data');
 const BinanceTickFeed = require('./binance-tick-feed');
 const { PaperStateStore, paperStateFilePath } = require('./paper-state-store');
+const { brotliDecompressSync } = require('node:zlib');
 
 const PAPER_HISTORY_IMPORT_URL = 'https://polymarket-btc-5m-bot-production.up.railway.app/api/state';
+
+function decodePaperHistorySeed(encoded) {
+  const snapshot = JSON.parse(brotliDecompressSync(Buffer.from(encoded, 'base64')).toString('utf8'));
+  if (snapshot?.mode !== 'DEMO ONLY') {
+    throw new Error('The temporary paper-history seed is not a demo-only snapshot');
+  }
+  return snapshot;
+}
 
 async function fetchPaperHistory(url) {
   const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
@@ -43,15 +52,32 @@ function startApplication({
   if (store) {
     ready = (async () => {
       const restored = await store.load();
+      let historySource;
       if (restored) {
         bot.restorePersistentState(restored);
+        historySource = 'persistent volume';
       } else {
-        const snapshot = await historyImporter(historyImportUrl);
+        const encodedSeed = env.PAPER_HISTORY_SEED_BR_B64;
+        const snapshot = encodedSeed
+          ? decodePaperHistorySeed(encodedSeed)
+          : await historyImporter(historyImportUrl);
         bot.restoreFromSnapshot(snapshot);
+        historySource = encodedSeed ? 'temporary migration seed' : 'existing dashboard';
       }
       bot.attachPersistenceStore(store);
       await bot.persistState(true);
       if (shutdownRequested) return;
+      const restoredState = bot.snapshot();
+      const positionCount = Array.isArray(restoredState.positions)
+        ? restoredState.positions.length
+        : (Array.isArray(bot.positions) ? bot.positions.length : 'unknown');
+      const settledCount = Number.isFinite(Number(restoredState.account?.settledTrades))
+        ? restoredState.account.settledTrades
+        : 'unknown';
+      console.log(
+        `[paper-state] restored from ${historySource}: ${positionCount} positions, `
+        + `${settledCount} settled, cash $${Number(restoredState.account?.cash).toFixed(2)}`,
+      );
       server.listen(port, () => {
         console.log(`[dashboard] listening on :${port} after paper history restore`);
       });
