@@ -288,6 +288,7 @@ class PressureForecastBot extends WickBot {
     this.persistenceStore = null;
     this.persistenceDirty = false;
     this.lastPersistedAt = 0;
+    this.paperHistoryResetVersion = null;
   }
 
   log(event, data = {}) {
@@ -312,6 +313,7 @@ class PressureForecastBot extends WickBot {
     } : null;
     return {
       schemaVersion: 1,
+      paperHistoryResetVersion: this.paperHistoryResetVersion,
       capital: this.capital,
       cash: this.cash,
       startedAt: this.startedAt,
@@ -352,6 +354,7 @@ class PressureForecastBot extends WickBot {
     }
 
     this.capital = Number(state.capital);
+    this.paperHistoryResetVersion = state.paperHistoryResetVersion || null;
     this.initialCapital = this.capital;
     this.cash = Number(state.cash);
     this.startedAt = Number(state.startedAt) || this.now();

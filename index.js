@@ -53,7 +53,14 @@ function startApplication({
     ready = (async () => {
       const restored = await store.load();
       let historySource;
-      if (restored) {
+      const resetVersion = String(env.PAPER_HISTORY_RESET_VERSION || '').trim();
+      // Persist the version so an authorized one-time reset cannot repeat on restart.
+      if (resetVersion && restored?.paperHistoryResetVersion !== resetVersion) {
+        const freshState = bot.serializePersistentState();
+        freshState.paperHistoryResetVersion = resetVersion;
+        bot.restorePersistentState(freshState);
+        historySource = 'one-time paper history reset';
+      } else if (restored) {
         bot.restorePersistentState(restored);
         historySource = 'persistent volume';
       } else {

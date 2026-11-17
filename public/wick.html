@@ -9,9 +9,9 @@
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
     :root{
       color-scheme:light;
-      --bg:#edf2ef;--paper:#f8faf7;--panel:#fffefa;--ink:#172b2b;--muted:#667978;
-      --line:#d9e2dd;--teal:#087f75;--teal-soft:#e1f2ed;--coral:#bd5548;--coral-soft:#f8e9e5;
-      --gold:#b27b24;--gold-soft:#f7efd9;--navy:#173b45;--shadow:0 8px 24px rgba(23,59,69,.055);
+      --bg:#e9f1f6;--paper:#f5f9fc;--panel:#fbfdff;--ink:#172d43;--muted:#526a7d;
+      --line:#d0dfe9;--teal:#08765f;--teal-soft:#d8f2e9;--coral:#b43c36;--coral-soft:#fbe4df;
+      --gold:#815514;--gold-soft:#fff0c9;--navy:#163d55;--shadow:0 9px 25px rgba(24,57,79,.08);
       --display:"Space Grotesk",ui-sans-serif,system-ui,sans-serif;--body:"DM Sans",ui-sans-serif,system-ui,sans-serif;--mono:"IBM Plex Mono",ui-monospace,monospace;
     }
     *{box-sizing:border-box}
@@ -121,6 +121,80 @@
     }
     @media(max-width:360px){.grid{grid-template-columns:1fr 1fr}.estimate-foot{flex-direction:column;gap:2px}.candidates,.shadow-grid{grid-template-columns:1fr}}
     @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
+    /* A vivid, instrument-panel finish: saturated signal colors, cool paper surfaces,
+       and crisp data hierarchy. Layout and responsive breakpoints remain unchanged. */
+    body{background:linear-gradient(135deg,#e6f0f6 0%,#f2f6f8 46%,#e9f1f3 100%);color:var(--ink)}
+    body:before{opacity:.10}
+    .mark{background:linear-gradient(145deg,#15546c,#12384f);color:#e5fff6;box-shadow:0 5px 14px rgba(17,67,87,.2)}
+    h1{color:#15344b}
+    .badge{border-color:#dfbd69;background:#fff0c9;color:#684612;box-shadow:0 3px 10px rgba(113,78,20,.08)}
+    .dot{box-shadow:0 0 0 3px rgba(129,85,20,.13)}
+    .intro{background:linear-gradient(118deg,#163d55 0%,#155568 58%,#16766b 100%);box-shadow:0 12px 28px rgba(19,64,82,.17)}
+    .intro:after{border-color:rgba(193,244,222,.27);box-shadow:0 0 0 23px rgba(193,244,222,.06),0 0 0 48px rgba(193,244,222,.045)}
+    .eyebrow{color:#a9ead2}
+    .notice{border-color:#e7ca7c;background:linear-gradient(135deg,#fff4d6,#ffefc5);box-shadow:0 6px 18px rgba(116,84,25,.07)}
+    .notice strong{color:#684712}.notice span{color:#65532e}
+    .stat,.panel,.market{background:linear-gradient(160deg,#fcfeff,#f8fbfd);border-color:#d0dfe9;box-shadow:0 8px 22px rgba(26,62,83,.075)}
+    .stat{position:relative;overflow:hidden}
+    .stat:before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:#7bb9c3}
+    .stat:nth-child(1):before,.stat:nth-child(2):before{background:#18a180}
+    .stat:nth-child(3):before{background:#e0a43e}
+    .stat:nth-child(4):before{background:#4d91ad}
+    .label{color:#4f697d}
+    .value{color:#183a53}
+    .good,.up{color:#08765f}.bad,.down{color:#b43c36}
+    .panel{border-radius:16px}
+    .panel-head{padding-bottom:10px;border-bottom:1px solid #e1eaf0}
+    .panel h2{color:#193b53}
+    .hint{color:#587084}
+    .market{border-top:4px solid #12a07a;background:linear-gradient(160deg,#fdffff,#f5fbfa)}
+    .countdown{color:#153b53;background:#e1f0f4;border:1px solid #c8e0e7}
+    .price-box{background:#f1f8f8;border-color:#cfe3e3}
+    .price-box:has(.side.up){background:linear-gradient(145deg,#e6f7f0,#f7fcfa);border-color:#b8e2d1}
+    .price-box:has(.side.down){background:linear-gradient(145deg,#fff0ec,#fff9f7);border-color:#efc9c1}
+    .mid.up{color:#08765f}.mid.down{color:#b43c36}
+    .pill{background:#f3f7f9}
+    .pill.live{color:#08634f;border-color:#8dcdb8;background:#ddf4ea}
+    .pill.fail{color:#9e302b;border-color:#e5aaa1;background:#ffebe6}
+    .pill.wait{color:#745014;border-color:#e5c66f;background:#fff3d1}
+    .forecast{background:linear-gradient(145deg,#eef7f8,#f3f8f7);border-color:#cbdfe3}
+    .uncal{background:#fff0c9;color:#684612;border:1px solid #ead18f}
+    .estimate{background:#fbfeff;border-color:#d5e3e9}
+    .estimate:first-child{background:linear-gradient(145deg,#f0faf6,#fbfefd);border-color:#c5e4d7}
+    .estimate.downside{background:linear-gradient(145deg,#fff4f0,#fffdfc);border-color:#efd0c9}
+    .bar{background:#dce8e9}
+    .estimate.downside .bar{background:#f0deda}
+    .metric{border-top-color:#d6e3e9}
+    .metric span{color:#536d80}
+    .candidate,.shadow-card{background:#fbfdff;border-color:#d5e2e9}
+    .candidate.up-card{border-left-color:#0c9b77;background:linear-gradient(145deg,#f3fbf7,#fbfefd)}
+    .candidate.down-card{border-left-color:#cf5145;background:linear-gradient(145deg,#fff5f2,#fffdfc)}
+    .shadow-card{border-left-color:#149875}
+    .shadow-card.adaptive{border-left-color:#d39a34}
+    .shadow-total{border-bottom-color:#dce6ec}
+    .shadow-row{border-bottom-color:#e2eaf0}
+    .rows{border-top-color:#d6e3e9}
+    .row,.event{border-bottom-color:#e2eaf0}
+    .scroll{border-radius:10px}
+    table{border-spacing:0}
+    th{color:#3f5c72;background:#e9f2f6}
+    td{color:#203d52}
+    tbody tr:nth-child(even){background:#f4f8fa}
+    tbody tr:hover{background:#eaf6f4}
+    .empty{color:#526c7e;background:linear-gradient(135deg,#edf4f7,#f5f9fa);border:1px dashed #c5d7e1}
+    .equity-wrap{background:linear-gradient(145deg,#edf7f8,#f7fbfc);border-color:#cbdfe5}
+    .equity-gridline{stroke:#d6e4e9}
+    .equity-line{stroke:#07876d}
+    .equity-live{fill:#174b63;stroke:#f7ffff}
+    .performance-stat{background:linear-gradient(145deg,#f1f8fa,#fbfdff);border-color:#d5e3e9}
+    .performance-stat:nth-child(1){border-top:3px solid #169775}
+    .performance-stat:nth-child(2){border-top:3px solid #c64b42}
+    .performance-stat:nth-child(3){border-top:3px solid #d39a34}
+    .performance-stat:nth-child(4){border-top:3px solid #4b91ad}
+    .foot{color:#526b7e}
+    .error{color:#a6332d}
+    @media(hover:hover){.stat,.panel,.market,.candidate,.shadow-card{transition:box-shadow .18s ease,border-color .18s ease}.stat:hover,.panel:hover,.market:hover{box-shadow:0 12px 29px rgba(26,62,83,.11);border-color:#bfd3df}}
+    @media(prefers-reduced-motion:reduce){.stat,.panel,.market,.candidate,.shadow-card{transition:none!important}}
   </style>
 </head>
 <body>
