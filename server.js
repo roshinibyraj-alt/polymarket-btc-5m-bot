@@ -6,14 +6,19 @@ const path = require('node:path');
 
 const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'wick.html'));
 
-function startServer(bot, port, liveBalanceProvider=null) {
+function startServer(bot, port, liveBalanceProvider=null, { listen = true } = {}) {
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
     if (pathname === '/api/healthz') {
       const state = bot.snapshot();
       const live=liveBalanceProvider?.snapshot?.()||null;
       const liveEnabled=live?.tradingEnabled===true;
-      const healthy = state.status !== 'blocked_or_error'
+      const unhealthyStates = new Set([
+        'blocked_or_error',
+        'history_restore_failed',
+        'history_persistence_error',
+      ]);
+      const healthy = !unhealthyStates.has(state.status)
         &&(!liveEnabled||(live.status==='ready'&&!live.halted));
       res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({
@@ -42,9 +47,11 @@ function startServer(bot, port, liveBalanceProvider=null) {
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('not found');
   });
-  server.listen(port, () => {
-    console.log(`[dashboard] listening on :${port}`);
-  });
+  if (listen) {
+    server.listen(port, () => {
+      console.log(`[dashboard] listening on :${port}`);
+    });
+  }
   return server;
 }
 

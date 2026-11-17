@@ -88,6 +88,19 @@
     .empty{padding:17px;color:var(--muted);text-align:center;font-size:11px;background:#f7f9f6;border-radius:10px}
     .events{display:grid;gap:0}.event{display:grid;grid-template-columns:145px 105px 1fr;gap:12px;padding:9px 0;border-bottom:1px solid var(--line);font-size:10px}.event:last-child{border:0}.event time,.event-type{color:var(--muted)}.event-type{font:700 9px var(--mono);letter-spacing:.06em}
     .foot{color:var(--muted);font-size:10px;margin:14px 2px 0;line-height:1.65;max-width:940px}.error{color:var(--coral);font:11px var(--mono);margin-top:10px}
+    .performance-layout{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(260px,.8fr);gap:12px;align-items:stretch}
+    .equity-wrap{min-width:0;padding:12px;border:1px solid var(--line);border-radius:12px;background:#f8faf7}
+    .equity-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:8px}
+    .equity-head strong{font:700 12px var(--display)}.equity-head span{font:9px var(--mono);color:var(--muted);text-align:right}
+    .equity-chart{width:100%;height:auto;display:block;overflow:visible}
+    .equity-gridline{stroke:#dfe7e2;stroke-width:1}.equity-line{fill:none;stroke:var(--teal);stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+    .equity-live{fill:var(--navy);stroke:#fff;stroke-width:2}.equity-label{fill:var(--muted);font:10px var(--mono)}
+    .performance-metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .performance-stat{background:#f8faf7;border:1px solid var(--line);border-radius:12px;padding:12px;min-width:0}
+    .performance-stat .label{font-size:8px}.performance-stat .value{font-size:18px;margin-top:6px}
+    .performance-stat .note{font-size:9px}
+    .performance-note{margin-top:10px;color:var(--muted);font-size:10px;line-height:1.5}
+    .analytics-empty{padding:30px 12px;text-align:center;color:var(--muted);font-size:11px}
     [hidden]{display:none!important}
     @media(max-width:800px){main{padding:20px}.hero{grid-template-columns:1fr 220px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
     @media(max-width:600px){main{padding:14px 12px 25px}header{align-items:flex-start;margin-bottom:14px}.brand{align-items:flex-start;gap:10px}.mark{width:36px;height:36px;border-radius:11px;font-size:13px}h1{font-size:21px}.subtitle{font-size:10px;max-width:225px}.header-right{align-items:flex-end;flex-direction:column-reverse;gap:5px}.refresh-label{font-size:9px}.badge{font-size:9px;padding:7px 9px}
@@ -102,6 +115,9 @@
       .candidates{gap:6px}.candidate{padding:8px}.candidate-title{font-size:9px}.candidate .row{font-size:9px}.candidate .row strong{font-size:9px}
        .shadow-grid{gap:6px}.shadow-card{padding:8px}.shadow-head{font-size:10px}.shadow-total strong{font-size:17px}.shadow-row{font-size:9px}.shadow-row strong{font-size:9px}.shadow-note{font-size:9px}
       .row{font-size:10px;padding:7px 0}.event{grid-template-columns:1fr;gap:1px;padding:8px 0}.event time{font-size:9px}.event-type{font-size:9px}
+       .performance-layout{grid-template-columns:1fr;gap:8px}.equity-wrap{padding:9px}.equity-head strong{font-size:11px}
+       .performance-metrics{gap:6px}.performance-stat{padding:9px}.performance-stat .value{font-size:16px}
+       .performance-note{font-size:9px}
     }
     @media(max-width:360px){.grid{grid-template-columns:1fr 1fr}.estimate-foot{flex-direction:column;gap:2px}.candidates,.shadow-grid{grid-template-columns:1fr}}
     @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
@@ -124,6 +140,23 @@
     <div class="stat"><div class="label">Real-order modules</div><div class="value good" id="accountReady">INACTIVE</div><span class="note" id="accountNote">Not loaded by the demo runner</span></div>
     <div class="stat"><div class="label">Paper cash</div><div class="value" id="collateral">—</div><span class="note">Available for simulated positions</span></div>
     <div class="stat"><div class="label">Paper equity</div><div class="value" id="equity">—</div><span class="note" id="snapshotTime">Demo account value</span></div>
+  </section>
+
+  <section class="panel" aria-label="Global paper performance">
+    <div class="panel-head"><h2>Global equity &amp; risk</h2><span class="hint">UP + DOWN combined · existing history</span></div>
+    <div class="performance-layout">
+      <div class="equity-wrap">
+        <div class="equity-head"><strong>Paper equity curve</strong><span id="equitySummary">Settled history plus current mark</span></div>
+        <div id="globalEquityChart"><div class="analytics-empty">Waiting for portfolio history…</div></div>
+      </div>
+      <div class="performance-metrics" id="performanceMetrics">
+        <div class="performance-stat"><div class="label">Maximum exposure · one window</div><div class="value" id="maxWindowExposure">—</div><span class="note" id="maxExposureWindow">Concurrent committed cost</span></div>
+        <div class="performance-stat"><div class="label">Maximum drawdown from peak</div><div class="value bad" id="maxDrawdown">—</div><span class="note" id="drawdownPercent">Realized equity curve</span></div>
+        <div class="performance-stat"><div class="label">Combined wins / losses</div><div class="value" id="combinedWinsLosses">—</div><span class="note" id="combinedSettled">Both sides, settled positions</span></div>
+        <div class="performance-stat"><div class="label">Combined win rate</div><div class="value" id="combinedWinRate">—</div><span class="note" id="combinedBreakEven">UP + DOWN</span></div>
+      </div>
+    </div>
+    <div class="performance-note">The curve shows settled P&amp;L over the full available paper history and adds the latest account-equity mark. Maximum drawdown is measured from settled equity peaks; it does not include unrecorded intratrade lows. Window exposure is the maximum simultaneous entry cost tied to one original 5-minute market, including fees.</div>
   </section>
 
   <section class="panel" id="flowTestPanel" hidden>
@@ -289,6 +322,70 @@
     </div>
     <div class="shadow-note">Adaptive forecast: ${esc(current.status || 'waiting')} · ${esc(current.selectedSide || 'no selected side')} · ${Number(current.sampleCount || 0)}/${Number(current.requiredSamples || activeCount)} samples. Hypothetical entries use the same visible-book fill model; this result is a paper simulation, not a live fill guarantee.</div>`;
   }
+  function renderGlobalEquity(state) {
+    const account = state.account || {};
+    const analytics = state.portfolioAnalytics || {};
+    const capital = num(account.capital);
+    const currentEquity = num(account.equity);
+    const history = Array.isArray(analytics.equityCurve) ? analytics.equityCurve : [];
+    const points = history
+      .map(point => ({ts:num(point.ts), equity:num(point.equity), live:false}))
+      .filter(point => point.ts != null && point.equity != null)
+      .sort((a,b) => a.ts-b.ts);
+    if (!points.length && capital != null) points.push({ts:num(state.now)||Date.now(),equity:capital,live:false});
+    if (currentEquity != null) {
+      const now = num(state.now) || Date.now();
+      if (!points.length || points.at(-1).ts !== now || points.at(-1).equity !== currentEquity) {
+        points.push({ts:now,equity:currentEquity,live:true});
+      } else {
+        points.at(-1).live = true;
+      }
+    }
+
+    const curve = document.querySelector('#globalEquityChart');
+    if (!points.length) {
+      curve.innerHTML = '<div class="analytics-empty">No equity history is available yet.</div>';
+    } else {
+      const width=900,height=230,pad={left:64,right:18,top:18,bottom:34};
+      const values=points.map(point=>point.equity);
+      const low=Math.min(...values),high=Math.max(...values);
+      const spread=Math.max(high-low,Math.abs(high)*0.002,1);
+      const min=low-spread*0.08,max=high+spread*0.08;
+      const x=i=>pad.left+(points.length===1?0:i/(points.length-1))*(width-pad.left-pad.right);
+      const y=value=>pad.top+(max-value)/(max-min)*(height-pad.top-pad.bottom);
+      const path=points.map((point,i)=>`${i?'L':'M'}${x(i).toFixed(1)},${y(point.equity).toFixed(1)}`).join(' ');
+      const grid=Array.from({length:4},(_,i)=>{
+        const value=max-(max-min)*i/3,py=y(value);
+        return `<line class="equity-gridline" x1="${pad.left}" y1="${py}" x2="${width-pad.right}" y2="${py}"></line><text class="equity-label" x="${pad.left-7}" y="${py+3}" text-anchor="end">${esc(money(value))}</text>`;
+      }).join('');
+      const first=points[0],last=points.at(-1);
+      const liveDot=last.live?`<circle class="equity-live" cx="${x(points.length-1)}" cy="${y(last.equity)}" r="5"><title>Current equity ${esc(money(last.equity))}</title></circle>`:'';
+      curve.innerHTML=`<svg class="equity-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Global paper equity curve from ${esc(money(first.equity))} to ${esc(money(last.equity))}">
+        ${grid}<path class="equity-line" d="${path}"></path>${liveDot}
+        <text class="equity-label" x="${pad.left}" y="${height-8}">${esc(new Date(first.ts).toLocaleDateString())}</text>
+        <text class="equity-label" x="${width-pad.right}" y="${height-8}" text-anchor="end">${last.live?'Now':esc(new Date(last.ts).toLocaleDateString())}</text>
+      </svg>`;
+    }
+    document.querySelector('#equitySummary').textContent = currentEquity == null
+      ? 'Settled account history'
+      : `Current equity ${money(currentEquity)} · ${points.length} points`;
+
+    const exposure=analytics.maxWindowExposure||{};
+    const exposureValue=num(exposure.amount);
+    document.querySelector('#maxWindowExposure').textContent=exposureValue==null?'—':money(exposureValue);
+    document.querySelector('#maxExposureWindow').textContent=exposure.title||exposure.slug
+      ? `${exposure.title||exposure.slug}${exposure.at?` · ${time(exposure.at)}`:''}`
+      : 'No settled or open exposure recorded';
+    const drawdown=num(analytics.maxDrawdown);
+    document.querySelector('#maxDrawdown').textContent=drawdown==null?'—':money(drawdown);
+    document.querySelector('#drawdownPercent').textContent=`${pct(analytics.maxDrawdownPercent)} from a settled-equity peak`;
+
+    const record=analytics.combinedResults||{};
+    document.querySelector('#combinedWinsLosses').textContent=`${Number(record.wins||0)} / ${Number(record.losses||0)}`;
+    document.querySelector('#combinedSettled').textContent=`${Number(record.settled||0)} settled · ${Number(record.breakEven||0)} break-even`;
+    document.querySelector('#combinedWinRate').textContent=pct(record.winRate);
+    document.querySelector('#combinedBreakEven').textContent='UP + DOWN combined';
+  }
   async function refresh() {
     try {
       const response = await fetch('/api/state?t='+Date.now(), {cache:'no-store'});
@@ -301,6 +398,7 @@
       document.querySelector('#collateral').textContent = money(account.cash);
       document.querySelector('#equity').textContent = money(account.equity);
       document.querySelector('#snapshotTime').textContent = account.asOf ? `Updated ${new Date(account.asOf).toLocaleTimeString()}` : 'Demo account value';
+      renderGlobalEquity(state);
       const flowTest = state.flowTest || {};
       const flowPanel = document.querySelector('#flowTestPanel');
       flowPanel.hidden = !flowTest.enabled && (!flowTest.status || flowTest.status === 'disabled');

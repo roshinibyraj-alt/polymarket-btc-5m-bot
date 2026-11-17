@@ -424,6 +424,58 @@ test('paper snapshot identifies only the uncalibrated BTC 5-minute demo strategy
   assert.equal(state.markets['5m'].forecast.calibrated, false);
 });
 
+test('paper snapshot adds global analytics without dropping position history', () => {
+  const bot = makeBot();
+  bot.positions = [
+    {
+      id: 'up-win',
+      side: 'UP',
+      status: 'SETTLED_EXIT',
+      windowStart: WINDOW_START,
+      slug: 'first-window',
+      shares: 100,
+      totalCost: 40,
+      openedAt: NOW - 10_000,
+      settledAt: NOW - 1_000,
+      realizedPnl: 10,
+    },
+    {
+      id: 'down-loss',
+      side: 'DOWN',
+      status: 'SETTLED_LOSS',
+      windowStart: WINDOW_START,
+      slug: 'first-window',
+      shares: 100,
+      totalCost: 30,
+      openedAt: NOW - 5_000,
+      settledAt: NOW - 500,
+      realizedPnl: -15,
+    },
+    {
+      id: 'other-window-open',
+      side: 'DOWN',
+      status: 'OPEN',
+      windowStart: WINDOW_START + config.WINDOW_MS_5M,
+      slug: 'second-window',
+      shares: 100,
+      totalCost: 60,
+      openedAt: NOW - 500,
+      realizedPnl: null,
+    },
+  ];
+
+  const state = bot.snapshot();
+
+  assert.equal(state.positions.length, 3);
+  assert.equal(state.account.positions.length, 3);
+  assert.equal(state.portfolioAnalytics.combinedResults.settled, 2);
+  assert.equal(state.portfolioAnalytics.combinedResults.wins, 1);
+  assert.equal(state.portfolioAnalytics.combinedResults.losses, 1);
+  assert.equal(state.portfolioAnalytics.maxWindowExposure.amount, 70);
+  assert.equal(state.portfolioAnalytics.maxDrawdown, 15);
+  assert.equal(state.portfolioAnalytics.equityCurve.at(-1).equity, 9_995);
+});
+
 test('0.99 take-profit counts as $1 and 0.01 stop-loss counts as $0', () => {
   for (const scenario of [
     { bid: 0.99, expectedPayout: 1, expectedStatus: 'SELL_TAKE_PROFIT', pnl: 60 },
@@ -511,4 +563,83 @@ test('Binance public aggregate trades record direction and the current 5-minute 
   assert.equal(snapshot.tradeFlow.tradeCount, 2);
   feed.handleMessage({ data: { p: '100.5', q: '3', T: NOW + 2, m: false } });
   assert.equal(feed.snapshot().tradeFlow.tradeCount, 3);
+});
+
+test('paper history migration restores positions, cash, cooldowns, and shadow totals', () => {
+  const bot = makeBot();
+  const position = {
+    id: 'btc-5m-1800000000000-buy_entry-up-23',
+    windowStart: WINDOW_START,
+    side: 'UP',
+    status: 'OPEN',
+    shares: 100,
+    totalCost: 48,
+    filledAt: NOW - 5000,
+    markBid: 0.49,
+  };
+  const snapshot = {
+    mode: 'DEMO ONLY',
+    now: NOW,
+    account: {
+      capital: 10_000,
+      cash: 9_952,
+      equityCurve: [{ ts: WINDOW_START - 60_000, equity: 10_000 }],
+    },
+    window: { start: WINDOW_START, end: WINDOW_START + config.WINDOW_MS_5M, slug: 'btc-window' },
+    markets: { '5m': { quotes: { UP: { bestBid: 0.49, updatedAt: NOW } }, orders: [] } },
+    quotes: {
+      UP: { status: 'LIVE', bestBid: 0.49, updatedAt: NOW },
+      DOWN: { status: 'LIVE', bestBid: 0.51, updatedAt: NOW },
+    },
+    positions: [position],
+    orders: [{
+      id: position.id,
+      windowStart: WINDOW_START,
+      side: 'UP',
+      action: 'BUY',
+      status: 'FILLED',
+      filledAt: NOW - 5000,
+    }],
+    events: [{ at: NOW - 4000, type: 'BUY_FILLED', message: 'entry retained' }],
+    resolutions: [{ slug: 'prior-window', outcome: 'DOWN', status: 'RESOLVED', pnl: 12 }],
+    forecast: { ready: false, reason: 'restored forecast' },
+    shadowComparison: {
+      activeSampleCount: 8,
+      adaptive: {
+        initialCapital: 10_000,
+        cash: 9_900,
+        entries: 4,
+        settledEntries: 3,
+        wins: 2,
+        losses: 1,
+        openPositions: 1,
+        awaitingResolution: 0,
+        realizedPnl: 15,
+        floatingPnl: -5,
+        totalPnl: 10,
+      },
+    },
+  };
+
+  bot.restoreFromSnapshot(snapshot);
+
+  assert.equal(bot.cash, 9_952);
+  assert.equal(bot.positions.length, 1);
+  assert.equal(bot.resolutions[0].slug, 'prior-window');
+  assert.equal(bot.lastEntryAtBySide.UP, NOW - 5000);
+  assert.equal(bot.orderWindowStart, WINDOW_START);
+  assert.equal(bot.pressureSamples.length, 0);
+  assert.equal(bot.forecast.reason, 'restored forecast');
+
+  const shadow = bot.snapshot().shadowComparison.adaptive;
+  assert.equal(shadow.entries, 4);
+  assert.equal(shadow.wins, 2);
+  assert.equal(shadow.cash, 9_900);
+  assert.equal(shadow.realizedPnl, 15);
+
+  const reloadedBot = makeBot();
+  reloadedBot.restorePersistentState(bot.serializePersistentState());
+  assert.equal(reloadedBot.positions[0].id, position.id);
+  assert.equal(reloadedBot.cash, 9_952);
+  assert.equal(reloadedBot.shadowStatsOffset.entries, 4);
 });

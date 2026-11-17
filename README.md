@@ -12,9 +12,12 @@ This document does not authorize a real order or a production deployment. Never 
 - The new signal is an experimental, uncalibrated estimate; it does not claim validated predictive accuracy.
 
 ## 2. Current strategy
+
 The full active rules are in `DEMO_RUNBOOK.md`. In short, the strategy waits for ten one-second Binance/Polymarket pressure samples and estimates each side's resolution probability from price, volatility, Polymarket odds, and pressure. Either side may qualify at any quoted price when its probability and net-edge checks pass; the full ask sweep remains capped at $0.90. Each 100-share entry has an independent 15-second cooldown per side. UP and DOWN positions trade separately, exit at their own $0.99/$0.01 thresholds, or wait for confirmed original-market resolution.
 
-The dashboard shows the experimental forecast and explicitly labels it uncalibrated. A separate adaptive-sample shadow portfolio compares hypothetical P&L using 10 samples for the first minute, then 9, 8, 7, and 6 samples at later minute marks. The trading model remains fixed at 10 samples; the shadow never submits orders or changes trading cash. Both portfolios' comparison history resets on process restart.
+The dashboard shows the experimental forecast and explicitly labels it uncalibrated. A separate adaptive-sample shadow portfolio compares hypothetical P&L using 10 samples for the first minute, then 9, 8, 7, and 6 samples at later minute marks. The trading model remains fixed at 10 samples; the shadow never submits orders or changes trading cash.
+
+The demo paper ledger is stored separately from the live-order ledger on the existing Railway volume at `/data/pressure-paper-state.json`. On first startup, the app imports the current demo snapshot from its existing dashboard before opening the new service; if that import or validation fails, it does not start a fresh empty bot. Afterward, trade/history changes and periodic checkpoints are saved atomically and restored on restart. The public snapshot exposes the shadow portfolio's totals but not its old individual tickets, so those pre-migration shadow totals are carried forward as a historical summary.
 
 ## 3. Real order lifecycle
 
@@ -46,14 +49,17 @@ The test is one-shot and restart-safe. A confirmed take-profit submission comple
 ### Fill checks and resolution
 
 - The live order polling target is **500 ms**. This is not a guarantee that Polymarket will respond or fill within 500 ms.
-- Poll and reconcile strategy BUY orders on the 500 ms target; a dashboard signal is not proof of an exchange fill.
+- Poll and reconcile both BUY and SELL orders on the 500 ms target; a dashboard signal is not proof of an exchange fill.
 - Use Polymarket's matched-share count as the source of truth. Never infer a real fill from a paper fill, a submitted response, or a quote touching the limit.
-- On the first confirmed partial fill of a new rung, cancel its unfilled BUY remainder and track the actual matched quantity.
-- The strategy submits no take-profit or stop-loss sell orders. Hold confirmed shares for the original market resolution.
+- On the first confirmed partial fill of a new rung, cancel its unfilled BUY remainder. Wait for final fill confirmation before sizing the exit.
+- Do not submit TP or SL sells for strategy entries. Keep confirmed shares until the original market is closed and its resolution is confirmed.
+- When a threshold is reached, submit a resting limit SELL at the selected source exit price ($0.99 TP or $0.01 SL) for the confirmed unsold shares.
+- Handle partial fills without overselling: account for shares already sold or reserved by a pending sell, and place a new sell only for the remaining confirmed quantity.
+- The current minimum live sell size is 5 shares. If a partial fill is below 5, wait for more matched shares; if the total remains below the minimum, report the blocked quantity clearly. Do not mark it as sold.
 - On an uncertain order-submission response, halt additional submissions until the order can be reconciled. Do not retry an uncertain BUY or SELL blindly, because that can create duplicates.
-- Reconcile BUY submissions, fills, cancellations, and rejections. Do not duplicate an uncertain order.
+- Reconcile TP/SL SELL fills, cancellations, and rejections. Do not duplicate an uncertain sell. A confirmed insufficient-balance rejection may retry after a delay; other rejected or canceled exits are not automatically re-armed.
 
-At window end, cancel any still-open BUY limits and wait for confirmed resolution of the **original market**. Do not infer settlement from the next window's UP/DOWN tokens. Strategy entries have no TP or SL sell orders.
+At window end, cancel any still-open BUY orders and wait for confirmed resolution of the **original market**. Do not infer settlement from the next window's UP/DOWN tokens. New strategy entries have no take-profit or stop-loss orders.
 
 ## 4. Account readiness, rate limits, and safety
 
@@ -73,8 +79,8 @@ Persist before/with every live submission:
 
 - Market slug, timeframe, window start/end, side, rung price, requested shares
 - CLOB order ID, order status, matched shares, and last reconciliation time
-- Confirmed matched shares and original-market resolution state
-- Submitted, matched, cancelled, and settled share quantities
+- Parent/child relationship between each BUY and its take-profit SELL
+- Submitted, filled, reserved-for-exit, and exited share quantities
 - Per-window/per-side/per-rung idempotency keys
 
 On startup, load the durable ledger before enabling new entries. Open-order and positions snapshots are useful for recovery and dashboard visibility, but they do not gate authenticated CLOB submissions. If an order's submission result is uncertain, reconcile that specific order before any retry. Do not reset live order state or paper balances as an implicit side effect of deployment.
@@ -90,7 +96,7 @@ The dashboard must show the active BTC 5m market and its current strategy:
 - Quote timestamp/age and an explicit `LIVE`, `STALE`, or `MISSING` state
 - The evaluated midpoint band, signal decision, and skip reason
 - Live trading enabled/paused state, CLOB order-path readiness, snapshot freshness, last successful snapshot, next retry, and any 429/error
-- Each live strategy BUY order's side, limit price, requested shares, matched shares, and status
+- Each live BUY and SELL order's side, limit price, requested shares, matched shares, status, and linked take-profit
 - Live account readiness, tracked BUY/SELL orders, matched shares, and bot events
 
 `/api/state` is the live bot snapshot. `/api/live-balance` reports the last account snapshot and tracked live orders. `/api/healthz` returns 503 until the CLOB client authenticates or while a hard safety halt is active; a stale Positions API snapshot alone does not fail health. Never display private keys or secrets.
@@ -100,14 +106,14 @@ The dashboard must show the active BTC 5m market and its current strategy:
 At minimum, test that:
 
  1. Only BTC 5m markets are actively scanned for new entries; ETH, 15m, and malformed/expired markets are not traded.
-2. At window open, green selects UP or red selects DOWN for one 10-share limit BUY at $0.30; a doji skips this opening order.
+2. At window open, a green previous candle selects UP or a red previous candle selects DOWN for one 10-share limit BUY at $0.30; a doji skips this order.
 3. A fresh midpoint at or above $0.70 triggers the separate two-order ladder: 10 shares at $0.40 and 20 shares at $0.45 on the candle-permitted side. Confirmed shares wait for original-market resolution, with no strategy TP/SL sells.
-4. Repeated scans do not duplicate the opening order or either trigger rung, and do not buy on the opposite side.
+4. Repeated scans do not duplicate either rung or submit a buy on the opposite side.
 6. Repeated scans of the same window do not duplicate either trigger's orders.
 7. Confirmed full and partial fills are tracked correctly and held until original-market resolution; no strategy SELL orders are submitted.
 8. 429 responses honor `Retry-After` for snapshot retries but do not block an authenticated CLOB order path.
 9. Restart recovery reconciles previous order IDs and partial fills without duplicating BUYs or SELLs.
-10. A restarted process loads the durable ledger, resumes only persisted entry intents for an open window, does not replay retired opening-pair orders, and does not duplicate submitted entries.
+10. A restarted process loads the durable ledger, preserves a qualifying new-strategy trigger only for its still-open window, does not replay retired opening-pair intents, and does not duplicate submitted entries.
 11. Missing/corrupt persistent state and ambiguous order submissions halt live execution; unclassified open orders are visible warnings.
 
 ## 8. Development

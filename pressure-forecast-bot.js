@@ -5,6 +5,10 @@ const WickBot = require('./wick-bot');
 const BinanceTickFeed = require('./binance-tick-feed');
 const defaultMarketData = require('./wick-market-data');
 const { feeFor, quoteFromBook } = WickBot._test;
+const {
+  summarizeCombinedResults,
+  maximumConcurrentWindowExposure,
+} = require('./portfolio-analytics');
 
 const EPSILON = 1e-9;
 const SIDES = ['UP', 'DOWN'];
@@ -95,28 +99,31 @@ function adaptiveShadowSampleCount(start, now) {
   );
 }
 
-function summarizePortfolio(positions, cash, initialCapital) {
+function summarizePortfolio(positions, cash, initialCapital, historicalOffset = null) {
   const open = positions.filter((position) => position.status === 'OPEN');
   const pending = positions.filter((position) => position.status === 'PENDING_CLOB_RESULT');
   const settled = positions.filter((position) => position.realizedPnl != null
     && Number.isFinite(Number(position.realizedPnl))
     && !['OPEN', 'PENDING_CLOB_RESULT'].includes(position.status));
-  const realizedPnl = settled.reduce((total, position) => total + Number(position.realizedPnl), 0);
+  const realizedPnl = settled.reduce((total, position) => total + Number(position.realizedPnl), 0)
+    + Number(historicalOffset?.realizedPnl || 0);
   const floatingPnl = open.reduce((total, position) => {
     if (position.markBid == null) return total;
     const bid = Number(position.markBid);
     if (!Number.isFinite(bid) || bid < 0) return total;
     return total + (bid * Number(position.shares)) - Number(position.totalCost || 0);
-  }, 0);
+  }, Number(historicalOffset?.floatingPnl || 0));
   return {
     initialCapital,
     cash,
-    entries: positions.length,
-    settledEntries: settled.length,
-    wins: settled.filter((position) => Number(position.realizedPnl) > 0).length,
-    losses: settled.filter((position) => Number(position.realizedPnl) < 0).length,
-    openPositions: open.length,
-    awaitingResolution: pending.length,
+    entries: positions.length + Number(historicalOffset?.entries || 0),
+    settledEntries: settled.length + Number(historicalOffset?.settledEntries || 0),
+    wins: settled.filter((position) => Number(position.realizedPnl) > 0).length
+      + Number(historicalOffset?.wins || 0),
+    losses: settled.filter((position) => Number(position.realizedPnl) < 0).length
+      + Number(historicalOffset?.losses || 0),
+    openPositions: open.length + Number(historicalOffset?.openPositions || 0),
+    awaitingResolution: pending.length + Number(historicalOffset?.awaitingResolution || 0),
     realizedPnl,
     floatingPnl,
     totalPnl: realizedPnl + floatingPnl,
@@ -268,6 +275,8 @@ class PressureForecastBot extends WickBot {
     this.lastEntryAtBySide = { UP: null, DOWN: null };
     this.shadowCash = initialCapital;
     this.shadowPositions = [];
+    this.shadowStatsOffset = null;
+    this.shadowInitialCapital = initialCapital;
     this.shadowLastEntryAt = null;
     this.shadowLastEntryAtBySide = { UP: null, DOWN: null };
     this.shadowSequence = 0;
@@ -276,6 +285,232 @@ class PressureForecastBot extends WickBot {
     this.lastResolutionCheckAt = new Map();
     this.actionSequence = 0;
     this.resolutions = [];
+    this.persistenceStore = null;
+    this.persistenceDirty = false;
+    this.lastPersistedAt = 0;
+  }
+
+  log(event, data = {}) {
+    super.log(event, data);
+    this.persistenceDirty = true;
+  }
+
+  attachPersistenceStore(store) {
+    this.persistenceStore = store;
+  }
+
+  serializePersistentState() {
+    const market = this.market ? {
+      id: this.market.id,
+      slug: this.market.slug,
+      title: this.market.title,
+      start: this.market.start,
+      end: this.market.end,
+      tokens: this.market.tokens,
+      feesEnabled: this.market.feesEnabled,
+      feeSchedule: this.market.feeSchedule,
+    } : null;
+    return {
+      schemaVersion: 1,
+      capital: this.capital,
+      cash: this.cash,
+      startedAt: this.startedAt,
+      positions: this.positions,
+      orders: this.orders,
+      events: this.events,
+      resolutions: this.resolutions,
+      market,
+      orderWindowStart: this.orderWindowStart,
+      quoteWindowStart: this.quoteWindowStart,
+      liveQuotes: this.liveQuotes,
+      pressureSamples: this.pressureSamples,
+      lastSampleAt: this.lastSampleAt,
+      lastEntryAt: this.lastEntryAt,
+      lastEntryAtBySide: this.lastEntryAtBySide,
+      shadowCash: this.shadowCash,
+      shadowPositions: this.shadowPositions,
+      shadowStatsOffset: this.shadowStatsOffset,
+      shadowInitialCapital: this.shadowInitialCapital,
+      shadowLastEntryAt: this.shadowLastEntryAt,
+      shadowLastEntryAtBySide: this.shadowLastEntryAtBySide,
+      shadowSequence: this.shadowSequence,
+      shadowSamplesRequired: this.shadowSamplesRequired,
+      shadowForecast: this.shadowForecast,
+      forecast: this.forecast,
+      actionSequence: this.actionSequence,
+      completedWindows: [...this.completedWindows.entries()],
+      lastResolutionCheckAt: [...this.lastResolutionCheckAt.entries()],
+    };
+  }
+
+  restorePersistentState(state) {
+    if (state?.schemaVersion !== 1
+      || !Array.isArray(state.positions)
+      || !Number.isFinite(Number(state.cash))
+      || !Number.isFinite(Number(state.capital))) {
+      throw new Error('Paper history import did not contain a valid portfolio snapshot');
+    }
+
+    this.capital = Number(state.capital);
+    this.initialCapital = this.capital;
+    this.cash = Number(state.cash);
+    this.startedAt = Number(state.startedAt) || this.now();
+    this.positions = state.positions;
+    this.orders = Array.isArray(state.orders) ? state.orders : [];
+    this.events = Array.isArray(state.events)
+      ? state.events.map((event) => ({ ...event, ts: Number(event.ts ?? event.at) || this.now() })).slice(0, 100)
+      : [];
+    this.resolutions = Array.isArray(state.resolutions) ? state.resolutions : [];
+    this.market = state.market || null;
+    this.lastMarketAt = 0;
+    this.orderWindowStart = Number.isFinite(Number(state.orderWindowStart))
+      ? Number(state.orderWindowStart)
+      : null;
+    this.quoteWindowStart = Number.isFinite(Number(state.quoteWindowStart))
+      ? Number(state.quoteWindowStart)
+      : this.orderWindowStart;
+    this.windowOrders = this.orders.filter((order) =>
+      Number(order.windowStart) === Number(this.orderWindowStart));
+    this.liveQuotes = state.liveQuotes || { UP: { status: 'MISSING' }, DOWN: { status: 'MISSING' } };
+    this.pressureSamples = Array.isArray(state.pressureSamples) ? state.pressureSamples : [];
+    this.lastSampleAt = Number.isFinite(Number(state.lastSampleAt)) ? Number(state.lastSampleAt) : null;
+    this.lastEntryAt = Number.isFinite(Number(state.lastEntryAt)) ? Number(state.lastEntryAt) : null;
+    this.lastEntryAtBySide = state.lastEntryAtBySide || { UP: null, DOWN: null };
+    this.shadowCash = Number.isFinite(Number(state.shadowCash))
+      ? Number(state.shadowCash)
+      : this.capital;
+    this.shadowPositions = Array.isArray(state.shadowPositions) ? state.shadowPositions : [];
+    this.shadowStatsOffset = state.shadowStatsOffset || null;
+    this.shadowInitialCapital = Number(state.shadowInitialCapital) || this.capital;
+    this.shadowLastEntryAt = Number.isFinite(Number(state.shadowLastEntryAt))
+      ? Number(state.shadowLastEntryAt)
+      : null;
+    this.shadowLastEntryAtBySide = state.shadowLastEntryAtBySide || { UP: null, DOWN: null };
+    this.shadowSequence = Number(state.shadowSequence) || 0;
+    this.shadowSamplesRequired = Number(state.shadowSamplesRequired) || config.PRESSURE_SAMPLE_COUNT;
+    this.shadowForecast = state.shadowForecast || this.emptyForecast('Waiting for live data for the adaptive shadow comparison.');
+    this.forecast = state.forecast || this.emptyForecast('Waiting for Binance and Polymarket data.');
+    this.actionSequence = Number(state.actionSequence) || 0;
+    this.completedWindows = new Map(Array.isArray(state.completedWindows) ? state.completedWindows : []);
+    this.lastResolutionCheckAt = new Map(
+      Array.isArray(state.lastResolutionCheckAt) ? state.lastResolutionCheckAt : [],
+    );
+    this.status = 'starting';
+    this.error = null;
+    this.persistenceDirty = false;
+    this.lastPersistedAt = this.now();
+  }
+
+  restoreFromSnapshot(snapshot) {
+    if (snapshot?.mode !== 'DEMO ONLY'
+      || !Array.isArray(snapshot.positions)
+      || !snapshot.account
+      || !Array.isArray(snapshot.account.equityCurve)
+      || !Array.isArray(snapshot.events)
+      || !Array.isArray(snapshot.resolutions)
+      || !Number.isFinite(Number(snapshot.account.capital))
+      || !Number.isFinite(Number(snapshot.account.cash))) {
+      throw new Error('The running dashboard did not return a complete demo-only paper ledger');
+    }
+    const reportedSettledTrades = Number(snapshot.account.settledTrades);
+    if (Number.isFinite(reportedSettledTrades) && snapshot.positions.length < reportedSettledTrades) {
+      throw new Error('The running dashboard returned fewer positions than its settled-trade count');
+    }
+
+    const windowStart = Number(snapshot.window?.start ?? snapshot.markets?.['5m']?.windowStart);
+    const positions = snapshot.positions;
+    const orders = Array.isArray(snapshot.orders)
+      ? snapshot.orders
+      : (snapshot.markets?.['5m']?.orders || []);
+    const lastEntryAtBySide = { UP: null, DOWN: null };
+    for (const position of positions) {
+      if (Number(position.windowStart) !== windowStart || !SIDES.includes(position.side)) continue;
+      const filledAt = Number(position.filledAt ?? position.openedAt ?? position.submittedAt);
+      if (Number.isFinite(filledAt)) {
+        lastEntryAtBySide[position.side] = Math.max(lastEntryAtBySide[position.side] || 0, filledAt);
+      }
+    }
+    for (const order of orders) {
+      if (Number(order.windowStart) !== windowStart || !SIDES.includes(order.side)) continue;
+      if (order.action !== 'BUY' || order.status !== 'FILLED') continue;
+      const filledAt = Number(order.filledAt ?? order.createdAt);
+      if (Number.isFinite(filledAt)) {
+        lastEntryAtBySide[order.side] = Math.max(lastEntryAtBySide[order.side] || 0, filledAt);
+      }
+    }
+    const sequenceValues = [...positions, ...orders].map((item) => {
+      const match = String(item.id || '').match(/-(\d+)$/);
+      return match ? Number(match[1]) : 0;
+    });
+    const shadow = snapshot.shadowComparison?.adaptive || null;
+    const marketSnapshot = snapshot.markets?.['5m'];
+    const completedByWindow = new Map();
+    const positionsByWindow = new Map();
+    for (const position of positions) {
+      if (!positionsByWindow.has(position.windowStart)) positionsByWindow.set(position.windowStart, []);
+      positionsByWindow.get(position.windowStart).push(position);
+    }
+    for (const [start, windowPositions] of positionsByWindow) {
+      if (windowPositions.length && windowPositions.every((position) =>
+        !['OPEN', 'PENDING_CLOB_RESULT'].includes(position.status))) {
+        completedByWindow.set(start, Math.max(...windowPositions.map((position) =>
+          Number(position.settledAt ?? position.closedAt ?? position.resolvedAt) || this.now())));
+      }
+    }
+
+    this.restorePersistentState({
+      schemaVersion: 1,
+      capital: snapshot.account.capital,
+      cash: snapshot.account.cash,
+      startedAt: snapshot.account.equityCurve?.[0]?.ts || snapshot.now,
+      positions,
+      orders,
+      events: snapshot.events || [],
+      resolutions: snapshot.resolutions || [],
+      market: snapshot.window ? {
+        id: null,
+        slug: snapshot.window.slug || marketSnapshot?.slug || null,
+        title: snapshot.window.title || marketSnapshot?.title || 'BTC 5-minute UP/DOWN',
+        start: windowStart,
+        end: snapshot.window.end ?? marketSnapshot?.windowEnd,
+        tokens: {},
+        feesEnabled: false,
+      } : null,
+      orderWindowStart: Number.isFinite(windowStart) ? windowStart : null,
+      quoteWindowStart: Number.isFinite(windowStart) ? windowStart : null,
+      liveQuotes: snapshot.quotes || marketSnapshot?.quotes,
+      pressureSamples: [],
+      lastSampleAt: null,
+      lastEntryAt: Math.max(...Object.values(lastEntryAtBySide).filter(Number.isFinite), 0) || null,
+      lastEntryAtBySide,
+      shadowCash: Number.isFinite(Number(shadow?.cash))
+        ? Number(shadow.cash)
+        : Number(snapshot.account.capital),
+      shadowPositions: [],
+      shadowStatsOffset: shadow,
+      shadowInitialCapital: Number.isFinite(Number(shadow?.initialCapital))
+        ? Number(shadow.initialCapital)
+        : Number(snapshot.account.capital),
+      shadowLastEntryAt: null,
+      shadowLastEntryAtBySide: { UP: null, DOWN: null },
+      shadowSequence: 0,
+      shadowSamplesRequired: Number(snapshot.shadowComparison?.activeSampleCount)
+        || config.PRESSURE_SAMPLE_COUNT,
+      shadowForecast: snapshot.shadowComparison?.currentForecast || null,
+      forecast: snapshot.forecast,
+      actionSequence: Math.max(0, ...sequenceValues),
+      completedWindows: [...completedByWindow.entries()],
+      lastResolutionCheckAt: [],
+    });
+  }
+
+  async persistState(force = false) {
+    if (!this.persistenceStore) return;
+    const now = this.now();
+    if (!force && !this.persistenceDirty && now - this.lastPersistedAt < 30_000) return;
+    await this.persistenceStore.save(this.serializePersistentState());
+    this.persistenceDirty = false;
+    this.lastPersistedAt = now;
   }
 
   emptyForecast(reason, status = 'WAITING_FOR_DATA') {
@@ -898,6 +1133,7 @@ class PressureForecastBot extends WickBot {
     this.windowOrders.unshift(order);
     this.orders.unshift(order);
     if (this.orders.length > 1000) this.orders.length = 1000;
+    this.persistenceDirty = true;
     return order;
   }
 
@@ -1095,15 +1331,37 @@ class PressureForecastBot extends WickBot {
     const loop = async () => {
       if (!this.running) return;
       await this.tick();
-      if (this.running) this.timer = setTimeout(loop, config.POLL_INTERVAL_MS);
+      if (this.running) {
+        try {
+          await this.persistState();
+        } catch (error) {
+          this.running = false;
+          this.status = 'history_persistence_error';
+          this.error = `Paper history could not be saved: ${error.message || String(error)}`;
+          this.priceFeed.stop?.();
+          console.error(`[paper-state] ${this.error}`);
+          return;
+        }
+      }
+      if (this.running) {
+        this.timer = setTimeout(() => {
+          this.loopPromise = loop();
+        }, config.POLL_INTERVAL_MS);
+      }
     };
-    void loop();
+    this.loopPromise = loop();
   }
 
   stop() {
     this.running = false;
     clearTimeout(this.timer);
     this.priceFeed.stop?.();
+  }
+
+  async stopAndFlush() {
+    this.stop();
+    await this.loopPromise?.catch(() => {});
+    await this.persistState(true);
   }
 
   snapshot() {
@@ -1134,6 +1392,7 @@ class PressureForecastBot extends WickBot {
       forecast: this.forecast,
       orders: currentOrders,
     };
+    const settledEquityCurve = state.account.equityCurve || [];
     return {
       ...state,
       now,
@@ -1187,8 +1446,20 @@ class PressureForecastBot extends WickBot {
         stepMs: config.PRESSURE_SHADOW_STEP_MS,
         currentForecast: this.shadowForecast,
         baseline: summarizePortfolio(this.positions, this.cash, this.capital),
-        adaptive: summarizePortfolio(this.shadowPositions, this.shadowCash, this.capital),
+        adaptive: summarizePortfolio(
+          this.shadowPositions,
+          this.shadowCash,
+          this.shadowInitialCapital,
+          this.shadowStatsOffset,
+        ),
         assumptions: 'Separate paper cash; same 100-share entry filters, independent 15-second cooldown per side, visible ask sweep, taker fees, $0.99/$0.01 exits, and official resolution.',
+      },
+      portfolioAnalytics: {
+        equityCurve: settledEquityCurve,
+        maxDrawdown: state.account.maxDrawdown,
+        maxDrawdownPercent: state.account.maxDrawdownPercent,
+        combinedResults: summarizeCombinedResults(this.positions),
+        maxWindowExposure: maximumConcurrentWindowExposure(this.positions, now),
       },
       quotes,
       account: {

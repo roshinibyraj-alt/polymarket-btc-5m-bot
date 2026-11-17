@@ -15,6 +15,22 @@ test('state endpoint accepts the dashboard cache-buster query string', async (t)
   assert.equal(response.headers.get('cache-control'), 'no-store');
 });
 
+test('dashboard serves global analytics and retains existing position and resolution history panels', async (t) => {
+  const server = startServer({ snapshot: () => ({}) }, 0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/`);
+  const html = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(html, /id="globalEquityChart"/);
+  assert.match(html, /id="maxWindowExposure"/);
+  assert.match(html, /id="maxDrawdown"/);
+  assert.match(html, /id="combinedWinsLosses"/);
+  assert.match(html, /id="positions"/);
+  assert.match(html, /id="resolutions"/);
+});
+
 test('unknown dashboard paths still return 404', async (t) => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise((resolve) => server.once('listening', resolve));
@@ -32,6 +48,18 @@ test('health endpoint returns demo service status without exposing secrets', asy
   assert.deepEqual(await response.json(), {
     ok:true,mode:'DEMO',status:'scanning',liveStatus:'disabled',now:123
   });
+});
+
+test('health endpoint reports an unhealthy state when paper history cannot be restored', async (t) => {
+  const server = startServer({
+    snapshot: () => ({ mode: 'DEMO ONLY', status: 'history_restore_failed', now: 123 }),
+  }, 0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/healthz`);
+
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).ok, false);
 });
 
 test('health endpoint reports live mode only when the live order adapter is ready',async t=>{
