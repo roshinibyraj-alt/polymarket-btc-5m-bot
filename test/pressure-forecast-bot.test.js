@@ -320,49 +320,32 @@ test('shadow-only entry leaves the trading portfolio completely untouched', () =
   assert.ok(bot.shadowCash < 10_000);
 });
 
-test('baseline and shadow P&L settle independently at the existing take-profit threshold', () => {
-  const bot = makeBot();
-  setQuote(bot, 'UP', 0.30, 0.32);
-  setQuote(bot, 'DOWN', 0.68, 0.70);
-  addSamples(bot, 1);
-  bot.market.feesEnabled = false;
+test('price touching former TP or SL levels does not exit main or shadow positions', async () => {
+  const bot = makeBot({
+    marketData: {
+      getBook: async (tokenId) => ({
+        bids: [{ price: tokenId === 'up-token' ? 0.99 : 0.01, size: 1000 }],
+        asks: [{ price: tokenId === 'up-token' ? 0.995 : 0.02, size: 1000 }],
+      }),
+    },
+  });
+  bot.lastMarketAt = NOW;
+  bot.positions.push(
+    { id: 'main-up', side: 'UP', shares: 100, totalCost: 40, windowStart: WINDOW_START, status: 'OPEN' },
+    { id: 'main-down', side: 'DOWN', shares: 100, totalCost: 40, windowStart: WINDOW_START, status: 'OPEN' },
+  );
+  bot.shadowPositions.push(
+    { id: 'shadow-up', side: 'UP', shares: 100, totalCost: 40, windowStart: WINDOW_START, status: 'OPEN' },
+    { id: 'shadow-down', side: 'DOWN', shares: 100, totalCost: 40, windowStart: WINDOW_START, status: 'OPEN' },
+  );
 
-  bot.processPressureStrategy(WINDOW_START, NOW);
-  setQuote(bot, 'UP', 0.99, 0.99, 1000, NOW + 1000);
-  bot.processThresholdExits(WINDOW_START, NOW + 1000);
+  await bot.tick();
 
-  assert.equal(bot.positions[0].status, 'SETTLED_EXIT');
-  assert.equal(bot.shadowPositions[0].status, 'SETTLED_EXIT');
-  const comparison = bot.snapshot().shadowComparison;
-  assert.equal(comparison.baseline.entries, 1);
-  assert.equal(comparison.adaptive.entries, 1);
-  assert.equal(comparison.baseline.realizedPnl, comparison.adaptive.realizedPnl);
-  assert.equal(bot.orders.filter((order) => order.kind === 'SELL_TAKE_PROFIT').length, 1);
-});
-
-test('shadow stop loss counts a $0.01 bid as a zero payout', () => {
-  const bot = makeBot();
-  setQuote(bot, 'UP', 0.01, 0.02, 1000);
-  const position = {
-    id: 'shadow-stop-up',
-    shadowOnly: true,
-    side: 'UP',
-    shares: 100,
-    totalCost: 40,
-    windowStart: WINDOW_START,
-    status: 'OPEN',
-    markBid: 0.01,
-  };
-  bot.shadowPositions.push(position);
-  bot.shadowCash = 9960;
-
-  bot.processThresholdExits(WINDOW_START, NOW);
-
-  assert.equal(position.status, 'SETTLED_EXIT');
-  assert.equal(position.exitPrice, 0);
-  assert.equal(position.realizedPnl, -40);
-  assert.equal(bot.shadowCash, 9960);
-  assert.equal(bot.orders.length, 0);
+  assert.deepEqual(bot.positions.map((position) => position.status), ['OPEN', 'OPEN']);
+  assert.deepEqual(bot.shadowPositions.map((position) => position.status), ['OPEN', 'OPEN']);
+  assert.equal(bot.orders.some((order) => order.action === 'SELL'), false);
+  assert.equal(bot.snapshot().strategy.exits.takeProfit, false);
+  assert.equal(bot.snapshot().strategy.exits.stopLoss, false);
 });
 
 test('shadow-only positions roll over and settle from official market resolution', async () => {
@@ -476,38 +459,6 @@ test('paper snapshot adds global analytics without dropping position history', (
   assert.equal(state.portfolioAnalytics.equityCurve.at(-1).equity, 9_995);
 });
 
-test('0.99 take-profit counts as $1 and 0.01 stop-loss counts as $0', () => {
-  for (const scenario of [
-    { bid: 0.99, expectedPayout: 1, expectedStatus: 'SELL_TAKE_PROFIT', pnl: 60 },
-    { bid: 0.01, expectedPayout: 0, expectedStatus: 'SELL_STOP_LOSS', pnl: -40 },
-  ]) {
-    const bot = makeBot();
-    setQuote(bot, 'UP', scenario.bid, scenario.bid, 1000);
-    const position = {
-      id: `threshold-${scenario.bid}`,
-      side: 'UP',
-      shares: 100,
-      initialShares: 100,
-      totalCost: 40,
-      cost: 40,
-      fees: 0,
-      windowStart: WINDOW_START,
-      marketId: bot.market.id,
-      tokenId: bot.market.tokens.UP,
-      slug: bot.market.slug,
-      status: 'OPEN',
-    };
-    bot.positions.unshift(position);
-
-    bot.processThresholdExits(WINDOW_START, NOW);
-
-    assert.equal(position.exitPrice, scenario.expectedPayout);
-    assert.equal(position.realizedPnl, scenario.pnl);
-    assert.equal(bot.orders[0].kind, scenario.expectedStatus);
-    assert.equal(bot.orders[0].price, scenario.expectedPayout);
-  }
-});
-
 test('ended paper positions wait for the original market resolution', async () => {
   const bot = makeBot({
     marketData: {
@@ -541,6 +492,36 @@ test('ended paper positions wait for the original market resolution', async () =
   assert.equal(position.realizedPnl, 60);
   assert.equal(bot.cash, 10_100);
   assert.equal(bot.resolutions[0].outcome, 'UP');
+});
+
+test('pending positions check official resolution no more often than every 10 seconds', async () => {
+  let resolutionChecks = 0;
+  const bot = makeBot({
+    marketData: {
+      getMarket: async () => {
+        resolutionChecks += 1;
+        return { closed: false, outcomes: '["Up","Down"]', outcomePrices: '["0.5","0.5"]' };
+      },
+    },
+  });
+  const position = {
+    id: 'pending-resolution-poll',
+    side: 'UP',
+    shares: 100,
+    totalCost: 40,
+    windowStart: WINDOW_START,
+    marketId: 'condition',
+    tokenId: 'up-token',
+    status: 'PENDING_CLOB_RESULT',
+  };
+  bot.positions.push(position);
+
+  await bot.resolvePendingPositions(NOW);
+  await bot.resolvePendingPositions(NOW + 9_999);
+  assert.equal(resolutionChecks, 1);
+  await bot.resolvePendingPositions(NOW + 10_000);
+  assert.equal(resolutionChecks, 2);
+  assert.equal(position.status, 'PENDING_CLOB_RESULT');
 });
 
 test('Binance public aggregate trades record direction and the current 5-minute candle', () => {

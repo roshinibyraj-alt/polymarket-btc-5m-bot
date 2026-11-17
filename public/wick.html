@@ -172,7 +172,7 @@
   <section class="panel" aria-label="Adaptive sample shadow comparison">
     <div class="panel-head"><h2>Adaptive-sample shadow P&amp;L</h2><span class="pill wait" id="shadowStatus">Shadow only</span></div>
     <div id="shadowComparison"><div class="empty">Waiting for pressure data. This comparison never submits orders.</div></div>
-    <div class="shadow-note">The trading model stays at 10 samples. The adaptive shadow changes to 9, 8, 7, then 6 samples at each minute mark. Both use the same entry filters, 100-share size, separate 15-second cooldowns for UP and DOWN, visible ask prices and estimated taker fees. P&amp;L includes settled results and open-position marks; unresolved positions are shown separately. Comparison totals reset when the bot restarts.</div>
+    <div class="shadow-note">The trading model stays at 10 samples. The adaptive shadow changes to 9, 8, 7, then 6 samples at each minute mark. Both use the same entry filters, 100-share size, separate 15-second cooldowns for UP and DOWN, visible ask prices and estimated taker fees. Positions stay open until official resolution; pending results are checked every 10 seconds. P&amp;L includes settled results and open-position marks; unresolved positions are shown separately. Comparison totals reset when the bot restarts.</div>
   </section>
 
   <section class="panel">
@@ -195,7 +195,7 @@
     <div class="events" id="events"><div class="empty">Waiting for activity…</div></div>
   </section>
 
-  <p class="foot">Paper strategy parameters: 100 shares per qualifying entry; separate 15-second cooldowns for UP and DOWN. Either side can qualify at any price; there is no $0.50 cheap-side filter. Each side exits at its own $0.99/$0.01 threshold or waits for resolution. Paper BUY ask cap remains $0.90. The demo runner does not load real-order modules. Forecasts are uncalibrated experimental estimates; no predictive accuracy or backtest performance is implied.</p>
+  <p class="foot">Paper strategy parameters: 100 shares per qualifying entry; separate 15-second cooldowns for UP and DOWN. Either side can qualify at any price; there is no $0.50 cheap-side filter. No take-profit or stop-loss exits: positions stay open until the original Polymarket market officially resolves, checked every 10 seconds. Paper BUY ask cap remains $0.90. The demo runner does not load real-order modules. Forecasts are uncalibrated experimental estimates; no predictive accuracy or backtest performance is implied.</p>
   <div class="error" id="error" role="status"></div>
 </main>
 <script>

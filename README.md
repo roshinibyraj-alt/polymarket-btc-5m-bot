@@ -13,7 +13,7 @@ This document does not authorize a real order or a production deployment. Never 
 
 ## 2. Current strategy
 
-The full active rules are in `DEMO_RUNBOOK.md`. In short, the strategy waits for ten one-second Binance/Polymarket pressure samples and estimates each side's resolution probability from price, volatility, Polymarket odds, and pressure. Either side may qualify at any quoted price when its probability and net-edge checks pass; the full ask sweep remains capped at $0.90. Each 100-share entry has an independent 15-second cooldown per side. UP and DOWN positions trade separately, exit at their own $0.99/$0.01 thresholds, or wait for confirmed original-market resolution.
+The full active rules are in `DEMO_RUNBOOK.md`. In short, the strategy waits for ten one-second Binance/Polymarket pressure samples and estimates each side's resolution probability from price, volatility, Polymarket odds, and pressure. Either side may qualify at any quoted price when its probability and net-edge checks pass; the full ask sweep remains capped at $0.90. Each 100-share entry has an independent 15-second cooldown per side. UP and DOWN positions trade separately, remain open through the window, and settle only after official resolution of the original market; pending results are checked every 10 seconds.
 
 The dashboard shows the experimental forecast and explicitly labels it uncalibrated. A separate adaptive-sample shadow portfolio compares hypothetical P&L using 10 samples for the first minute, then 9, 8, 7, and 6 samples at later minute marks. The trading model remains fixed at 10 samples; the shadow never submits orders or changes trading cash.
 

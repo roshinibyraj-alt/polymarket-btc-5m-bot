@@ -603,7 +603,6 @@ class PressureForecastBot extends WickBot {
       if (this.orderWindowStart !== start) this.openStrategyWindow(start, now);
       await this.refreshLiveQuotes(now);
       this.processPressureStrategy(start, now);
-      this.processThresholdExits(start, now);
       this.lastScanAt = now;
       this.error = null;
       this.status = this.positions.some((position) =>
@@ -861,8 +860,6 @@ class PressureForecastBot extends WickBot {
       markBid: read.quotes[side]?.bestBid ?? null,
       markUpdatedAt: read.quotes[side]?.updatedAt || now,
       markStatus: 'LIVE',
-      takeProfitPrice: config.PRESSURE_TAKE_PROFIT_TRIGGER,
-      stopLossPrice: config.PRESSURE_STOP_LOSS_TRIGGER,
       entryFills: execution.fills.map((fill) => ({ ...fill, at: now })),
       expectedProbability: candidate.estimatedProbability,
       expectedNetEdgePerShare: candidate.expectedNetEdgePerShare,
@@ -1077,9 +1074,6 @@ class PressureForecastBot extends WickBot {
       markBid: quote.bestBid,
       markUpdatedAt: quote.updatedAt,
       markStatus: 'LIVE',
-      takeProfitEnabled: false,
-      takeProfitPrice: config.PRESSURE_TAKE_PROFIT_TRIGGER,
-      stopLossPrice: config.PRESSURE_STOP_LOSS_TRIGGER,
       entryFills: execution.fills.map((fill) => ({ ...fill, at: now })),
       expectedProbability: candidate?.estimatedProbability ?? null,
       expectedNetEdgePerShare: candidate?.expectedNetEdgePerShare ?? null,
@@ -1124,7 +1118,6 @@ class PressureForecastBot extends WickBot {
       price: execution?.averagePrice ?? null,
       orderType: 'PAPER_TAKER_MARKET',
       maxPrice: kind.startsWith('BUY') ? config.PRESSURE_MAX_BUY_PRICE : null,
-      minPrice: kind.startsWith('SELL') ? config.PRESSURE_MIN_SELL_PRICE : null,
       status: 'SUBMITTED',
       createdAt: now,
       fee: 0,
@@ -1135,41 +1128,6 @@ class PressureForecastBot extends WickBot {
     if (this.orders.length > 1000) this.orders.length = 1000;
     this.persistenceDirty = true;
     return order;
-  }
-
-  processThresholdExits(start, now) {
-    for (const position of this.positions) {
-      if (position.status !== 'OPEN' || Number(position.windowStart) !== Number(start)) continue;
-      const quote = this.freshQuote(position.side, now);
-      if (!quote) continue;
-      if (Number(quote.bestBid) >= config.PRESSURE_TAKE_PROFIT_TRIGGER) {
-        this.finalizeExit(position, config.PRESSURE_TAKE_PROFIT_PAYOUT, 'TAKE_PROFIT_0_99_COUNTS_AS_1');
-        this.recordThresholdOrder(position, now, 'SELL_TAKE_PROFIT', config.PRESSURE_TAKE_PROFIT_PAYOUT);
-      } else if (Number(quote.bestBid) <= config.PRESSURE_STOP_LOSS_TRIGGER) {
-        this.finalizeExit(position, config.PRESSURE_STOP_LOSS_PAYOUT, 'STOP_LOSS_0_01_COUNTS_AS_0');
-        this.recordThresholdOrder(position, now, 'SELL_STOP_LOSS', config.PRESSURE_STOP_LOSS_PAYOUT);
-      }
-    }
-    for (const position of this.shadowPositions) {
-      if (position.status !== 'OPEN' || Number(position.windowStart) !== Number(start)) continue;
-      const quote = this.freshQuote(position.side, now);
-      if (!quote) continue;
-      if (Number(quote.bestBid) >= config.PRESSURE_TAKE_PROFIT_TRIGGER) {
-        this.finalizeShadowPosition(
-          position,
-          config.PRESSURE_TAKE_PROFIT_PAYOUT,
-          'TAKE_PROFIT_0_99_COUNTS_AS_1',
-          now,
-        );
-      } else if (Number(quote.bestBid) <= config.PRESSURE_STOP_LOSS_TRIGGER) {
-        this.finalizeShadowPosition(
-          position,
-          config.PRESSURE_STOP_LOSS_PAYOUT,
-          'STOP_LOSS_0_01_COUNTS_AS_0',
-          now,
-        );
-      }
-    }
   }
 
   finalizeShadowPosition(position, payout, reason, now, resolved = false) {
@@ -1258,9 +1216,11 @@ class PressureForecastBot extends WickBot {
   async resolvePendingPositions(now) {
     const pendingByMarket = new Map();
     for (const position of [...this.positions, ...this.shadowPositions]) {
+      const lastCheckedAt = this.lastResolutionCheckAt.get(position.id);
       if (position.status !== 'PENDING_CLOB_RESULT'
         || !position.marketId
-        || now - Number(this.lastResolutionCheckAt.get(position.id) || 0) < config.RESOLUTION_POLL_MS) continue;
+        || (lastCheckedAt != null
+          && now - Number(lastCheckedAt) < config.RESOLUTION_POLL_MS)) continue;
       this.lastResolutionCheckAt.set(position.id, now);
       if (!pendingByMarket.has(position.marketId)) pendingByMarket.set(position.marketId, []);
       pendingByMarket.get(position.marketId).push(position);
@@ -1408,7 +1368,6 @@ class PressureForecastBot extends WickBot {
         realOrderModulesLoaded: false,
         entryShares: config.PRESSURE_ENTRY_SHARES,
         maxBuyPrice: config.PRESSURE_MAX_BUY_PRICE,
-        minSellPrice: config.PRESSURE_MIN_SELL_PRICE,
         minNetEdgePerShare: config.PRESSURE_MIN_NET_EDGE_PER_SHARE,
         signal: 'Uncalibrated resolution estimate blends BTC price/volatility, current Polymarket odds, and ten one-second pressure samples.',
         signalState: this.forecast,
@@ -1416,16 +1375,17 @@ class PressureForecastBot extends WickBot {
           type: 'Visible-book taker-style paper sweeps',
           initialShares: config.PRESSURE_ENTRY_SHARES,
           maxBuyPrice: config.PRESSURE_MAX_BUY_PRICE,
-          minSellPrice: config.PRESSURE_MIN_SELL_PRICE,
           entryCooldownMs: config.PRESSURE_ENTRY_COOLDOWN_MS,
           maxEntriesPerWindow: 'No fixed cap; limited by qualifying signals and available cash.',
         },
-        repeatEntryRule: 'UP and DOWN have separate 15-second entry cooldowns. Each side can independently open repeated 100-share entries, exit at its own $0.99/$0.01 threshold or resolution, then re-enter when its signal qualifies.',
+        repeatEntryRule: 'UP and DOWN have separate 15-second entry cooldowns. Each side can independently open repeated 100-share entries, hold through the window, and settle only after official resolution.',
         priceFeed: this.priceFeed?.snapshot?.() || null,
         exits: {
-          takeProfit: `${config.PRESSURE_TAKE_PROFIT_TRIGGER} best bid counts as $${config.PRESSURE_TAKE_PROFIT_PAYOUT} per share`,
-          stopLoss: `${config.PRESSURE_STOP_LOSS_TRIGGER} best bid counts as $${config.PRESSURE_STOP_LOSS_PAYOUT} per share`,
-          otherwise: 'Wait for official resolution of the original Polymarket window.',
+          mode: 'OFFICIAL_RESOLUTION_ONLY',
+          takeProfit: false,
+          stopLoss: false,
+          resolutionPollMs: config.RESOLUTION_POLL_MS,
+          otherwise: 'Hold positions until the original Polymarket market officially resolves.',
         },
       },
       forecast: this.forecast,
@@ -1452,7 +1412,7 @@ class PressureForecastBot extends WickBot {
           this.shadowInitialCapital,
           this.shadowStatsOffset,
         ),
-        assumptions: 'Separate paper cash; same 100-share entry filters, independent 15-second cooldown per side, visible ask sweep, taker fees, $0.99/$0.01 exits, and official resolution.',
+        assumptions: 'Separate paper cash; same 100-share entry filters, independent 15-second cooldown per side, visible ask sweep, taker fees, and official-resolution-only settlement.',
       },
       portfolioAnalytics: {
         equityCurve: settledEquityCurve,
