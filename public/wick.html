@@ -216,6 +216,11 @@
     <div class="stat"><div class="label">Paper equity</div><div class="value" id="equity">—</div><span class="note" id="snapshotTime">Demo account value</span></div>
   </section>
 
+  <section class="panel">
+    <div class="panel-head"><h2>Paper actions &amp; orders</h2><span class="hint" id="orderCount">0 current-window orders</span></div>
+    <div class="scroll" id="orders"><div class="empty">No paper orders in this 5m window.</div></div>
+  </section>
+
   <section class="panel" aria-label="Global paper performance">
     <div class="panel-head"><h2>Global equity &amp; risk</h2><span class="hint">UP + DOWN combined · existing history</span></div>
     <div class="performance-layout">
@@ -247,11 +252,6 @@
     <div class="panel-head"><h2>Adaptive-sample shadow P&amp;L</h2><span class="pill wait" id="shadowStatus">Shadow only</span></div>
     <div id="shadowComparison"><div class="empty">Waiting for pressure data. This comparison never submits orders.</div></div>
     <div class="shadow-note">The trading model stays at 10 samples. The adaptive shadow changes to 9, 8, 7, then 6 samples at each minute mark. Both use the same entry filters, 100-share size, separate 15-second cooldowns for UP and DOWN, visible ask prices and estimated taker fees. Positions stay open until official resolution; pending results are checked every 10 seconds. P&amp;L includes settled results and open-position marks; unresolved positions are shown separately. Comparison totals reset when the bot restarts.</div>
-  </section>
-
-  <section class="panel">
-    <div class="panel-head"><h2>Paper actions &amp; orders</h2><span class="hint" id="orderCount">0 current-window orders</span></div>
-    <div class="scroll" id="orders"><div class="empty">No paper orders in this 5m window.</div></div>
   </section>
 
   <section class="panel">
