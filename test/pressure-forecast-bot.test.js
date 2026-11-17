@@ -425,6 +425,7 @@ test('paper snapshot identifies only the uncalibrated BTC 5-minute demo strategy
   assert.equal(state.strategy.maxBuyPrice, 0.95);
   assert.equal(state.strategy.minNetEdgePerShare, 0.10);
   assert.equal(state.strategy.maxEntryShares, 200);
+  assert.match(state.strategy.exit, /stay open until official resolution/i);
   assert.equal(state.strategy.signalState.calibrated, false);
   assert.equal(state.strategy.priceFeed.source, 'Binance BTCUSDT aggregate trades');
   assert.equal(state.shadowComparison.mode, 'SHADOW_ONLY');

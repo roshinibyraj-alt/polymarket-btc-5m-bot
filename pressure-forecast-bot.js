@@ -1429,6 +1429,7 @@ class PressureForecastBot extends WickBot {
         execution: 'PAPER ONLY',
         markets: ['BTC 5m'],
         orderType: 'VISIBLE_BOOK_TAKER_SWEEP',
+        exit: 'No take-profit or stop-loss orders; positions stay open until official resolution.',
         liveTradingEnabled: false,
         realOrderModulesLoaded: false,
         entryShares: config.PRESSURE_ENTRY_SHARES,
