@@ -1122,7 +1122,7 @@ class PressureForecastBot extends WickBot {
       entryLabel: `Pressure entry · ${side}`,
       entryType: 'PAPER_TAKER_PRESSURE',
       orderType: 'PAPER_TAKER_MARKET',
-      fillModel: 'VISIBLE_ASK_SWEEP_TO_0_90',
+      fillModel: 'VISIBLE_ASK_SWEEP_WITH_CONFIGURED_MAX_PRICE',
       shares: execution.filledShares,
       initialShares: execution.filledShares,
       avgEntry: execution.averagePrice,

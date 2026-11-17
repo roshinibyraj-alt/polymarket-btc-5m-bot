@@ -214,6 +214,7 @@ test('entry uses edge-based share sizing and records modeled fees and all-in cos
   const position = bot.positions.find((item) => item.status === 'OPEN');
   assert.equal(position.side, 'UP');
   assert.equal(position.shares, 200);
+  assert.equal(position.fillModel, 'VISIBLE_ASK_SWEEP_WITH_CONFIGURED_MAX_PRICE');
   assert.ok(position.fees > 0);
   assert.equal(bot.orders[0].orderType, 'PAPER_TAKER_MARKET');
   assert.equal(bot.orders[0].maxPrice, 0.95);
