@@ -13,9 +13,9 @@ The active app is paper-only. Its startup file loads the demo strategy and does 
 
 ## Repeat-entry and exit rules
 
-- Consider only the cheaper outcome when its best ask is below $0.50.
+- Either UP or DOWN may qualify at any quoted price; there is no $0.50 cheaper-side filter.
 - Enter 100 shares only when that side's experimental estimate is above 50%, the full visible ask sweep stays at or below $0.90, paper cash covers it, and expected net edge after the market's taker fees is at least $0.05 per share.
-- After each successful entry, wait 15 seconds before another entry can be made. Once the cooldown ends, any newly qualifying UP or DOWN signal may add another independent 100-share position; there is no fixed per-window entry cap beyond available paper cash and qualifying signals.
+- UP and DOWN have separate 15-second entry cooldowns. After its own cooldown, either side may add another independent 100-share position; there is no fixed per-window entry cap beyond available paper cash and qualifying signals.
 - Do not sell an existing position just because a signal points to the opposite side. Each position remains open independently and exits at its own $0.99/$0.01 threshold, or waits for confirmed resolution of its original market.
 - A $0.99 bid is counted as a $1 payout per share; a $0.01 bid or lower is counted as $0. Otherwise hold the position until the original Polymarket market confirms resolution.
 - When visible depth is insufficient to complete the requested sweep within the cap/floor, skip the action rather than simulate a partial position.
@@ -24,7 +24,7 @@ The active app is paper-only. Its startup file loads the demo strategy and does 
 
 - Keep the active trading signal on ten one-second samples throughout each window.
 - In parallel, calculate a shadow-only forecast using 10 samples through the first minute, then 9, 8, 7, and 6 samples at the 60-, 120-, 180-, and 240-second marks.
-- Simulate an independent paper portfolio with the same 100-share entries, signal filters, 15-second cooldown, visible ask-sweep cap, taker-fee estimate, $0.99/$0.01 threshold exits, and official-market resolution.
+- Simulate an independent paper portfolio with the same 100-share entries, signal filters, per-side 15-second cooldowns, visible ask-sweep cap, taker-fee estimate, $0.99/$0.01 threshold exits, and official-market resolution.
 - Shadow entries never create orders, consume the trading portfolio's cash, or influence the selected trading side.
 - Compare settled and floating P&L, entry counts, wins/losses, and unresolved positions. Floating P&L marks open shares at the latest bid; unresolved positions are excluded until the official result arrives.
 - The comparison is an experimental fill simulation, not a live execution guarantee. Its in-memory portfolio resets when the process restarts.

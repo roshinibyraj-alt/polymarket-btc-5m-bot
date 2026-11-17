@@ -139,7 +139,7 @@
   <section class="panel" aria-label="Adaptive sample shadow comparison">
     <div class="panel-head"><h2>Adaptive-sample shadow P&amp;L</h2><span class="pill wait" id="shadowStatus">Shadow only</span></div>
     <div id="shadowComparison"><div class="empty">Waiting for pressure data. This comparison never submits orders.</div></div>
-    <div class="shadow-note">The trading model stays at 10 samples. The adaptive shadow changes to 9, 8, 7, then 6 samples at each minute mark. Both use the same entry filters, 100-share size, 15-second cooldown, visible ask prices and estimated taker fees. P&amp;L includes settled results and open-position marks; unresolved positions are shown separately. Comparison totals reset when the bot restarts.</div>
+    <div class="shadow-note">The trading model stays at 10 samples. The adaptive shadow changes to 9, 8, 7, then 6 samples at each minute mark. Both use the same entry filters, 100-share size, separate 15-second cooldowns for UP and DOWN, visible ask prices and estimated taker fees. P&amp;L includes settled results and open-position marks; unresolved positions are shown separately. Comparison totals reset when the bot restarts.</div>
   </section>
 
   <section class="panel">
@@ -162,7 +162,7 @@
     <div class="events" id="events"><div class="empty">Waiting for activity…</div></div>
   </section>
 
-  <p class="foot">Paper strategy parameters: 100 shares per qualifying entry; 15-second cooldown between entries. New UP or DOWN signals can add independent positions; reversals do not sell existing positions. Paper BUY ask cap $0.90 · paper SELL bid floor $0.01 · take-profit $0.99 counts as $1 and stop-loss $0.01 counts as $0. The demo runner does not load real-order modules. Forecasts are uncalibrated experimental estimates; no predictive accuracy or backtest performance is implied.</p>
+  <p class="foot">Paper strategy parameters: 100 shares per qualifying entry; separate 15-second cooldowns for UP and DOWN. Either side can qualify at any price; there is no $0.50 cheap-side filter. Each side exits at its own $0.99/$0.01 threshold or waits for resolution. Paper BUY ask cap remains $0.90. The demo runner does not load real-order modules. Forecasts are uncalibrated experimental estimates; no predictive accuracy or backtest performance is implied.</p>
   <div class="error" id="error" role="status"></div>
 </main>
 <script>
@@ -210,7 +210,7 @@
     const forecast = f ? `<section class="forecast" aria-label="Uncalibrated forecast">
       <div class="forecast-head"><div><div class="forecast-title">Pressure estimate vs. market odds</div><div class="forecast-caption">${esc(f.reason || f.status || 'Experimental estimate')} · ${Number(f.sampleCount||0)} / ${Number(f.requiredSamples||10)} samples</div></div><span class="uncal">UNCALIBRATED</span></div>
       <div class="estimate-grid">
-        <div class="estimate"><div class="estimate-top"><span class="side up">EST. UP</span><strong class="prob up">${prob(f.estimateUp)}</strong></div><div class="bar"><i style="width:${Math.max(0,Math.min(100,(num(f.estimateUp)??0)*100))}%"></i></div><div class="estimate-foot"><span>Market ${prob(f.marketImpliedUp)}</span><span>Lagging ${esc(f.laggingSide||'—')}</span></div></div>
+        <div class="estimate"><div class="estimate-top"><span class="side up">EST. UP</span><strong class="prob up">${prob(f.estimateUp)}</strong></div><div class="bar"><i style="width:${Math.max(0,Math.min(100,(num(f.estimateUp)??0)*100))}%"></i></div><div class="estimate-foot"><span>Market ${prob(f.marketImpliedUp)}</span><span>Cheaper (info) ${esc(f.laggingSide||'—')}</span></div></div>
         <div class="estimate downside"><div class="estimate-top"><span class="side down">EST. DOWN</span><strong class="prob down">${prob(f.estimateDown)}</strong></div><div class="bar"><i style="width:${Math.max(0,Math.min(100,(num(f.estimateDown)??0)*100))}%"></i></div><div class="estimate-foot"><span>Market ${prob(f.marketImpliedDown)}</span><span>Selected ${esc(f.selectedSide||'—')}</span></div></div>
       </div>
       <div class="metrics">

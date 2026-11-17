@@ -127,7 +127,7 @@ test('taker sweep observes the buy ceiling, sell floor, and per-level fees', () 
   assert.equal(sell.filledShares, 100);
 });
 
-test('forecast waits for ten samples and qualifies only the cheap side with positive net edge', () => {
+test('forecast waits for ten samples and checks either side independently of the $0.50 level', () => {
   const bot = makeBot();
   setQuote(bot, 'UP', 0.30, 0.32);
   setQuote(bot, 'DOWN', 0.68, 0.70);
@@ -162,6 +162,19 @@ test('forecast waits for ten samples and qualifies only the cheap side with posi
   assert.ok(narrowEdge.candidateBySide.UP.expectedNetEdgePerShare < config.PRESSURE_MIN_NET_EDGE_PER_SHARE);
 });
 
+test('a signal-qualified side can enter above $0.50 while the other side is cheaper', () => {
+  const bot = makeBot();
+  setQuote(bot, 'UP', 0.64, 0.65);
+  setQuote(bot, 'DOWN', 0.34, 0.35);
+  addSamples(bot, 1);
+  const forecast = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
+
+  assert.equal(forecast.laggingSide, 'DOWN');
+  assert.equal(forecast.candidateBySide.UP.qualifies, true);
+  assert.equal(forecast.selectedSide, 'UP');
+  assert.equal(forecast.candidateBySide.UP.bestAsk, 0.65);
+});
+
 test('entry uses a 100-share taker sweep and records its fees and all-in cost', () => {
   const bot = makeBot();
   setQuote(bot, 'UP', 0.30, 0.32);
@@ -190,7 +203,8 @@ test('opposite qualifying signal adds a position without selling the existing on
   setQuote(bot, 'DOWN', 0.34, 0.36);
   addSamples(bot, -1);
   bot.market.feesEnabled = false;
-  bot.lastEntryAt = NOW - config.PRESSURE_ENTRY_COOLDOWN_MS;
+  bot.lastEntryAt = NOW - 1000;
+  bot.lastEntryAtBySide.UP = NOW - 1000;
   const open = {
     id: 'open-up',
     side: 'UP',
@@ -213,6 +227,8 @@ test('opposite qualifying signal adds a position without selling the existing on
 
   assert.equal(added, true);
   assert.equal(open.status, 'OPEN');
+  assert.equal(bot.lastEntryAtBySide.UP, NOW - 1000);
+  assert.equal(bot.lastEntryAtBySide.DOWN, NOW);
   const openPositions = bot.positions.filter((position) => position.status === 'OPEN');
   assert.equal(openPositions.length, 2);
   assert.deepEqual(openPositions.map((position) => position.side).sort(), ['DOWN', 'UP']);
@@ -243,7 +259,8 @@ test('same-side entries are blocked until the 15-second cooldown elapses', () =>
   };
   bot.positions.unshift(open);
   bot.cash = 9968;
-  bot.lastEntryAt = NOW - config.PRESSURE_ENTRY_COOLDOWN_MS + 1000;
+  bot.lastEntryAt = NOW - 1000;
+  bot.lastEntryAtBySide.UP = NOW - config.PRESSURE_ENTRY_COOLDOWN_MS + 1000;
 
   const duringCooldown = bot.processPressureStrategy(WINDOW_START, NOW);
   assert.equal(duringCooldown, false);
@@ -258,6 +275,7 @@ test('same-side entries are blocked until the 15-second cooldown elapses', () =>
     .map((position) => position.side), ['UP', 'UP']);
   assert.equal(bot.orders[0].kind, 'BUY_ENTRY');
   assert.equal(bot.lastEntryAt, NOW + 1000);
+  assert.equal(bot.lastEntryAtBySide.UP, NOW + 1000);
 });
 
 test('shadow entries use separate fee-aware paper cash and never add main orders', () => {
@@ -394,7 +412,8 @@ test('paper snapshot identifies only the uncalibrated BTC 5-minute demo strategy
   assert.equal(state.strategy.realOrderModulesLoaded, false);
   assert.equal(state.strategy.orders.type, 'Visible-book taker-style paper sweeps');
   assert.equal(state.strategy.orders.entryCooldownMs, 15_000);
-  assert.match(state.strategy.repeatEntryRule, /independent 100-share position/i);
+  assert.match(state.strategy.repeatEntryRule, /separate 15-second entry cooldowns/i);
+  assert.match(state.strategy.repeatEntryRule, /repeated 100-share entries/i);
   assert.equal(state.strategy.signalState.calibrated, false);
   assert.equal(state.strategy.priceFeed.source, 'Binance BTCUSDT aggregate trades');
   assert.equal(state.shadowComparison.mode, 'SHADOW_ONLY');

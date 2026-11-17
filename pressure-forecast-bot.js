@@ -265,9 +265,11 @@ class PressureForecastBot extends WickBot {
     this.lastSampleAt = null;
     this.forecast = this.emptyForecast('Waiting for Binance and Polymarket data.');
     this.lastEntryAt = null;
+    this.lastEntryAtBySide = { UP: null, DOWN: null };
     this.shadowCash = initialCapital;
     this.shadowPositions = [];
     this.shadowLastEntryAt = null;
+    this.shadowLastEntryAtBySide = { UP: null, DOWN: null };
     this.shadowSequence = 0;
     this.shadowSamplesRequired = config.PRESSURE_SAMPLE_COUNT;
     this.shadowForecast = this.emptyForecast('Waiting for live data for the adaptive shadow comparison.');
@@ -328,7 +330,9 @@ class PressureForecastBot extends WickBot {
     this.pressureSamples = [];
     this.lastSampleAt = null;
     this.lastEntryAt = null;
+    this.lastEntryAtBySide = { UP: null, DOWN: null };
     this.shadowLastEntryAt = null;
+    this.shadowLastEntryAtBySide = { UP: null, DOWN: null };
     this.shadowSamplesRequired = config.PRESSURE_SAMPLE_COUNT;
     this.shadowForecast = this.emptyForecast(
       'Collecting ten fresh one-second samples for the adaptive shadow comparison.',
@@ -534,25 +538,28 @@ class PressureForecastBot extends WickBot {
     }
     if (!evaluationDue || !forecast.ready || !forecast.selectedSide) return false;
 
+    const side = forecast.selectedSide;
+    const lastSideEntryAt = this.lastEntryAtBySide[side];
     const cooldownRemaining = config.PRESSURE_ENTRY_COOLDOWN_MS
-      - (now - Number(this.lastEntryAt || 0));
-    if (this.lastEntryAt != null && cooldownRemaining > 0) {
+      - (now - Number(lastSideEntryAt || 0));
+    if (lastSideEntryAt != null && cooldownRemaining > 0) {
       this.forecast.status = 'ENTRY_COOLDOWN';
-      this.forecast.reason = `${forecast.selectedSide} signal qualifies; next entry is available in ${Math.ceil(cooldownRemaining / 1000)} seconds.`;
+      this.forecast.reason = `${side} signal qualifies; another ${side} entry is available in ${Math.ceil(cooldownRemaining / 1000)} seconds. The other side has its own cooldown.`;
       return false;
     }
 
-    const candidate = forecast.candidateBySide[forecast.selectedSide];
-    const opened = this.executeBuy(forecast.selectedSide, config.PRESSURE_ENTRY_SHARES, now, {
+    const candidate = forecast.candidateBySide[side];
+    const opened = this.executeBuy(side, config.PRESSURE_ENTRY_SHARES, now, {
       kind: 'BUY_ENTRY',
       candidate,
       signal: read,
     });
     if (opened) {
       this.lastEntryAt = now;
+      this.lastEntryAtBySide[side] = now;
       this.forecast.status = 'ENTRY_FILLED';
-      this.forecast.reason = `Bought another 100-share ${forecast.selectedSide} position; existing positions remain open. The next entry can occur after the 15-second cooldown if a signal qualifies.`;
-      this.signal = { side: forecast.selectedSide, action: 'BUY_ENTRY', reason: this.forecast.reason };
+      this.forecast.reason = `Bought another 100-share ${side} position. UP and DOWN trade independently; this side can re-enter after its 15-second cooldown while the other side remains available.`;
+      this.signal = { side, action: 'BUY_ENTRY', reason: this.forecast.reason };
       return true;
     }
     return false;
@@ -562,11 +569,12 @@ class PressureForecastBot extends WickBot {
     const side = forecast.selectedSide;
     if (!forecast.ready || !side || !forecast.candidateBySide[side]?.qualifies) return false;
 
+    const lastSideEntryAt = this.shadowLastEntryAtBySide[side];
     const cooldownRemaining = config.PRESSURE_ENTRY_COOLDOWN_MS
-      - (now - Number(this.shadowLastEntryAt || 0));
-    if (this.shadowLastEntryAt != null && cooldownRemaining > 0) {
+      - (now - Number(lastSideEntryAt || 0));
+    if (lastSideEntryAt != null && cooldownRemaining > 0) {
       forecast.status = 'ENTRY_COOLDOWN';
-      forecast.reason = `Shadow signal qualifies; another simulated entry is available in ${Math.ceil(cooldownRemaining / 1000)} seconds.`;
+      forecast.reason = `Shadow ${side} signal qualifies; another ${side} entry is available in ${Math.ceil(cooldownRemaining / 1000)} seconds.`;
       return false;
     }
 
@@ -629,6 +637,7 @@ class PressureForecastBot extends WickBot {
     this.shadowCash -= execution.totalCost;
     this.shadowPositions.unshift(position);
     this.shadowLastEntryAt = now;
+    this.shadowLastEntryAtBySide[side] = now;
     forecast.status = 'SHADOW_ENTRY';
     forecast.reason = `Shadow only: simulated a 100-share ${side} entry; the trading portfolio was not changed.`;
     return true;
@@ -691,9 +700,7 @@ class PressureForecastBot extends WickBot {
     const estimateDown = 1 - estimateUp;
     const askUp = Number(read.quotes.UP.bestAsk);
     const askDown = Number(read.quotes.DOWN.bestAsk);
-    const laggingSide = Math.min(askUp, askDown) < 0.5
-      ? (askUp <= askDown ? 'UP' : 'DOWN')
-      : null;
+    const laggingSide = askUp <= askDown ? 'UP' : 'DOWN';
 
     for (const side of SIDES) {
       const quote = read.quotes[side];
@@ -709,20 +716,18 @@ class PressureForecastBot extends WickBot {
         ? entry.totalCost / config.PRESSURE_ENTRY_SHARES
         : null;
       const edge = allInCostPerShare == null ? null : probability - allInCostPerShare;
-      let reason = 'Not the lagging side below $0.50.';
-      if (side !== laggingSide) reason = 'Only the cheaper side below $0.50 is eligible.';
-      else if (!(probability > 0.5)) reason = 'The estimate does not put this side above 50%.';
+      let reason = 'This side does not currently clear the probability and net-edge checks.';
+      if (!(probability > 0.5)) reason = 'The estimate does not put this side above 50%.';
       else if (!entry.complete) reason = 'Insufficient visible ask depth below the $0.90 cap.';
       else if (edge < config.PRESSURE_MIN_NET_EDGE_PER_SHARE) {
         reason = `Net edge is below the required $${config.PRESSURE_MIN_NET_EDGE_PER_SHARE.toFixed(2)} per share after taker fees.`;
-      } else reason = 'Lagging-side estimate clears the net edge and taker price cap.';
+      } else reason = 'Side estimate clears the net edge and taker price cap; there is no $0.50 entry filter.';
       candidateBySide[side] = {
         estimatedProbability: probability,
         bestAsk: quote.bestAsk,
         allInCostPerShare,
         expectedNetEdgePerShare: edge,
-        qualifies: side === laggingSide
-          && probability > 0.5
+        qualifies: probability > 0.5
           && entry.complete
           && edge >= config.PRESSURE_MIN_NET_EDGE_PER_SHARE,
         reason,
@@ -737,8 +742,8 @@ class PressureForecastBot extends WickBot {
     const selectedSide = qualifying[0] || null;
     const status = selectedSide ? 'QUALIFIED' : 'NO_EDGE';
     const reason = selectedSide
-      ? `${selectedSide} is the lagging side; its experimental estimate clears $${config.PRESSURE_MIN_NET_EDGE_PER_SHARE.toFixed(2)} net edge per share.`
-      : 'No lagging side currently clears the 50% estimate and net-edge filters.';
+      ? `${selectedSide} clears the probability and $${config.PRESSURE_MIN_NET_EDGE_PER_SHARE.toFixed(2)} net-edge checks; its entry is not restricted to prices below $0.50.`
+      : 'Neither UP nor DOWN currently clears the probability, ask-cap, and net-edge checks.';
     return {
       ready: true,
       calibrated: false,
@@ -1156,7 +1161,7 @@ class PressureForecastBot extends WickBot {
           entryCooldownMs: config.PRESSURE_ENTRY_COOLDOWN_MS,
           maxEntriesPerWindow: 'No fixed cap; limited by qualifying signals and available cash.',
         },
-        repeatEntryRule: 'After each successful entry, wait 15 seconds. A new qualifying signal on either side opens another independent 100-share position; existing positions are not sold on signal reversals.',
+        repeatEntryRule: 'UP and DOWN have separate 15-second entry cooldowns. Each side can independently open repeated 100-share entries, exit at its own $0.99/$0.01 threshold or resolution, then re-enter when its signal qualifies.',
         priceFeed: this.priceFeed?.snapshot?.() || null,
         exits: {
           takeProfit: `${config.PRESSURE_TAKE_PROFIT_TRIGGER} best bid counts as $${config.PRESSURE_TAKE_PROFIT_PAYOUT} per share`,
@@ -1183,7 +1188,7 @@ class PressureForecastBot extends WickBot {
         currentForecast: this.shadowForecast,
         baseline: summarizePortfolio(this.positions, this.cash, this.capital),
         adaptive: summarizePortfolio(this.shadowPositions, this.shadowCash, this.capital),
-        assumptions: 'Separate paper cash; same 100-share entry filters, 15-second cooldown, visible ask sweep, taker fees, $0.99/$0.01 exits, and official resolution.',
+        assumptions: 'Separate paper cash; same 100-share entry filters, independent 15-second cooldown per side, visible ask sweep, taker fees, $0.99/$0.01 exits, and official resolution.',
       },
       quotes,
       account: {
