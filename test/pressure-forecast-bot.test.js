@@ -67,10 +67,15 @@ function setQuote(bot, side, bid, ask, size = 1000, now = NOW) {
 }
 
 function addSamples(bot, direction, now = NOW) {
+  const currentPrice = direction > 0 ? 100.5 : 99.5;
+  bot.priceFeed.price = currentPrice;
+  bot.priceFeed.currentCandle.close = currentPrice;
+  bot.priceFeed.currentCandle.high = Math.max(bot.priceFeed.currentCandle.high, currentPrice);
+  bot.priceFeed.currentCandle.low = Math.min(bot.priceFeed.currentCandle.low, currentPrice);
   bot.pressureSamples = Array.from({ length: config.PRESSURE_SAMPLE_COUNT }, (_, index) => ({
     at: now - (config.PRESSURE_SAMPLE_COUNT - 1 - index) * 1000,
     score: direction * (0.2 + index * 0.07),
-    price: direction > 0 ? 100 + index * 0.03 : 100 - index * 0.03,
+    price: currentPrice - direction * (config.PRESSURE_SAMPLE_COUNT - 1 - index) * 0.01,
     windowOpenPrice: 100,
     marketImpliedUp: direction > 0 ? 0.32 : 0.65,
   }));
@@ -108,15 +113,15 @@ test('adaptive shadow sample count steps down once per minute and floors at six'
 test('taker sweep observes the buy ceiling, sell floor, and per-level fees', () => {
   const market = { feesEnabled: true, feeSchedule: { rate: 0.07, exponent: 1 } };
   const buy = PressureForecastBot._test.sweepBook([
-    { price: 0.89, size: 50 },
-    { price: 0.90, size: 50 },
-    { price: 0.91, size: 1000 },
-  ], 100, 'BUY', market, { maximumPrice: 0.90 });
+    { price: 0.94, size: 50 },
+    { price: 0.95, size: 50 },
+    { price: 0.96, size: 1000 },
+  ], 100, 'BUY', market, { maximumPrice: 0.95 });
   assert.equal(buy.complete, true);
   assert.equal(buy.filledShares, 100);
-  assert.ok(Math.abs(buy.gross - 89.5) < 1e-9);
+  assert.ok(Math.abs(buy.gross - 94.5) < 1e-9);
   assert.ok(buy.fees > 0);
-  assert.equal(buy.fills.some((fill) => fill.price > 0.90), false);
+  assert.equal(buy.fills.some((fill) => fill.price > 0.95), false);
 
   const sell = PressureForecastBot._test.sweepBook([
     { price: 0.009, size: 1000 },
@@ -125,6 +130,25 @@ test('taker sweep observes the buy ceiling, sell floor, and per-level fees', () 
   assert.equal(sell.complete, true);
   assert.equal(sell.averagePrice, 0.01);
   assert.equal(sell.filledShares, 100);
+});
+
+test('entry probability floor is strict and edge scales size by ten shares per cent', () => {
+  const quote = {
+    bestAsk: 0.60,
+    askLevels: [{ price: 0.60, size: 500 }],
+  };
+  const evaluate = PressureForecastBot._test.evaluateEntryCandidate;
+  const atFloor = evaluate(0.70, quote, { feesEnabled: false });
+  const oneCentOver = evaluate(0.71, quote, { feesEnabled: false });
+  const capped = evaluate(0.99, quote, { feesEnabled: false });
+
+  assert.equal(atFloor.qualifies, false);
+  assert.equal(atFloor.requestedShares, 100);
+  assert.equal(oneCentOver.qualifies, true);
+  assert.ok(Math.abs(oneCentOver.expectedNetEdgePerShare - 0.11) < 1e-12);
+  assert.equal(oneCentOver.requestedShares, 110);
+  assert.equal(capped.requestedShares, 200);
+  assert.equal(PressureForecastBot._test.sharesAllowedByEdge(0.20), 200);
 });
 
 test('forecast waits for ten samples and checks either side independently of the $0.50 level', () => {
@@ -175,7 +199,7 @@ test('a signal-qualified side can enter above $0.50 while the other side is chea
   assert.equal(forecast.candidateBySide.UP.bestAsk, 0.65);
 });
 
-test('entry uses a 100-share taker sweep and records its fees and all-in cost', () => {
+test('entry uses edge-based share sizing and records modeled fees and all-in cost', () => {
   const bot = makeBot();
   setQuote(bot, 'UP', 0.30, 0.32);
   setQuote(bot, 'DOWN', 0.68, 0.70);
@@ -189,10 +213,10 @@ test('entry uses a 100-share taker sweep and records its fees and all-in cost', 
   assert.equal(changed, true);
   const position = bot.positions.find((item) => item.status === 'OPEN');
   assert.equal(position.side, 'UP');
-  assert.equal(position.shares, 100);
+  assert.equal(position.shares, 200);
   assert.ok(position.fees > 0);
   assert.equal(bot.orders[0].orderType, 'PAPER_TAKER_MARKET');
-  assert.equal(bot.orders[0].maxPrice, 0.90);
+  assert.equal(bot.orders[0].maxPrice, 0.95);
   assert.ok(bot.cash < 10_000);
   assert.ok(read.ready);
 });
@@ -233,7 +257,7 @@ test('opposite qualifying signal adds a position without selling the existing on
   assert.equal(openPositions.length, 2);
   assert.deepEqual(openPositions.map((position) => position.side).sort(), ['DOWN', 'UP']);
   assert.deepEqual(bot.orders.map((order) => order.kind), ['BUY_ENTRY']);
-  assert.equal(bot.orders[0].maxPrice, 0.90);
+  assert.equal(bot.orders[0].maxPrice, 0.95);
 });
 
 test('same-side entries are blocked until the 15-second cooldown elapses', () => {
@@ -396,7 +420,11 @@ test('paper snapshot identifies only the uncalibrated BTC 5-minute demo strategy
   assert.equal(state.strategy.orders.type, 'Visible-book taker-style paper sweeps');
   assert.equal(state.strategy.orders.entryCooldownMs, 15_000);
   assert.match(state.strategy.repeatEntryRule, /separate 15-second entry cooldowns/i);
-  assert.match(state.strategy.repeatEntryRule, /repeated 100-share entries/i);
+  assert.match(state.strategy.repeatEntryRule, /increasing by 10 shares per \$0\.01 edge/i);
+  assert.equal(state.strategy.minEstimatedProbability, 0.70);
+  assert.equal(state.strategy.maxBuyPrice, 0.95);
+  assert.equal(state.strategy.minNetEdgePerShare, 0.10);
+  assert.equal(state.strategy.maxEntryShares, 200);
   assert.equal(state.strategy.signalState.calibrated, false);
   assert.equal(state.strategy.priceFeed.source, 'Binance BTCUSDT aggregate trades');
   assert.equal(state.shadowComparison.mode, 'SHADOW_ONLY');

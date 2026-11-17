@@ -212,6 +212,93 @@ function sweepBook(levels, shares, action, market, {
   };
 }
 
+function sharesAllowedByEdge(edge) {
+  const baseShares = config.PRESSURE_ENTRY_SHARES;
+  if (!Number.isFinite(Number(edge))
+    || Number(edge) + EPSILON < config.PRESSURE_MIN_NET_EDGE_PER_SHARE) {
+    return baseShares;
+  }
+  const extraSteps = Math.floor(
+    (Number(edge) - config.PRESSURE_MIN_NET_EDGE_PER_SHARE + EPSILON)
+      / config.PRESSURE_EDGE_SIZE_STEP,
+  );
+  return Math.min(
+    config.PRESSURE_MAX_ENTRY_SHARES,
+    baseShares + extraSteps * config.PRESSURE_ENTRY_SIZE_STEP_SHARES,
+  );
+}
+
+function evaluateEntryCandidate(probability, quote, market) {
+  const baseShares = config.PRESSURE_ENTRY_SHARES;
+  const maxShares = config.PRESSURE_MAX_ENTRY_SHARES;
+  let best = null;
+  let baseSweep = null;
+
+  for (let shares = baseShares; shares <= maxShares;
+    shares += config.PRESSURE_ENTRY_SIZE_STEP_SHARES) {
+    const execution = sweepBook(
+      quote?.askLevels,
+      shares,
+      'BUY',
+      market,
+      { maximumPrice: config.PRESSURE_MAX_BUY_PRICE },
+    );
+    if (shares === baseShares) baseSweep = execution;
+    if (!execution.complete) break;
+
+    const allInCostPerShare = execution.totalCost / shares;
+    const edge = Number(probability) - allInCostPerShare;
+    const edgeSizeLimit = sharesAllowedByEdge(edge);
+    if (Number(probability) > config.PRESSURE_MIN_ESTIMATED_PROBABILITY
+      && edge + EPSILON >= config.PRESSURE_MIN_NET_EDGE_PER_SHARE
+      && shares <= edgeSizeLimit) {
+      best = {
+        estimatedProbability: Number(probability),
+        bestAsk: quote?.bestAsk ?? null,
+        allInCostPerShare,
+        expectedNetEdgePerShare: edge,
+        requestedShares: shares,
+        qualifies: true,
+        reason: `Probability clears ${Math.round(config.PRESSURE_MIN_ESTIMATED_PROBABILITY * 100)}%; full size fits below the $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} ask cap and the net-edge sizing rule.`,
+      };
+    }
+  }
+
+  if (best) return best;
+
+  const execution = baseSweep || sweepBook(
+    quote?.askLevels,
+    baseShares,
+    'BUY',
+    market,
+    { maximumPrice: config.PRESSURE_MAX_BUY_PRICE },
+  );
+  const allInCostPerShare = execution.complete
+    ? execution.totalCost / baseShares
+    : null;
+  const edge = allInCostPerShare == null
+    ? null
+    : Number(probability) - allInCostPerShare;
+  let reason = 'This side does not currently clear the probability, depth, and net-edge checks.';
+  if (!(Number(probability) > config.PRESSURE_MIN_ESTIMATED_PROBABILITY)) {
+    reason = `The estimate must be above ${Math.round(config.PRESSURE_MIN_ESTIMATED_PROBABILITY * 100)}%.`;
+  } else if (!execution.complete) {
+    reason = `Insufficient visible ask depth for ${baseShares} shares at or below $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)}.`;
+  } else if (edge + EPSILON < config.PRESSURE_MIN_NET_EDGE_PER_SHARE) {
+    reason = `Net edge is below the required $${config.PRESSURE_MIN_NET_EDGE_PER_SHARE.toFixed(2)} per share after taker fees.`;
+  }
+
+  return {
+    estimatedProbability: Number(probability),
+    bestAsk: quote?.bestAsk ?? null,
+    allInCostPerShare,
+    expectedNetEdgePerShare: edge,
+    requestedShares: baseShares,
+    qualifies: false,
+    reason,
+  };
+}
+
 function parseArray(value) {
   if (Array.isArray(value)) return value;
   if (typeof value !== 'string') return [];
@@ -786,7 +873,8 @@ class PressureForecastBot extends WickBot {
     }
 
     const candidate = forecast.candidateBySide[side];
-    const opened = this.executeBuy(side, config.PRESSURE_ENTRY_SHARES, now, {
+    const requestedShares = Number(candidate?.requestedShares) || config.PRESSURE_ENTRY_SHARES;
+    const opened = this.executeBuy(side, requestedShares, now, {
       kind: 'BUY_ENTRY',
       candidate,
       signal: read,
@@ -795,7 +883,7 @@ class PressureForecastBot extends WickBot {
       this.lastEntryAt = now;
       this.lastEntryAtBySide[side] = now;
       this.forecast.status = 'ENTRY_FILLED';
-      this.forecast.reason = `Bought another 100-share ${side} position. UP and DOWN trade independently; this side can re-enter after its 15-second cooldown while the other side remains available.`;
+      this.forecast.reason = `Bought another ${opened.shares}-share ${side} position. UP and DOWN trade independently; this side can re-enter after its 15-second cooldown while the other side remains available.`;
       this.signal = { side, action: 'BUY_ENTRY', reason: this.forecast.reason };
       return true;
     }
@@ -815,16 +903,18 @@ class PressureForecastBot extends WickBot {
       return false;
     }
 
+    const candidate = forecast.candidateBySide[side];
+    const requestedShares = Number(candidate?.requestedShares) || config.PRESSURE_ENTRY_SHARES;
     const execution = sweepBook(
       read.quotes[side]?.askLevels,
-      config.PRESSURE_ENTRY_SHARES,
+      requestedShares,
       'BUY',
       this.market,
       { maximumPrice: config.PRESSURE_MAX_BUY_PRICE },
     );
     if (!execution.complete) {
       forecast.status = 'SHADOW_SKIPPED_DEPTH';
-      forecast.reason = 'Shadow entry skipped because the full 100 shares were not available below the $0.90 cap.';
+      forecast.reason = `Shadow entry skipped because the full ${requestedShares} shares were not available below the $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} cap.`;
       return false;
     }
     if (execution.totalCost > this.shadowCash + EPSILON) {
@@ -833,7 +923,6 @@ class PressureForecastBot extends WickBot {
       return false;
     }
 
-    const candidate = forecast.candidateBySide[side];
     const position = {
       id: `shadow-${this.market?.start || start}-${side.toLowerCase()}-${++this.shadowSequence}`,
       shadowOnly: true,
@@ -874,7 +963,7 @@ class PressureForecastBot extends WickBot {
     this.shadowLastEntryAt = now;
     this.shadowLastEntryAtBySide[side] = now;
     forecast.status = 'SHADOW_ENTRY';
-    forecast.reason = `Shadow only: simulated a 100-share ${side} entry; the trading portfolio was not changed.`;
+    forecast.reason = `Shadow only: simulated a ${position.shares}-share ${side} entry; the trading portfolio was not changed.`;
     return true;
   }
 
@@ -940,34 +1029,7 @@ class PressureForecastBot extends WickBot {
     for (const side of SIDES) {
       const quote = read.quotes[side];
       const probability = side === 'UP' ? estimateUp : estimateDown;
-      const entry = sweepBook(
-        quote.askLevels,
-        config.PRESSURE_ENTRY_SHARES,
-        'BUY',
-        this.market,
-        { maximumPrice: config.PRESSURE_MAX_BUY_PRICE },
-      );
-      const allInCostPerShare = entry.complete
-        ? entry.totalCost / config.PRESSURE_ENTRY_SHARES
-        : null;
-      const edge = allInCostPerShare == null ? null : probability - allInCostPerShare;
-      let reason = 'This side does not currently clear the probability and net-edge checks.';
-      if (!(probability > 0.5)) reason = 'The estimate does not put this side above 50%.';
-      else if (!entry.complete) reason = 'Insufficient visible ask depth below the $0.90 cap.';
-      else if (edge < config.PRESSURE_MIN_NET_EDGE_PER_SHARE) {
-        reason = `Net edge is below the required $${config.PRESSURE_MIN_NET_EDGE_PER_SHARE.toFixed(2)} per share after taker fees.`;
-      } else reason = 'Side estimate clears the net edge and taker price cap; there is no $0.50 entry filter.';
-      candidateBySide[side] = {
-        estimatedProbability: probability,
-        bestAsk: quote.bestAsk,
-        allInCostPerShare,
-        expectedNetEdgePerShare: edge,
-        qualifies: probability > 0.5
-          && entry.complete
-          && edge >= config.PRESSURE_MIN_NET_EDGE_PER_SHARE,
-        reason,
-        requestedShares: config.PRESSURE_ENTRY_SHARES,
-      };
+      candidateBySide[side] = evaluateEntryCandidate(probability, quote, this.market);
     }
 
     const qualifying = SIDES
@@ -977,7 +1039,7 @@ class PressureForecastBot extends WickBot {
     const selectedSide = qualifying[0] || null;
     const status = selectedSide ? 'QUALIFIED' : 'NO_EDGE';
     const reason = selectedSide
-      ? `${selectedSide} clears the probability and $${config.PRESSURE_MIN_NET_EDGE_PER_SHARE.toFixed(2)} net-edge checks; its entry is not restricted to prices below $0.50.`
+      ? `${selectedSide} clears the probability and $${config.PRESSURE_MIN_NET_EDGE_PER_SHARE.toFixed(2)} net-edge checks; the share size is scaled by edge and capped at ${config.PRESSURE_MAX_ENTRY_SHARES}.`
       : 'Neither UP nor DOWN currently clears the probability, ask-cap, and net-edge checks.';
     return {
       ready: true,
@@ -1023,7 +1085,7 @@ class PressureForecastBot extends WickBot {
     const order = this.createOrder(kind || 'BUY_ENTRY', side, shares, now, preview);
     if (!preview.complete) {
       order.status = 'SKIPPED_PRICE_CAP_OR_DEPTH';
-      order.error = 'Full requested size was not available at or below $0.90.';
+      order.error = `Full requested size was not available at or below $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)}.`;
       return null;
     }
     if (preview.totalCost > this.cash + EPSILON) {
@@ -1370,6 +1432,10 @@ class PressureForecastBot extends WickBot {
         liveTradingEnabled: false,
         realOrderModulesLoaded: false,
         entryShares: config.PRESSURE_ENTRY_SHARES,
+        maxEntryShares: config.PRESSURE_MAX_ENTRY_SHARES,
+        entrySizeStepShares: config.PRESSURE_ENTRY_SIZE_STEP_SHARES,
+        edgeSizeStep: config.PRESSURE_EDGE_SIZE_STEP,
+        minEstimatedProbability: config.PRESSURE_MIN_ESTIMATED_PROBABILITY,
         maxBuyPrice: config.PRESSURE_MAX_BUY_PRICE,
         minNetEdgePerShare: config.PRESSURE_MIN_NET_EDGE_PER_SHARE,
         signal: 'Uncalibrated resolution estimate blends BTC price/volatility, current Polymarket odds, and ten one-second pressure samples.',
@@ -1377,11 +1443,16 @@ class PressureForecastBot extends WickBot {
         orders: {
           type: 'Visible-book taker-style paper sweeps',
           initialShares: config.PRESSURE_ENTRY_SHARES,
+          maxShares: config.PRESSURE_MAX_ENTRY_SHARES,
+          sizeStepShares: config.PRESSURE_ENTRY_SIZE_STEP_SHARES,
+          edgeStep: config.PRESSURE_EDGE_SIZE_STEP,
+          minEstimatedProbability: config.PRESSURE_MIN_ESTIMATED_PROBABILITY,
+          minNetEdgePerShare: config.PRESSURE_MIN_NET_EDGE_PER_SHARE,
           maxBuyPrice: config.PRESSURE_MAX_BUY_PRICE,
           entryCooldownMs: config.PRESSURE_ENTRY_COOLDOWN_MS,
           maxEntriesPerWindow: 'No fixed cap; limited by qualifying signals and available cash.',
         },
-        repeatEntryRule: 'UP and DOWN have separate 15-second entry cooldowns. Each side can independently open repeated 100-share entries, hold through the window, and settle only after official resolution.',
+        repeatEntryRule: `UP and DOWN have separate 15-second entry cooldowns. Each side can independently open repeated ${config.PRESSURE_ENTRY_SHARES}-${config.PRESSURE_MAX_ENTRY_SHARES} share entries, with size increasing by ${config.PRESSURE_ENTRY_SIZE_STEP_SHARES} shares per $${config.PRESSURE_EDGE_SIZE_STEP.toFixed(2)} edge above the minimum, then hold through the window and settle only after official resolution.`,
         priceFeed: this.priceFeed?.snapshot?.() || null,
         exits: {
           mode: 'OFFICIAL_RESOLUTION_ONLY',
@@ -1415,7 +1486,7 @@ class PressureForecastBot extends WickBot {
           this.shadowInitialCapital,
           this.shadowStatsOffset,
         ),
-        assumptions: 'Separate paper cash; same 100-share entry filters, independent 15-second cooldown per side, visible ask sweep, taker fees, and official-resolution-only settlement.',
+        assumptions: `Separate paper cash; same 100–${config.PRESSURE_MAX_ENTRY_SHARES} share edge-based sizing, probability and net-edge filters, independent 15-second cooldown per side, visible ask sweep, taker fees, and official-resolution-only settlement.`,
       },
       portfolioAnalytics: {
         equityCurve: settledEquityCurve,
@@ -1465,6 +1536,8 @@ PressureForecastBot._test = {
   summarizePortfolio,
   bookPressure,
   sweepBook,
+  sharesAllowedByEdge,
+  evaluateEntryCandidate,
   resolvedPayout,
 };
 
