@@ -18,16 +18,6 @@ function clamp(value, minimum = -1, maximum = 1) {
   return Math.max(minimum, Math.min(maximum, Number(value) || 0));
 }
 
-function normalCdf(value) {
-  const sign = value < 0 ? -1 : 1;
-  const x = Math.abs(value);
-  const t = 1 / (1 + 0.3275911 * x);
-  const polynomial = (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
-    - 0.284496736) * t + 0.254829592) * t;
-  const erf = sign * (1 - polynomial * Math.exp(-x * x));
-  return Math.max(0, Math.min(1, 0.5 * (1 + erf)));
-}
-
 function mean(values) {
   return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
 }
@@ -131,37 +121,6 @@ function summarizePortfolio(positions, cash, initialCapital, historicalOffset = 
   };
 }
 
-function bookPressure(quote) {
-  const bids = (quote?.bidLevels || []).slice(0, config.PRESSURE_DEPTH_LEVELS);
-  const asks = (quote?.askLevels || []).slice(0, config.PRESSURE_DEPTH_LEVELS);
-  const bidDepth = bids.reduce((sum, level) => sum + Number(level.size || 0), 0);
-  const askDepth = asks.reduce((sum, level) => sum + Number(level.size || 0), 0);
-  const total = bidDepth + askDepth;
-  const depthImbalance = total > 0 ? (bidDepth - askDepth) / total : 0;
-  const bestBid = bids[0];
-  const bestAsk = asks[0];
-  let micropriceImbalance = 0;
-  if (bestBid && bestAsk && bestAsk.price > bestBid.price) {
-    const bidSize = Number(bestBid.size) || 0;
-    const askSize = Number(bestAsk.size) || 0;
-    const combined = bidSize + askSize;
-    if (combined > 0) {
-      const midpoint = (bestBid.price + bestAsk.price) / 2;
-      const microprice = (bestAsk.price * bidSize + bestBid.price * askSize) / combined;
-      micropriceImbalance = clamp(
-        (microprice - midpoint) / ((bestAsk.price - bestBid.price) / 2),
-      );
-    }
-  }
-  return {
-    score: clamp(0.65 * depthImbalance + 0.35 * micropriceImbalance),
-    depthImbalance: clamp(depthImbalance),
-    micropriceImbalance,
-    bidDepth,
-    askDepth,
-  };
-}
-
 function sweepBook(levels, shares, action, market, {
   minimumPrice = 0,
   maximumPrice = Infinity,
@@ -213,89 +172,28 @@ function sweepBook(levels, shares, action, market, {
   };
 }
 
-function sharesAllowedByEdge(edge) {
-  const baseShares = config.PRESSURE_ENTRY_SHARES;
-  if (!Number.isFinite(Number(edge))
-    || Number(edge) + EPSILON < config.PRESSURE_MIN_NET_EDGE_PER_SHARE) {
-    return baseShares;
-  }
-  const extraSteps = Math.floor(
-    (Number(edge) - config.PRESSURE_MIN_NET_EDGE_PER_SHARE + EPSILON)
-      / config.PRESSURE_EDGE_SIZE_STEP,
-  );
-  return Math.min(
-    config.PRESSURE_MAX_ENTRY_SHARES,
-    baseShares + extraSteps * config.PRESSURE_ENTRY_SIZE_STEP_SHARES,
-  );
-}
+function evaluatePressureCandidate(side, signalSide, quote) {
+  const bestAsk = Number(quote?.bestAsk);
+  const isSelected = side === signalSide;
+  const hasUsableAsk = Number.isFinite(bestAsk) && bestAsk > 0 && bestAsk < 1;
+  const underPriceCap = hasUsableAsk
+    && bestAsk <= config.PRESSURE_MAX_BUY_PRICE + EPSILON;
+  let reason = `${side} is not the side selected by Binance pressure.`;
 
-function evaluateEntryCandidate(probability, quote, market) {
-  const baseShares = config.PRESSURE_ENTRY_SHARES;
-  const maxShares = config.PRESSURE_MAX_ENTRY_SHARES;
-  let best = null;
-  let baseSweep = null;
-  const askPrice = Number(quote?.bestAsk);
-  const modeledAskLevels = Number.isFinite(askPrice) && askPrice > 0
-    ? [{ price: askPrice, size: maxShares }]
-    : [];
-
-  for (let shares = baseShares; shares <= maxShares;
-    shares += config.PRESSURE_ENTRY_SIZE_STEP_SHARES) {
-    const execution = sweepBook(
-      modeledAskLevels,
-      shares,
-      'BUY',
-      market,
-      { maximumPrice: config.PRESSURE_MAX_BUY_PRICE },
-    );
-    if (shares === baseShares) baseSweep = execution;
-    if (!execution.complete) break;
-
-    const allInCostPerShare = execution.totalCost / shares;
-    const edge = Number(probability) - allInCostPerShare;
-    const edgeSizeLimit = sharesAllowedByEdge(edge);
-    if (Number(probability) > config.PRESSURE_MIN_ESTIMATED_PROBABILITY
-      && edge + EPSILON >= config.PRESSURE_MIN_NET_EDGE_PER_SHARE
-      && shares <= edgeSizeLimit) {
-      best = {
-        estimatedProbability: Number(probability),
-        bestAsk: quote?.bestAsk ?? null,
-        allInCostPerShare,
-        expectedNetEdgePerShare: edge,
-        requestedShares: shares,
-        qualifies: true,
-        reason: `Probability clears ${Math.round(config.PRESSURE_MIN_ESTIMATED_PROBABILITY * 100)}%; the ask price is below the $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} cap and the net-edge sizing rule.`,
-      };
-    }
-  }
-
-  if (best) return best;
-
-  const execution = baseSweep || sweepBook(modeledAskLevels, baseShares, 'BUY', market, {
-    maximumPrice: config.PRESSURE_MAX_BUY_PRICE,
-  });
-  const allInCostPerShare = execution.complete
-    ? execution.totalCost / baseShares
-    : null;
-  const edge = allInCostPerShare == null
-    ? null
-    : Number(probability) - allInCostPerShare;
-  let reason = 'This side does not currently clear the probability, price-cap, and net-edge checks.';
-  if (!(Number(probability) > config.PRESSURE_MIN_ESTIMATED_PROBABILITY)) {
-    reason = `The estimate must be above ${Math.round(config.PRESSURE_MIN_ESTIMATED_PROBABILITY * 100)}%.`;
-  } else if (!execution.complete) {
-    reason = `No valid ask price at or below $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)}.`;
-  } else if (edge + EPSILON < config.PRESSURE_MIN_NET_EDGE_PER_SHARE) {
-    reason = `Net edge is below the required $${config.PRESSURE_MIN_NET_EDGE_PER_SHARE.toFixed(2)} per share after taker fees.`;
+  if (isSelected && !hasUsableAsk) {
+    reason = `Binance pressure selected ${side}; waiting for a fresh CLOB ask to execute.`;
+  } else if (isSelected && !underPriceCap) {
+    reason = `Binance pressure selected ${side}, but its ask is above the existing $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} execution cap.`;
+  } else if (isSelected) {
+    reason = `Binance pressure selected ${side}; the current ask is within the execution cap.`;
   }
 
   return {
-    estimatedProbability: Number(probability),
-    bestAsk: quote?.bestAsk ?? null,
-    allInCostPerShare,
-    expectedNetEdgePerShare: edge,
-    requestedShares: baseShares,
-    qualifies: false,
+    selectedByPressure: isSelected,
+    bestAsk: hasUsableAsk ? bestAsk : null,
+    priceCap: config.PRESSURE_MAX_BUY_PRICE,
+    requestedShares: config.PRESSURE_ENTRY_SHARES,
+    qualifies: isSelected && underPriceCap,
     reason,
   };
 }
@@ -358,11 +256,11 @@ class PressureForecastBot extends WickBot {
     this.clobFeed = null;
     this.clobFeedMarketKey = null;
     this.initialCapital = initialCapital;
-    this.strategyName = 'BTC 5-minute pressure and price forecast paper bot';
+    this.strategyName = 'BTC 5-minute Binance pressure-only paper bot';
     this.strategyMode = 'pressure-forecast';
     this.pressureSamples = [];
     this.lastSampleAt = null;
-    this.forecast = this.emptyForecast('Waiting for Binance and Polymarket data.');
+    this.forecast = this.emptyForecast('Waiting for fresh Binance pressure data.');
     this.lastEntryAt = null;
     this.lastEntryAtBySide = { UP: null, DOWN: null };
     this.pendingEntries = { UP: null, DOWN: null };
@@ -469,8 +367,12 @@ class PressureForecastBot extends WickBot {
     this.windowOrders = this.orders.filter((order) =>
       Number(order.windowStart) === Number(this.orderWindowStart));
     this.liveQuotes = state.liveQuotes || { UP: { status: 'MISSING' }, DOWN: { status: 'MISSING' } };
-    this.pressureSamples = Array.isArray(state.pressureSamples) ? state.pressureSamples : [];
-    this.lastSampleAt = Number.isFinite(Number(state.lastSampleAt)) ? Number(state.lastSampleAt) : null;
+    this.pressureSamples = Array.isArray(state.pressureSamples)
+      ? state.pressureSamples.filter((sample) => sample.scoreSource === 'BINANCE_PRESSURE_V1')
+      : [];
+    this.lastSampleAt = this.pressureSamples.length
+      ? Number(this.pressureSamples.at(-1).at)
+      : null;
     this.lastEntryAt = Number.isFinite(Number(state.lastEntryAt)) ? Number(state.lastEntryAt) : null;
     this.lastEntryAtBySide = state.lastEntryAtBySide || { UP: null, DOWN: null };
     this.pendingEntries = { UP: null, DOWN: null };
@@ -487,8 +389,14 @@ class PressureForecastBot extends WickBot {
     this.shadowLastEntryAtBySide = state.shadowLastEntryAtBySide || { UP: null, DOWN: null };
     this.shadowSequence = Number(state.shadowSequence) || 0;
     this.shadowSamplesRequired = Number(state.shadowSamplesRequired) || config.PRESSURE_SAMPLE_COUNT;
-    this.shadowForecast = state.shadowForecast || this.emptyForecast('Waiting for live data for the adaptive shadow comparison.');
-    this.forecast = state.forecast || this.emptyForecast('Waiting for Binance and Polymarket data.');
+    this.shadowForecast = this.emptyForecast(
+      'Collecting fresh Binance pressure samples for the adaptive shadow comparison.',
+      'COLLECTING_SAMPLES',
+    );
+    this.forecast = this.emptyForecast(
+      'Collecting fresh Binance pressure samples after the strategy update.',
+      'COLLECTING_SAMPLES',
+    );
     this.actionSequence = Number(state.actionSequence) || 0;
     this.completedWindows = new Map(Array.isArray(state.completedWindows) ? state.completedWindows : []);
     this.lastResolutionCheckAt = new Map(
@@ -618,14 +526,12 @@ class PressureForecastBot extends WickBot {
       calibrated: false,
       status,
       reason,
-      estimateUp: null,
-      estimateDown: null,
-      marketImpliedUp: null,
-      marketImpliedDown: null,
-      laggingSide: null,
+      signalSource: 'BINANCE_PRESSURE_ONLY',
+      pressureScore: null,
+      pressureImpulse: null,
       selectedSide: null,
-      expectedNetEdgePerShare: null,
-      minRequiredEdgePerShare: config.PRESSURE_MIN_NET_EDGE_PER_SHARE,
+      executionPriceCap: config.PRESSURE_MAX_BUY_PRICE,
+      entryShares: config.PRESSURE_ENTRY_SHARES,
       sampleCount: 0,
       requiredSamples: config.PRESSURE_SAMPLE_COUNT,
       pressureTrendSlope: null,
@@ -643,10 +549,10 @@ class PressureForecastBot extends WickBot {
 
   emptyCandidate(reason) {
     return {
-      estimatedProbability: null,
+      selectedByPressure: false,
       bestAsk: null,
-      allInCostPerShare: null,
-      expectedNetEdgePerShare: null,
+      priceCap: config.PRESSURE_MAX_BUY_PRICE,
+      requestedShares: config.PRESSURE_ENTRY_SHARES,
       qualifies: false,
       reason,
     };
@@ -827,7 +733,7 @@ class PressureForecastBot extends WickBot {
     const opened = this.executeBuy(side, pending.shares, now, {
       kind: 'BUY_ENTRY',
       candidate: pending.candidate,
-      signal: { combinedScore: pending.signalScore },
+      signal: { binancePressureScore: pending.signalScore },
       fillQuote: quote,
       fillPrice: nextAsk,
       triggerPrice: pending.triggerPrice,
@@ -910,14 +816,11 @@ class PressureForecastBot extends WickBot {
       && Number(flow.tradeCount) >= config.PRESSURE_MIN_BINANCE_TRADES
       && Number.isFinite(Number(flow.imbalance));
     const quotes = Object.fromEntries(SIDES.map((side) => [side, this.freshQuote(side, now)]));
-    const clobReady = SIDES.every((side) => quotes[side]);
-    if (!binanceReady || !clobReady) {
+    if (!binanceReady) {
       return {
         ready: false,
         status: 'WAITING_FOR_DATA',
-        reason: !binanceReady
-          ? 'Waiting for fresh Binance trades and a current tick.'
-          : 'Waiting for fresh two-sided Polymarket books.',
+        reason: 'Waiting for fresh Binance trades and a current tick.',
         feed,
         flow,
         quotes,
@@ -931,25 +834,18 @@ class PressureForecastBot extends WickBot {
       : 0;
     const momentum = clamp(priceChangePct / 0.0004);
     const binanceScore = clamp(0.75 * binanceImbalance + 0.25 * momentum);
-    const upBook = bookPressure(quotes.UP);
-    const downBook = bookPressure(quotes.DOWN);
-    const clobScore = clamp((upBook.score - downBook.score) / 2);
-    const combinedScore = clamp((binanceScore + clobScore) / 2);
     return {
       ready: true,
       status: 'READY',
-      reason: 'Combined Binance trade flow and Polymarket book pressure are fresh.',
+      reason: 'Binance trade flow is fresh; Polymarket quotes are used only for execution.',
       feed,
       flow,
       quotes,
       tickAgeMs,
       binanceScore,
+      pressureScore: binanceScore,
       binanceImbalance,
       momentum,
-      clobScore,
-      combinedScore,
-      upBook,
-      downBook,
     };
   }
 
@@ -982,10 +878,10 @@ class PressureForecastBot extends WickBot {
         : null;
       this.pressureSamples.push({
         at: now,
-        score: read.combinedScore,
+        scoreSource: 'BINANCE_PRESSURE_V1',
+        score: read.binanceScore,
         price: Number(read.feed.price),
         windowOpenPrice: openPrice,
-        marketImpliedUp: Number(read.quotes.UP.mid),
       });
       this.pressureSamples = this.pressureSamples.slice(-config.PRESSURE_SAMPLE_COUNT);
     }
@@ -1013,6 +909,7 @@ class PressureForecastBot extends WickBot {
     }
 
     const side = forecast.selectedSide;
+    if (!forecast.candidateBySide[side]?.qualifies) return false;
     if (this.pendingEntries[side]) {
       this.forecast.status = 'ENTRY_PENDING_NEXT_TICK';
       this.forecast.reason = `${side} is waiting for the next Polymarket ask tick to confirm all ${this.pendingEntries[side].shares} shares.`;
@@ -1037,7 +934,7 @@ class PressureForecastBot extends WickBot {
       triggerPrice: Number(triggerQuote.bestAsk),
       quoteUpdateSequence: Number(this.quoteUpdateSequence[side] || 0),
       triggeredAt: now,
-      signalScore: read.combinedScore,
+      signalScore: read.binanceScore,
       candidate,
     };
     this.forecast.status = 'ENTRY_PENDING_NEXT_TICK';
@@ -1109,9 +1006,7 @@ class PressureForecastBot extends WickBot {
       markUpdatedAt: read.quotes[side]?.updatedAt || now,
       markStatus: 'LIVE',
       entryFills: execution.fills.map((fill) => ({ ...fill, at: now })),
-      expectedProbability: candidate.estimatedProbability,
-      expectedNetEdgePerShare: candidate.expectedNetEdgePerShare,
-      signalScore: read.combinedScore,
+      signalScore: read.binanceScore,
       settlementBasis: 'ADAPTIVE_SAMPLE_SHADOW',
     };
     this.shadowCash -= execution.totalCost;
@@ -1133,8 +1028,6 @@ class PressureForecastBot extends WickBot {
   createForecast(read, now, start, requiredSamples = config.PRESSURE_SAMPLE_COUNT) {
     const samples = this.freshSamples(now, requiredSamples);
     const secondsRemaining = Math.max(0, (start + this.windowMs - now) / 1000);
-    const marketImpliedUp = Number(read.quotes.UP.mid);
-    const marketImpliedDown = Number(read.quotes.DOWN.mid);
     const candidateBySide = { UP: this.emptyCandidate('Waiting for enough fresh pressure samples.'), DOWN: this.emptyCandidate('Waiting for enough fresh pressure samples.') };
     const trend = pressureTrend(samples, requiredSamples);
     const currentPrice = Number(read.feed.price);
@@ -1145,24 +1038,19 @@ class PressureForecastBot extends WickBot {
       : null;
     const volatility = volatilityPerSecond(samples, requiredSamples);
     const ready = samples.length >= requiredSamples
-      && marketImpliedUp > 0 && marketImpliedUp < 1
-      && marketImpliedDown > 0 && marketImpliedDown < 1
-      && windowOpenPrice > 0
-      && currentPrice > 0
-      && volatility != null
+      && Number.isFinite(Number(trend.pressureImpulse))
       && secondsRemaining > 0;
     if (!ready) {
       return {
         ...this.emptyForecast(
-          `Collecting ${requiredSamples} fresh one-second samples (${samples.length}/${requiredSamples}); no forecast is used yet.`,
+          `Collecting ${requiredSamples} fresh Binance pressure samples (${samples.length}/${requiredSamples}).`,
           'COLLECTING_SAMPLES',
         ),
         sampleCount: samples.length,
         requiredSamples,
-        marketImpliedUp,
-        marketImpliedDown,
         btcMoveFromOpenPct,
         volatilityPerSecond: volatility,
+        pressureScore: read.binanceScore ?? null,
         secondsRemaining,
         pressureTrendSlope: trend.pressureTrendSlope,
         pressurePersistence: trend.pressurePersistence,
@@ -1171,49 +1059,38 @@ class PressureForecastBot extends WickBot {
       };
     }
 
-    const remainingVolatility = Math.max(1e-8, volatility * Math.sqrt(secondsRemaining));
-    const zScore = Math.log(currentPrice / windowOpenPrice) / remainingVolatility;
-    const priceModelUp = normalCdf(zScore);
-    const pressureProbabilityUp = Math.max(0.05, Math.min(0.95, 0.5 + 0.45 * trend.pressureImpulse));
-    const estimateUp = Math.max(0.01, Math.min(0.99,
-      0.50 * priceModelUp + 0.30 * marketImpliedUp + 0.20 * pressureProbabilityUp));
-    const estimateDown = 1 - estimateUp;
-    const askUp = Number(read.quotes.UP.bestAsk);
-    const askDown = Number(read.quotes.DOWN.bestAsk);
-    const laggingSide = askUp <= askDown ? 'UP' : 'DOWN';
-
+    const selectedSide = trend.pressureImpulse > 0
+      ? 'UP'
+      : trend.pressureImpulse < 0 ? 'DOWN' : null;
     for (const side of SIDES) {
-      const quote = read.quotes[side];
-      const probability = side === 'UP' ? estimateUp : estimateDown;
-      candidateBySide[side] = evaluateEntryCandidate(probability, quote, this.market);
+      candidateBySide[side] = evaluatePressureCandidate(
+        side,
+        selectedSide,
+        read.quotes?.[side],
+      );
     }
 
-    const qualifying = SIDES
-      .filter((side) => candidateBySide[side].qualifies)
-      .sort((a, b) => candidateBySide[b].expectedNetEdgePerShare
-        - candidateBySide[a].expectedNetEdgePerShare);
-    const selectedSide = qualifying[0] || null;
-    const status = selectedSide ? 'QUALIFIED' : 'NO_EDGE';
-    const reason = selectedSide
-      ? `${selectedSide} clears the probability and $${config.PRESSURE_MIN_NET_EDGE_PER_SHARE.toFixed(2)} net-edge checks; the share size is scaled by edge and capped at ${config.PRESSURE_MAX_ENTRY_SHARES}.`
-      : 'Neither UP nor DOWN currently clears the probability, ask-cap, and net-edge checks.';
+    const selectedCandidate = selectedSide ? candidateBySide[selectedSide] : null;
+    const status = !selectedSide
+      ? 'NO_PRESSURE_SIGNAL'
+      : selectedCandidate.qualifies
+        ? 'QUALIFIED'
+        : selectedCandidate.bestAsk == null
+          ? 'SIGNAL_WAITING_FOR_EXECUTION_QUOTE'
+          : 'SIGNAL_PRICE_CAP';
+    const reason = !selectedSide
+      ? 'Binance pressure is neutral; no side is selected.'
+      : selectedCandidate.reason;
     return {
       ready: true,
       calibrated: false,
+      signalSource: 'BINANCE_PRESSURE_ONLY',
       status,
       reason,
-      estimateUp,
-      estimateDown,
-      priceModelUp,
-      pressureProbabilityUp,
-      marketImpliedUp,
-      marketImpliedDown,
-      laggingSide,
+      pressureScore: read.binanceScore ?? null,
       selectedSide,
-      expectedNetEdgePerShare: selectedSide
-        ? candidateBySide[selectedSide].expectedNetEdgePerShare
-        : null,
-      minRequiredEdgePerShare: config.PRESSURE_MIN_NET_EDGE_PER_SHARE,
+      executionPriceCap: config.PRESSURE_MAX_BUY_PRICE,
+      entryShares: config.PRESSURE_ENTRY_SHARES,
       sampleCount: samples.length,
       requiredSamples,
       pressureTrendSlope: trend.pressureTrendSlope,
@@ -1223,7 +1100,6 @@ class PressureForecastBot extends WickBot {
       btcMoveFromOpenPct,
       volatilityPerSecond: volatility,
       secondsRemaining,
-      zScore,
       candidateBySide,
     };
   }
@@ -1293,7 +1169,6 @@ class PressureForecastBot extends WickBot {
       orderType: 'PAPER_TAKER_MARKET',
       fillModel: 'NEXT_CLOB_ASK_TICK_FULL_REQUESTED_SIZE',
       triggerPrice: Number.isFinite(Number(triggerPrice)) ? Number(triggerPrice) : null,
-      signalExpectedNetEdgePerShare: candidate?.expectedNetEdgePerShare ?? null,
       shares: execution.filledShares,
       initialShares: execution.filledShares,
       avgEntry: execution.averagePrice,
@@ -1311,11 +1186,7 @@ class PressureForecastBot extends WickBot {
       markUpdatedAt: quote.updatedAt,
       markStatus: 'LIVE',
       entryFills: execution.fills.map((fill) => ({ ...fill, at: now })),
-      expectedProbability: candidate?.estimatedProbability ?? null,
-      expectedNetEdgePerShare: candidate?.estimatedProbability == null
-        ? candidate?.expectedNetEdgePerShare ?? null
-        : Number(candidate.estimatedProbability) - (execution.totalCost / execution.filledShares),
-      signalScore: signal?.combinedScore ?? null,
+      signalScore: signal?.binancePressureScore ?? null,
     };
     this.cash -= execution.totalCost;
     this.positions.unshift(position);
@@ -1329,8 +1200,6 @@ class PressureForecastBot extends WickBot {
     order.maxPrice = config.PRESSURE_MAX_BUY_PRICE;
     order.triggerPrice = Number.isFinite(Number(triggerPrice)) ? Number(triggerPrice) : null;
     order.fillConfirmation = 'NEXT_CLOB_ASK_TICK';
-    order.signalExpectedNetEdgePerShare = candidate?.expectedNetEdgePerShare ?? null;
-    order.expectedNetEdgePerShare = position.expectedNetEdgePerShare;
     this.log('PAPER_PRESSURE_ENTRY_FILLED', {
       orderId: order.id,
       positionId: position.id,
@@ -1338,7 +1207,6 @@ class PressureForecastBot extends WickBot {
       shares: position.shares,
       averagePrice: position.avgEntry,
       fees: position.fees,
-      expectedNetEdgePerShare: position.expectedNetEdgePerShare,
       signalScore: position.signalScore,
     });
     return position;
@@ -1624,27 +1492,17 @@ class PressureForecastBot extends WickBot {
         liveTradingEnabled: false,
         realOrderModulesLoaded: false,
         entryShares: config.PRESSURE_ENTRY_SHARES,
-        maxEntryShares: config.PRESSURE_MAX_ENTRY_SHARES,
-        entrySizeStepShares: config.PRESSURE_ENTRY_SIZE_STEP_SHARES,
-        edgeSizeStep: config.PRESSURE_EDGE_SIZE_STEP,
-        minEstimatedProbability: config.PRESSURE_MIN_ESTIMATED_PROBABILITY,
         maxBuyPrice: config.PRESSURE_MAX_BUY_PRICE,
-        minNetEdgePerShare: config.PRESSURE_MIN_NET_EDGE_PER_SHARE,
-        signal: 'Uncalibrated resolution estimate blends BTC price/volatility, current Polymarket odds, and ten one-second pressure samples.',
+        signal: 'The direction is selected from ten one-second Binance pressure scores only. Polymarket quotes are used only to execute the paper order.',
         signalState: this.forecast,
         orders: {
           type: 'Full requested-size paper fill at the next Polymarket ask tick',
           initialShares: config.PRESSURE_ENTRY_SHARES,
-          maxShares: config.PRESSURE_MAX_ENTRY_SHARES,
-          sizeStepShares: config.PRESSURE_ENTRY_SIZE_STEP_SHARES,
-          edgeStep: config.PRESSURE_EDGE_SIZE_STEP,
-          minEstimatedProbability: config.PRESSURE_MIN_ESTIMATED_PROBABILITY,
-          minNetEdgePerShare: config.PRESSURE_MIN_NET_EDGE_PER_SHARE,
           maxBuyPrice: config.PRESSURE_MAX_BUY_PRICE,
           entryCooldownMs: config.PRESSURE_ENTRY_COOLDOWN_MS,
           maxEntriesPerWindow: 'No fixed cap; limited by qualifying signals and available cash.',
         },
-        repeatEntryRule: `UP and DOWN have separate 15-second entry cooldowns. Each side can independently open repeated ${config.PRESSURE_ENTRY_SHARES}-${config.PRESSURE_MAX_ENTRY_SHARES} share entries, with size increasing by ${config.PRESSURE_ENTRY_SIZE_STEP_SHARES} shares per $${config.PRESSURE_EDGE_SIZE_STEP.toFixed(2)} edge above the minimum, then hold through the window and settle only after official resolution.`,
+        repeatEntryRule: `The Binance pressure impulse selects UP when positive and DOWN when negative. Each side has its own 15-second entry cooldown; each entry is ${config.PRESSURE_ENTRY_SHARES} shares, then held through the window until official resolution.`,
         priceFeed: this.priceFeed?.snapshot?.() || null,
         exits: {
           mode: 'OFFICIAL_RESOLUTION_ONLY',
@@ -1678,7 +1536,7 @@ class PressureForecastBot extends WickBot {
           this.shadowInitialCapital,
           this.shadowStatsOffset,
         ),
-        assumptions: `Separate paper cash; 100–${config.PRESSURE_MAX_ENTRY_SHARES} share edge-based sizing, probability and net-edge filters, independent 15-second cooldowns, visible ask-depth sweep for shadow entries, taker fees, and official-resolution-only settlement.`,
+        assumptions: `Separate paper cash; Binance-pressure-only direction, fixed ${config.PRESSURE_ENTRY_SHARES}-share entries, independent 15-second cooldowns, the existing $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} execution cap, visible ask-depth sweep for shadow entries, taker fees, and official-resolution-only settlement.`,
       },
       portfolioAnalytics: {
         equityCurve: settledEquityCurve,
@@ -1721,15 +1579,12 @@ class PressureForecastBot extends WickBot {
 
 PressureForecastBot._test = {
   clamp,
-  normalCdf,
   pressureTrend,
   volatilityPerSecond,
   adaptiveShadowSampleCount,
   summarizePortfolio,
-  bookPressure,
   sweepBook,
-  sharesAllowedByEdge,
-  evaluateEntryCandidate,
+  evaluatePressureCandidate,
   resolvedPayout,
 };
 

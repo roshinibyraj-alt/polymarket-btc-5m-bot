@@ -54,9 +54,9 @@ test('legacy live server serves the current pressure dashboard without implying 
   const html = await page.text();
   assert.match(html, /Five Minute \| BTC Paper Monitor/);
   assert.match(html, /Real-order modules/);
-  assert.match(html, /Uncalibrated/);
+  assert.match(html, /Binance pressure selects the side/i);
   assert.doesNotMatch(html, /15m/i);
   assert.match(html, /Paper only/i);
   assert.match(html, /sampleCount/);
-  assert.match(html, /expected net edge/i);
+  assert.doesNotMatch(html, /expected net edge|market-implied probability/i);
 });

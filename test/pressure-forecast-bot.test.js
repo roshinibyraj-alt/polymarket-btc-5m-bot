@@ -85,12 +85,14 @@ function addSamples(bot, direction, now = NOW) {
   bot.priceFeed.currentCandle.close = currentPrice;
   bot.priceFeed.currentCandle.high = Math.max(bot.priceFeed.currentCandle.high, currentPrice);
   bot.priceFeed.currentCandle.low = Math.min(bot.priceFeed.currentCandle.low, currentPrice);
+  bot.priceFeed.tradeFlow.imbalance = direction * 0.8;
+  bot.priceFeed.tradeFlow.priceChangePct = direction * 0.0003;
   bot.pressureSamples = Array.from({ length: config.PRESSURE_SAMPLE_COUNT }, (_, index) => ({
     at: now - (config.PRESSURE_SAMPLE_COUNT - 1 - index) * 1000,
+    scoreSource: 'BINANCE_PRESSURE_V1',
     score: direction * (0.2 + index * 0.07),
     price: currentPrice - direction * (config.PRESSURE_SAMPLE_COUNT - 1 - index) * 0.01,
     windowOpenPrice: 100,
-    marketImpliedUp: direction > 0 ? 0.32 : 0.65,
   }));
   bot.lastSampleAt = now - 1000;
 }
@@ -145,27 +147,7 @@ test('taker sweep observes the buy ceiling, sell floor, and per-level fees', () 
   assert.equal(sell.filledShares, 100);
 });
 
-test('entry probability floor is strict and edge scales size by ten shares per cent', () => {
-  const quote = {
-    bestAsk: 0.50,
-    askLevels: [{ price: 0.50, size: 1 }],
-  };
-  const evaluate = PressureForecastBot._test.evaluateEntryCandidate;
-  const atFloor = evaluate(0.60, quote, { feesEnabled: false });
-  const oneCentOver = evaluate(0.61, quote, { feesEnabled: false });
-  const capped = evaluate(0.99, quote, { feesEnabled: false });
-
-  assert.equal(config.PRESSURE_MIN_ESTIMATED_PROBABILITY, 0.60);
-  assert.equal(atFloor.qualifies, false);
-  assert.equal(atFloor.requestedShares, 100);
-  assert.equal(oneCentOver.qualifies, true);
-  assert.ok(Math.abs(oneCentOver.expectedNetEdgePerShare - 0.11) < 1e-12);
-  assert.equal(oneCentOver.requestedShares, 110);
-  assert.equal(capped.requestedShares, 200);
-  assert.equal(PressureForecastBot._test.sharesAllowedByEdge(0.20), 200);
-});
-
-test('forecast waits for ten samples and checks either side independently of the $0.50 level', () => {
+test('Binance pressure can select a side without CLOB odds or probability inputs', () => {
   const bot = makeBot();
   setQuote(bot, 'UP', 0.30, 0.32);
   setQuote(bot, 'DOWN', 0.68, 0.70);
@@ -175,42 +157,71 @@ test('forecast waits for ten samples and checks either side independently of the
   assert.equal(waiting.sampleCount, 0);
 
   addSamples(bot, 1);
-  const forecast = bot.createForecast(read, NOW, WINDOW_START);
+  const forecast = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
   assert.equal(forecast.ready, true);
-  assert.equal(forecast.laggingSide, 'UP');
+  assert.equal(forecast.signalSource, 'BINANCE_PRESSURE_ONLY');
+  assert.equal(forecast.selectedSide, 'UP');
   assert.equal(forecast.candidateBySide.UP.qualifies, true);
   assert.equal(forecast.candidateBySide.DOWN.qualifies, false);
-  assert.equal(forecast.calibrated, false);
-
-  setQuote(bot, 'UP', 0.48, 0.49);
-  setQuote(bot, 'DOWN', 0.50, 0.51);
-  const neutralFeed = makeFeed(NOW, 100);
-  neutralFeed.tradeFlow.imbalance = 0;
-  neutralFeed.tradeFlow.priceChangePct = 0;
-  bot.priceFeed = neutralFeed;
-  bot.pressureSamples = Array.from({ length: config.PRESSURE_SAMPLE_COUNT }, (_, index) => ({
-    at: NOW - (config.PRESSURE_SAMPLE_COUNT - 1 - index) * 1000,
-    score: 0,
-    price: 100 + (index % 2 ? 0.01 : 0),
-    windowOpenPrice: 100,
-    marketImpliedUp: 0.49,
-  }));
-  const narrowEdge = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
-  assert.equal(narrowEdge.candidateBySide.UP.qualifies, false);
-  assert.ok(narrowEdge.candidateBySide.UP.expectedNetEdgePerShare < config.PRESSURE_MIN_NET_EDGE_PER_SHARE);
+  assert.equal(forecast.candidateBySide.UP.requestedShares, config.PRESSURE_ENTRY_SHARES);
+  assert.equal('estimateUp' in forecast, false);
+  assert.equal('marketImpliedUp' in forecast, false);
+  assert.equal('expectedNetEdgePerShare' in forecast, false);
 });
 
-test('a signal-qualified side can enter above $0.50 while the other side is cheaper', () => {
+test('Polymarket book imbalance and odds cannot change the Binance-selected side', () => {
+  const bot = makeBot();
+  setQuote(bot, 'UP', 0.64, 0.65, 1000);
+  setQuote(bot, 'DOWN', 0.34, 0.35, 1);
+  addSamples(bot, 1);
+  const first = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
+
+  setQuote(bot, 'UP', 0.34, 0.35, 1);
+  setQuote(bot, 'DOWN', 0.64, 0.65, 1000);
+  const second = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
+
+  assert.equal(first.selectedSide, 'UP');
+  assert.equal(second.selectedSide, 'UP');
+  assert.equal(first.candidateBySide.UP.qualifies, true);
+  assert.equal(second.candidateBySide.UP.qualifies, true);
+  assert.equal(second.candidateBySide.UP.requestedShares, 100);
+});
+
+test('a Binance-selected side can enter above $0.50 while the other side is cheaper', () => {
   const bot = makeBot();
   setQuote(bot, 'UP', 0.64, 0.65);
   setQuote(bot, 'DOWN', 0.34, 0.35);
   addSamples(bot, 1);
   const forecast = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
 
-  assert.equal(forecast.laggingSide, 'DOWN');
+  assert.equal(forecast.selectedSide, 'UP');
   assert.equal(forecast.candidateBySide.UP.qualifies, true);
   assert.equal(forecast.selectedSide, 'UP');
   assert.equal(forecast.candidateBySide.UP.bestAsk, 0.65);
+  assert.equal(forecast.candidateBySide.UP.requestedShares, 100);
+});
+
+test('a missing CLOB book does not block a Binance pressure signal', () => {
+  const bot = makeBot();
+  addSamples(bot, -1);
+  const read = bot.buildPressureRead(NOW);
+  const forecast = bot.createForecast(read, NOW, WINDOW_START);
+  assert.equal(read.ready, true);
+  assert.equal(forecast.ready, true);
+  assert.equal(forecast.selectedSide, 'DOWN');
+  assert.equal(forecast.candidateBySide.DOWN.qualifies, false);
+  assert.match(forecast.candidateBySide.DOWN.reason, /waiting for a fresh CLOB ask/i);
+});
+
+test('existing execution price cap remains separate from pressure direction', () => {
+  const bot = makeBot();
+  setQuote(bot, 'UP', 0.95, 0.96);
+  setQuote(bot, 'DOWN', 0.04, 0.05);
+  addSamples(bot, 1);
+  const forecast = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
+  assert.equal(forecast.selectedSide, 'UP');
+  assert.equal(forecast.candidateBySide.UP.qualifies, false);
+  assert.equal(forecast.status, 'SIGNAL_PRICE_CAP');
 });
 
 test('entry ignores visible ask depth and fills full size at the next ask tick', () => {
@@ -226,7 +237,7 @@ test('entry ignores visible ask depth and fills full size at the next ask tick',
 
   assert.equal(changed, true);
   assert.equal(bot.positions.filter((item) => item.status === 'OPEN').length, 0);
-  assert.equal(bot.pendingEntries.UP.shares, 200);
+  assert.equal(bot.pendingEntries.UP.shares, 100);
   assert.equal(bot.pendingEntries.UP.triggerPrice, 0.32);
 
   bot.handleClobQuote('up-token', {
@@ -239,7 +250,7 @@ test('entry ignores visible ask depth and fills full size at the next ask tick',
 
   const position = bot.positions.find((item) => item.status === 'OPEN');
   assert.equal(position.side, 'UP');
-  assert.equal(position.shares, 200);
+  assert.equal(position.shares, 100);
   assert.equal(position.avgEntry, 0.33);
   assert.equal(position.triggerPrice, 0.32);
   assert.equal(position.fillModel, 'NEXT_CLOB_ASK_TICK_FULL_REQUESTED_SIZE');
@@ -247,7 +258,7 @@ test('entry ignores visible ask depth and fills full size at the next ask tick',
   assert.equal(bot.orders[0].orderType, 'PAPER_TAKER_MARKET');
   assert.equal(bot.orders[0].maxPrice, 0.95);
   assert.equal(bot.orders[0].fillConfirmation, 'NEXT_CLOB_ASK_TICK');
-  assert.equal(bot.orders[0].matchedShares, 200);
+  assert.equal(bot.orders[0].matchedShares, 100);
   assert.ok(bot.cash < 10_000);
   assert.ok(read.ready);
 });
@@ -261,10 +272,7 @@ test('the next ask tick may be below the trigger and still fills full size', () 
     windowStart: WINDOW_START,
     triggerPrice: 0.62,
     quoteUpdateSequence: 0,
-    candidate: {
-      estimatedProbability: 0.80,
-      expectedNetEdgePerShare: 0.10,
-    },
+    candidate: {},
     signalScore: 0.5,
   };
 
@@ -556,22 +564,22 @@ test('shadow-only positions roll over and settle from official market resolution
   assert.equal(bot.resolutions.length, 0);
 });
 
-test('paper snapshot identifies only the uncalibrated BTC 5-minute demo strategy', () => {
+test('paper snapshot identifies the Binance-pressure-only BTC 5-minute demo strategy', () => {
   const bot = makeBot();
   const state = bot.snapshot();
-  assert.equal(state.strategy.name, 'BTC 5-minute pressure and price forecast paper bot');
+  assert.equal(state.strategy.name, 'BTC 5-minute Binance pressure-only paper bot');
   assert.deepEqual(state.strategy.markets, ['BTC 5m']);
   assert.equal(state.strategy.execution, 'PAPER ONLY');
   assert.equal(state.strategy.liveTradingEnabled, false);
   assert.equal(state.strategy.realOrderModulesLoaded, false);
   assert.equal(state.strategy.orders.type, 'Full requested-size paper fill at the next Polymarket ask tick');
   assert.equal(state.strategy.orders.entryCooldownMs, 15_000);
-  assert.match(state.strategy.repeatEntryRule, /separate 15-second entry cooldowns/i);
-  assert.match(state.strategy.repeatEntryRule, /increasing by 10 shares per \$0\.01 edge/i);
-  assert.equal(state.strategy.minEstimatedProbability, 0.60);
+  assert.match(state.strategy.repeatEntryRule, /each side has its own 15-second entry cooldown/i);
+  assert.match(state.strategy.repeatEntryRule, /Binance pressure impulse selects UP when positive/i);
+  assert.equal('minEstimatedProbability' in state.strategy, false);
   assert.equal(state.strategy.maxBuyPrice, 0.95);
-  assert.equal(state.strategy.minNetEdgePerShare, 0.10);
-  assert.equal(state.strategy.maxEntryShares, 200);
+  assert.equal('minNetEdgePerShare' in state.strategy, false);
+  assert.equal('maxEntryShares' in state.strategy, false);
   assert.match(state.strategy.exit, /stay open until official resolution/i);
   assert.equal(state.strategy.signalState.calibrated, false);
   assert.equal(state.strategy.priceFeed.source, 'Binance BTCUSDT aggregate trades');
@@ -759,7 +767,7 @@ test('paper history migration restores positions, cash, cooldowns, and shadow to
     }],
     events: [{ at: NOW - 4000, type: 'BUY_FILLED', message: 'entry retained' }],
     resolutions: [{ slug: 'prior-window', outcome: 'DOWN', status: 'RESOLVED', pnl: 12 }],
-    forecast: { ready: false, reason: 'restored forecast' },
+    forecast: { ready: false, reason: 'legacy combined forecast' },
     shadowComparison: {
       activeSampleCount: 8,
       adaptive: {
@@ -786,7 +794,7 @@ test('paper history migration restores positions, cash, cooldowns, and shadow to
   assert.equal(bot.lastEntryAtBySide.UP, NOW - 5000);
   assert.equal(bot.orderWindowStart, WINDOW_START);
   assert.equal(bot.pressureSamples.length, 0);
-  assert.equal(bot.forecast.reason, 'restored forecast');
+  assert.match(bot.forecast.reason, /fresh Binance pressure samples/i);
 
   const shadow = bot.snapshot().shadowComparison.adaptive;
   assert.equal(shadow.entries, 4);
@@ -795,8 +803,24 @@ test('paper history migration restores positions, cash, cooldowns, and shadow to
   assert.equal(shadow.realizedPnl, 15);
 
   const reloadedBot = makeBot();
-  reloadedBot.restorePersistentState(bot.serializePersistentState());
+  const persisted = bot.serializePersistentState();
+  persisted.pressureSamples = [
+    { at: NOW - 2000, score: 0.7, price: 100.1 },
+    {
+      at: NOW - 1000,
+      scoreSource: 'BINANCE_PRESSURE_V1',
+      score: 0.4,
+      price: 100.2,
+    },
+  ];
+  persisted.lastSampleAt = NOW - 1000;
+  persisted.forecast = { ready: true, reason: 'legacy combined forecast' };
+  reloadedBot.restorePersistentState(persisted);
   assert.equal(reloadedBot.positions[0].id, position.id);
   assert.equal(reloadedBot.cash, 9_952);
   assert.equal(reloadedBot.shadowStatsOffset.entries, 4);
+  assert.equal(reloadedBot.pressureSamples.length, 1);
+  assert.equal(reloadedBot.pressureSamples[0].score, 0.4);
+  assert.equal(reloadedBot.lastSampleAt, NOW - 1000);
+  assert.match(reloadedBot.forecast.reason, /fresh Binance pressure samples/i);
 });
