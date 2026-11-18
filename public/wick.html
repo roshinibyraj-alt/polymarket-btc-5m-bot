@@ -251,7 +251,7 @@
   <section class="panel" aria-label="Adaptive sample shadow comparison">
     <div class="panel-head"><h2>Adaptive-sample shadow P&amp;L</h2><span class="pill wait" id="shadowStatus">Shadow only</span></div>
     <div id="shadowComparison"><div class="empty">Waiting for pressure data. This comparison never submits orders.</div></div>
-    <div class="shadow-note">The trading model stays at 10 samples. The adaptive shadow changes to 9, 8, 7, then 6 samples at each minute mark. Both use the same entry filters, 100–200 share edge-based sizing, separate 15-second cooldowns for UP and DOWN, visible ask prices and estimated taker fees. Positions stay open until official resolution; pending results are checked every 10 seconds. P&amp;L includes settled results and open-position marks; unresolved positions are shown separately. Comparison totals reset when the bot restarts.</div>
+    <div class="shadow-note">The trading model stays at 10 samples. The adaptive shadow changes to 9, 8, 7, then 6 samples at each minute mark. The trading model records the full requested size at the next Polymarket ask tick; the shadow still uses visible ask depth. Both use 100–200 share edge-based sizing, separate 15-second cooldowns for UP and DOWN, and modeled taker fees. Positions stay open until official resolution; pending results are checked every 10 seconds. P&amp;L includes settled results and open-position marks; unresolved positions are shown separately. Comparison totals reset when the bot restarts.</div>
   </section>
 
   <section class="panel">
@@ -269,7 +269,7 @@
     <div class="events" id="events"><div class="empty">Waiting for activity…</div></div>
   </section>
 
-  <p class="foot">Paper strategy parameters: probability must exceed 70%; net edge after modeled taker fees must be at least $0.10 per share; full ask sweeps are capped at $0.95. Orders start at 100 shares, add 10 shares per additional $0.01 of net edge, and cap at 200 shares. UP and DOWN use separate 15-second cooldowns; either side can qualify at any price. No take-profit or stop-loss exits: positions stay open until the original Polymarket market officially resolves, checked every 10 seconds. The demo runner does not load real-order modules. Forecasts are uncalibrated experimental estimates; no predictive accuracy or backtest performance is implied.</p>
+  <p class="foot">Paper strategy parameters: probability must exceed 60%; net edge at signal time after modeled taker fees must be at least $0.10 per share; the next-tick ask remains capped at $0.95. The full requested share size is recorded at the next Polymarket ask tick without checking visible ask depth. Orders start at 100 shares, add 10 shares per additional $0.01 of signal-time net edge, and cap at 200 shares. UP and DOWN use separate 15-second cooldowns; either side can qualify at any price. No take-profit or stop-loss exits: positions stay open until the original Polymarket market officially resolves, checked every 10 seconds. The demo runner does not load real-order modules. Forecasts are uncalibrated experimental estimates; no predictive accuracy or backtest performance is implied.</p>
   <div class="error" id="error" role="status"></div>
 </main>
 <script>

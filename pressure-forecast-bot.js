@@ -234,11 +234,15 @@ function evaluateEntryCandidate(probability, quote, market) {
   const maxShares = config.PRESSURE_MAX_ENTRY_SHARES;
   let best = null;
   let baseSweep = null;
+  const askPrice = Number(quote?.bestAsk);
+  const modeledAskLevels = Number.isFinite(askPrice) && askPrice > 0
+    ? [{ price: askPrice, size: maxShares }]
+    : [];
 
   for (let shares = baseShares; shares <= maxShares;
     shares += config.PRESSURE_ENTRY_SIZE_STEP_SHARES) {
     const execution = sweepBook(
-      quote?.askLevels,
+      modeledAskLevels,
       shares,
       'BUY',
       market,
@@ -260,31 +264,27 @@ function evaluateEntryCandidate(probability, quote, market) {
         expectedNetEdgePerShare: edge,
         requestedShares: shares,
         qualifies: true,
-        reason: `Probability clears ${Math.round(config.PRESSURE_MIN_ESTIMATED_PROBABILITY * 100)}%; full size fits below the $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} ask cap and the net-edge sizing rule.`,
+        reason: `Probability clears ${Math.round(config.PRESSURE_MIN_ESTIMATED_PROBABILITY * 100)}%; the ask price is below the $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} cap and the net-edge sizing rule.`,
       };
     }
   }
 
   if (best) return best;
 
-  const execution = baseSweep || sweepBook(
-    quote?.askLevels,
-    baseShares,
-    'BUY',
-    market,
-    { maximumPrice: config.PRESSURE_MAX_BUY_PRICE },
-  );
+  const execution = baseSweep || sweepBook(modeledAskLevels, baseShares, 'BUY', market, {
+    maximumPrice: config.PRESSURE_MAX_BUY_PRICE,
+  });
   const allInCostPerShare = execution.complete
     ? execution.totalCost / baseShares
     : null;
   const edge = allInCostPerShare == null
     ? null
     : Number(probability) - allInCostPerShare;
-  let reason = 'This side does not currently clear the probability, depth, and net-edge checks.';
+  let reason = 'This side does not currently clear the probability, price-cap, and net-edge checks.';
   if (!(Number(probability) > config.PRESSURE_MIN_ESTIMATED_PROBABILITY)) {
     reason = `The estimate must be above ${Math.round(config.PRESSURE_MIN_ESTIMATED_PROBABILITY * 100)}%.`;
   } else if (!execution.complete) {
-    reason = `Insufficient visible ask depth for ${baseShares} shares at or below $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)}.`;
+    reason = `No valid ask price at or below $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)}.`;
   } else if (edge + EPSILON < config.PRESSURE_MIN_NET_EDGE_PER_SHARE) {
     reason = `Net edge is below the required $${config.PRESSURE_MIN_NET_EDGE_PER_SHARE.toFixed(2)} per share after taker fees.`;
   }
@@ -365,6 +365,8 @@ class PressureForecastBot extends WickBot {
     this.forecast = this.emptyForecast('Waiting for Binance and Polymarket data.');
     this.lastEntryAt = null;
     this.lastEntryAtBySide = { UP: null, DOWN: null };
+    this.pendingEntries = { UP: null, DOWN: null };
+    this.quoteUpdateSequence = { UP: 0, DOWN: 0 };
     this.shadowCash = initialCapital;
     this.shadowPositions = [];
     this.shadowStatsOffset = null;
@@ -471,6 +473,8 @@ class PressureForecastBot extends WickBot {
     this.lastSampleAt = Number.isFinite(Number(state.lastSampleAt)) ? Number(state.lastSampleAt) : null;
     this.lastEntryAt = Number.isFinite(Number(state.lastEntryAt)) ? Number(state.lastEntryAt) : null;
     this.lastEntryAtBySide = state.lastEntryAtBySide || { UP: null, DOWN: null };
+    this.pendingEntries = { UP: null, DOWN: null };
+    this.quoteUpdateSequence = { UP: 0, DOWN: 0 };
     this.shadowCash = Number.isFinite(Number(state.shadowCash))
       ? Number(state.shadowCash)
       : this.capital;
@@ -649,6 +653,16 @@ class PressureForecastBot extends WickBot {
   }
 
   openStrategyWindow(start, now) {
+    for (const side of SIDES) {
+      const pending = this.pendingEntries?.[side];
+      if (pending) {
+        this.log('PAPER_PRESSURE_ENTRY_EXPIRED_WAITING_FOR_TICK', {
+          side,
+          shares: pending.shares,
+          windowStart: pending.windowStart,
+        });
+      }
+    }
     this.orderWindowStart = start;
     this.windowOrders = [];
     this.windowFiredEntries = 0;
@@ -661,6 +675,8 @@ class PressureForecastBot extends WickBot {
     this.lastSampleAt = null;
     this.lastEntryAt = null;
     this.lastEntryAtBySide = { UP: null, DOWN: null };
+    this.pendingEntries = { UP: null, DOWN: null };
+    this.quoteUpdateSequence = { UP: 0, DOWN: 0 };
     this.shadowLastEntryAt = null;
     this.shadowLastEntryAtBySide = { UP: null, DOWN: null };
     this.shadowSamplesRequired = config.PRESSURE_SAMPLE_COUNT;
@@ -731,28 +747,103 @@ class PressureForecastBot extends WickBot {
     this.clobFeed = this.clobFeedFactory({
       assetIds,
       now: this.now,
-      onQuote: (assetId, quote) => {
-        const side = SIDES.find((candidate) => String(this.market?.tokens?.[candidate]) === String(assetId));
-        if (!side) return;
-        if (!quote) {
-          this.liveQuotes[side] = {
-            ...this.liveQuotes[side],
-            status: this.clobFeed?.snapshot?.().status === 'CONNECTED' ? 'MISSING' : 'STALE',
-            stale: true,
-            error: 'Waiting for a fresh CLOB book snapshot.',
-          };
-          return;
-        }
-        const now = this.now();
-        const ageMs = Math.max(0, now - Number(quote.updatedAt));
-        this.liveQuotes[side] = {
-          ...quote,
-          status: ageMs <= config.PRESSURE_MAX_QUOTE_AGE_MS ? quote.status : 'STALE',
-          stale: ageMs > config.PRESSURE_MAX_QUOTE_AGE_MS,
-        };
-      },
+      onQuote: (assetId, quote) => this.handleClobQuote(assetId, quote),
     });
     this.clobFeed.start?.();
+  }
+
+  handleClobQuote(assetId, quote) {
+    const side = SIDES.find((candidate) =>
+      String(this.market?.tokens?.[candidate]) === String(assetId));
+    if (!side) return;
+    if (!quote) {
+      this.liveQuotes[side] = {
+        ...this.liveQuotes[side],
+        status: this.clobFeed?.snapshot?.().status === 'CONNECTED' ? 'MISSING' : 'STALE',
+        stale: true,
+        error: 'Waiting for a fresh CLOB book snapshot.',
+      };
+      return;
+    }
+
+    this.quoteUpdateSequence[side] = Number(this.quoteUpdateSequence[side] || 0) + 1;
+    const now = this.now();
+    const ageMs = Math.max(0, now - Number(quote.updatedAt));
+    this.liveQuotes[side] = {
+      ...quote,
+      status: ageMs <= config.PRESSURE_MAX_QUOTE_AGE_MS ? quote.status : 'STALE',
+      stale: ageMs > config.PRESSURE_MAX_QUOTE_AGE_MS,
+    };
+    this.confirmPendingEntryOnNextTick(side, this.liveQuotes[side]);
+  }
+
+  confirmPendingEntryOnNextTick(side, quote) {
+    const pending = this.pendingEntries?.[side];
+    if (!pending || Number(this.quoteUpdateSequence[side] || 0) <= pending.quoteUpdateSequence) {
+      return false;
+    }
+
+    this.pendingEntries[side] = null;
+    const now = this.now();
+    if (pending.windowStart !== Number(this.market?.start)) {
+      this.log('PAPER_PRESSURE_ENTRY_EXPIRED_WAITING_FOR_TICK', {
+        side,
+        shares: pending.shares,
+        windowStart: pending.windowStart,
+      });
+      return false;
+    }
+
+    const nextAsk = Number(quote?.bestAsk);
+    const quoteAgeMs = Number.isFinite(Number(quote?.updatedAt))
+      ? Math.max(0, now - Number(quote.updatedAt))
+      : Infinity;
+    if (!Number.isFinite(nextAsk) || nextAsk <= 0 || quote.stale
+      || quoteAgeMs > config.PRESSURE_MAX_QUOTE_AGE_MS) {
+      this.forecast.status = 'ENTRY_SKIPPED_NO_NEXT_TICK_ASK';
+      this.forecast.reason = `${side} entry was skipped because the next Polymarket tick had no fresh ask price.`;
+      this.log('PAPER_PRESSURE_ENTRY_SKIPPED_NEXT_TICK', {
+        side,
+        shares: pending.shares,
+        triggerPrice: pending.triggerPrice,
+        reason: 'NEXT_TICK_ASK_MISSING_OR_STALE',
+      });
+      return false;
+    }
+
+    if (nextAsk > config.PRESSURE_MAX_BUY_PRICE + EPSILON) {
+      this.forecast.status = 'ENTRY_SKIPPED_PRICE_CAP';
+      this.forecast.reason = `${side} entry was skipped because the next-tick ask exceeded the $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} cap.`;
+      this.log('PAPER_PRESSURE_ENTRY_SKIPPED_NEXT_TICK', {
+        side,
+        shares: pending.shares,
+        triggerPrice: pending.triggerPrice,
+        nextTickAsk: nextAsk,
+        reason: 'NEXT_TICK_PRICE_ABOVE_CAP',
+      });
+      return false;
+    }
+
+    const opened = this.executeBuy(side, pending.shares, now, {
+      kind: 'BUY_ENTRY',
+      candidate: pending.candidate,
+      signal: { combinedScore: pending.signalScore },
+      fillQuote: quote,
+      fillPrice: nextAsk,
+      triggerPrice: pending.triggerPrice,
+    });
+    if (!opened) {
+      this.forecast.status = 'ENTRY_REJECTED_INSUFFICIENT_CASH';
+      this.forecast.reason = `${side} next-tick entry was rejected because paper cash could not cover the full requested size and fee.`;
+      return false;
+    }
+
+    this.lastEntryAt = now;
+    this.lastEntryAtBySide[side] = now;
+    this.forecast.status = 'ENTRY_FILLED';
+    this.forecast.reason = `Filled all ${opened.shares} ${side} shares at the next Polymarket ask tick ($${opened.avgEntry.toFixed(3)}).`;
+    this.signal = { side, action: 'BUY_ENTRY', reason: this.forecast.reason };
+    return true;
   }
 
   async refreshLiveQuotes(now) {
@@ -911,9 +1002,22 @@ class PressureForecastBot extends WickBot {
     if (evaluationDue && this.shadowForecast.ready) {
       this.processShadowEntry(start, now, read, this.shadowForecast);
     }
-    if (!evaluationDue || !forecast.ready || !forecast.selectedSide) return false;
+    if (!evaluationDue || !forecast.ready || !forecast.selectedSide) {
+      const pendingSide = SIDES.find((side) => this.pendingEntries[side]);
+      if (pendingSide) {
+        const pending = this.pendingEntries[pendingSide];
+        this.forecast.status = 'ENTRY_PENDING_NEXT_TICK';
+        this.forecast.reason = `${pendingSide} is waiting for the next Polymarket ask tick to confirm all ${pending.shares} shares.`;
+      }
+      return false;
+    }
 
     const side = forecast.selectedSide;
+    if (this.pendingEntries[side]) {
+      this.forecast.status = 'ENTRY_PENDING_NEXT_TICK';
+      this.forecast.reason = `${side} is waiting for the next Polymarket ask tick to confirm all ${this.pendingEntries[side].shares} shares.`;
+      return false;
+    }
     const lastSideEntryAt = this.lastEntryAtBySide[side];
     const cooldownRemaining = config.PRESSURE_ENTRY_COOLDOWN_MS
       - (now - Number(lastSideEntryAt || 0));
@@ -925,20 +1029,21 @@ class PressureForecastBot extends WickBot {
 
     const candidate = forecast.candidateBySide[side];
     const requestedShares = Number(candidate?.requestedShares) || config.PRESSURE_ENTRY_SHARES;
-    const opened = this.executeBuy(side, requestedShares, now, {
-      kind: 'BUY_ENTRY',
+    const triggerQuote = read.quotes[side];
+    this.pendingEntries[side] = {
+      side,
+      shares: requestedShares,
+      windowStart: start,
+      triggerPrice: Number(triggerQuote.bestAsk),
+      quoteUpdateSequence: Number(this.quoteUpdateSequence[side] || 0),
+      triggeredAt: now,
+      signalScore: read.combinedScore,
       candidate,
-      signal: read,
-    });
-    if (opened) {
-      this.lastEntryAt = now;
-      this.lastEntryAtBySide[side] = now;
-      this.forecast.status = 'ENTRY_FILLED';
-      this.forecast.reason = `Bought another ${opened.shares}-share ${side} position. UP and DOWN trade independently; this side can re-enter after its 15-second cooldown while the other side remains available.`;
-      this.signal = { side, action: 'BUY_ENTRY', reason: this.forecast.reason };
-      return true;
-    }
-    return false;
+    };
+    this.forecast.status = 'ENTRY_PENDING_NEXT_TICK';
+    this.forecast.reason = `${side} signal qualifies; waiting for its next Polymarket ask tick to confirm all ${requestedShares} shares.`;
+    this.signal = { side, action: 'BUY_ENTRY_PENDING', reason: this.forecast.reason };
+    return true;
   }
 
   processShadowEntry(start, now, read, forecast) {
@@ -1123,11 +1228,24 @@ class PressureForecastBot extends WickBot {
     };
   }
 
-  executeBuy(side, shares, now, { kind, candidate, signal } = {}) {
-    const quote = this.freshQuote(side, now);
-    if (!quote) return null;
+  executeBuy(side, shares, now, {
+    kind,
+    candidate,
+    signal,
+    fillQuote,
+    fillPrice,
+    triggerPrice,
+  } = {}) {
+    const quote = fillQuote || this.freshQuote(side, now);
+    const executionPrice = Number(fillPrice ?? quote?.bestAsk);
+    const quoteAgeMs = Number.isFinite(Number(quote?.updatedAt))
+      ? Math.max(0, now - Number(quote.updatedAt))
+      : Infinity;
+    if (!quote || quote.stale || quoteAgeMs > config.PRESSURE_MAX_QUOTE_AGE_MS
+      || !Number.isFinite(executionPrice) || executionPrice <= 0) return null;
+    const modeledAskLevels = [{ price: executionPrice, size: shares }];
     const preview = sweepBook(
-      quote.askLevels,
+      modeledAskLevels,
       shares,
       'BUY',
       this.market,
@@ -1145,7 +1263,7 @@ class PressureForecastBot extends WickBot {
       return null;
     }
     const execution = sweepBook(
-      quote.askLevels,
+      modeledAskLevels,
       shares,
       'BUY',
       this.market,
@@ -1173,7 +1291,9 @@ class PressureForecastBot extends WickBot {
       entryLabel: `Pressure entry · ${side}`,
       entryType: 'PAPER_TAKER_PRESSURE',
       orderType: 'PAPER_TAKER_MARKET',
-      fillModel: 'VISIBLE_ASK_SWEEP_WITH_CONFIGURED_MAX_PRICE',
+      fillModel: 'NEXT_CLOB_ASK_TICK_FULL_REQUESTED_SIZE',
+      triggerPrice: Number.isFinite(Number(triggerPrice)) ? Number(triggerPrice) : null,
+      signalExpectedNetEdgePerShare: candidate?.expectedNetEdgePerShare ?? null,
       shares: execution.filledShares,
       initialShares: execution.filledShares,
       avgEntry: execution.averagePrice,
@@ -1192,7 +1312,9 @@ class PressureForecastBot extends WickBot {
       markStatus: 'LIVE',
       entryFills: execution.fills.map((fill) => ({ ...fill, at: now })),
       expectedProbability: candidate?.estimatedProbability ?? null,
-      expectedNetEdgePerShare: candidate?.expectedNetEdgePerShare ?? null,
+      expectedNetEdgePerShare: candidate?.estimatedProbability == null
+        ? candidate?.expectedNetEdgePerShare ?? null
+        : Number(candidate.estimatedProbability) - (execution.totalCost / execution.filledShares),
       signalScore: signal?.combinedScore ?? null,
     };
     this.cash -= execution.totalCost;
@@ -1205,6 +1327,10 @@ class PressureForecastBot extends WickBot {
     order.totalCost = execution.totalCost;
     order.fills = execution.fills;
     order.maxPrice = config.PRESSURE_MAX_BUY_PRICE;
+    order.triggerPrice = Number.isFinite(Number(triggerPrice)) ? Number(triggerPrice) : null;
+    order.fillConfirmation = 'NEXT_CLOB_ASK_TICK';
+    order.signalExpectedNetEdgePerShare = candidate?.expectedNetEdgePerShare ?? null;
+    order.expectedNetEdgePerShare = position.expectedNetEdgePerShare;
     this.log('PAPER_PRESSURE_ENTRY_FILLED', {
       orderId: order.id,
       positionId: position.id,
@@ -1493,7 +1619,7 @@ class PressureForecastBot extends WickBot {
         name: this.strategyName,
         execution: 'PAPER ONLY',
         markets: ['BTC 5m'],
-        orderType: 'VISIBLE_BOOK_TAKER_SWEEP',
+        orderType: 'NEXT_CLOB_ASK_TICK_FULL_SIZE',
         exit: 'No take-profit or stop-loss orders; positions stay open until official resolution.',
         liveTradingEnabled: false,
         realOrderModulesLoaded: false,
@@ -1507,7 +1633,7 @@ class PressureForecastBot extends WickBot {
         signal: 'Uncalibrated resolution estimate blends BTC price/volatility, current Polymarket odds, and ten one-second pressure samples.',
         signalState: this.forecast,
         orders: {
-          type: 'Visible-book taker-style paper sweeps',
+          type: 'Full requested-size paper fill at the next Polymarket ask tick',
           initialShares: config.PRESSURE_ENTRY_SHARES,
           maxShares: config.PRESSURE_MAX_ENTRY_SHARES,
           sizeStepShares: config.PRESSURE_ENTRY_SIZE_STEP_SHARES,
@@ -1552,7 +1678,7 @@ class PressureForecastBot extends WickBot {
           this.shadowInitialCapital,
           this.shadowStatsOffset,
         ),
-        assumptions: `Separate paper cash; same 100–${config.PRESSURE_MAX_ENTRY_SHARES} share edge-based sizing, probability and net-edge filters, independent 15-second cooldown per side, visible ask sweep, taker fees, and official-resolution-only settlement.`,
+        assumptions: `Separate paper cash; 100–${config.PRESSURE_MAX_ENTRY_SHARES} share edge-based sizing, probability and net-edge filters, independent 15-second cooldowns, visible ask-depth sweep for shadow entries, taker fees, and official-resolution-only settlement.`,
       },
       portfolioAnalytics: {
         equityCurve: settledEquityCurve,

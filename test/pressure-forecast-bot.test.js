@@ -147,14 +147,15 @@ test('taker sweep observes the buy ceiling, sell floor, and per-level fees', () 
 
 test('entry probability floor is strict and edge scales size by ten shares per cent', () => {
   const quote = {
-    bestAsk: 0.60,
-    askLevels: [{ price: 0.60, size: 500 }],
+    bestAsk: 0.50,
+    askLevels: [{ price: 0.50, size: 1 }],
   };
   const evaluate = PressureForecastBot._test.evaluateEntryCandidate;
-  const atFloor = evaluate(0.70, quote, { feesEnabled: false });
-  const oneCentOver = evaluate(0.71, quote, { feesEnabled: false });
+  const atFloor = evaluate(0.60, quote, { feesEnabled: false });
+  const oneCentOver = evaluate(0.61, quote, { feesEnabled: false });
   const capped = evaluate(0.99, quote, { feesEnabled: false });
 
+  assert.equal(config.PRESSURE_MIN_ESTIMATED_PROBABILITY, 0.60);
   assert.equal(atFloor.qualifies, false);
   assert.equal(atFloor.requestedShares, 100);
   assert.equal(oneCentOver.qualifies, true);
@@ -212,10 +213,10 @@ test('a signal-qualified side can enter above $0.50 while the other side is chea
   assert.equal(forecast.candidateBySide.UP.bestAsk, 0.65);
 });
 
-test('entry uses edge-based share sizing and records modeled fees and all-in cost', () => {
+test('entry ignores visible ask depth and fills full size at the next ask tick', () => {
   const bot = makeBot();
-  setQuote(bot, 'UP', 0.30, 0.32);
-  setQuote(bot, 'DOWN', 0.68, 0.70);
+  setQuote(bot, 'UP', 0.30, 0.32, 1);
+  setQuote(bot, 'DOWN', 0.68, 0.70, 1);
   addSamples(bot, 1);
   bot.market.feesEnabled = true;
   bot.market.feeSchedule = { rate: 0.07, exponent: 1 };
@@ -224,15 +225,62 @@ test('entry uses edge-based share sizing and records modeled fees and all-in cos
   const changed = bot.processPressureStrategy(WINDOW_START, NOW);
 
   assert.equal(changed, true);
+  assert.equal(bot.positions.filter((item) => item.status === 'OPEN').length, 0);
+  assert.equal(bot.pendingEntries.UP.shares, 200);
+  assert.equal(bot.pendingEntries.UP.triggerPrice, 0.32);
+
+  bot.handleClobQuote('up-token', {
+    ...bot.liveQuotes.UP,
+    bestBid: 0.32,
+    bestAsk: 0.33,
+    askLevels: [{ price: 0.33, size: 1 }],
+    updatedAt: NOW,
+  });
+
   const position = bot.positions.find((item) => item.status === 'OPEN');
   assert.equal(position.side, 'UP');
   assert.equal(position.shares, 200);
-  assert.equal(position.fillModel, 'VISIBLE_ASK_SWEEP_WITH_CONFIGURED_MAX_PRICE');
+  assert.equal(position.avgEntry, 0.33);
+  assert.equal(position.triggerPrice, 0.32);
+  assert.equal(position.fillModel, 'NEXT_CLOB_ASK_TICK_FULL_REQUESTED_SIZE');
   assert.ok(position.fees > 0);
   assert.equal(bot.orders[0].orderType, 'PAPER_TAKER_MARKET');
   assert.equal(bot.orders[0].maxPrice, 0.95);
+  assert.equal(bot.orders[0].fillConfirmation, 'NEXT_CLOB_ASK_TICK');
+  assert.equal(bot.orders[0].matchedShares, 200);
   assert.ok(bot.cash < 10_000);
   assert.ok(read.ready);
+});
+
+test('the next ask tick may be below the trigger and still fills full size', () => {
+  const bot = makeBot();
+  setQuote(bot, 'UP', 0.60, 0.62, 1);
+  bot.pendingEntries.UP = {
+    side: 'UP',
+    shares: 100,
+    windowStart: WINDOW_START,
+    triggerPrice: 0.62,
+    quoteUpdateSequence: 0,
+    candidate: {
+      estimatedProbability: 0.80,
+      expectedNetEdgePerShare: 0.10,
+    },
+    signalScore: 0.5,
+  };
+
+  bot.handleClobQuote('up-token', {
+    ...bot.liveQuotes.UP,
+    bestBid: 0.58,
+    bestAsk: 0.59,
+    askLevels: [{ price: 0.59, size: 1 }],
+    updatedAt: NOW,
+  });
+
+  const position = bot.positions.find((item) => item.status === 'OPEN');
+  assert.equal(position.shares, 100);
+  assert.equal(position.avgEntry, 0.59);
+  assert.equal(position.triggerPrice, 0.62);
+  assert.equal(bot.pendingEntries.UP, null);
 });
 
 test('opposite qualifying signal adds a position without selling the existing one', () => {
@@ -264,6 +312,13 @@ test('opposite qualifying signal adds a position without selling the existing on
   const added = bot.processPressureStrategy(WINDOW_START, NOW);
 
   assert.equal(added, true);
+  assert.equal(bot.pendingEntries.DOWN.shares > 0, true);
+  bot.handleClobQuote('down-token', {
+    ...bot.liveQuotes.DOWN,
+    bestBid: 0.34,
+    bestAsk: 0.35,
+    updatedAt: NOW,
+  });
   assert.equal(open.status, 'OPEN');
   assert.equal(bot.lastEntryAtBySide.UP, NOW - 1000);
   assert.equal(bot.lastEntryAtBySide.DOWN, NOW);
@@ -308,6 +363,14 @@ test('same-side entries are blocked until the 15-second cooldown elapses', () =>
 
   const afterCooldown = bot.processPressureStrategy(WINDOW_START, NOW + 1000);
   assert.equal(afterCooldown, true);
+  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 1);
+  bot.now = () => NOW + 1000;
+  bot.handleClobQuote('up-token', {
+    ...bot.liveQuotes.UP,
+    bestBid: 0.31,
+    bestAsk: 0.33,
+    updatedAt: NOW + 1000,
+  });
   assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 2);
   assert.deepEqual(bot.positions.filter((position) => position.status === 'OPEN')
     .map((position) => position.side), ['UP', 'UP']);
@@ -329,8 +392,16 @@ test('shadow entries use separate fee-aware paper cash and never add main orders
   assert.equal(changed, true);
   assert.equal(bot.forecast.requiredSamples, 10);
   assert.equal(bot.shadowForecast.requiredSamples, 10);
-  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 1);
+  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 0);
   assert.equal(bot.shadowPositions.filter((position) => position.status === 'OPEN').length, 1);
+  assert.equal(bot.orders.length, 0);
+  bot.handleClobQuote('up-token', {
+    ...bot.liveQuotes.UP,
+    bestBid: 0.30,
+    bestAsk: 0.31,
+    updatedAt: NOW,
+  });
+  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 1);
   assert.equal(bot.orders.length, 1);
   assert.equal(bot.orders[0].kind, 'BUY_ENTRY');
   assert.ok(bot.positions[0].fees > 0);
@@ -493,11 +564,11 @@ test('paper snapshot identifies only the uncalibrated BTC 5-minute demo strategy
   assert.equal(state.strategy.execution, 'PAPER ONLY');
   assert.equal(state.strategy.liveTradingEnabled, false);
   assert.equal(state.strategy.realOrderModulesLoaded, false);
-  assert.equal(state.strategy.orders.type, 'Visible-book taker-style paper sweeps');
+  assert.equal(state.strategy.orders.type, 'Full requested-size paper fill at the next Polymarket ask tick');
   assert.equal(state.strategy.orders.entryCooldownMs, 15_000);
   assert.match(state.strategy.repeatEntryRule, /separate 15-second entry cooldowns/i);
   assert.match(state.strategy.repeatEntryRule, /increasing by 10 shares per \$0\.01 edge/i);
-  assert.equal(state.strategy.minEstimatedProbability, 0.70);
+  assert.equal(state.strategy.minEstimatedProbability, 0.60);
   assert.equal(state.strategy.maxBuyPrice, 0.95);
   assert.equal(state.strategy.minNetEdgePerShare, 0.10);
   assert.equal(state.strategy.maxEntryShares, 200);
