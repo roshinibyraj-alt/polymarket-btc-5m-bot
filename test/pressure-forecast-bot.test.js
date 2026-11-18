@@ -438,6 +438,101 @@ test('fresh $0.99 best bid pays $1 per share with no stop-loss', async () => {
   assert.equal(losingPosition.status, 'OPEN');
 });
 
+test('a fresh CLOB update triggers take-profit immediately without waiting for a polling tick', () => {
+  let onQuote;
+  const bot = makeBot({
+    clobFeedFactory: (options) => {
+      onQuote = options.onQuote;
+      return {
+        start() {},
+        stop() {},
+        getQuote() { return null; },
+        snapshot() { return { status: 'CONNECTED', connected: true, quoteAgesMs: {} }; },
+      };
+    },
+  });
+  const position = {
+    id: 'websocket-tp-up',
+    side: 'UP',
+    initialShares: 100,
+    shares: 100,
+    totalCost: 40,
+    windowStart: WINDOW_START,
+    windowMs: config.WINDOW_MS_5M,
+    status: 'OPEN',
+  };
+  bot.positions.push(position);
+  bot.cash = 9960;
+  bot.ensureClobFeed();
+
+  onQuote('up-token', {
+    status: 'LIVE',
+    bestBid: 0.99,
+    bestAsk: 1,
+    bidSize: 1000,
+    askSize: 1000,
+    mid: 0.995,
+    bidLevels: [{ price: 0.99, size: 1000 }],
+    askLevels: [{ price: 1, size: 1000 }],
+    updatedAt: NOW,
+  });
+
+  assert.equal(position.status, 'SETTLED_EXIT');
+  assert.equal(position.exitReason, 'TAKE_PROFIT_BID_AT_0.99');
+  assert.equal(position.closedAt, NOW);
+  assert.equal(bot.orders[0].kind, 'SELL_TAKE_PROFIT');
+  assert.equal(bot.cash, 10_060);
+});
+
+test('the final fresh in-window bid triggers TP before rollover moves a position to resolution', async () => {
+  const bot = makeBot();
+  const windowEnd = WINDOW_START + config.WINDOW_MS_5M;
+  const finalQuoteAt = windowEnd - 403;
+  const position = {
+    id: 'last-tick-tp-up',
+    side: 'UP',
+    initialShares: 100,
+    shares: 100,
+    totalCost: 40,
+    windowStart: WINDOW_START,
+    windowMs: config.WINDOW_MS_5M,
+    status: 'OPEN',
+  };
+  bot.positions.push(position);
+  bot.cash = 9960;
+  setQuote(bot, 'UP', 0.999, 1, 1000, finalQuoteAt);
+
+  await bot.completeWindow(WINDOW_START, null, 'WINDOW_ROLLOVER', windowEnd + 100);
+
+  assert.equal(position.status, 'SETTLED_EXIT');
+  assert.equal(position.exitReason, 'TAKE_PROFIT_BID_AT_0.99');
+  assert.equal(position.closedAt, finalQuoteAt);
+  assert.equal(bot.cash, 10_060);
+  assert.equal(bot.events.find((event) => event.event === 'PAPER_PRESSURE_WINDOW_ENDED')
+    .pendingResolutionCount, 0);
+});
+
+test('a bid timestamped at the window end does not count as an in-window take-profit', async () => {
+  const bot = makeBot();
+  const windowEnd = WINDOW_START + config.WINDOW_MS_5M;
+  const position = {
+    id: 'after-window-tp-up',
+    side: 'UP',
+    shares: 100,
+    totalCost: 40,
+    windowStart: WINDOW_START,
+    windowMs: config.WINDOW_MS_5M,
+    status: 'OPEN',
+  };
+  bot.positions.push(position);
+  setQuote(bot, 'UP', 0.999, 1, 1000, windowEnd);
+
+  await bot.completeWindow(WINDOW_START, null, 'WINDOW_ROLLOVER', windowEnd + 100);
+
+  assert.equal(position.status, 'PENDING_CLOB_RESULT');
+  assert.equal(bot.orders.some((order) => order.kind === 'SELL_TAKE_PROFIT'), false);
+});
+
 test('paper snapshot identifies only the uncalibrated BTC 5-minute demo strategy', () => {
   const bot = makeBot();
   const state = bot.snapshot();

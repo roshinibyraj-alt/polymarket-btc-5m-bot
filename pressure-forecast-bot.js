@@ -657,6 +657,7 @@ class PressureForecastBot extends WickBot {
           status: ageMs <= config.PRESSURE_MAX_QUOTE_AGE_MS ? quote.status : 'STALE',
           stale: ageMs > config.PRESSURE_MAX_QUOTE_AGE_MS,
         };
+        this.applyTakeProfitExits(now);
       },
     });
     this.clobFeed.start?.();
@@ -702,20 +703,26 @@ class PressureForecastBot extends WickBot {
     if (!this.market || now >= Number(this.market.end)) return;
     for (const position of this.positions) {
       if (position.windowStart !== this.market.start || position.status !== 'OPEN') continue;
-      if (!this.isTakeProfitQuote(this.liveQuotes[position.side], now)) continue;
-      this.finalizeTakeProfit(position, now);
+      const quote = this.liveQuotes[position.side];
+      if (!this.isTakeProfitQuote(quote, now, position)) continue;
+      this.finalizeTakeProfit(position, Number(quote.updatedAt));
     }
   }
 
-  isTakeProfitQuote(quote, now) {
+  isTakeProfitQuote(quote, now, position = null) {
     const updatedAt = Number(quote?.updatedAt);
     const ageMs = Number.isFinite(updatedAt) ? Math.max(0, now - updatedAt) : Infinity;
     const bestBid = Number(quote?.bestBid);
+    const windowStart = Number(position?.windowStart);
+    const windowEnd = Number.isFinite(windowStart)
+      ? windowStart + (Number(position.windowMs) || this.windowMs)
+      : null;
     return quote?.status === 'LIVE'
       && !quote.stale
       && Number.isFinite(updatedAt)
       && updatedAt <= now
       && ageMs <= config.PRESSURE_MAX_QUOTE_AGE_MS
+      && (windowEnd == null || (updatedAt >= windowStart && updatedAt < windowEnd))
       && Number.isFinite(bestBid)
       && bestBid >= config.PRESSURE_TAKE_PROFIT_TRIGGER;
   }
@@ -1126,7 +1133,19 @@ class PressureForecastBot extends WickBot {
     this.cancelWindowOrders(windowStart, now, triggerReason);
     const positions = this.positions.filter((position) =>
       position.windowStart === windowStart && position.status === 'OPEN');
+    const windowEnd = windowStart + this.windowMs;
     for (const position of positions) {
+      const quote = this.market?.start === windowStart
+        ? this.liveQuotes[position.side]
+        : null;
+      if (Number(quote?.updatedAt) >= windowStart
+        && Number(quote?.updatedAt) < windowEnd
+        && this.isTakeProfitQuote(quote, now, position)) {
+        this.finalizeTakeProfit(position, Number(quote.updatedAt));
+      }
+    }
+    const pendingPositions = positions.filter((position) => position.status === 'OPEN');
+    for (const position of pendingPositions) {
       position.status = 'PENDING_CLOB_RESULT';
       position.markStatus = 'PENDING_CLOB_RESULT';
       position.pendingResolutionAt = now;
@@ -1135,7 +1154,7 @@ class PressureForecastBot extends WickBot {
     }
     this.log('PAPER_PRESSURE_WINDOW_ENDED', {
       windowStart,
-      pendingResolutionCount: positions.length,
+      pendingResolutionCount: pendingPositions.length,
       triggerReason,
     });
   }
