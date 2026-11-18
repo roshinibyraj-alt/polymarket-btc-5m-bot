@@ -362,7 +362,7 @@
     return `<div class="candidate ${cls}">
       <div class="candidate-head"><span class="candidate-title ${up?'up':'down'}">${side} PRESSURE ENTRY</span><span class="pill ${ready?'live':'wait'}">${ready?'READY':'WAIT'}</span></div>
       <div class="row"><span>Selected by projected close</span><strong>${item.selectedByPressure?'YES':'NO'}</strong></div>
-      <div class="row"><span>Current CLOB ask / cap</span><strong>${price(item.bestAsk)} / ${price(item.priceCap)}</strong></div>
+      <div class="row"><span>Current ask / signal price limit</span><strong>${price(item.bestAsk)} / &lt; ${price(item.maxSignalSidePrice)}</strong></div>
       <div class="row"><span>Qualified size</span><strong>${ready ? Number(item.requestedShares||100) + ' shares' : '—'}</strong></div>
       <div class="row"><span>Candidate note</span><strong>${esc(item.reason||'—')}</strong></div>
     </div>`;

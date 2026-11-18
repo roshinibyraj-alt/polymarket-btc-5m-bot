@@ -239,6 +239,7 @@ test('Binance pressure can select a side without CLOB odds or probability inputs
   assert.equal(forecast.candidateBySide.UP.qualifies, true);
   assert.equal(forecast.candidateBySide.DOWN.qualifies, false);
   assert.equal(forecast.candidateBySide.UP.requestedShares, config.PRESSURE_ENTRY_SHARES);
+  assert.equal(forecast.candidateBySide.UP.maxSignalSidePrice, 0.40);
   assert.equal('estimateUp' in forecast, false);
   assert.equal('marketImpliedUp' in forecast, false);
   assert.equal('expectedNetEdgePerShare' in forecast, false);
@@ -272,13 +273,13 @@ test('main and shadow entries wait until 30 seconds after each window starts', (
 
 test('Polymarket book imbalance and odds cannot change the Binance-selected side', () => {
   const bot = makeBot();
-  setQuote(bot, 'UP', 0.64, 0.65, 1000);
-  setQuote(bot, 'DOWN', 0.34, 0.35, 1);
+  setQuote(bot, 'UP', 0.34, 0.35, 1000);
+  setQuote(bot, 'DOWN', 0.64, 0.65, 1);
   addSamples(bot, 1);
   const first = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
 
-  setQuote(bot, 'UP', 0.34, 0.35, 1);
-  setQuote(bot, 'DOWN', 0.64, 0.65, 1000);
+  setQuote(bot, 'UP', 0.35, 0.36, 1);
+  setQuote(bot, 'DOWN', 0.34, 0.35, 1000);
   const second = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
 
   assert.equal(first.selectedSide, 'UP');
@@ -288,18 +289,29 @@ test('Polymarket book imbalance and odds cannot change the Binance-selected side
   assert.equal(second.candidateBySide.UP.requestedShares, 100);
 });
 
-test('a Binance-selected side can enter above $0.50 while the other side is cheaper', () => {
+test('the selected side only qualifies when its ask is strictly below $0.40', () => {
   const bot = makeBot();
-  setQuote(bot, 'UP', 0.64, 0.65);
-  setQuote(bot, 'DOWN', 0.34, 0.35);
+  setQuote(bot, 'UP', 0.38, 0.39);
+  setQuote(bot, 'DOWN', 0.60, 0.61);
   addSamples(bot, 1);
-  const forecast = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
+  const belowLimit = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
 
-  assert.equal(forecast.selectedSide, 'UP');
-  assert.equal(forecast.candidateBySide.UP.qualifies, true);
-  assert.equal(forecast.selectedSide, 'UP');
-  assert.equal(forecast.candidateBySide.UP.bestAsk, 0.65);
-  assert.equal(forecast.candidateBySide.UP.requestedShares, 100);
+  assert.equal(belowLimit.selectedSide, 'UP');
+  assert.equal(belowLimit.candidateBySide.UP.qualifies, true);
+  assert.equal(belowLimit.candidateBySide.UP.bestAsk, 0.39);
+  assert.equal(belowLimit.candidateBySide.UP.maxSignalSidePrice, 0.40);
+
+  setQuote(bot, 'UP', 0.39, 0.40);
+  const atLimit = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
+  assert.equal(atLimit.selectedSide, 'UP');
+  assert.equal(atLimit.candidateBySide.UP.qualifies, false);
+  assert.match(atLimit.candidateBySide.UP.reason, /must be below \$0\.40/i);
+
+  setQuote(bot, 'UP', 0.42, 0.43);
+  const aboveLimit = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
+  assert.equal(aboveLimit.selectedSide, 'UP');
+  assert.equal(aboveLimit.candidateBySide.UP.qualifies, false);
+  assert.equal(aboveLimit.status, 'SIGNAL_PRICE_FILTER');
 });
 
 test('a missing CLOB book does not block a Binance pressure signal', () => {
@@ -322,7 +334,7 @@ test('existing execution price cap remains separate from pressure direction', ()
   const forecast = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
   assert.equal(forecast.selectedSide, 'UP');
   assert.equal(forecast.candidateBySide.UP.qualifies, false);
-  assert.equal(forecast.status, 'SIGNAL_PRICE_CAP');
+  assert.equal(forecast.status, 'SIGNAL_PRICE_FILTER');
 });
 
 test('entry ignores visible ask depth and fills full size at the next ask tick', () => {
@@ -364,14 +376,14 @@ test('entry ignores visible ask depth and fills full size at the next ask tick',
   assert.ok(read.ready);
 });
 
-test('the next ask tick may be below the trigger and still fills full size', () => {
+test('the next ask tick may be below the trigger and still fills when under $0.40', () => {
   const bot = makeBot();
-  setQuote(bot, 'UP', 0.60, 0.62, 1);
+  setQuote(bot, 'UP', 0.30, 0.32, 1);
   bot.pendingEntries.UP = {
     side: 'UP',
     shares: 100,
     windowStart: WINDOW_START,
-    triggerPrice: 0.62,
+    triggerPrice: 0.32,
     quoteUpdateSequence: 0,
     candidate: {},
     signalScore: 0.5,
@@ -379,17 +391,40 @@ test('the next ask tick may be below the trigger and still fills full size', () 
 
   bot.handleClobQuote('up-token', {
     ...bot.liveQuotes.UP,
-    bestBid: 0.58,
-    bestAsk: 0.59,
-    askLevels: [{ price: 0.59, size: 1 }],
+    bestBid: 0.28,
+    bestAsk: 0.29,
+    askLevels: [{ price: 0.29, size: 1 }],
     updatedAt: NOW,
   });
 
   const position = bot.positions.find((item) => item.status === 'OPEN');
   assert.equal(position.shares, 100);
-  assert.equal(position.avgEntry, 0.59);
-  assert.equal(position.triggerPrice, 0.62);
+  assert.equal(position.avgEntry, 0.29);
+  assert.equal(position.triggerPrice, 0.32);
   assert.equal(bot.pendingEntries.UP, null);
+});
+
+test('a next-tick ask at or above $0.40 cancels a pending entry', () => {
+  const bot = makeBot();
+  setQuote(bot, 'UP', 0.37, 0.39, 1000);
+  setQuote(bot, 'DOWN', 0.60, 0.62, 1000);
+  addSamples(bot, 1);
+
+  assert.equal(bot.processPressureStrategy(WINDOW_START, NOW), true);
+  assert.equal(bot.pendingEntries.UP.triggerPrice, 0.39);
+
+  bot.handleClobQuote('up-token', {
+    ...bot.liveQuotes.UP,
+    bestBid: 0.39,
+    bestAsk: 0.40,
+    askLevels: [{ price: 0.40, size: 1000 }],
+    updatedAt: NOW,
+  });
+
+  assert.equal(bot.pendingEntries.UP, null);
+  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 0);
+  assert.equal(bot.forecast.status, 'ENTRY_SKIPPED_SIGNAL_PRICE_FILTER');
+  assert.match(bot.forecast.reason, /not below \$0\.40/i);
 });
 
 test('opposite qualifying signal adds a position without selling the existing one', () => {
@@ -772,8 +807,11 @@ test('paper snapshot identifies the pressure-projection BTC 5-minute demo strate
   assert.equal(state.strategy.realOrderModulesLoaded, false);
   assert.equal(state.strategy.orders.type, 'Full requested-size paper fill at the next Polymarket ask tick');
   assert.equal(state.strategy.orders.entryCooldownMs, 15_000);
+  assert.equal(state.strategy.maxSignalSidePrice, 0.40);
+  assert.equal(state.strategy.orders.maxSignalSidePrice, 0.40);
   assert.equal(state.strategy.entryDelayMs, 30_000);
   assert.match(state.strategy.repeatEntryRule, /ignore entry signals for the first 30 seconds/i);
+  assert.match(state.strategy.repeatEntryRule, /signalled side's ask is below \$0\.40 at signal and next-tick confirmation/i);
   assert.match(state.strategy.repeatEntryRule, /each side has its own 15-second entry cooldown/i);
   assert.match(state.strategy.repeatEntryRule, /projected close above the previous candle close selects UP/i);
   assert.equal('minEstimatedProbability' in state.strategy, false);

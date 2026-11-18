@@ -274,24 +274,30 @@ function evaluatePressureCandidate(side, signalSide, quote) {
   const bestAsk = Number(quote?.bestAsk);
   const isSelected = side === signalSide;
   const hasUsableAsk = Number.isFinite(bestAsk) && bestAsk > 0 && bestAsk < 1;
+  const belowSignalPriceLimit = hasUsableAsk
+    && bestAsk < config.PRESSURE_MAX_SIGNAL_SIDE_PRICE;
   const underPriceCap = hasUsableAsk
     && bestAsk <= config.PRESSURE_MAX_BUY_PRICE + EPSILON;
   let reason = `${side} is not the side selected by the projected close.`;
 
   if (isSelected && !hasUsableAsk) {
     reason = `The projected close selected ${side}; waiting for a fresh CLOB ask to execute.`;
+  } else if (isSelected && !belowSignalPriceLimit) {
+    reason = `The projected close selected ${side}, but its ask must be below $${config.PRESSURE_MAX_SIGNAL_SIDE_PRICE.toFixed(2)}.`;
   } else if (isSelected && !underPriceCap) {
     reason = `The projected close selected ${side}, but its ask is above the existing $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} execution cap.`;
   } else if (isSelected) {
-    reason = `The projected close selected ${side}; the current ask is within the execution cap.`;
+    reason = `The projected close selected ${side}; its current ask is below $${config.PRESSURE_MAX_SIGNAL_SIDE_PRICE.toFixed(2)}.`;
   }
 
   return {
     selectedByPressure: isSelected,
     bestAsk: hasUsableAsk ? bestAsk : null,
+    maxSignalSidePrice: config.PRESSURE_MAX_SIGNAL_SIDE_PRICE,
+    belowSignalPriceLimit,
     priceCap: config.PRESSURE_MAX_BUY_PRICE,
     requestedShares: config.PRESSURE_ENTRY_SHARES,
-    qualifies: isSelected && underPriceCap,
+    qualifies: isSelected && belowSignalPriceLimit && underPriceCap,
     reason,
   };
 }
@@ -653,6 +659,7 @@ class PressureForecastBot extends WickBot {
     return {
       selectedByPressure: false,
       bestAsk: null,
+      maxSignalSidePrice: config.PRESSURE_MAX_SIGNAL_SIDE_PRICE,
       priceCap: config.PRESSURE_MAX_BUY_PRICE,
       requestedShares: config.PRESSURE_ENTRY_SHARES,
       qualifies: false,
@@ -821,6 +828,19 @@ class PressureForecastBot extends WickBot {
         shares: pending.shares,
         triggerPrice: pending.triggerPrice,
         reason: 'NEXT_TICK_ASK_MISSING_OR_STALE',
+      });
+      return false;
+    }
+
+    if (nextAsk >= config.PRESSURE_MAX_SIGNAL_SIDE_PRICE) {
+      this.forecast.status = 'ENTRY_SKIPPED_SIGNAL_PRICE_FILTER';
+      this.forecast.reason = `${side} entry was skipped because the next-tick ask was not below $${config.PRESSURE_MAX_SIGNAL_SIDE_PRICE.toFixed(2)}.`;
+      this.log('PAPER_PRESSURE_ENTRY_SKIPPED_NEXT_TICK', {
+        side,
+        shares: pending.shares,
+        triggerPrice: pending.triggerPrice,
+        nextTickAsk: nextAsk,
+        reason: 'NEXT_TICK_ASK_NOT_BELOW_SIGNAL_SIDE_PRICE_LIMIT',
       });
       return false;
     }
@@ -1273,7 +1293,7 @@ class PressureForecastBot extends WickBot {
         ? 'QUALIFIED'
         : selectedCandidate.bestAsk == null
           ? 'SIGNAL_WAITING_FOR_EXECUTION_QUOTE'
-          : 'SIGNAL_PRICE_CAP';
+          : 'SIGNAL_PRICE_FILTER';
     const reason = !selectedSide
       ? 'The projected BTC close is equal to the previous candle close; no side is selected.'
       : `${selectedSide} selected: projected BTC close $${projection.projectedClose.toFixed(2)} is ${selectedSide === 'UP' ? 'above' : 'below'} the previous close $${previousCandleClose.toFixed(2)} with ${Math.floor(secondsRemaining)} seconds left. ${selectedCandidate.reason}`;
@@ -1742,17 +1762,19 @@ class PressureForecastBot extends WickBot {
         realOrderModulesLoaded: false,
         entryShares: config.PRESSURE_ENTRY_SHARES,
         maxBuyPrice: config.PRESSURE_MAX_BUY_PRICE,
+        maxSignalSidePrice: config.PRESSURE_MAX_SIGNAL_SIDE_PRICE,
         signal: 'Projects the BTC 5-minute close relative to the previous candle close using ten one-second Binance pressure scores, recent volatility, and time remaining. Polymarket quotes are used only for execution.',
         signalState: this.forecast,
         orders: {
           type: 'Full requested-size paper fill at the next Polymarket ask tick',
           initialShares: config.PRESSURE_ENTRY_SHARES,
           maxBuyPrice: config.PRESSURE_MAX_BUY_PRICE,
+          maxSignalSidePrice: config.PRESSURE_MAX_SIGNAL_SIDE_PRICE,
           entryCooldownMs: config.PRESSURE_ENTRY_COOLDOWN_MS,
           maxEntriesPerWindow: 'No fixed cap; limited by qualifying signals and available cash.',
         },
         entryDelayMs: config.PRESSURE_ENTRY_DELAY_MS,
-        repeatEntryRule: `Ignore entry signals for the first ${config.PRESSURE_ENTRY_DELAY_MS / 1000} seconds of each window, then use the pressure-weighted close projection. Projected close above the previous candle close selects UP; below selects DOWN. Each side has its own 15-second entry cooldown; entries are ${config.PRESSURE_ENTRY_SHARES} shares.`,
+        repeatEntryRule: `Ignore entry signals for the first ${config.PRESSURE_ENTRY_DELAY_MS / 1000} seconds of each window, then use the pressure-weighted close projection. Projected close above the previous candle close selects UP; below selects DOWN. Buy only if the signalled side's ask is below $${config.PRESSURE_MAX_SIGNAL_SIDE_PRICE.toFixed(2)} at signal and next-tick confirmation. Each side has its own 15-second entry cooldown; entries are ${config.PRESSURE_ENTRY_SHARES} shares.`,
         priceFeed: this.priceFeed?.snapshot?.() || null,
         exits: {
           mode: 'ANY_CLOB_QUOTE_TP_BID_SL_THEN_OFFICIAL_RESOLUTION',
@@ -1790,7 +1812,7 @@ class PressureForecastBot extends WickBot {
           this.shadowInitialCapital,
           this.shadowStatsOffset,
         ),
-        assumptions: `Separate paper cash; entries start after ${config.PRESSURE_ENTRY_DELAY_MS / 1000} seconds, with a Binance-pressure projection, fixed ${config.PRESSURE_ENTRY_SHARES}-share entries, independent 15-second cooldowns, the existing $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} cap, visible ask-depth sweep and modeled taker fees. Best-bid $0.99/$0.01 exits are accounted as $1/$0 per share; otherwise positions settle at official resolution.`,
+        assumptions: `Separate paper cash; entries start after ${config.PRESSURE_ENTRY_DELAY_MS / 1000} seconds, with a Binance-pressure projection, fixed ${config.PRESSURE_ENTRY_SHARES}-share entries, independent 15-second cooldowns, signalled-side ask below $${config.PRESSURE_MAX_SIGNAL_SIDE_PRICE.toFixed(2)} at signal and next-tick confirmation, the $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} hard cap, visible ask-depth sweep and modeled taker fees. Best-bid $0.99/$0.01 exits are accounted as $1/$0 per share; otherwise positions settle at official resolution.`,
       },
       portfolioAnalytics: {
         equityCurve: settledEquityCurve,
