@@ -61,6 +61,7 @@
     .outcome-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;margin-bottom:12px}
     .outcome-kicker{font:700 10px var(--mono);letter-spacing:.13em;text-transform:uppercase;color:#bfe3db}
     .outcome-head h2{font:700 17px var(--display);margin:3px 0 0;letter-spacing:-.025em}
+    .outcome-scope{display:block;margin-top:4px;color:#d4e7e7;font-size:10px}
     .outcome-window{font:600 10px var(--mono);text-align:right;color:#d5e7e8}
     .scenario-grid{display:grid;grid-template-columns:1fr 1fr;gap:11px}
     .scenario-card{min-width:0;padding:14px 15px;border:1px solid rgba(255,255,255,.28);border-radius:13px;background:rgba(255,255,255,.96);color:var(--ink)}
@@ -247,7 +248,7 @@
 
   <section class="outcome-calculator" id="outcomeCalculatorPanel" aria-label="Current window outcome calculator">
     <div class="outcome-head">
-      <div><div class="outcome-kicker">Live outcome calculator</div><h2>Potential net result if this window resolves</h2></div>
+      <div><div class="outcome-kicker">Live outcome calculator · current window only</div><h2>Potential net result if this window resolves</h2><small class="outcome-scope">Earlier windows settle separately and are not included here.</small></div>
       <div class="outcome-window" id="outcomeWindowLabel">Waiting for current window</div>
     </div>
     <div class="scenario-grid">
@@ -264,7 +265,7 @@
         <span class="scenario-detail" id="downScenarioDetail">Awaiting live positions</span>
       </article>
     </div>
-    <div class="outcome-foot" id="outcomeSummary">Closed TP/SL proceeds are included; the calculator resets with each new window.</div>
+    <div class="outcome-foot" id="outcomeSummary">Net = winning-side payout + proceeds from completed TP/SL exits − all entry costs, including fees.</div>
   </section>
 
   <section class="hero" aria-label="Strategy status">
@@ -378,6 +379,10 @@
     const value = state?.outcomeCalculator || {};
     const up = value.upWins || {};
     const down = value.downWins || {};
+    const upShares = Number(value.openShares?.UP || 0);
+    const downShares = Number(value.openShares?.DOWN || 0);
+    const exitProceeds = Number(value.knownExitProceeds || 0);
+    const entryCost = Number(value.totalEntryCost || 0);
     const pnlClass = result => Number(result) > 0 ? 'positive'
       : Number(result) < 0 ? 'negative' : 'neutral';
     document.querySelector('#upScenarioPnl').className = `scenario-pnl ${pnlClass(up.netPnl)}`;
@@ -385,15 +390,15 @@
     document.querySelector('#upScenarioPnl').textContent = money(up.netPnl);
     document.querySelector('#downScenarioPnl').textContent = money(down.netPnl);
     document.querySelector('#upScenarioDetail').textContent =
-      `${money(up.payout)} payout · ${Number(value.openShares?.UP || 0).toLocaleString()} open UP shares`;
+      `UP ${upShares.toLocaleString()} × $1 · DOWN ${downShares.toLocaleString()} × $0 · exits +${money(exitProceeds)} · costs −${money(entryCost)}`;
     document.querySelector('#downScenarioDetail').textContent =
-      `${money(down.payout)} payout · ${Number(value.openShares?.DOWN || 0).toLocaleString()} open DOWN shares`;
+      `DOWN ${downShares.toLocaleString()} × $1 · UP ${upShares.toLocaleString()} × $0 · exits +${money(exitProceeds)} · costs −${money(entryCost)}`;
     document.querySelector('#outcomeWindowLabel').textContent = state.windowEnd
       ? `Ends ${time(state.windowEnd)}`
       : 'Waiting for current window';
     document.querySelector('#outcomeSummary').textContent = Number(value.positionCount || 0) === 0
-      ? 'No filled entries yet this window. Closed TP/SL proceeds are included; totals reset at the next window.'
-      : `${money(value.totalEntryCost)} total entry cost including fees · ${money(value.knownExitProceeds)} TP/SL proceeds credited · ${Number(value.positionCount || 0)} filled positions.`;
+      ? 'No filled entries in this window yet. Net = winning-side payout + completed TP/SL proceeds − entry costs including fees.'
+      : `${money(entryCost)} total entry cost (including fees) · ${money(exitProceeds)} completed TP/SL proceeds · ${Number(value.positionCount || 0)} filled entries.`;
   }
   function renderMarket(state) {
     const q = state?.quotes || {};

@@ -35,6 +35,8 @@ test('dashboard serves global analytics and retains existing position and resolu
   assert.match(html, /event\.loss/);
   assert.match(html, /PROJECTED 5M CLOSE/);
   assert.match(html, /id="outcomeCalculatorPanel"/);
+  assert.match(html, /current window only/);
+  assert.match(html, /Earlier windows settle separately and are not included here/);
   assert.match(html, /IF UP WINS/);
   assert.match(html, /IF DOWN WINS/);
   assert.match(html, /Wait 30 seconds after the window opens/);
