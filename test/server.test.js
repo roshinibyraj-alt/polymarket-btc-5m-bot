@@ -15,7 +15,7 @@ test('state endpoint accepts the dashboard cache-buster query string', async (t)
   assert.equal(response.headers.get('cache-control'), 'no-store');
 });
 
-test('dashboard serves global analytics and retains existing position and resolution history panels', async (t) => {
+test('dashboard serves global analytics, open positions, completed transactions, and resolutions', async (t) => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise((resolve) => server.once('listening', resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
@@ -28,6 +28,10 @@ test('dashboard serves global analytics and retains existing position and resolu
   assert.match(html, /id="maxDrawdown"/);
   assert.match(html, /id="combinedWinsLosses"/);
   assert.match(html, /id="positions"/);
+  assert.match(html, /id="transactions"/);
+  assert.match(html, /Exit price/);
+  assert.match(html, /Profit \/ loss/);
+  assert.match(html, /pnl > 0 \? 'good' : 'bad'/);
   assert.match(html, /id="resolutions"/);
 });
 

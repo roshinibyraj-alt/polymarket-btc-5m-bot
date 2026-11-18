@@ -238,6 +238,11 @@
   </section>
 
   <section class="panel">
+    <div class="panel-head"><h2>Completed transactions</h2><span class="hint" id="transactionCount">0 closed positions</span></div>
+    <div class="scroll" id="transactions"><div class="empty">No completed transactions yet.</div></div>
+  </section>
+
+  <section class="panel">
     <div class="panel-head"><h2>Window resolutions</h2><span class="hint">Resolved outcomes when available</span></div>
     <div class="scroll" id="resolutions"><div class="empty">No resolution records in the latest state.</div></div>
   </section>
@@ -338,6 +343,29 @@
     }
     const rows = items.map(r => `<tr><td>${esc(r.slug||r.market||r.title||'—')}</td><td>${esc(r.outcome||r.winningSide||r.result||'—')}</td><td>${esc(r.status||'resolved')}</td><td>${money(r.pnl??r.realizedPnl??r.profit)}</td><td>${esc(r.resolvedAt?time(r.resolvedAt):r.error||'—')}</td></tr>`).join('');
     return `<table><thead><tr><th>Market</th><th>Outcome</th><th>Status</th><th>Realized P&amp;L</th><th>Resolution</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  function renderTransactions(positions) {
+    const completed = (Array.isArray(positions) ? positions : [])
+      .filter(position => ['SETTLED_EXIT','SETTLED_WIN','SETTLED_LOSS'].includes(position.status))
+      .sort((a,b) => Number(b.settledAt||b.closedAt||b.resolvedAt||0) - Number(a.settledAt||a.closedAt||a.resolvedAt||0))
+      .slice(0,100);
+    if (!completed.length) return '<div class="empty">No completed transactions yet.</div>';
+    const rows = completed.map(position => {
+      const pnl = num(position.realizedPnl ?? position.pnl);
+      const pnlClass = pnl == null || pnl === 0 ? 'muted' : pnl > 0 ? 'good' : 'bad';
+      const closedAt = position.settledAt || position.closedAt || position.resolvedAt;
+      return `<tr>
+        <td>${esc(closedAt ? time(closedAt) : '—')}</td>
+        <td>${esc(position.slug||position.market||position.title||'—')}</td>
+        <td class="${position.side==='UP'?'up':position.side==='DOWN'?'down':''}">${esc(position.side||'—')}</td>
+        <td>${Number(position.shares||0).toFixed(2)}</td>
+        <td>${price(position.avgPrice??position.avgEntry)}</td>
+        <td>${price(position.exitPrice)}</td>
+        <td class="${pnlClass}">${pnl == null ? '—' : money(pnl)}</td>
+        <td>${escStatus(position.exitReason||position.settlementBasis||position.status)}</td>
+      </tr>`;
+    }).join('');
+    return `<table><thead><tr><th>Closed</th><th>Market</th><th>Side</th><th>Shares</th><th>Entry price</th><th>Exit price</th><th>Profit / loss</th><th>Result</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
   function renderEvents(events) {
     if (!events?.length) return '<div class="empty">Waiting for activity…</div>';
@@ -445,6 +473,10 @@
       const positions = state.positions || account.positions || [];
       document.querySelector('#positions').innerHTML = renderTable(positions, 'position');
       document.querySelector('#positionCount').textContent = `${Array.isArray(positions)?positions.length:0} positions`;
+      const completedTransactions = (Array.isArray(positions) ? positions : [])
+        .filter(position => ['SETTLED_EXIT','SETTLED_WIN','SETTLED_LOSS'].includes(position.status));
+      document.querySelector('#transactions').innerHTML = renderTransactions(completedTransactions);
+      document.querySelector('#transactionCount').textContent = `${completedTransactions.length} completed positions`;
       const resolutions = state.resolutions || state.resolutionHistory || [];
       document.querySelector('#resolutions').innerHTML = renderTable(resolutions, 'resolution');
       document.querySelector('#events').innerHTML = renderEvents(state.events||[]);
