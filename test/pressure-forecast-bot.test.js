@@ -311,6 +311,28 @@ test('current Polymarket prices come from the CLOB feed cache, not repeated REST
   assert.equal(bot.snapshot().clobFeed.connected, true);
 });
 
+test('bounds dip-history sampling at 50ms while preserving accepted quotes', () => {
+  const bot = makeBot();
+  const quote = {
+    status: 'LIVE',
+    stale: false,
+    updatedAt: NOW,
+    mid: 0.50,
+  };
+
+  assert.equal(bot.recordDipQuote('UP', quote), true);
+  quote.updatedAt = NOW + 25;
+  quote.mid = 0.51;
+  assert.equal(bot.recordDipQuote('UP', quote), false);
+  assert.equal(bot.dipHistory.UP.length, 1);
+
+  quote.updatedAt = NOW + config.DIP_SAMPLE_INTERVAL_MS;
+  quote.mid = 0.52;
+  assert.equal(bot.recordDipQuote('UP', quote), true);
+  assert.equal(bot.dipHistory.UP.length, 2);
+  assert.equal(bot.dipHistory.UP.at(-1).mid, 0.52);
+});
+
 test('reuses the current-window market instead of re-fetching Gamma every refresh interval', async () => {
   let marketRefreshCalls = 0;
   const bot = makeBot({

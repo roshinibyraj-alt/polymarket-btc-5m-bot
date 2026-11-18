@@ -562,10 +562,10 @@ class PressureForecastBot extends WickBot {
       status: ageMs <= config.CLOB_MAX_QUOTE_AGE_MS ? quote.status : 'STALE',
       stale: ageMs > config.CLOB_MAX_QUOTE_AGE_MS,
     };
-    this.recordDipQuote(side, this.liveQuotes[side]);
+    const sampleRecorded = this.recordDipQuote(side, this.liveQuotes[side]);
     this.updatePositionMarks(side, this.liveQuotes[side], now);
     this.applyTakeProfitExits(now);
-    this.processDipStrategy(this.market?.start, now, side);
+    if (sampleRecorded) this.processDipStrategy(this.market?.start, now, side);
   }
 
   async refreshLiveQuotes(now) {
@@ -604,8 +604,10 @@ class PressureForecastBot extends WickBot {
   recordDipQuote(side, quote) {
     if (!quote || quote.status !== 'LIVE' || quote.stale) return false;
     const updatedAt = Number(quote.updatedAt);
+    const lastSampleAt = this.lastHistoryQuoteAtBySide[side];
     if (!Number.isFinite(updatedAt)
-      || updatedAt === this.lastHistoryQuoteAtBySide[side]) return false;
+      || (lastSampleAt != null
+        && updatedAt - Number(lastSampleAt) < config.DIP_SAMPLE_INTERVAL_MS)) return false;
     const mid = Number.isFinite(Number(quote.mid))
       ? Number(quote.mid)
       : (Number(quote.bestBid) + Number(quote.bestAsk)) / 2;
