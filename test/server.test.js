@@ -40,7 +40,8 @@ test('dashboard serves global analytics and retains existing position and resolu
   assert.match(html, /IF UP WINS/);
   assert.match(html, /IF DOWN WINS/);
   assert.match(html, /Wait 30 seconds after the window opens/);
-  assert.match(html, /best bid at \$0\.99 books \$1\/share/);
+  assert.match(html, /best bid, midpoint, or best ask reaches \$0\.99/);
+  assert.match(html, /SL remains best bid at \$0\.01/);
 });
 
 test('unknown dashboard paths still return 404', async (t) => {

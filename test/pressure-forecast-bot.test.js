@@ -558,6 +558,7 @@ test('best-bid TP and SL close main and shadow positions at the requested payout
   assert.deepEqual(bot.positions.map((position) => position.status), ['SETTLED_EXIT', 'SETTLED_EXIT']);
   assert.deepEqual(bot.shadowPositions.map((position) => position.status), ['SETTLED_EXIT', 'SETTLED_EXIT']);
   assert.equal(bot.positions[0].exitPrice, 0.99);
+  assert.equal(bot.positions[0].exitTriggerField, 'BEST_BID');
   assert.equal(bot.positions[0].payoutPerShare, 1);
   assert.equal(bot.positions[0].exitProceeds, 100);
   assert.equal(bot.positions[0].realizedPnl, 60);
@@ -572,9 +573,75 @@ test('best-bid TP and SL close main and shadow positions at the requested payout
   assert.equal(bot.orders.find((order) => order.kind === 'SELL_TAKE_PROFIT').payoutPerShare, 1);
   const state = bot.snapshot();
   assert.equal(state.strategy.exits.takeProfit, 0.99);
+  assert.deepEqual(state.strategy.exits.takeProfitTriggerFields, ['BEST_BID', 'MIDPOINT', 'BEST_ASK']);
   assert.equal(state.strategy.exits.takeProfitPayout, 1);
   assert.equal(state.strategy.exits.stopLoss, 0.01);
+  assert.equal(state.strategy.exits.stopLossTriggerField, 'BEST_BID');
   assert.equal(state.strategy.exits.stopLossPayout, 0);
+});
+
+test('any fresh best bid, midpoint, or best ask at $0.99 triggers paper TP', () => {
+  const cases = [
+    { field: 'BEST_BID', bid: 0.99, mid: 0.99, ask: 0.995 },
+    { field: 'MIDPOINT', bid: 0.98, mid: 0.99, ask: 1 },
+    { field: 'BEST_ASK', bid: 0.97, mid: 0.98, ask: 0.99 },
+    { field: 'BEST_ASK', bid: null, mid: 0.50, ask: 0.99 },
+  ];
+
+  for (const [index, scenario] of cases.entries()) {
+    const bot = makeBot();
+    bot.positions.push({
+      id: `quote-tp-${index}`,
+      side: 'UP',
+      shares: 100,
+      initialShares: 100,
+      totalCost: 40,
+      windowStart: WINDOW_START,
+      status: 'OPEN',
+    });
+    bot.cash = 9960;
+    bot.liveQuotes.UP = {
+      status: 'LIVE',
+      stale: false,
+      bestBid: scenario.bid,
+      mid: scenario.mid,
+      bestAsk: scenario.ask,
+      updatedAt: NOW,
+    };
+
+    bot.processPositionExits(WINDOW_START, NOW);
+
+    assert.equal(bot.positions[0].status, 'SETTLED_EXIT', scenario.field);
+    assert.equal(bot.positions[0].payoutPerShare, 1, scenario.field);
+    assert.equal(bot.positions[0].exitTriggerField, scenario.field);
+    assert.equal(bot.orders[0].triggerField, scenario.field);
+  }
+});
+
+test('paper TP takes precedence if ask touches $0.99 while bid touches stop loss', () => {
+  const bot = makeBot();
+  bot.positions.push({
+    id: 'wide-spread-up',
+    side: 'UP',
+    shares: 100,
+    totalCost: 40,
+    windowStart: WINDOW_START,
+    status: 'OPEN',
+  });
+  bot.liveQuotes.UP = {
+    status: 'LIVE',
+    stale: false,
+    bestBid: 0.01,
+    mid: 0.5,
+    bestAsk: 0.99,
+    updatedAt: NOW,
+  };
+
+  bot.processPositionExits(WINDOW_START, NOW);
+
+  assert.equal(bot.positions[0].payoutPerShare, 1);
+  assert.equal(bot.positions[0].exitTriggerField, 'BEST_ASK');
+  assert.equal(bot.orders[0].kind, 'SELL_TAKE_PROFIT');
 });
 
 test('stale or empty CLOB bids do not trigger threshold exits', () => {
@@ -713,11 +780,13 @@ test('paper snapshot identifies the pressure-projection BTC 5-minute demo strate
   assert.equal(state.strategy.maxBuyPrice, 0.95);
   assert.equal('minNetEdgePerShare' in state.strategy, false);
   assert.equal('maxEntryShares' in state.strategy, false);
-  assert.match(state.strategy.exit, /best bid at \$0\.99 closes for \$1\/share/i);
+  assert.match(state.strategy.exit, /best bid, midpoint, or best ask reaches \$0\.99/i);
   assert.match(state.strategy.exit, /otherwise official resolution/i);
   assert.equal(state.strategy.exits.takeProfit, 0.99);
+  assert.deepEqual(state.strategy.exits.takeProfitTriggerFields, ['BEST_BID', 'MIDPOINT', 'BEST_ASK']);
   assert.equal(state.strategy.exits.takeProfitPayout, 1);
   assert.equal(state.strategy.exits.stopLoss, 0.01);
+  assert.equal(state.strategy.exits.stopLossTriggerField, 'BEST_BID');
   assert.equal(state.strategy.exits.stopLossPayout, 0);
   assert.equal(state.strategy.signalState.calibrated, false);
   assert.equal(state.strategy.priceFeed.source, 'Binance BTCUSDT aggregate trades');

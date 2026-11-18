@@ -700,7 +700,9 @@ class PressureForecastBot extends WickBot {
       entryShares: config.PRESSURE_ENTRY_SHARES,
       entryDelayMs: config.PRESSURE_ENTRY_DELAY_MS,
       takeProfitTrigger: config.PRESSURE_TAKE_PROFIT_TRIGGER,
+      takeProfitTriggerFields: ['BEST_BID', 'MIDPOINT', 'BEST_ASK'],
       stopLossTrigger: config.PRESSURE_STOP_LOSS_TRIGGER,
+      stopLossTriggerField: 'BEST_BID',
     });
   }
 
@@ -913,17 +915,29 @@ class PressureForecastBot extends WickBot {
       const bid = Number(quote?.bestBid);
       if (!quote || quote.status !== 'LIVE' || quote.stale
         || !Number.isFinite(updatedAt) || now < updatedAt
-        || now - updatedAt > config.PRESSURE_MAX_QUOTE_AGE_MS
-        || !Number.isFinite(bid) || bid <= 0 || bid > 1) continue;
-      const takeProfitHit = bid >= config.PRESSURE_TAKE_PROFIT_TRIGGER;
-      const stopLossHit = bid <= config.PRESSURE_STOP_LOSS_TRIGGER;
+        || now - updatedAt > config.PRESSURE_MAX_QUOTE_AGE_MS) continue;
+      const takeProfitQuote = [
+        ['BEST_BID', bid],
+        ['MIDPOINT', Number(quote.mid)],
+        ['BEST_ASK', Number(quote.bestAsk)],
+      ].find(([, price]) => Number.isFinite(price)
+        && price > 0
+        && price <= 1
+        && price >= config.PRESSURE_TAKE_PROFIT_TRIGGER);
+      const takeProfitHit = Boolean(takeProfitQuote);
+      const stopLossHit = quote.bestBid != null
+        && Number.isFinite(bid)
+        && bid > 0
+        && bid <= config.PRESSURE_STOP_LOSS_TRIGGER;
       if (!takeProfitHit && !stopLossHit) continue;
       const payout = takeProfitHit ? 1 : 0;
+      const triggerField = takeProfitHit ? takeProfitQuote[0] : 'BEST_BID';
+      const triggerPrice = takeProfitHit ? takeProfitQuote[1] : bid;
       const reason = takeProfitHit
-        ? 'TAKE_PROFIT_BID_0.99_ACCOUNTED_AS_1'
+        ? `TAKE_PROFIT_${triggerField}_0.99_ACCOUNTED_AS_1`
         : 'STOP_LOSS_BID_0.01_ACCOUNTED_AS_0';
       if (position.shadowOnly) {
-        this.finalizeShadowPosition(position, payout, reason, now, false, bid);
+        this.finalizeShadowPosition(position, payout, reason, now, false, triggerPrice, triggerField);
         this.log(takeProfitHit
           ? 'PAPER_PRESSURE_SHADOW_TAKE_PROFIT'
           : 'PAPER_PRESSURE_SHADOW_STOP_LOSS', {
@@ -931,13 +945,15 @@ class PressureForecastBot extends WickBot {
           side: position.side,
           status: position.realizedPnl > 0 ? 'WIN' : position.realizedPnl < 0 ? 'LOSS' : 'BREAK_EVEN',
           shares: position.shares,
-          triggerPrice: bid,
+          triggerPrice,
+          triggerField,
+          quote: { bestBid: quote.bestBid, mid: quote.mid, bestAsk: quote.bestAsk },
           payoutPerShare: payout,
           realizedPnl: position.realizedPnl,
         });
         continue;
       }
-      this.finalizePosition(position, payout, reason, now, bid, takeProfitHit);
+      this.finalizePosition(position, payout, reason, now, triggerPrice, takeProfitHit, triggerField, quote);
     }
   }
 
@@ -1424,12 +1440,18 @@ class PressureForecastBot extends WickBot {
     return order;
   }
 
-  finalizePosition(position, payout, reason, now, triggerPrice, takeProfitHit) {
+  finalizePosition(position, payout, reason, now, triggerPrice, takeProfitHit, triggerField, quote) {
     if (position.status !== 'OPEN') return;
     const shares = Number(position.shares);
     const grossPayout = Number(payout) * shares;
     position.exitTriggerPrice = Number(triggerPrice);
     position.exitPrice = Number(triggerPrice);
+    position.exitTriggerField = triggerField;
+    position.exitQuote = {
+      bestBid: quote?.bestBid ?? null,
+      mid: quote?.mid ?? null,
+      bestAsk: quote?.bestAsk ?? null,
+    };
     position.payoutPerShare = Number(payout);
     position.exitProceeds = grossPayout;
     position.proceeds = grossPayout;
@@ -1441,24 +1463,27 @@ class PressureForecastBot extends WickBot {
     position.settledAt = now;
     this.cash += grossPayout;
     const kind = takeProfitHit ? 'SELL_TAKE_PROFIT' : 'SELL_STOP_LOSS';
-    this.recordThresholdOrder(position, now, kind, payout, triggerPrice);
+    this.recordThresholdOrder(position, now, kind, payout, triggerPrice, triggerField);
     this.log(takeProfitHit ? 'PAPER_PRESSURE_TAKE_PROFIT' : 'PAPER_PRESSURE_STOP_LOSS', {
       positionId: position.id,
       side: position.side,
       status: position.realizedPnl > 0 ? 'WIN' : position.realizedPnl < 0 ? 'LOSS' : 'BREAK_EVEN',
       shares,
       triggerPrice,
+      triggerField,
+      quote: position.exitQuote,
       payoutPerShare: payout,
       realizedPnl: position.realizedPnl,
       reason,
     });
   }
 
-  finalizeShadowPosition(position, payout, reason, now, resolved = false, triggerPrice = payout) {
+  finalizeShadowPosition(position, payout, reason, now, resolved = false, triggerPrice = payout, triggerField = null) {
     if (!['OPEN', 'PENDING_CLOB_RESULT'].includes(position.status)) return;
     const grossPayout = Number(payout) * Number(position.shares);
     position.exitTriggerPrice = Number(triggerPrice);
     position.exitPrice = Number(triggerPrice);
+    position.exitTriggerField = triggerField;
     position.payoutPerShare = Number(payout);
     position.exitProceeds = grossPayout;
     position.proceeds = grossPayout;
@@ -1479,7 +1504,7 @@ class PressureForecastBot extends WickBot {
     this.shadowCash += grossPayout;
   }
 
-  recordThresholdOrder(position, now, kind, payout, triggerPrice = payout) {
+  recordThresholdOrder(position, now, kind, payout, triggerPrice = payout, triggerField = null) {
     const order = this.createOrder(kind, position.side, position.initialShares || position.shares, now, {
       complete: true,
       filledShares: position.initialShares || position.shares,
@@ -1488,13 +1513,14 @@ class PressureForecastBot extends WickBot {
     order.status = 'FILLED';
     order.matchedShares = order.shares;
     order.price = triggerPrice;
+    order.triggerField = triggerField;
     order.payoutPerShare = payout;
     order.exitProceeds = Number(payout) * Number(order.shares);
     order.positionId = position.id;
     order.exitReason = position.exitReason;
     order.filledAt = now;
     order.fee = 0;
-    order.fillConfirmation = 'PRICE_THRESHOLD_TOUCHED';
+    order.fillConfirmation = 'PAPER_QUOTE_THRESHOLD_TOUCHED';
   }
 
   async completeWindow(windowStart, triggerPosition, triggerReason, now = this.now()) {
@@ -1711,7 +1737,7 @@ class PressureForecastBot extends WickBot {
         execution: 'PAPER ONLY',
         markets: ['BTC 5m'],
         orderType: 'NEXT_CLOB_ASK_TICK_FULL_SIZE',
-        exit: 'Best bid at $0.99 closes for $1/share; best bid at $0.01 closes for $0/share; otherwise official resolution.',
+        exit: 'Paper TP triggers when the held-side best bid, midpoint, or best ask reaches $0.99 and counts as $1/share; SL triggers at best bid $0.01 and counts as $0; otherwise official resolution.',
         liveTradingEnabled: false,
         realOrderModulesLoaded: false,
         entryShares: config.PRESSURE_ENTRY_SHARES,
@@ -1729,10 +1755,12 @@ class PressureForecastBot extends WickBot {
         repeatEntryRule: `Ignore entry signals for the first ${config.PRESSURE_ENTRY_DELAY_MS / 1000} seconds of each window, then use the pressure-weighted close projection. Projected close above the previous candle close selects UP; below selects DOWN. Each side has its own 15-second entry cooldown; entries are ${config.PRESSURE_ENTRY_SHARES} shares.`,
         priceFeed: this.priceFeed?.snapshot?.() || null,
         exits: {
-          mode: 'CLOB_BID_THRESHOLDS_THEN_OFFICIAL_RESOLUTION',
+          mode: 'ANY_CLOB_QUOTE_TP_BID_SL_THEN_OFFICIAL_RESOLUTION',
           takeProfit: config.PRESSURE_TAKE_PROFIT_TRIGGER,
+          takeProfitTriggerFields: ['BEST_BID', 'MIDPOINT', 'BEST_ASK'],
           takeProfitPayout: 1,
           stopLoss: config.PRESSURE_STOP_LOSS_TRIGGER,
+          stopLossTriggerField: 'BEST_BID',
           stopLossPayout: 0,
           resolutionPollMs: config.RESOLUTION_POLL_MS,
           otherwise: 'Hold positions until the original Polymarket market officially resolves.',

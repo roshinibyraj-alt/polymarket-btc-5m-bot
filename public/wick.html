@@ -315,7 +315,7 @@
   <section class="panel" aria-label="Adaptive sample shadow comparison">
     <div class="panel-head"><h2>Adaptive-sample shadow P&amp;L</h2><span class="pill wait" id="shadowStatus">Shadow only</span></div>
     <div id="shadowComparison"><div class="empty">Waiting for pressure data. This comparison never submits orders.</div></div>
-    <div class="shadow-note">Both models wait 30 seconds after each window opens. The trading model uses ten one-second Binance pressure samples; the adaptive shadow changes to 9, 8, 7, then 6 samples at each minute mark. Both use fixed 100-share entries, separate 15-second side cooldowns, and modeled taker fees. The $0.95 ask cap remains. A fresh best bid at $0.99 closes for $1/share; a best bid at $0.01 closes for $0/share. Otherwise, positions settle at official resolution, checked every 10 seconds.</div>
+    <div class="shadow-note">Both models wait 30 seconds after each window opens. The trading model uses ten one-second Binance pressure samples; the adaptive shadow changes to 9, 8, 7, then 6 samples at each minute mark. Both use fixed 100-share entries, separate 15-second side cooldowns, and modeled taker fees. The $0.95 ask cap remains. For paper TP, a fresh best bid, midpoint, or best ask at $0.99 counts as $1/share; SL remains best bid at $0.01 counting as $0. These are quote-touch assumptions, not executed sells. Otherwise, positions settle at official resolution, checked every 10 seconds.</div>
   </section>
 
   <section class="panel">
@@ -333,7 +333,7 @@
     <div class="events" id="events"><div class="empty">Waiting for activity…</div></div>
   </section>
 
-  <p class="foot">Paper strategy parameters: after a 30-second delay from each window start, the bot uses the last ten one-second Binance pressure scores, recent BTC volatility, and remaining time to project the close relative to the previous candle close. Above selects UP; below selects DOWN. Entries are fixed at 100 shares; the $0.95 ask cap, next-ask-tick fill confirmation, and separate 15-second side cooldowns remain. A fresh held-side best bid at $0.99 books $1/share; at $0.01 it books $0/share. If neither is reached, the position waits for official Polymarket resolution. The demo runner does not load real-order modules.</p>
+  <p class="foot">Paper strategy parameters: after a 30-second delay from each window start, the bot uses the last ten one-second Binance pressure scores, recent BTC volatility, and remaining time to project the close relative to the previous candle close. Above selects UP; below selects DOWN. Entries are fixed at 100 shares; the $0.95 ask cap, next-ask-tick fill confirmation, and separate 15-second side cooldowns remain. Paper TP triggers when the held-side best bid, midpoint, or best ask reaches $0.99, and counts as $1/share; SL remains best bid at $0.01 and counts as $0. These are simulated quote touches, not actual sell executions. If neither is reached, the position waits for official Polymarket resolution. The demo runner does not load real-order modules.</p>
   <div class="error" id="error" role="status"></div>
 </main>
 <script>
@@ -453,8 +453,8 @@
       const isEntry = o.action === 'BUY' || String(o.kind || '').startsWith('BUY');
       const isExit = o.action === 'SELL' || String(o.kind || '').startsWith('SELL');
       const exit = isEntry
-        ? `TP ${price(0.99)} → $1 / SL ${price(0.01)} → $0`
-        : isExit ? `${money(o.exitProceeds)} payout (${price(o.price)} trigger)` : '—';
+        ? `TP bid/mid/ask ${price(0.99)} → $1 · SL bid ${price(0.01)} → $0`
+        : isExit ? `${money(o.exitProceeds)} paper payout (${esc(o.triggerField||'quote')} ${price(o.price)})` : '—';
       const status = String(o.status || 'unknown');
       return `<tr><td>${esc(o.timeframe||'—')}</td><td>${esc(o.kind||'—')}${o.testOnly?' · TEST':''}</td><td class="${outcome==='UP'?'up':'down'}">${esc(outcome)}</td><td>${price(o.price)}</td><td>${Number(o.shares||0).toFixed(2)}</td><td>${Number(o.matchedShares||0).toFixed(2)}</td><td>${exit}</td><td><span class="pill ${statusClass(status)==='good'?'live':statusClass(status)==='bad'?'fail':'wait'}">${esc(status)}</span></td><td>${esc(o.error||o.exitBlockedReason||o.resolutionError||'—')}</td></tr>`;
     }).join('');
