@@ -14,111 +14,67 @@ const {
 const EPSILON = 1e-9;
 const SIDES = ['UP', 'DOWN'];
 
-function clamp(value, minimum = -1, maximum = 1) {
-  return Math.max(minimum, Math.min(maximum, Number(value) || 0));
-}
-
-function normalCdf(value) {
-  const sign = value < 0 ? -1 : 1;
-  const x = Math.abs(value);
-  const t = 1 / (1 + 0.3275911 * x);
-  const polynomial = (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
-    - 0.284496736) * t + 0.254829592) * t;
-  const erf = sign * (1 - polynomial * Math.exp(-x * x));
-  return Math.max(0, Math.min(1, 0.5 * (1 + erf)));
-}
-
-function mean(values) {
-  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
-}
-
-function pressureTrend(samples, sampleLimit = config.PRESSURE_SAMPLE_COUNT) {
-  const values = samples.map((sample) => Number(sample.score))
-    .filter(Number.isFinite)
-    .slice(-sampleLimit);
-  if (values.length < 2) {
-    return {
-      sampleCount: values.length,
-      pressureTrendSlope: null,
-      pressurePersistence: null,
-      pressureAcceleration: null,
-      pressureImpulse: null,
-    };
-  }
-
-  const centerX = (values.length - 1) / 2;
-  const centerY = mean(values);
-  let numerator = 0;
-  let denominator = 0;
-  for (let index = 0; index < values.length; index += 1) {
-    const x = index - centerX;
-    numerator += x * (values[index] - centerY);
-    denominator += x * x;
-  }
-  const slope = denominator > 0 ? numerator / denominator : 0;
-  const direction = Math.sign(values.at(-1));
-  const persistence = direction === 0
-    ? 0
-    : values.filter((value) => Math.sign(value) === direction).length / values.length;
-  const split = Math.floor(values.length / 2);
-  const acceleration = mean(values.slice(split)) - mean(values.slice(0, split));
-  const normalizedSlope = clamp(slope * (values.length - 1));
-  const persistenceBias = direction === 0 ? 0 : (persistence - 0.5) * 2 * direction;
-  const impulse = clamp(
-    0.40 * values.at(-1)
-    + 0.25 * normalizedSlope
-    + 0.20 * acceleration
-    + 0.15 * persistenceBias,
-  );
-  return {
-    sampleCount: values.length,
-    pressureTrendSlope: slope,
-    pressurePersistence: persistence,
-    pressureAcceleration: acceleration,
-    pressureImpulse: impulse,
+function analyzeDipRebound(samples, now) {
+  const lookback = samples
+    .filter((sample) => Number(sample.at) >= now - config.DIP_LOOKBACK_MS
+      && Number(sample.at) <= now
+      && Number(sample.mid) > 0
+      && Number(sample.mid) < 1)
+    .sort((a, b) => Number(a.at) - Number(b.at));
+  const empty = {
+    ready: false,
+    qualifies: false,
+    sampleCount: lookback.length,
+    referenceHigh: null,
+    trough: null,
+    currentMid: lookback.length ? Number(lookback.at(-1).mid) : null,
+    dipAmount: null,
+    reboundAmount: null,
+    reason: 'Collecting fresh Polymarket price history.',
   };
-}
-
-function volatilityPerSecond(samples, sampleLimit = config.PRESSURE_SAMPLE_COUNT) {
-  const prices = samples.slice(-sampleLimit)
-    .map((sample) => Number(sample.price))
-    .filter((price) => price > 0);
-  if (prices.length < 3) return null;
-  const returns = [];
-  for (let index = 1; index < prices.length; index += 1) {
-    returns.push(Math.log(prices[index] / prices[index - 1]));
+  if (lookback.length < config.DIP_MIN_HISTORY_SAMPLES
+    || Number(lookback.at(-1).at) - Number(lookback[0].at) < config.DIP_MIN_HISTORY_SPAN_MS) {
+    return empty;
   }
-  return Math.sqrt(returns.reduce((sum, value) => sum + value ** 2, 0) / returns.length);
-}
 
-function bookPressure(quote) {
-  const bids = (quote?.bidLevels || []).slice(0, config.PRESSURE_DEPTH_LEVELS);
-  const asks = (quote?.askLevels || []).slice(0, config.PRESSURE_DEPTH_LEVELS);
-  const bidDepth = bids.reduce((sum, level) => sum + Number(level.size || 0), 0);
-  const askDepth = asks.reduce((sum, level) => sum + Number(level.size || 0), 0);
-  const total = bidDepth + askDepth;
-  const depthImbalance = total > 0 ? (bidDepth - askDepth) / total : 0;
-  const bestBid = bids[0];
-  const bestAsk = asks[0];
-  let micropriceImbalance = 0;
-  if (bestBid && bestAsk && bestAsk.price > bestBid.price) {
-    const bidSize = Number(bestBid.size) || 0;
-    const askSize = Number(bestAsk.size) || 0;
-    const combined = bidSize + askSize;
-    if (combined > 0) {
-      const midpoint = (bestBid.price + bestAsk.price) / 2;
-      const microprice = (bestAsk.price * bidSize + bestBid.price * askSize) / combined;
-      micropriceImbalance = clamp(
-        (microprice - midpoint) / ((bestAsk.price - bestBid.price) / 2),
-      );
-    }
+  const troughStart = now - config.DIP_TROUGH_WINDOW_MS;
+  const reference = lookback.filter((sample) => Number(sample.at) < troughStart);
+  const troughSamples = lookback.filter((sample) => Number(sample.at) >= troughStart);
+  if (reference.length < 3 || troughSamples.length < 2) {
+    return { ...empty, reason: 'Waiting for enough older prices to define a dip and a recent trough.' };
   }
+
+  const referenceHigh = Math.max(...reference.map((sample) => Number(sample.mid)));
+  const trough = Math.min(...troughSamples.map((sample) => Number(sample.mid)));
+  const currentMid = Number(lookback.at(-1).mid);
+  const previous = Number(lookback.at(-2)?.mid);
+  const previousPrevious = Number(lookback.at(-3)?.mid);
+  const dipAmount = referenceHigh - trough;
+  const reboundAmount = currentMid - trough;
+  const hasTurn = previousPrevious < previous && previous < currentMid;
+  const qualifies = dipAmount + EPSILON >= config.DIP_DROP_FROM_REFERENCE
+    && reboundAmount + EPSILON >= config.DIP_REBOUND_FROM_TROUGH
+    && hasTurn;
+
+  let reason = 'No confirmed dip-and-rebound setup yet.';
+  if (dipAmount + EPSILON < config.DIP_DROP_FROM_REFERENCE) {
+    reason = `Waiting for a $${config.DIP_DROP_FROM_REFERENCE.toFixed(2)} dip from the recent reference high.`;
+  } else if (reboundAmount + EPSILON < config.DIP_REBOUND_FROM_TROUGH || !hasTurn) {
+    reason = `Dip detected; waiting for a $${config.DIP_REBOUND_FROM_TROUGH.toFixed(2)} rebound with two rising quotes.`;
+  } else {
+    reason = `Dip-and-rebound confirmed: $${dipAmount.toFixed(3)} below the recent high, then $${reboundAmount.toFixed(3)} off the trough.`;
+  }
+
   return {
-    score: clamp(0.65 * depthImbalance + 0.35 * micropriceImbalance),
-    depthImbalance: clamp(depthImbalance),
-    micropriceImbalance,
-    bidDepth,
-    askDepth,
+    ready: true,
+    qualifies,
+    sampleCount: lookback.length,
+    referenceHigh,
+    trough,
+    currentMid,
+    dipAmount,
+    reboundAmount,
+    reason,
   };
 }
 
@@ -173,93 +129,6 @@ function sweepBook(levels, shares, action, market, {
   };
 }
 
-function sharesAllowedByEdge(edge) {
-  const baseShares = config.PRESSURE_ENTRY_SHARES;
-  if (!Number.isFinite(Number(edge))
-    || Number(edge) + EPSILON < config.PRESSURE_EDGE_SIZE_BASE) {
-    return baseShares;
-  }
-  const extraSteps = Math.floor(
-    (Number(edge) - config.PRESSURE_EDGE_SIZE_BASE + EPSILON)
-      / config.PRESSURE_EDGE_SIZE_STEP,
-  );
-  return Math.min(
-    config.PRESSURE_MAX_ENTRY_SHARES,
-    baseShares + extraSteps * config.PRESSURE_ENTRY_SIZE_STEP_SHARES,
-  );
-}
-
-function evaluateEntryCandidate(probability, quote, market) {
-  const baseShares = config.PRESSURE_ENTRY_SHARES;
-  const maxShares = config.PRESSURE_MAX_ENTRY_SHARES;
-  let best = null;
-  let baseSweep = null;
-
-  for (let shares = baseShares; shares <= maxShares;
-    shares += config.PRESSURE_ENTRY_SIZE_STEP_SHARES) {
-    const execution = sweepBook(
-      quote?.askLevels,
-      shares,
-      'BUY',
-      market,
-      { maximumPrice: config.PRESSURE_MAX_BUY_PRICE },
-    );
-    if (shares === baseShares) baseSweep = execution;
-    if (!execution.complete) break;
-
-    const allInCostPerShare = execution.totalCost / shares;
-    const edge = Number(probability) - allInCostPerShare;
-    const edgeSizeLimit = sharesAllowedByEdge(edge);
-    if (Number(probability) > config.PRESSURE_MIN_ESTIMATED_PROBABILITY
-      && edge + EPSILON >= config.PRESSURE_MIN_NET_EDGE_PER_SHARE
-      && shares <= edgeSizeLimit) {
-      best = {
-        estimatedProbability: Number(probability),
-        bestAsk: quote?.bestAsk ?? null,
-        allInCostPerShare,
-        expectedNetEdgePerShare: edge,
-        requestedShares: shares,
-        qualifies: true,
-        reason: `Probability clears ${Math.round(config.PRESSURE_MIN_ESTIMATED_PROBABILITY * 100)}%; full size fits below the $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} ask cap and the net-edge sizing rule.`,
-      };
-    }
-  }
-
-  if (best) return best;
-
-  const execution = baseSweep || sweepBook(
-    quote?.askLevels,
-    baseShares,
-    'BUY',
-    market,
-    { maximumPrice: config.PRESSURE_MAX_BUY_PRICE },
-  );
-  const allInCostPerShare = execution.complete
-    ? execution.totalCost / baseShares
-    : null;
-  const edge = allInCostPerShare == null
-    ? null
-    : Number(probability) - allInCostPerShare;
-  let reason = 'This side does not currently clear the probability, depth, and net-edge checks.';
-  if (!(Number(probability) > config.PRESSURE_MIN_ESTIMATED_PROBABILITY)) {
-    reason = `The estimate must be above ${Math.round(config.PRESSURE_MIN_ESTIMATED_PROBABILITY * 100)}%.`;
-  } else if (!execution.complete) {
-    reason = `Insufficient visible ask depth for ${baseShares} shares at or below $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)}.`;
-  } else if (edge + EPSILON < config.PRESSURE_MIN_NET_EDGE_PER_SHARE) {
-    reason = `Net edge is below the required $${config.PRESSURE_MIN_NET_EDGE_PER_SHARE.toFixed(2)} per share after taker fees.`;
-  }
-
-  return {
-    estimatedProbability: Number(probability),
-    bestAsk: quote?.bestAsk ?? null,
-    allInCostPerShare,
-    expectedNetEdgePerShare: edge,
-    requestedShares: baseShares,
-    qualifies: false,
-    reason,
-  };
-}
-
 function parseArray(value) {
   if (Array.isArray(value)) return value;
   if (typeof value !== 'string') return [];
@@ -309,7 +178,7 @@ class PressureForecastBot extends WickBot {
       timeframe: '5m',
       windowMs: config.WINDOW_MS_5M,
       capital: initialCapital,
-      strategyMode: 'pressure-forecast',
+      strategyMode: 'dip-rebound',
       priceFeed: feed,
     });
     this.now = now;
@@ -318,13 +187,17 @@ class PressureForecastBot extends WickBot {
     this.clobFeed = null;
     this.clobFeedMarketKey = null;
     this.initialCapital = initialCapital;
-    this.strategyName = 'BTC 5-minute pressure and price forecast paper bot';
-    this.strategyMode = 'pressure-forecast';
-    this.pressureSamples = [];
-    this.lastSampleAt = null;
-    this.forecast = this.emptyForecast('Waiting for Binance and Polymarket data.');
+    this.strategyName = 'BTC 5-minute independent dip-and-spike paper bot';
+    this.strategyMode = 'dip-rebound';
+    this.forecast = this.emptyForecast('Waiting for fresh Polymarket UP and DOWN quotes.');
     this.lastEntryAt = null;
     this.lastEntryAtBySide = { UP: null, DOWN: null };
+    this.lastDipAttemptAtBySide = { UP: null, DOWN: null };
+    this.dipHistory = { UP: [], DOWN: [] };
+    this.lastHistoryQuoteAtBySide = { UP: null, DOWN: null };
+    this.dipEntryCountBySide = { UP: 0, DOWN: 0 };
+    this.dipArmedBySide = { UP: true, DOWN: true };
+    this.dipRearmPriceBySide = { UP: null, DOWN: null };
     this.lastResolutionCheckAt = new Map();
     this.actionSequence = 0;
     this.resolutions = [];
@@ -368,10 +241,13 @@ class PressureForecastBot extends WickBot {
       orderWindowStart: this.orderWindowStart,
       quoteWindowStart: this.quoteWindowStart,
       liveQuotes: this.liveQuotes,
-      pressureSamples: this.pressureSamples,
-      lastSampleAt: this.lastSampleAt,
       lastEntryAt: this.lastEntryAt,
       lastEntryAtBySide: this.lastEntryAtBySide,
+      lastDipAttemptAtBySide: this.lastDipAttemptAtBySide,
+      dipEntryCountBySide: this.dipEntryCountBySide,
+      dipArmedBySide: this.dipArmedBySide,
+      dipRearmPriceBySide: this.dipRearmPriceBySide,
+      strategyVersion: 'DIP_REBOUND_V1',
       forecast: this.forecast,
       actionSequence: this.actionSequence,
       completedWindows: [...this.completedWindows.entries()],
@@ -409,11 +285,34 @@ class PressureForecastBot extends WickBot {
     this.windowOrders = this.orders.filter((order) =>
       Number(order.windowStart) === Number(this.orderWindowStart));
     this.liveQuotes = state.liveQuotes || { UP: { status: 'MISSING' }, DOWN: { status: 'MISSING' } };
-    this.pressureSamples = Array.isArray(state.pressureSamples) ? state.pressureSamples : [];
-    this.lastSampleAt = Number.isFinite(Number(state.lastSampleAt)) ? Number(state.lastSampleAt) : null;
     this.lastEntryAt = Number.isFinite(Number(state.lastEntryAt)) ? Number(state.lastEntryAt) : null;
     this.lastEntryAtBySide = state.lastEntryAtBySide || { UP: null, DOWN: null };
-    this.forecast = state.forecast || this.emptyForecast('Waiting for Binance and Polymarket data.');
+    this.lastDipAttemptAtBySide = state.lastDipAttemptAtBySide || { ...this.lastEntryAtBySide };
+    this.dipHistory = { UP: [], DOWN: [] };
+    this.lastHistoryQuoteAtBySide = { UP: null, DOWN: null };
+    const currentWindowPositions = this.positions.filter((position) =>
+      Number(position.windowStart) === Number(this.orderWindowStart)
+      && position.strategyVersion === 'DIP_REBOUND_V1');
+    this.dipEntryCountBySide = state.dipEntryCountBySide || Object.fromEntries(
+      SIDES.map((side) => [side, currentWindowPositions.filter((position) => position.side === side).length]),
+    );
+    this.dipArmedBySide = state.dipArmedBySide || Object.fromEntries(
+      SIDES.map((side) => [side, currentWindowPositions.every((position) => position.side !== side)]),
+    );
+    this.dipRearmPriceBySide = state.dipRearmPriceBySide || Object.fromEntries(
+      SIDES.map((side) => {
+        const latest = currentWindowPositions
+          .filter((position) => position.side === side)
+          .sort((a, b) => Number(b.filledAt || b.openedAt || 0) - Number(a.filledAt || a.openedAt || 0))[0];
+        return [side, latest
+          ? Math.min(0.99, Number(latest.dipTriggerMid ?? latest.avgEntry ?? 0) + config.DIP_REARM_RECOVERY)
+          : null];
+      }),
+    );
+    this.forecast = this.emptyForecast(
+      'Collecting fresh Polymarket quotes after restart.',
+      'COLLECTING_PRICE_HISTORY',
+    );
     this.actionSequence = Number(state.actionSequence) || 0;
     this.completedWindows = new Map(Array.isArray(state.completedWindows) ? state.completedWindows : []);
     this.lastResolutionCheckAt = new Map(
@@ -502,8 +401,6 @@ class PressureForecastBot extends WickBot {
       orderWindowStart: Number.isFinite(windowStart) ? windowStart : null,
       quoteWindowStart: Number.isFinite(windowStart) ? windowStart : null,
       liveQuotes: snapshot.quotes || marketSnapshot?.quotes,
-      pressureSamples: [],
-      lastSampleAt: null,
       lastEntryAt: Math.max(...Object.values(lastEntryAtBySide).filter(Number.isFinite), 0) || null,
       lastEntryAtBySide,
       forecast: snapshot.forecast,
@@ -525,38 +422,35 @@ class PressureForecastBot extends WickBot {
   emptyForecast(reason, status = 'WAITING_FOR_DATA') {
     return {
       ready: false,
-      calibrated: false,
       status,
       reason,
-      estimateUp: null,
-      estimateDown: null,
-      marketImpliedUp: null,
-      marketImpliedDown: null,
-      laggingSide: null,
+      signalSource: 'POLYMARKET_CLOB_PRICE_ONLY',
       selectedSide: null,
-      expectedNetEdgePerShare: null,
-      minRequiredEdgePerShare: config.PRESSURE_MIN_NET_EDGE_PER_SHARE,
-      sampleCount: 0,
-      requiredSamples: config.PRESSURE_SAMPLE_COUNT,
-      pressureTrendSlope: null,
-      pressurePersistence: null,
-      pressureAcceleration: null,
-      btcMoveFromOpenPct: null,
-      volatilityPerSecond: null,
+      qualifyingSides: [],
+      secondsIntoWindow: null,
       secondsRemaining: null,
+      tradeWindowMs: config.DIP_TRADE_WINDOW_MS,
       candidateBySide: {
-        UP: this.emptyCandidate('Waiting for 10 valid one-second samples.'),
-        DOWN: this.emptyCandidate('Waiting for 10 valid one-second samples.'),
+        UP: this.emptyCandidate('Waiting for fresh UP quotes.'),
+        DOWN: this.emptyCandidate('Waiting for fresh DOWN quotes.'),
       },
     };
   }
 
   emptyCandidate(reason) {
     return {
-      estimatedProbability: null,
+      ready: false,
+      currentMid: null,
       bestAsk: null,
-      allInCostPerShare: null,
-      expectedNetEdgePerShare: null,
+      referenceHigh: null,
+      trough: null,
+      dipAmount: null,
+      reboundAmount: null,
+      sampleCount: 0,
+      entriesThisWindow: 0,
+      maxEntries: config.DIP_MAX_ENTRIES_PER_SIDE,
+      requestedShares: config.DIP_ENTRY_SHARES,
+      armed: true,
       qualifies: false,
       reason,
     };
@@ -571,16 +465,21 @@ class PressureForecastBot extends WickBot {
     this.initialEntryAt = null;
     this.quoteWindowStart = start;
     this.liveQuotes = { UP: { status: 'MISSING' }, DOWN: { status: 'MISSING' } };
-    this.pressureSamples = [];
-    this.lastSampleAt = null;
     this.lastEntryAt = null;
     this.lastEntryAtBySide = { UP: null, DOWN: null };
+    this.lastDipAttemptAtBySide = { UP: null, DOWN: null };
+    this.dipHistory = { UP: [], DOWN: [] };
+    this.lastHistoryQuoteAtBySide = { UP: null, DOWN: null };
+    this.dipEntryCountBySide = { UP: 0, DOWN: 0 };
+    this.dipArmedBySide = { UP: true, DOWN: true };
+    this.dipRearmPriceBySide = { UP: null, DOWN: null };
     this.signal = null;
-    this.forecast = this.emptyForecast('Collecting ten fresh one-second pressure samples.', 'COLLECTING_SAMPLES');
-    this.log('PAPER_PRESSURE_WINDOW_STARTED', {
+    this.forecast = this.emptyForecast('Collecting a fresh rolling UP and DOWN price history.', 'COLLECTING_PRICE_HISTORY');
+    this.log('PAPER_DIP_WINDOW_STARTED', {
       windowStart: start,
-      samplesRequired: config.PRESSURE_SAMPLE_COUNT,
-      entryShares: config.PRESSURE_ENTRY_SHARES,
+      entryShares: config.DIP_ENTRY_SHARES,
+      maxEntriesPerSide: config.DIP_MAX_ENTRIES_PER_SIDE,
+      tradeWindowMs: config.DIP_TRADE_WINDOW_MS,
     });
   }
 
@@ -605,7 +504,7 @@ class PressureForecastBot extends WickBot {
       if (this.orderWindowStart !== start) this.openStrategyWindow(start, now);
       this.ensureClobFeed();
       await this.refreshLiveQuotes(now);
-      this.processPressureStrategy(start, now);
+      this.processDipStrategy(start, now);
       this.lastScanAt = now;
       this.error = null;
       this.status = this.positions.some((position) =>
@@ -618,7 +517,7 @@ class PressureForecastBot extends WickBot {
       if (this.lastError !== this.error || now - (this.lastErrorAt || 0) > 30_000) {
         this.lastError = this.error;
         this.lastErrorAt = now;
-        this.log('PAPER_PRESSURE_SCAN_ERROR', { error: this.error });
+        this.log('PAPER_DIP_SCAN_ERROR', { error: this.error });
       }
     }
   }
@@ -638,29 +537,36 @@ class PressureForecastBot extends WickBot {
     this.clobFeed = this.clobFeedFactory({
       assetIds,
       now: this.now,
-      onQuote: (assetId, quote) => {
-        const side = SIDES.find((candidate) => String(this.market?.tokens?.[candidate]) === String(assetId));
-        if (!side) return;
-        if (!quote) {
-          this.liveQuotes[side] = {
-            ...this.liveQuotes[side],
-            status: this.clobFeed?.snapshot?.().status === 'CONNECTED' ? 'MISSING' : 'STALE',
-            stale: true,
-            error: 'Waiting for a fresh CLOB book snapshot.',
-          };
-          return;
-        }
-        const now = this.now();
-        const ageMs = Math.max(0, now - Number(quote.updatedAt));
-        this.liveQuotes[side] = {
-          ...quote,
-          status: ageMs <= config.PRESSURE_MAX_QUOTE_AGE_MS ? quote.status : 'STALE',
-          stale: ageMs > config.PRESSURE_MAX_QUOTE_AGE_MS,
-        };
-        this.applyTakeProfitExits(now);
-      },
+      onQuote: (assetId, quote) => this.handleClobQuote(assetId, quote),
     });
     this.clobFeed.start?.();
+  }
+
+  handleClobQuote(assetId, quote) {
+    const side = SIDES.find((candidate) =>
+      String(this.market?.tokens?.[candidate]) === String(assetId));
+    if (!side) return;
+    if (!quote) {
+      this.liveQuotes[side] = {
+        ...this.liveQuotes[side],
+        status: this.clobFeed?.snapshot?.().status === 'CONNECTED' ? 'MISSING' : 'STALE',
+        stale: true,
+        error: 'Waiting for a fresh CLOB book snapshot.',
+      };
+      return;
+    }
+
+    const now = this.now();
+    const ageMs = Math.max(0, now - Number(quote.updatedAt));
+    this.liveQuotes[side] = {
+      ...quote,
+      status: ageMs <= config.CLOB_MAX_QUOTE_AGE_MS ? quote.status : 'STALE',
+      stale: ageMs > config.CLOB_MAX_QUOTE_AGE_MS,
+    };
+    this.recordDipQuote(side, this.liveQuotes[side]);
+    this.updatePositionMarks(side, this.liveQuotes[side], now);
+    this.applyTakeProfitExits(now);
+    this.processDipStrategy(this.market?.start, now, side);
   }
 
   async refreshLiveQuotes(now) {
@@ -672,8 +578,8 @@ class PressureForecastBot extends WickBot {
         const ageMs = Math.max(0, now - Number(quote.updatedAt));
         this.liveQuotes[side] = {
           ...quote,
-          status: ageMs <= config.PRESSURE_MAX_QUOTE_AGE_MS ? quote.status : 'STALE',
-          stale: ageMs > config.PRESSURE_MAX_QUOTE_AGE_MS,
+          status: ageMs <= config.CLOB_MAX_QUOTE_AGE_MS ? quote.status : 'STALE',
+          stale: ageMs > config.CLOB_MAX_QUOTE_AGE_MS,
         };
       } else {
         const previous = this.liveQuotes[side] || {};
@@ -682,21 +588,45 @@ class PressureForecastBot extends WickBot {
           : Infinity;
         this.liveQuotes[side] = {
           ...previous,
-          status: quoteAge > config.PRESSURE_MAX_QUOTE_AGE_MS ? 'STALE' : previous.status || 'MISSING',
-          stale: quoteAge > config.PRESSURE_MAX_QUOTE_AGE_MS,
+          status: quoteAge > config.CLOB_MAX_QUOTE_AGE_MS ? 'STALE' : previous.status || 'MISSING',
+          stale: quoteAge > config.CLOB_MAX_QUOTE_AGE_MS,
           source: 'POLYMARKET_CLOB_WEBSOCKET',
           error: this.clobFeed?.snapshot?.().error || null,
         };
       }
+      this.recordDipQuote(side, this.liveQuotes[side]);
     }
+    for (const side of SIDES) {
+      this.updatePositionMarks(side, this.liveQuotes[side], now);
+    }
+    this.applyTakeProfitExits(now);
+  }
+
+  recordDipQuote(side, quote) {
+    if (!quote || quote.status !== 'LIVE' || quote.stale) return false;
+    const updatedAt = Number(quote.updatedAt);
+    if (!Number.isFinite(updatedAt)
+      || updatedAt === this.lastHistoryQuoteAtBySide[side]) return false;
+    const mid = Number.isFinite(Number(quote.mid))
+      ? Number(quote.mid)
+      : (Number(quote.bestBid) + Number(quote.bestAsk)) / 2;
+    if (!(mid > 0 && mid < 1)) return false;
+    this.lastHistoryQuoteAtBySide[side] = updatedAt;
+    this.dipHistory[side].push({ at: updatedAt, mid });
+    this.dipHistory[side] = this.dipHistory[side].filter((sample) =>
+      sample.at >= updatedAt - config.DIP_LOOKBACK_MS);
+    return true;
+  }
+
+  updatePositionMarks(side, quote, now) {
     for (const position of this.positions) {
-      if (position.windowStart !== this.market.start || position.status !== 'OPEN') continue;
-      const quote = this.liveQuotes[position.side];
+      if (position.windowStart !== this.market?.start
+        || position.side !== side
+        || position.status !== 'OPEN') continue;
       position.markBid = quote?.bestBid ?? null;
       position.markUpdatedAt = quote?.updatedAt || now;
       position.markStatus = quote?.bestBid == null || quote.stale ? 'MISSING' : 'LIVE';
     }
-    this.applyTakeProfitExits(now);
   }
 
   applyTakeProfitExits(now) {
@@ -704,6 +634,10 @@ class PressureForecastBot extends WickBot {
     for (const position of this.positions) {
       if (position.windowStart !== this.market.start || position.status !== 'OPEN') continue;
       const quote = this.liveQuotes[position.side];
+      if (position.strategyVersion === 'DIP_REBOUND_V1') {
+        this.processSpikeExit(position.side, now);
+        continue;
+      }
       if (!this.isTakeProfitQuote(quote, now, position)) continue;
       this.finalizeTakeProfit(position, Number(quote.updatedAt));
     }
@@ -721,15 +655,15 @@ class PressureForecastBot extends WickBot {
       && !quote.stale
       && Number.isFinite(updatedAt)
       && updatedAt <= now
-      && ageMs <= config.PRESSURE_MAX_QUOTE_AGE_MS
+      && ageMs <= config.CLOB_MAX_QUOTE_AGE_MS
       && (windowEnd == null || (updatedAt >= windowStart && updatedAt < windowEnd))
       && Number.isFinite(bestBid)
-      && bestBid >= config.PRESSURE_TAKE_PROFIT_TRIGGER;
+      && bestBid >= config.LEGACY_TAKE_PROFIT_TRIGGER;
   }
 
   finalizeTakeProfit(position, now) {
     if (position.status !== 'OPEN') return;
-    const payout = config.PRESSURE_TAKE_PROFIT_PAYOUT;
+    const payout = config.LEGACY_TAKE_PROFIT_PAYOUT;
     const grossPayout = payout * Number(position.shares);
     position.exitPrice = payout;
     position.exitProceeds = grossPayout;
@@ -737,16 +671,16 @@ class PressureForecastBot extends WickBot {
     position.exitFees = 0;
     position.realizedPnl = grossPayout - Number(position.totalCost || 0);
     position.status = 'SETTLED_EXIT';
-    position.exitReason = `TAKE_PROFIT_BID_AT_${config.PRESSURE_TAKE_PROFIT_TRIGGER.toFixed(2)}`;
+    position.exitReason = `TAKE_PROFIT_BID_AT_${config.LEGACY_TAKE_PROFIT_TRIGGER.toFixed(2)}`;
     position.settlementBasis = 'PAPER_TAKE_PROFIT';
     position.closedAt = now;
     position.settledAt = now;
     this.cash += grossPayout;
     this.recordThresholdOrder(position, now, 'SELL_TAKE_PROFIT', payout);
-    this.log('PAPER_PRESSURE_TAKE_PROFIT_HIT', {
+    this.log('PAPER_LEGACY_TAKE_PROFIT_HIT', {
       positionId: position.id,
       side: position.side,
-      triggerBid: config.PRESSURE_TAKE_PROFIT_TRIGGER,
+      triggerBid: config.LEGACY_TAKE_PROFIT_TRIGGER,
       payoutPerShare: payout,
       shares: position.shares,
       proceeds: grossPayout,
@@ -759,231 +693,241 @@ class PressureForecastBot extends WickBot {
     if (!quote || quote.status !== 'LIVE' || quote.stale
       || !Number.isFinite(Number(quote.updatedAt))
       || now < Number(quote.updatedAt)
-      || now - Number(quote.updatedAt) > config.PRESSURE_MAX_QUOTE_AGE_MS
+      || now - Number(quote.updatedAt) > config.CLOB_MAX_QUOTE_AGE_MS
       || !(Number(quote.bestBid) > 0 && Number(quote.bestAsk) < 1)
       || !Array.isArray(quote.bidLevels) || !Array.isArray(quote.askLevels)) return null;
     return quote;
   }
 
-  buildPressureRead(now) {
-    const feed = this.priceFeed.snapshot?.() || {};
-    const flow = feed.tradeFlow || {};
-    const tickAt = Number(feed.tickAt);
-    const tickAgeMs = Number.isFinite(tickAt) ? Math.max(0, now - tickAt) : null;
-    const binanceReady = feed.status === 'CONNECTED'
-      && tickAgeMs != null
-      && tickAgeMs <= config.PRESSURE_MAX_BINANCE_AGE_MS
-      && Number(flow.tradeCount) >= config.PRESSURE_MIN_BINANCE_TRADES
-      && Number.isFinite(Number(flow.imbalance));
-    const quotes = Object.fromEntries(SIDES.map((side) => [side, this.freshQuote(side, now)]));
-    const clobReady = SIDES.every((side) => quotes[side]);
-    if (!binanceReady || !clobReady) {
-      return {
-        ready: false,
-        status: 'WAITING_FOR_DATA',
-        reason: !binanceReady
-          ? 'Waiting for fresh Binance trades and a current tick.'
-          : 'Waiting for fresh two-sided Polymarket books.',
-        feed,
-        flow,
-        quotes,
-        tickAgeMs,
-      };
-    }
-
-    const binanceImbalance = clamp(Number(flow.imbalance));
-    const priceChangePct = Number.isFinite(Number(flow.priceChangePct))
-      ? Number(flow.priceChangePct)
-      : 0;
-    const momentum = clamp(priceChangePct / 0.0004);
-    const binanceScore = clamp(0.75 * binanceImbalance + 0.25 * momentum);
-    const upBook = bookPressure(quotes.UP);
-    const downBook = bookPressure(quotes.DOWN);
-    const clobScore = clamp((upBook.score - downBook.score) / 2);
-    const combinedScore = clamp((binanceScore + clobScore) / 2);
-    return {
-      ready: true,
-      status: 'READY',
-      reason: 'Combined Binance trade flow and Polymarket book pressure are fresh.',
-      feed,
-      flow,
-      quotes,
-      tickAgeMs,
-      binanceScore,
-      binanceImbalance,
-      momentum,
-      clobScore,
-      combinedScore,
-      upBook,
-      downBook,
+  buildDipCandidate(side, now, start, tradeOpen) {
+    const quote = this.freshQuote(side, now);
+    const analysis = analyzeDipRebound(this.dipHistory[side] || [], now);
+    const candidate = {
+      ...this.emptyCandidate(analysis.reason),
+      ...analysis,
+      qualifies: false,
+      ready: analysis.ready && Boolean(quote),
+      bestAsk: quote?.bestAsk ?? null,
+      entriesThisWindow: Number(this.dipEntryCountBySide[side] || 0),
+      armed: this.dipArmedBySide[side] !== false,
+      requestedShares: config.DIP_ENTRY_SHARES,
+      maxEntries: config.DIP_MAX_ENTRIES_PER_SIDE,
     };
-  }
+    const elapsed = Number(now) - Number(start);
+    const cooldownAt = Number(this.lastDipAttemptAtBySide[side] ?? this.lastEntryAtBySide[side]);
+    const cooldownRemaining = cooldownAt
+      ? config.DIP_ENTRY_COOLDOWN_MS - (now - cooldownAt)
+      : 0;
 
-  processPressureStrategy(start, now) {
-    const read = this.buildPressureRead(now);
-    if (!read.ready) {
-      this.forecast = {
-        ...this.emptyForecast(read.reason),
-        status: read.status,
-        sampleCount: this.freshSamples(now).length,
-        secondsRemaining: Math.max(0, (start + this.windowMs - now) / 1000),
-      };
-      return false;
+    if (!tradeOpen) {
+      candidate.reason = elapsed >= config.DIP_TRADE_WINDOW_MS
+        ? 'Entry and spike-trading window is closed; remaining shares wait for official resolution.'
+        : 'Waiting for this five-minute market window to start.';
+      return candidate;
+    }
+    if (!quote) {
+      candidate.reason = `Waiting for a fresh ${side} CLOB quote. The other side is evaluated independently.`;
+      return candidate;
     }
 
-    const evaluationDue = this.lastSampleAt == null
-      || now - this.lastSampleAt >= config.PRESSURE_SAMPLE_INTERVAL_MS;
-    if (evaluationDue) {
-      this.lastSampleAt = now;
-      const openPrice = Number(read.feed.currentCandle?.start) === start
-        ? Number(read.feed.currentCandle.open)
-        : null;
-      this.pressureSamples.push({
-        at: now,
-        score: read.combinedScore,
-        price: Number(read.feed.price),
-        windowOpenPrice: openPrice,
-        marketImpliedUp: Number(read.quotes.UP.mid),
+    if (this.dipArmedBySide[side] === false
+      && Number.isFinite(Number(this.dipRearmPriceBySide[side]))
+      && candidate.currentMid >= Number(this.dipRearmPriceBySide[side])) {
+      this.dipArmedBySide[side] = true;
+      this.dipRearmPriceBySide[side] = null;
+      candidate.armed = true;
+      this.log('PAPER_DIP_SIDE_REARMED', {
+        side,
+        mid: candidate.currentMid,
+        windowStart: start,
       });
-      this.pressureSamples = this.pressureSamples.slice(-config.PRESSURE_SAMPLE_COUNT);
     }
 
-    const forecast = this.createForecast(read, now, start);
-    this.forecast = forecast;
-    if (!evaluationDue || !forecast.ready || !forecast.selectedSide) return false;
-
-    const side = forecast.selectedSide;
-    const lastSideEntryAt = this.lastEntryAtBySide[side];
-    const cooldownRemaining = config.PRESSURE_ENTRY_COOLDOWN_MS
-      - (now - Number(lastSideEntryAt || 0));
-    if (lastSideEntryAt != null && cooldownRemaining > 0) {
-      this.forecast.status = 'ENTRY_COOLDOWN';
-      this.forecast.reason = `${side} signal qualifies; another ${side} entry is available in ${Math.ceil(cooldownRemaining / 1000)} seconds. The other side has its own cooldown.`;
-      return false;
+    if (!analysis.ready) return candidate;
+    if (!this.dipArmedBySide[side]) {
+      candidate.reason = `Waiting for ${side} to recover to $${Number(this.dipRearmPriceBySide[side]).toFixed(3)} before another dip can trigger.`;
+      return candidate;
     }
-
-    const candidate = forecast.candidateBySide[side];
-    const requestedShares = Number(candidate?.requestedShares) || config.PRESSURE_ENTRY_SHARES;
-    const opened = this.executeBuy(side, requestedShares, now, {
-      kind: 'BUY_ENTRY',
-      candidate,
-      signal: read,
-    });
-    if (opened) {
-      this.lastEntryAt = now;
-      this.lastEntryAtBySide[side] = now;
-      this.forecast.status = 'ENTRY_FILLED';
-      this.forecast.reason = `Bought another ${opened.shares}-share ${side} position. UP and DOWN trade independently; this side can re-enter after its ${config.PRESSURE_ENTRY_COOLDOWN_MS / 1000}-second cooldown while the other side remains available.`;
-      this.signal = { side, action: 'BUY_ENTRY', reason: this.forecast.reason };
-      return true;
+    if (candidate.entriesThisWindow >= config.DIP_MAX_ENTRIES_PER_SIDE) {
+      candidate.reason = `${side} has reached its ${config.DIP_MAX_ENTRIES_PER_SIDE}-entry limit for this window.`;
+      return candidate;
     }
-    return false;
+    if (cooldownRemaining > 0) {
+      candidate.reason = `${side} is cooling down for ${Math.ceil(cooldownRemaining / 1000)} more seconds.`;
+      return candidate;
+    }
+    if (Number(quote.bestAsk) > config.DIP_MAX_BUY_PRICE + EPSILON) {
+      candidate.reason = `${side} ask is above the $${config.DIP_MAX_BUY_PRICE.toFixed(2)} entry ceiling.`;
+      return candidate;
+    }
+    if (!analysis.qualifies) return candidate;
+
+    candidate.qualifies = true;
+    candidate.reason = `${analysis.reason} Buy ${config.DIP_ENTRY_SHARES} ${side} shares at the ask.`;
+    return candidate;
   }
 
-  freshSamples(now) {
-    return this.pressureSamples
-      .filter((sample) => now - Number(sample.at)
-        <= config.PRESSURE_SAMPLE_INTERVAL_MS * config.PRESSURE_SAMPLE_COUNT + 500)
-      .slice(-config.PRESSURE_SAMPLE_COUNT);
-  }
-
-  createForecast(read, now, start) {
-    const requiredSamples = config.PRESSURE_SAMPLE_COUNT;
-    const samples = this.freshSamples(now, requiredSamples);
-    const secondsRemaining = Math.max(0, (start + this.windowMs - now) / 1000);
-    const marketImpliedUp = Number(read.quotes.UP.mid);
-    const marketImpliedDown = Number(read.quotes.DOWN.mid);
-    const candidateBySide = { UP: this.emptyCandidate('Waiting for enough fresh pressure samples.'), DOWN: this.emptyCandidate('Waiting for enough fresh pressure samples.') };
-    const trend = pressureTrend(samples, requiredSamples);
-    const currentPrice = Number(read.feed.price);
-    const candle = read.feed.currentCandle;
-    const windowOpenPrice = Number(candle?.start) === start ? Number(candle.open) : null;
-    const btcMoveFromOpenPct = currentPrice > 0 && windowOpenPrice > 0
-      ? ((currentPrice - windowOpenPrice) / windowOpenPrice) * 100
-      : null;
-    const volatility = volatilityPerSecond(samples, requiredSamples);
-    const ready = samples.length >= requiredSamples
-      && marketImpliedUp > 0 && marketImpliedUp < 1
-      && marketImpliedDown > 0 && marketImpliedDown < 1
-      && windowOpenPrice > 0
-      && currentPrice > 0
-      && volatility != null
-      && secondsRemaining > 0;
-    if (!ready) {
-      return {
-        ...this.emptyForecast(
-          `Collecting ${requiredSamples} fresh one-second samples (${samples.length}/${requiredSamples}); no forecast is used yet.`,
-          'COLLECTING_SAMPLES',
-        ),
-        sampleCount: samples.length,
-        requiredSamples,
-        marketImpliedUp,
-        marketImpliedDown,
-        btcMoveFromOpenPct,
-        volatilityPerSecond: volatility,
-        secondsRemaining,
-        pressureTrendSlope: trend.pressureTrendSlope,
-        pressurePersistence: trend.pressurePersistence,
-        pressureAcceleration: trend.pressureAcceleration,
-        candidateBySide,
-      };
+  createDipForecast(now, start) {
+    const elapsed = Number(now) - Number(start);
+    const tradeOpen = elapsed >= 0 && elapsed < config.DIP_TRADE_WINDOW_MS;
+    const candidateBySide = Object.fromEntries(SIDES.map((side) => [
+      side,
+      this.buildDipCandidate(side, now, start, tradeOpen),
+    ]));
+    const qualifyingSides = SIDES.filter((side) => candidateBySide[side].qualifies);
+    const ready = SIDES.some((side) => this.freshQuote(side, now));
+    let status = 'SCANNING_FOR_DIP';
+    let reason = 'UP and DOWN are monitored separately for a dip followed by a confirmed rebound.';
+    if (elapsed >= config.DIP_TRADE_WINDOW_MS) {
+      status = 'TRADE_WINDOW_CLOSED';
+      reason = 'Trading is limited to the first 240 seconds; open shares now wait for official resolution.';
+    } else if (!ready) {
+      status = 'WAITING_FOR_CLOB';
+      reason = 'Waiting for fresh Polymarket quotes; no Binance or model signal is required.';
+    } else if (qualifyingSides.length) {
+      status = 'DIP_REBOUND_READY';
+      reason = `${qualifyingSides.join(' and ')} ${qualifyingSides.length === 1 ? 'has' : 'have'} a confirmed dip-and-rebound setup. Each side may enter independently.`;
     }
 
-    const remainingVolatility = Math.max(1e-8, volatility * Math.sqrt(secondsRemaining));
-    const zScore = Math.log(currentPrice / windowOpenPrice) / remainingVolatility;
-    const priceModelUp = normalCdf(zScore);
-    const pressureProbabilityUp = Math.max(0.05, Math.min(0.95, 0.5 + 0.45 * trend.pressureImpulse));
-    const estimateUp = Math.max(0.01, Math.min(0.99,
-      0.50 * priceModelUp + 0.30 * marketImpliedUp + 0.20 * pressureProbabilityUp));
-    const estimateDown = 1 - estimateUp;
-    const askUp = Number(read.quotes.UP.bestAsk);
-    const askDown = Number(read.quotes.DOWN.bestAsk);
-    const laggingSide = askUp <= askDown ? 'UP' : 'DOWN';
-
-    for (const side of SIDES) {
-      const quote = read.quotes[side];
-      const probability = side === 'UP' ? estimateUp : estimateDown;
-      candidateBySide[side] = evaluateEntryCandidate(probability, quote, this.market);
-    }
-
-    const qualifying = SIDES
-      .filter((side) => candidateBySide[side].qualifies)
-      .sort((a, b) => candidateBySide[b].expectedNetEdgePerShare
-        - candidateBySide[a].expectedNetEdgePerShare);
-    const selectedSide = qualifying[0] || null;
-    const status = selectedSide ? 'QUALIFIED' : 'NO_EDGE';
-    const reason = selectedSide
-      ? `${selectedSide} clears the probability and $${config.PRESSURE_MIN_NET_EDGE_PER_SHARE.toFixed(2)} net-edge checks; the share size is scaled by edge and capped at ${config.PRESSURE_MAX_ENTRY_SHARES}.`
-      : 'Neither UP nor DOWN currently clears the probability, ask-cap, and net-edge checks.';
     return {
-      ready: true,
-      calibrated: false,
+      ready,
       status,
       reason,
-      estimateUp,
-      estimateDown,
-      priceModelUp,
-      pressureProbabilityUp,
-      marketImpliedUp,
-      marketImpliedDown,
-      laggingSide,
-      selectedSide,
-      expectedNetEdgePerShare: selectedSide
-        ? candidateBySide[selectedSide].expectedNetEdgePerShare
-        : null,
-      minRequiredEdgePerShare: config.PRESSURE_MIN_NET_EDGE_PER_SHARE,
-      sampleCount: samples.length,
-      requiredSamples,
-      pressureTrendSlope: trend.pressureTrendSlope,
-      pressurePersistence: trend.pressurePersistence,
-      pressureAcceleration: trend.pressureAcceleration,
-      pressureImpulse: trend.pressureImpulse,
-      btcMoveFromOpenPct,
-      volatilityPerSecond: volatility,
-      secondsRemaining,
-      zScore,
+      signalSource: 'POLYMARKET_CLOB_PRICE_ONLY',
+      selectedSide: null,
+      qualifyingSides,
+      secondsIntoWindow: Math.max(0, elapsed / 1000),
+      secondsRemaining: Math.max(0, (start + this.windowMs - now) / 1000),
+      tradeWindowMs: config.DIP_TRADE_WINDOW_MS,
+      entryShares: config.DIP_ENTRY_SHARES,
+      maxEntriesPerSide: config.DIP_MAX_ENTRIES_PER_SIDE,
       candidateBySide,
     };
+  }
+
+  processDipStrategy(start, now, onlySide = null) {
+    if (!Number.isFinite(Number(start)) || !this.market || this.market.start !== start) return false;
+    const forecast = this.createDipForecast(now, start);
+    this.forecast = forecast;
+    const sides = onlySide && SIDES.includes(onlySide) ? [onlySide] : SIDES;
+    let changed = false;
+
+    for (const side of sides) {
+      const candidate = forecast.candidateBySide[side];
+      if (!candidate?.qualifies) continue;
+      this.lastDipAttemptAtBySide[side] = now;
+      const opened = this.executeBuy(side, config.DIP_ENTRY_SHARES, now, {
+        kind: 'BUY_DIP',
+        candidate,
+        signal: candidate,
+      });
+      if (!opened) {
+        candidate.qualifies = false;
+        candidate.reason = this.windowOrders[0]?.error
+          || `${side} paper order was not filled; the next dip setup can be evaluated independently.`;
+        continue;
+      }
+
+      this.lastEntryAt = now;
+      this.lastEntryAtBySide[side] = now;
+      this.dipEntryCountBySide[side] = Number(this.dipEntryCountBySide[side] || 0) + 1;
+      this.dipArmedBySide[side] = false;
+      this.dipRearmPriceBySide[side] = Math.min(
+        0.99,
+        Number(candidate.currentMid) + config.DIP_REARM_RECOVERY,
+      );
+      candidate.qualifies = false;
+      candidate.entriesThisWindow = this.dipEntryCountBySide[side];
+      candidate.armed = false;
+      candidate.reason = `Bought ${opened.shares} ${side} shares. This side rearms after recovering to $${this.dipRearmPriceBySide[side].toFixed(3)}; the other side remains independent.`;
+      this.signal = { side, action: 'BUY_DIP', reason: candidate.reason };
+      changed = true;
+    }
+
+    forecast.qualifyingSides = SIDES.filter((side) => forecast.candidateBySide[side].qualifies);
+    if (changed) {
+      forecast.status = 'DIP_ENTRY_FILLED';
+      forecast.reason = 'Paper dip entry recorded. UP and DOWN have separate histories, cooldowns, and exposure limits.';
+    }
+    return changed;
+  }
+
+  processSpikeExit(side, now) {
+    if (!SIDES.includes(side) || !this.market) return false;
+    const windowStart = Number(this.market.start);
+    const tradeCutoff = windowStart + config.DIP_TRADE_WINDOW_MS;
+    if (now >= tradeCutoff) return false;
+
+    const positions = this.positions.filter((position) =>
+      position.windowStart === windowStart
+      && position.side === side
+      && position.strategyVersion === 'DIP_REBOUND_V1'
+      && position.status === 'OPEN');
+    if (!positions.length) return false;
+    const quote = this.freshQuote(side, now);
+    if (!quote || Number(quote.updatedAt) >= tradeCutoff) return false;
+
+    const shares = positions.reduce((total, position) => total + Number(position.shares || 0), 0);
+    const grossEntryCost = positions.reduce((total, position) =>
+      total + Number(position.cost ?? position.totalCost ?? 0), 0);
+    if (!(shares > 0)) return false;
+
+    const preview = sweepBook(quote.bidLevels, shares, 'SELL', this.market);
+    if (!preview.complete) return false;
+    const averageEntry = grossEntryCost / shares;
+    const netProfit = preview.netProceeds
+      - positions.reduce((total, position) => total + Number(position.totalCost || 0), 0);
+    const minimumProfit = shares * config.DIP_SPIKE_MIN_NET_PROFIT_PER_SHARE;
+    if (preview.averagePrice + EPSILON < averageEntry + config.DIP_SPIKE_MIN_PRICE_MOVE
+      || netProfit + EPSILON < minimumProfit) return false;
+
+    const execution = sweepBook(quote.bidLevels, shares, 'SELL', this.market, { consume: true });
+    if (!execution.complete) return false;
+    const order = this.createOrder('SELL_SPIKE', side, shares, now, execution);
+    order.status = 'FILLED';
+    order.filledAt = now;
+    order.matchedShares = execution.filledShares;
+    order.price = execution.averagePrice;
+    order.fee = execution.fees;
+    order.grossProceeds = execution.gross;
+    order.netProceeds = execution.netProceeds;
+    order.positionIds = positions.map((position) => position.id);
+    order.exitReason = 'NET_PROFITABLE_SPIKE';
+    order.fills = execution.fills;
+    this.cash += execution.netProceeds;
+
+    let remainingGross = execution.gross;
+    let remainingFees = execution.fees;
+    for (const [index, position] of positions.entries()) {
+      const last = index === positions.length - 1;
+      const shareFraction = Number(position.shares) / shares;
+      const gross = last ? remainingGross : execution.gross * shareFraction;
+      const fees = last ? remainingFees : execution.fees * shareFraction;
+      remainingGross -= gross;
+      remainingFees -= fees;
+      position.exitPrice = execution.averagePrice;
+      position.exitProceeds = gross;
+      position.proceeds = gross - fees;
+      position.exitFees = fees;
+      position.realizedPnl = gross - fees - Number(position.totalCost || 0);
+      position.status = 'SETTLED_EXIT';
+      position.exitReason = 'PROFITABLE_SPIKE_TAKER_SWEEP';
+      position.settlementBasis = 'PAPER_TAKER_SPIKE_EXIT';
+      position.closedAt = now;
+      position.settledAt = now;
+      position.exitOrderId = order.id;
+    }
+    this.log('PAPER_DIP_SPIKE_EXIT_FILLED', {
+      orderId: order.id,
+      side,
+      shares,
+      averageExit: execution.averagePrice,
+      grossProceeds: execution.gross,
+      fees: execution.fees,
+      netProfit,
+      positions: positions.length,
+    });
+    return true;
   }
 
   executeBuy(side, shares, now, { kind, candidate, signal } = {}) {
@@ -994,12 +938,12 @@ class PressureForecastBot extends WickBot {
       shares,
       'BUY',
       this.market,
-      { maximumPrice: config.PRESSURE_MAX_BUY_PRICE },
+      { maximumPrice: config.DIP_MAX_BUY_PRICE },
     );
     const order = this.createOrder(kind || 'BUY_ENTRY', side, shares, now, preview);
     if (!preview.complete) {
       order.status = 'SKIPPED_PRICE_CAP_OR_DEPTH';
-      order.error = `Full requested size was not available at or below $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)}.`;
+      order.error = `Full requested size was not available at or below $${config.DIP_MAX_BUY_PRICE.toFixed(2)}.`;
       return null;
     }
     if (preview.totalCost > this.cash + EPSILON) {
@@ -1012,7 +956,7 @@ class PressureForecastBot extends WickBot {
       shares,
       'BUY',
       this.market,
-      { maximumPrice: config.PRESSURE_MAX_BUY_PRICE, consume: true },
+      { maximumPrice: config.DIP_MAX_BUY_PRICE, consume: true },
     );
     if (!execution.complete) {
       order.status = 'CANCELLED_BOOK_CHANGED';
@@ -1033,8 +977,9 @@ class PressureForecastBot extends WickBot {
       outcome: side,
       tokenId: this.market.tokens[side],
       entryKey: order.id,
-      entryLabel: `Pressure entry · ${side}`,
-      entryType: 'PAPER_TAKER_PRESSURE',
+      entryLabel: `Dip-and-rebound entry · ${side}`,
+      entryType: 'PAPER_TAKER_DIP_REBOUND',
+      strategyVersion: 'DIP_REBOUND_V1',
       orderType: 'PAPER_TAKER_MARKET',
       fillModel: 'VISIBLE_ASK_SWEEP_WITH_CONFIGURED_MAX_PRICE',
       shares: execution.filledShares,
@@ -1054,9 +999,12 @@ class PressureForecastBot extends WickBot {
       markUpdatedAt: quote.updatedAt,
       markStatus: 'LIVE',
       entryFills: execution.fills.map((fill) => ({ ...fill, at: now })),
-      expectedProbability: candidate?.estimatedProbability ?? null,
-      expectedNetEdgePerShare: candidate?.expectedNetEdgePerShare ?? null,
-      signalScore: signal?.combinedScore ?? null,
+      dipReferenceHigh: candidate?.referenceHigh ?? null,
+      dipTrough: candidate?.trough ?? null,
+      dipReboundAmount: candidate?.reboundAmount ?? null,
+      dipTriggerMid: candidate?.currentMid ?? null,
+      signalSource: 'POLYMARKET_CLOB_PRICE_ONLY',
+      signalScore: null,
     };
     this.cash -= execution.totalCost;
     this.positions.unshift(position);
@@ -1067,16 +1015,22 @@ class PressureForecastBot extends WickBot {
     order.grossCost = execution.gross;
     order.totalCost = execution.totalCost;
     order.fills = execution.fills;
-    order.maxPrice = config.PRESSURE_MAX_BUY_PRICE;
-    this.log('PAPER_PRESSURE_ENTRY_FILLED', {
+    order.maxPrice = config.DIP_MAX_BUY_PRICE;
+    order.signalSource = 'POLYMARKET_CLOB_PRICE_ONLY';
+    order.dipReferenceHigh = candidate?.referenceHigh ?? null;
+    order.dipTrough = candidate?.trough ?? null;
+    order.dipReboundAmount = candidate?.reboundAmount ?? null;
+    order.dipTriggerMid = candidate?.currentMid ?? null;
+    this.log('PAPER_DIP_ENTRY_FILLED', {
       orderId: order.id,
       positionId: position.id,
       side,
       shares: position.shares,
       averagePrice: position.avgEntry,
       fees: position.fees,
-      expectedNetEdgePerShare: position.expectedNetEdgePerShare,
-      signalScore: position.signalScore,
+      dipReferenceHigh: position.dipReferenceHigh,
+      dipTrough: position.dipTrough,
+      dipReboundAmount: position.dipReboundAmount,
     });
     return position;
   }
@@ -1096,7 +1050,7 @@ class PressureForecastBot extends WickBot {
       matchedShares: execution?.complete ? execution.filledShares : 0,
       price: execution?.averagePrice ?? null,
       orderType: 'PAPER_TAKER_MARKET',
-      maxPrice: kind.startsWith('BUY') ? config.PRESSURE_MAX_BUY_PRICE : null,
+      maxPrice: kind.startsWith('BUY') ? config.DIP_MAX_BUY_PRICE : null,
       status: 'SUBMITTED',
       createdAt: now,
       fee: 0,
@@ -1135,6 +1089,7 @@ class PressureForecastBot extends WickBot {
       position.windowStart === windowStart && position.status === 'OPEN');
     const windowEnd = windowStart + this.windowMs;
     for (const position of positions) {
+      if (position.strategyVersion === 'DIP_REBOUND_V1') continue;
       const quote = this.market?.start === windowStart
         ? this.liveQuotes[position.side]
         : null;
@@ -1152,7 +1107,7 @@ class PressureForecastBot extends WickBot {
       position.exitReason = 'WAITING_FOR_OFFICIAL_RESOLUTION';
       position.settlementBasis = 'POLYMARKET_RESOLUTION_PENDING';
     }
-    this.log('PAPER_PRESSURE_WINDOW_ENDED', {
+    this.log('PAPER_DIP_WINDOW_ENDED', {
       windowStart,
       pendingResolutionCount: pendingPositions.length,
       triggerReason,
@@ -1199,7 +1154,7 @@ class PressureForecastBot extends WickBot {
             resolvedAt: now,
             marketId: position.marketId,
           });
-          this.log('PAPER_PRESSURE_RESOLVED', {
+          this.log('PAPER_DIP_RESOLVED', {
             positionId: position.id,
             side: position.side,
             winningSide: position.resolvedOutcome,
@@ -1220,9 +1175,11 @@ class PressureForecastBot extends WickBot {
     if (this.running) return;
     this.running = true;
     this.priceFeed.start?.();
-    this.log('PAPER_PRESSURE_BOT_STARTED', {
-      note: 'Paper-only 5-minute pressure forecast. Real-order modules are not loaded.',
-      entryShares: config.PRESSURE_ENTRY_SHARES,
+    this.log('PAPER_DIP_BOT_STARTED', {
+      note: 'Paper-only CLOB dip-and-rebound entries with fee-aware spike exits. Real-order modules are not loaded.',
+      entryShares: config.DIP_ENTRY_SHARES,
+      maxEntriesPerSide: config.DIP_MAX_ENTRIES_PER_SIDE,
+      tradingSeconds: config.DIP_TRADE_WINDOW_MS / 1000,
     });
     const loop = async () => {
       if (!this.running) return;
@@ -1314,42 +1271,36 @@ class PressureForecastBot extends WickBot {
         execution: 'PAPER ONLY',
         markets: ['BTC 5m'],
         orderType: 'VISIBLE_BOOK_TAKER_SWEEP',
-        exit: `Take-profit: a fresh best bid at or above $${config.PRESSURE_TAKE_PROFIT_TRIGGER.toFixed(2)} exits at $${config.PRESSURE_TAKE_PROFIT_PAYOUT.toFixed(2)} per share. No stop-loss; otherwise hold until official resolution.`,
+        exit: `Within the first ${config.DIP_TRADE_WINDOW_MS / 1000} seconds, sell all current-window UP or DOWN shares together only when the executable bid sweep is at least $${config.DIP_SPIKE_MIN_PRICE_MOVE.toFixed(2)} above average entry and net profit after modeled taker fees is at least $${config.DIP_SPIKE_MIN_NET_PROFIT_PER_SHARE.toFixed(2)} per share. Otherwise hold for official resolution.`,
         liveTradingEnabled: false,
         realOrderModulesLoaded: false,
-        entryShares: config.PRESSURE_ENTRY_SHARES,
-        maxEntryShares: config.PRESSURE_MAX_ENTRY_SHARES,
-        entrySizeStepShares: config.PRESSURE_ENTRY_SIZE_STEP_SHARES,
-        edgeSizeStep: config.PRESSURE_EDGE_SIZE_STEP,
-        edgeSizeBase: config.PRESSURE_EDGE_SIZE_BASE,
-        minEstimatedProbability: config.PRESSURE_MIN_ESTIMATED_PROBABILITY,
-        maxBuyPrice: config.PRESSURE_MAX_BUY_PRICE,
-        minNetEdgePerShare: config.PRESSURE_MIN_NET_EDGE_PER_SHARE,
-        signal: 'Uncalibrated resolution estimate blends BTC price/volatility, current Polymarket odds, and ten one-second pressure samples.',
+        entryShares: config.DIP_ENTRY_SHARES,
+        maxEntriesPerSide: config.DIP_MAX_ENTRIES_PER_SIDE,
+        maxBuyPrice: config.DIP_MAX_BUY_PRICE,
+        tradeWindowMs: config.DIP_TRADE_WINDOW_MS,
+        signal: 'CLOB midpoint only: a four-cent dip from the prior rolling high, followed by a one-cent rebound and two rising quote updates.',
         signalState: this.forecast,
         orders: {
           type: 'Visible-book taker-style paper sweeps',
-          initialShares: config.PRESSURE_ENTRY_SHARES,
-          maxShares: config.PRESSURE_MAX_ENTRY_SHARES,
-          sizeStepShares: config.PRESSURE_ENTRY_SIZE_STEP_SHARES,
-          edgeStep: config.PRESSURE_EDGE_SIZE_STEP,
-          edgeSizeBase: config.PRESSURE_EDGE_SIZE_BASE,
-          minEstimatedProbability: config.PRESSURE_MIN_ESTIMATED_PROBABILITY,
-          minNetEdgePerShare: config.PRESSURE_MIN_NET_EDGE_PER_SHARE,
-          maxBuyPrice: config.PRESSURE_MAX_BUY_PRICE,
-          entryCooldownMs: config.PRESSURE_ENTRY_COOLDOWN_MS,
-          maxEntriesPerWindow: 'No fixed cap; limited by qualifying signals and available cash.',
+          initialShares: config.DIP_ENTRY_SHARES,
+          maxEntriesPerSide: config.DIP_MAX_ENTRIES_PER_SIDE,
+          maxBuyPrice: config.DIP_MAX_BUY_PRICE,
+          entryCooldownMs: config.DIP_ENTRY_COOLDOWN_MS,
+          rearmRecovery: config.DIP_REARM_RECOVERY,
+          maxEntriesPerWindow: `${config.DIP_MAX_ENTRIES_PER_SIDE} per side`,
         },
-        repeatEntryRule: `UP and DOWN have separate ${config.PRESSURE_ENTRY_COOLDOWN_MS / 1000}-second entry cooldowns. Each side can independently open repeated ${config.PRESSURE_ENTRY_SHARES}-${config.PRESSURE_MAX_ENTRY_SHARES} share entries, with size increasing by ${config.PRESSURE_ENTRY_SIZE_STEP_SHARES} shares per $${config.PRESSURE_EDGE_SIZE_STEP.toFixed(2)} edge above the $${config.PRESSURE_EDGE_SIZE_BASE.toFixed(2)} sizing threshold. Exit at the take-profit threshold or hold until official resolution; no stop-loss.`,
+        repeatEntryRule: `UP and DOWN are independent. Each can buy ${config.DIP_ENTRY_SHARES} shares on up to ${config.DIP_MAX_ENTRIES_PER_SIDE} separate dip setups per window, with a ${config.DIP_ENTRY_COOLDOWN_MS / 1000}-second cooldown and a $${config.DIP_REARM_RECOVERY.toFixed(2)} recovery required before that side rearms.`,
         priceFeed: this.priceFeed?.snapshot?.() || null,
         exits: {
-          mode: 'TAKE_PROFIT_OR_OFFICIAL_RESOLUTION',
+          mode: 'SPIKE_EXIT_OR_OFFICIAL_RESOLUTION',
           takeProfit: true,
-          takeProfitTrigger: config.PRESSURE_TAKE_PROFIT_TRIGGER,
-          takeProfitPayout: config.PRESSURE_TAKE_PROFIT_PAYOUT,
+          takeProfitTrigger: config.DIP_SPIKE_MIN_PRICE_MOVE,
+          takeProfitPayout: null,
           stopLoss: false,
+          tradeWindowMs: config.DIP_TRADE_WINDOW_MS,
+          minimumNetProfitPerShare: config.DIP_SPIKE_MIN_NET_PROFIT_PER_SHARE,
           resolutionPollMs: config.RESOLUTION_POLL_MS,
-          otherwise: 'If take-profit is not reached, hold positions until the original Polymarket market officially resolves.',
+          otherwise: 'After 240 seconds, stop strategy orders. Hold unsold shares until the original Polymarket market officially resolves.',
         },
       },
       forecast: this.forecast,
@@ -1403,14 +1354,8 @@ class PressureForecastBot extends WickBot {
 }
 
 PressureForecastBot._test = {
-  clamp,
-  normalCdf,
-  pressureTrend,
-  volatilityPerSecond,
-  bookPressure,
+  analyzeDipRebound,
   sweepBook,
-  sharesAllowedByEdge,
-  evaluateEntryCandidate,
   resolvedPayout,
 };
 

@@ -1,21 +1,21 @@
-# Polymarket BTC 5-minute pressure forecast — paper demo
+# Polymarket BTC 5-minute dip-and-spike paper demo
 
-The active production entrypoint is now a paper-only BTC 5-minute pressure-forecast demo. It loads `pressure-forecast-bot.js` and does not import or start the real-order bot or Polymarket trading adapter. The detailed live-order sections later in this file are dormant reference material and are not part of the active runtime.
+The active entrypoint runs a paper-only BTC five-minute dip-and-spike strategy. UP and DOWN are monitored and traded independently using Polymarket CLOB midpoint history. It loads `pressure-forecast-bot.js` but does not import or start the real-order bot or Polymarket trading adapter. The detailed live-order sections later in this file are dormant reference material and are not part of the active runtime.
 
 This document does not authorize a real order or a production deployment. Never put a private key or other secret in source control, this README, prompts, logs, or the dashboard.
 
 ## 1. Scope
 
 - Monitor only BTC 5-minute UP/DOWN markets.
-- Use Binance BTCUSDT aggregate trades and Polymarket CLOB order books.
+- Use Polymarket CLOB WebSocket quotes for dip signals and paper execution. Binance remains available as informational dashboard context and does not gate entries.
 - The running app is demo-only. No real order adapters are loaded at startup, regardless of the `LIVE_TRADING` variable.
-- The new signal is an experimental, uncalibrated estimate; it does not claim validated predictive accuracy.
+- The strategy is experimental and has no validated predictive accuracy or profitability claim.
 
 ## 2. Current strategy
 
-The full active rules are in `DEMO_RUNBOOK.md`. In short, the strategy waits for ten one-second Binance/Polymarket pressure samples and estimates each side's resolution probability from price, volatility, Polymarket odds, and pressure. Either side may qualify at any quoted price when its probability is above 50% and its net edge is at least $0.02 per share; the full ask sweep remains capped at $0.95. Entries start at 100 shares and grow by 10 shares per additional $0.01 of net edge above the unchanged $0.10 sizing base, capped at 200 shares. Each side has an independent 5-second cooldown. A fresh best bid of $0.99 triggers a simulated $1-per-share take-profit; there is no stop-loss. Positions that do not hit take-profit settle only after official resolution of the original market, checked every 10 seconds.
+The full active rules are in `DEMO_RUNBOOK.md`. In short, during seconds 0–240 the bot may buy 20 shares on either side after a $0.04 pullback from its 20-second reference high, followed by a $0.01 bounce and two rising quotes. Each side has a separate 10-second cooldown, must recover $0.02 before rearming, and is capped at four entries per five-minute window. Entries sweep visible asks up to $0.85 and include modeled taker fees. The bot sells all current-window shares on one side together only when the full visible bid sweep is at least $0.05 above weighted entry and net profitable after modeled fees. After second 240 it makes no strategy trades; unsold shares wait for official resolution, checked every 10 seconds.
 
-The dashboard shows the active experimental forecast and explicitly labels it uncalibrated. There is no shadow portfolio or alternate shadow signal.
+The dashboard shows live prices, recent high/trough, pullback/bounce size, entries used, and current trade-window status for UP and DOWN separately.
 
 The demo paper ledger is stored separately from the live-order ledger on the existing Railway volume at `/data/pressure-paper-state.json`. On first startup, the app imports the current demo snapshot from its existing dashboard before opening the new service; if that import or validation fails, it does not start a fresh empty bot. Afterward, trade/history changes and periodic checkpoints are saved atomically and restored on restart. A one-time `PAPER_HISTORY_RESET_VERSION` change intentionally starts a fresh demo ledger.
 

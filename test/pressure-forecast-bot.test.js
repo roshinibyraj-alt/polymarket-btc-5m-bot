@@ -79,32 +79,24 @@ function setQuote(bot, side, bid, ask, size = 1000, now = NOW) {
   };
 }
 
-function addSamples(bot, direction, now = NOW) {
-  const currentPrice = direction > 0 ? 100.5 : 99.5;
-  bot.priceFeed.price = currentPrice;
-  bot.priceFeed.currentCandle.close = currentPrice;
-  bot.priceFeed.currentCandle.high = Math.max(bot.priceFeed.currentCandle.high, currentPrice);
-  bot.priceFeed.currentCandle.low = Math.min(bot.priceFeed.currentCandle.low, currentPrice);
-  bot.pressureSamples = Array.from({ length: config.PRESSURE_SAMPLE_COUNT }, (_, index) => ({
-    at: now - (config.PRESSURE_SAMPLE_COUNT - 1 - index) * 1000,
-    score: direction * (0.2 + index * 0.07),
-    price: currentPrice - direction * (config.PRESSURE_SAMPLE_COUNT - 1 - index) * 0.01,
-    windowOpenPrice: 100,
-    marketImpliedUp: direction > 0 ? 0.32 : 0.65,
-  }));
-  bot.lastSampleAt = now - 1000;
+function addDipHistory(bot, side, { start = WINDOW_START, now = NOW, base = 0.50 } = {}) {
+  const points = [
+    [0, base],
+    [2_000, base - 0.005],
+    [4_000, base],
+    [6_000, base - 0.01],
+    [7_000, base - 0.02],
+    [8_000, base - 0.06],
+    [9_000, base - 0.055],
+    [10_000, base - 0.05],
+    [11_000, base - 0.045],
+    [12_000, base - 0.04],
+  ];
+  bot.dipHistory[side] = points.map(([offset, mid]) => ({ at: start + offset, mid }));
+  bot.lastHistoryQuoteAtBySide[side] = now;
+  const mid = points.at(-1)[1];
+  setQuote(bot, side, mid - 0.01, mid + 0.01, 500, now);
 }
-
-test('ten one-second pressure samples expose direction, persistence, and acceleration', () => {
-  const result = PressureForecastBot._test.pressureTrend(
-    Array.from({ length: 10 }, (_, index) => ({ score: index / 10 })),
-  );
-  assert.equal(result.sampleCount, 10);
-  assert.ok(result.pressureTrendSlope > 0);
-  assert.equal(result.pressurePersistence, 0.9);
-  assert.ok(result.pressureAcceleration > 0);
-  assert.ok(result.pressureImpulse > 0);
-});
 
 test('taker sweep observes the buy ceiling, sell floor, and per-level fees', () => {
   const market = { feesEnabled: true, feeSchedule: { rate: 0.07, exponent: 1 } };
@@ -128,187 +120,110 @@ test('taker sweep observes the buy ceiling, sell floor, and per-level fees', () 
   assert.equal(sell.filledShares, 100);
 });
 
-test('entry requires probability above 50%, $0.02 net edge, and retains $0.10 sizing base', () => {
-  const evaluate = PressureForecastBot._test.evaluateEntryCandidate;
-  const probabilityFloor = evaluate(0.50, {
-    bestAsk: 0.30,
-    askLevels: [{ price: 0.30, size: 500 }],
-  }, { feesEnabled: false });
-  const exactEdge = evaluate(0.51, {
-    bestAsk: 0.49,
-    askLevels: [{ price: 0.49, size: 500 }],
-  }, { feesEnabled: false });
-  const oneCentAboveSizingBase = evaluate(0.71, {
-    bestAsk: 0.60,
-    askLevels: [{ price: 0.60, size: 500 }],
-  }, { feesEnabled: false });
-  const capped = evaluate(0.99, {
-    bestAsk: 0.60,
-    askLevels: [{ price: 0.60, size: 500 }],
-  }, { feesEnabled: false });
+test('dip analysis waits for a pullback, rebound, and two rising quote updates', () => {
+  const bot = makeBot();
+  addDipHistory(bot, 'UP');
+  const candidate = bot.buildDipCandidate('UP', NOW, WINDOW_START, true);
+  assert.equal(candidate.ready, true);
+  assert.equal(candidate.qualifies, true);
+  assert.ok(Math.abs(candidate.dipAmount - 0.06) < 1e-9);
+  assert.ok(Math.abs(candidate.reboundAmount - 0.02) < 1e-9);
+  assert.equal(candidate.requestedShares, 20);
 
-  assert.equal(probabilityFloor.qualifies, false);
-  assert.equal(exactEdge.qualifies, true);
-  assert.ok(Math.abs(exactEdge.expectedNetEdgePerShare - 0.02) < 1e-12);
-  assert.equal(exactEdge.requestedShares, 100);
-  assert.equal(oneCentAboveSizingBase.qualifies, true);
-  assert.equal(oneCentAboveSizingBase.requestedShares, 110);
-  assert.equal(capped.requestedShares, 200);
-  assert.equal(PressureForecastBot._test.sharesAllowedByEdge(0.10), 100);
-  assert.equal(PressureForecastBot._test.sharesAllowedByEdge(0.11), 110);
-  assert.equal(PressureForecastBot._test.sharesAllowedByEdge(0.20), 200);
+  bot.dipHistory.UP[9].mid = bot.dipHistory.UP[8].mid - 0.001;
+  const falling = bot.buildDipCandidate('UP', NOW, WINDOW_START, true);
+  assert.equal(falling.qualifies, false);
 });
 
-test('forecast waits for ten samples and checks either side independently of the $0.50 level', () => {
+test('UP and DOWN can enter independently with separate per-side limits', () => {
   const bot = makeBot();
-  setQuote(bot, 'UP', 0.30, 0.32);
-  setQuote(bot, 'DOWN', 0.68, 0.70);
-  const read = bot.buildPressureRead(NOW);
-  const waiting = bot.createForecast(read, NOW, WINDOW_START);
-  assert.equal(waiting.ready, false);
-  assert.equal(waiting.sampleCount, 0);
-
-  addSamples(bot, 1);
-  const forecast = bot.createForecast(read, NOW, WINDOW_START);
-  assert.equal(forecast.ready, true);
-  assert.equal(forecast.laggingSide, 'UP');
-  assert.equal(forecast.candidateBySide.UP.qualifies, true);
-  assert.equal(forecast.candidateBySide.DOWN.qualifies, false);
-  assert.equal(forecast.calibrated, false);
-
-  setQuote(bot, 'UP', 0.48, 0.49);
-  setQuote(bot, 'DOWN', 0.50, 0.51);
-  const neutralFeed = makeFeed(NOW, 100);
-  neutralFeed.tradeFlow.imbalance = 0;
-  neutralFeed.tradeFlow.priceChangePct = 0;
-  bot.priceFeed = neutralFeed;
-  bot.pressureSamples = Array.from({ length: config.PRESSURE_SAMPLE_COUNT }, (_, index) => ({
-    at: NOW - (config.PRESSURE_SAMPLE_COUNT - 1 - index) * 1000,
-    score: 0,
-    price: 100 + (index % 2 ? 0.01 : 0),
-    windowOpenPrice: 100,
-    marketImpliedUp: 0.49,
-  }));
-  const narrowEdge = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
-  assert.equal(narrowEdge.candidateBySide.UP.qualifies, false);
-  assert.ok(narrowEdge.candidateBySide.UP.expectedNetEdgePerShare < config.PRESSURE_MIN_NET_EDGE_PER_SHARE);
-});
-
-test('a signal-qualified side can enter above $0.50 while the other side is cheaper', () => {
-  const bot = makeBot();
-  setQuote(bot, 'UP', 0.64, 0.65);
-  setQuote(bot, 'DOWN', 0.34, 0.35);
-  addSamples(bot, 1);
-  const forecast = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
-
-  assert.equal(forecast.laggingSide, 'DOWN');
-  assert.equal(forecast.candidateBySide.UP.qualifies, true);
-  assert.equal(forecast.selectedSide, 'UP');
-  assert.equal(forecast.candidateBySide.UP.bestAsk, 0.65);
-});
-
-test('entry uses edge-based share sizing and records modeled fees and all-in cost', () => {
-  const bot = makeBot();
-  setQuote(bot, 'UP', 0.30, 0.32);
-  setQuote(bot, 'DOWN', 0.68, 0.70);
-  addSamples(bot, 1);
+  addDipHistory(bot, 'UP', { base: 0.50 });
+  addDipHistory(bot, 'DOWN', { base: 0.52 });
   bot.market.feesEnabled = true;
   bot.market.feeSchedule = { rate: 0.07, exponent: 1 };
-  const read = bot.buildPressureRead(NOW);
 
-  const changed = bot.processPressureStrategy(WINDOW_START, NOW);
-
-  assert.equal(changed, true);
-  const position = bot.positions.find((item) => item.status === 'OPEN');
-  assert.equal(position.side, 'UP');
-  assert.equal(position.shares, 200);
-  assert.equal(position.fillModel, 'VISIBLE_ASK_SWEEP_WITH_CONFIGURED_MAX_PRICE');
-  assert.ok(position.fees > 0);
-  assert.equal(bot.orders[0].orderType, 'PAPER_TAKER_MARKET');
-  assert.equal(bot.orders[0].maxPrice, 0.95);
-  assert.ok(bot.cash < 10_000);
-  assert.ok(read.ready);
+  assert.equal(bot.processDipStrategy(WINDOW_START, NOW), true);
+  const open = bot.positions.filter((position) => position.status === 'OPEN');
+  assert.equal(open.length, 2);
+  assert.deepEqual(open.map((position) => position.side).sort(), ['DOWN', 'UP']);
+  assert.ok(open.every((position) => position.shares === 20));
+  assert.ok(open.every((position) => position.strategyVersion === 'DIP_REBOUND_V1'));
+  assert.ok(open.every((position) => position.fees > 0));
+  assert.deepEqual(bot.orders.map((order) => order.kind).sort(), ['BUY_DIP', 'BUY_DIP']);
+  assert.ok(bot.orders.every((order) => order.maxPrice === 0.85));
+  assert.equal(bot.dipEntryCountBySide.UP, 1);
+  assert.equal(bot.dipEntryCountBySide.DOWN, 1);
+  assert.equal(bot.dipArmedBySide.UP, false);
+  assert.equal(bot.dipArmedBySide.DOWN, false);
 });
 
-test('opposite qualifying signal adds a position without selling the existing one', () => {
-  const bot = makeBot({ price: 99.7 });
-  setQuote(bot, 'UP', 0.50, 0.52);
-  setQuote(bot, 'DOWN', 0.34, 0.36);
-  addSamples(bot, -1);
-  bot.market.feesEnabled = false;
-  bot.lastEntryAt = NOW - 1000;
-  bot.lastEntryAtBySide.UP = NOW - 1000;
-  const open = {
-    id: 'open-up',
-    side: 'UP',
-    outcome: 'UP',
-    shares: 100,
-    initialShares: 100,
-    totalCost: 60,
-    fees: 0,
-    windowStart: WINDOW_START,
-    marketId: bot.market.id,
-    tokenId: bot.market.tokens.UP,
-    slug: bot.market.slug,
-    status: 'OPEN',
-    markBid: 0.50,
-  };
-  bot.positions.unshift(open);
-  bot.cash = 9940;
-
-  const added = bot.processPressureStrategy(WINDOW_START, NOW);
-
-  assert.equal(added, true);
-  assert.equal(open.status, 'OPEN');
-  assert.equal(bot.lastEntryAtBySide.UP, NOW - 1000);
-  assert.equal(bot.lastEntryAtBySide.DOWN, NOW);
-  const openPositions = bot.positions.filter((position) => position.status === 'OPEN');
-  assert.equal(openPositions.length, 2);
-  assert.deepEqual(openPositions.map((position) => position.side).sort(), ['DOWN', 'UP']);
-  assert.deepEqual(bot.orders.map((order) => order.kind), ['BUY_ENTRY']);
-  assert.equal(bot.orders[0].maxPrice, 0.95);
-});
-
-test('same-side entries are blocked until the 5-second cooldown elapses', () => {
+test('one side can rearm only after recovery, cooldown, and another confirmed dip', () => {
   const bot = makeBot();
-  setQuote(bot, 'UP', 0.30, 0.32);
-  setQuote(bot, 'DOWN', 0.68, 0.70);
-  addSamples(bot, 1);
-  bot.market.feesEnabled = false;
-  const open = {
-    id: 'existing-up',
+  addDipHistory(bot, 'UP');
+  assert.equal(bot.processDipStrategy(WINDOW_START, NOW, 'UP'), true);
+  assert.equal(bot.positions.length, 1);
+
+  bot.dipHistory.UP = Array.from({ length: 10 }, (_, index) => ({
+    at: NOW + index * 1000,
+    mid: index < 5 ? 0.50 + index * 0.005 : 0.525 - (index - 5) * 0.01,
+  }));
+  bot.dipHistory.UP.push(
+    { at: NOW + 10_000, mid: 0.47 },
+    { at: NOW + 11_000, mid: 0.48 },
+    { at: NOW + 12_000, mid: 0.49 },
+  );
+  setQuote(bot, 'UP', 0.485, 0.505, 500, NOW + 12_000);
+  bot.recordDipQuote('UP', bot.liveQuotes.UP);
+  assert.equal(bot.processDipStrategy(WINDOW_START, NOW + 12_000, 'UP'), true);
+  assert.equal(bot.dipEntryCountBySide.UP, 2);
+});
+
+test('the strategy stops both entries and spike sales at second 240', () => {
+  const bot = makeBot();
+  addDipHistory(bot, 'UP', { now: WINDOW_START + 241_000, start: WINDOW_START + 229_000 });
+  const now = WINDOW_START + 241_000;
+  bot.processDipStrategy(WINDOW_START, now);
+  assert.equal(bot.positions.length, 0);
+  const position = {
+    id: 'late-position',
     side: 'UP',
-    outcome: 'UP',
-    shares: 100,
-    initialShares: 100,
-    totalCost: 32,
-    fees: 0,
+    strategyVersion: 'DIP_REBOUND_V1',
+    shares: 20,
+    cost: 8,
+    totalCost: 8,
+    avgEntry: 0.40,
     windowStart: WINDOW_START,
-    marketId: bot.market.id,
-    tokenId: bot.market.tokens.UP,
-    slug: bot.market.slug,
     status: 'OPEN',
-    markBid: 0.30,
   };
-  bot.positions.unshift(open);
-  bot.cash = 9968;
-  bot.lastEntryAt = NOW - 1000;
-  bot.lastEntryAtBySide.UP = NOW - config.PRESSURE_ENTRY_COOLDOWN_MS + 1000;
+  bot.positions.push(position);
+  setQuote(bot, 'UP', 0.50, 0.52, 100, now);
+  assert.equal(bot.processSpikeExit('UP', now), false);
+  assert.equal(position.status, 'OPEN');
+  assert.equal(bot.forecast.status, 'TRADE_WINDOW_CLOSED');
+});
 
-  const duringCooldown = bot.processPressureStrategy(WINDOW_START, NOW);
-  assert.equal(duringCooldown, false);
-  assert.equal(bot.forecast.status, 'ENTRY_COOLDOWN');
-  assert.equal(bot.orders.length, 0);
-  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 1);
+test('a profitable spike sells all same-side shares together and leaves the other side alone', () => {
+  const bot = makeBot();
+  bot.market.feesEnabled = true;
+  bot.market.feeSchedule = { rate: 0.07, exponent: 1 };
+  bot.positions.push(
+    { id: 'spike-up-a', side: 'UP', strategyVersion: 'DIP_REBOUND_V1', shares: 20, cost: 8, totalCost: 8.2, avgEntry: 0.40, windowStart: WINDOW_START, status: 'OPEN' },
+    { id: 'spike-up-b', side: 'UP', strategyVersion: 'DIP_REBOUND_V1', shares: 20, cost: 8.4, totalCost: 8.6, avgEntry: 0.42, windowStart: WINDOW_START, status: 'OPEN' },
+    { id: 'spike-down', side: 'DOWN', strategyVersion: 'DIP_REBOUND_V1', shares: 20, cost: 8, totalCost: 8.2, avgEntry: 0.40, windowStart: WINDOW_START, status: 'OPEN' },
+  );
+  setQuote(bot, 'UP', 0.50, 0.52, 100, NOW);
+  bot.liveQuotes.UP.bidLevels = [{ price: 0.50, size: 40 }];
 
-  const afterCooldown = bot.processPressureStrategy(WINDOW_START, NOW + 1000);
-  assert.equal(afterCooldown, true);
-  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 2);
-  assert.deepEqual(bot.positions.filter((position) => position.status === 'OPEN')
-    .map((position) => position.side), ['UP', 'UP']);
-  assert.equal(bot.orders[0].kind, 'BUY_ENTRY');
-  assert.equal(bot.lastEntryAt, NOW + 1000);
-  assert.equal(bot.lastEntryAtBySide.UP, NOW + 1000);
+  assert.equal(bot.processSpikeExit('UP', NOW), true);
+  assert.equal(bot.positions[0].status, 'SETTLED_EXIT');
+  assert.equal(bot.positions[1].status, 'SETTLED_EXIT');
+  assert.equal(bot.positions[2].status, 'OPEN');
+  assert.equal(bot.orders[0].kind, 'SELL_SPIKE');
+  assert.equal(bot.orders[0].shares, 40);
+  assert.equal(bot.orders[0].matchedShares, 40);
+  assert.ok(bot.orders[0].fee > 0);
+  assert.ok(bot.positions[0].realizedPnl > 0);
+  assert.ok(bot.positions[1].realizedPnl > 0);
 });
 
 test('missing quotes do not exit open positions', async () => {
@@ -510,7 +425,7 @@ test('the final fresh in-window bid triggers TP before rollover moves a position
   assert.equal(bot.cash, 10_060);
   assert.equal(bot.snapshot().account.startingCapital, 10_000);
   assert.equal(bot.snapshot().account.currentCapital, 10_060);
-  assert.equal(bot.events.find((event) => event.event === 'PAPER_PRESSURE_WINDOW_ENDED')
+  assert.equal(bot.events.find((event) => event.event === 'PAPER_DIP_WINDOW_ENDED')
     .pendingResolutionCount, 0);
 });
 
@@ -535,34 +450,33 @@ test('a bid timestamped at the window end does not count as an in-window take-pr
   assert.equal(bot.orders.some((order) => order.kind === 'SELL_TAKE_PROFIT'), false);
 });
 
-test('paper snapshot identifies only the uncalibrated BTC 5-minute demo strategy', () => {
+test('paper snapshot identifies the independent dip-and-spike demo strategy', () => {
   const bot = makeBot();
   const state = bot.snapshot();
-  assert.equal(state.strategy.name, 'BTC 5-minute pressure and price forecast paper bot');
+  assert.equal(state.strategy.name, 'BTC 5-minute independent dip-and-spike paper bot');
   assert.deepEqual(state.strategy.markets, ['BTC 5m']);
   assert.equal(state.strategy.execution, 'PAPER ONLY');
   assert.equal(state.strategy.liveTradingEnabled, false);
   assert.equal(state.strategy.realOrderModulesLoaded, false);
   assert.equal(state.strategy.orders.type, 'Visible-book taker-style paper sweeps');
-  assert.equal(state.strategy.orders.entryCooldownMs, 5_000);
-  assert.match(state.strategy.repeatEntryRule, /separate 5-second entry cooldowns/i);
-  assert.match(state.strategy.repeatEntryRule, /increasing by 10 shares per \$0\.01 edge/i);
-  assert.equal(state.strategy.minEstimatedProbability, 0.50);
-  assert.equal(state.strategy.maxBuyPrice, 0.95);
-  assert.equal(state.strategy.minNetEdgePerShare, 0.02);
-  assert.equal(state.strategy.orders.edgeSizeBase, 0.10);
-  assert.equal(state.strategy.maxEntryShares, 200);
-  assert.match(state.strategy.exit, /take-profit.*official resolution/i);
+  assert.equal(state.strategy.orders.entryCooldownMs, 10_000);
+  assert.match(state.strategy.repeatEntryRule, /10-second cooldown/i);
+  assert.match(state.strategy.repeatEntryRule, /recover/i);
+  assert.equal(state.strategy.maxBuyPrice, 0.85);
+  assert.equal(state.strategy.entryShares, 20);
+  assert.equal(state.strategy.maxEntriesPerSide, 4);
+  assert.equal(state.strategy.tradeWindowMs, 240_000);
+  assert.match(state.strategy.exit, /sell all.*official resolution/i);
   assert.equal(state.strategy.exits.takeProfit, true);
-  assert.equal(state.strategy.exits.takeProfitTrigger, 0.99);
-  assert.equal(state.strategy.exits.takeProfitPayout, 1);
+  assert.equal(state.strategy.exits.takeProfitTrigger, 0.05);
+  assert.equal(state.strategy.exits.takeProfitPayout, null);
   assert.equal(state.strategy.exits.stopLoss, false);
-  assert.equal(state.strategy.signalState.calibrated, false);
+  assert.equal(state.strategy.signalState.status, 'WAITING_FOR_DATA');
   assert.equal(state.strategy.priceFeed.source, 'Binance BTCUSDT aggregate trades');
   assert.equal(state.account.startingCapital, 10_000);
   assert.equal(state.account.currentCapital, state.account.equity);
   assert.equal(Object.hasOwn(state, 'shadowComparison'), false);
-  assert.equal(state.markets['5m'].forecast.calibrated, false);
+  assert.equal(state.markets['5m'].forecast.status, 'WAITING_FOR_DATA');
 });
 
 test('paper snapshot adds global analytics without dropping position history', () => {
@@ -752,8 +666,8 @@ test('paper history migration restores positions, cash, and cooldowns', () => {
   assert.equal(bot.resolutions[0].slug, 'prior-window');
   assert.equal(bot.lastEntryAtBySide.UP, NOW - 5000);
   assert.equal(bot.orderWindowStart, WINDOW_START);
-  assert.equal(bot.pressureSamples.length, 0);
-  assert.equal(bot.forecast.reason, 'restored forecast');
+  assert.equal(bot.forecast.status, 'COLLECTING_PRICE_HISTORY');
+  assert.equal(bot.forecast.reason, 'Collecting fresh Polymarket quotes after restart.');
 
   assert.equal(Object.hasOwn(bot.snapshot(), 'shadowComparison'), false);
 

@@ -39,7 +39,7 @@ test('live server exposes the bot state and health status', async t => {
   assert.equal((await healthResponse.json()).ok, true);
 });
 
-test('legacy live server serves the current pressure dashboard without implying active real trading', async t => {
+test('legacy live server serves the current dip-and-spike dashboard without implying active real trading', async t => {
   const server = startLiveServer(mockBot('error'), 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -54,9 +54,9 @@ test('legacy live server serves the current pressure dashboard without implying 
   const html = await page.text();
   assert.match(html, /Five Minute \| BTC Paper Monitor/);
   assert.match(html, /Real-order modules/);
-  assert.match(html, /Uncalibrated/);
+  assert.match(html, /Buy confirmed dips\. Sell profitable spikes\./);
   assert.doesNotMatch(html, /15m/i);
   assert.match(html, /Paper only/i);
-  assert.match(html, /sampleCount/);
-  assert.match(html, /expected net edge/i);
+  assert.match(html, /CLOB PRICE ONLY/);
+  assert.doesNotMatch(html, /expected net edge/i);
 });
