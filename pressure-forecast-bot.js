@@ -3,8 +3,9 @@
 const config = require('./config');
 const WickBot = require('./wick-bot');
 const BinanceTickFeed = require('./binance-tick-feed');
+const ClobMarketFeed = require('./clob-feed');
 const defaultMarketData = require('./wick-market-data');
-const { feeFor, quoteFromBook } = WickBot._test;
+const { feeFor } = WickBot._test;
 const {
   summarizeCombinedResults,
   maximumConcurrentWindowExposure,
@@ -339,6 +340,7 @@ class PressureForecastBot extends WickBot {
     now = Date.now,
     marketData = defaultMarketData,
     priceFeed = null,
+    clobFeedFactory = (options) => new ClobMarketFeed(options),
     initialCapital = config.DEMO_CAPITAL_5M,
   } = {}) {
     const feed = priceFeed || new BinanceTickFeed({ now });
@@ -352,6 +354,9 @@ class PressureForecastBot extends WickBot {
     });
     this.now = now;
     this.marketData = marketData;
+    this.clobFeedFactory = clobFeedFactory;
+    this.clobFeed = null;
+    this.clobFeedMarketKey = null;
     this.initialCapital = initialCapital;
     this.strategyName = 'BTC 5-minute pressure and price forecast paper bot';
     this.strategyMode = 'pressure-forecast';
@@ -691,6 +696,7 @@ class PressureForecastBot extends WickBot {
       }
 
       if (this.orderWindowStart !== start) this.openStrategyWindow(start, now);
+      this.ensureClobFeed();
       await this.refreshLiveQuotes(now);
       this.processPressureStrategy(start, now);
       this.lastScanAt = now;
@@ -710,39 +716,84 @@ class PressureForecastBot extends WickBot {
     }
   }
 
+  ensureClobFeed() {
+    if (!this.market?.tokens?.UP || !this.market?.tokens?.DOWN) return;
+    const assetIds = [String(this.market.tokens.UP), String(this.market.tokens.DOWN)];
+    const marketKey = `${this.market.start}:${assetIds.join(':')}`;
+    if (this.clobFeed && this.clobFeedMarketKey === marketKey) return;
+
+    this.clobFeed?.stop?.();
+    this.clobFeedMarketKey = marketKey;
+    this.liveQuotes = {
+      UP: { status: 'MISSING', stale: true, source: 'POLYMARKET_CLOB_WEBSOCKET' },
+      DOWN: { status: 'MISSING', stale: true, source: 'POLYMARKET_CLOB_WEBSOCKET' },
+    };
+    this.clobFeed = this.clobFeedFactory({
+      assetIds,
+      now: this.now,
+      onQuote: (assetId, quote) => {
+        const side = SIDES.find((candidate) => String(this.market?.tokens?.[candidate]) === String(assetId));
+        if (!side) return;
+        if (!quote) {
+          this.liveQuotes[side] = {
+            ...this.liveQuotes[side],
+            status: this.clobFeed?.snapshot?.().status === 'CONNECTED' ? 'MISSING' : 'STALE',
+            stale: true,
+            error: 'Waiting for a fresh CLOB book snapshot.',
+          };
+          return;
+        }
+        const now = this.now();
+        const ageMs = Math.max(0, now - Number(quote.updatedAt));
+        this.liveQuotes[side] = {
+          ...quote,
+          status: ageMs <= config.PRESSURE_MAX_QUOTE_AGE_MS ? quote.status : 'STALE',
+          stale: ageMs > config.PRESSURE_MAX_QUOTE_AGE_MS,
+        };
+      },
+    });
+    this.clobFeed.start?.();
+  }
+
   async refreshLiveQuotes(now) {
     if (!this.market) return;
-    const results = await Promise.allSettled(SIDES.map((side) =>
-      this.marketData.getBook(this.market.tokens[side])));
-    SIDES.forEach((side, index) => {
-      const result = results[index];
-      if (result.status === 'fulfilled') {
-        this.liveQuotes[side] = quoteFromBook(result.value, now);
+    for (const side of SIDES) {
+      const tokenId = this.market.tokens[side];
+      const quote = this.clobFeed?.getQuote?.(tokenId);
+      if (quote) {
+        const ageMs = Math.max(0, now - Number(quote.updatedAt));
+        this.liveQuotes[side] = {
+          ...quote,
+          status: ageMs <= config.PRESSURE_MAX_QUOTE_AGE_MS ? quote.status : 'STALE',
+          stale: ageMs > config.PRESSURE_MAX_QUOTE_AGE_MS,
+        };
       } else {
         const previous = this.liveQuotes[side] || {};
-        const stale = !previous.updatedAt || now - previous.updatedAt > config.PRESSURE_MAX_QUOTE_AGE_MS;
+        const quoteAge = Number.isFinite(Number(previous.updatedAt))
+          ? Math.max(0, now - Number(previous.updatedAt))
+          : Infinity;
         this.liveQuotes[side] = {
           ...previous,
-          status: stale ? 'STALE' : 'LIVE',
-          stale,
-          attemptedAt: now,
-          error: result.reason?.message || 'CLOB book unavailable',
+          status: quoteAge > config.PRESSURE_MAX_QUOTE_AGE_MS ? 'STALE' : previous.status || 'MISSING',
+          stale: quoteAge > config.PRESSURE_MAX_QUOTE_AGE_MS,
+          source: 'POLYMARKET_CLOB_WEBSOCKET',
+          error: this.clobFeed?.snapshot?.().error || null,
         };
       }
-    });
+    }
     for (const position of this.positions) {
       if (position.windowStart !== this.market.start || position.status !== 'OPEN') continue;
       const quote = this.liveQuotes[position.side];
       position.markBid = quote?.bestBid ?? null;
       position.markUpdatedAt = quote?.updatedAt || now;
-      position.markStatus = quote?.bestBid == null ? 'MISSING' : 'LIVE';
+      position.markStatus = quote?.bestBid == null || quote.stale ? 'MISSING' : 'LIVE';
     }
     for (const position of this.shadowPositions) {
       if (position.windowStart !== this.market.start || position.status !== 'OPEN') continue;
       const quote = this.liveQuotes[position.side];
       position.markBid = quote?.bestBid ?? null;
       position.markUpdatedAt = quote?.updatedAt || now;
-      position.markStatus = quote?.bestBid == null ? 'MISSING' : 'LIVE';
+      position.markStatus = quote?.bestBid == null || quote.stale ? 'MISSING' : 'LIVE';
     }
   }
 
@@ -1381,6 +1432,9 @@ class PressureForecastBot extends WickBot {
     this.running = false;
     clearTimeout(this.timer);
     this.priceFeed.stop?.();
+    this.clobFeed?.stop?.();
+    this.clobFeed = null;
+    this.clobFeedMarketKey = null;
   }
 
   async stopAndFlush() {
@@ -1423,6 +1477,17 @@ class PressureForecastBot extends WickBot {
       now,
       mode: 'DEMO ONLY',
       status: this.status,
+      clobFeed: this.clobFeed?.snapshot?.() || {
+        source: 'Polymarket CLOB market WebSocket',
+        status: 'WAITING',
+        connected: false,
+        error: null,
+        assetCount: 0,
+        lastMessageAt: null,
+        lastMessageAgeMs: null,
+        reconnectCount: 0,
+        quoteAgesMs: {},
+      },
       strategy: {
         ...state.strategy,
         name: this.strategyName,

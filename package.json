@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@polymarket/client": "0.14.0",
+    "ws": "8.22.0",
     "viem": "^2.46.3"
   }
 }

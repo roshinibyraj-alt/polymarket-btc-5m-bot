@@ -31,11 +31,24 @@ function makeFeed(now = NOW, price = 100.3) {
   };
 }
 
-function makeBot({ now = NOW, price = 100.3, marketData = {} } = {}) {
+function makeBot({ now = NOW, price = 100.3, marketData = {}, clobFeedFactory = null } = {}) {
   const bot = new PressureForecastBot({
     now: () => now,
     priceFeed: makeFeed(now, price),
     marketData,
+    clobFeedFactory: clobFeedFactory || (() => ({
+      start() {},
+      stop() {},
+      getQuote() { return null; },
+      snapshot() {
+        return {
+          status: 'CONNECTED',
+          connected: true,
+          source: 'Polymarket CLOB market WebSocket',
+          quoteAgesMs: {},
+        };
+      },
+    })),
     initialCapital: 10_000,
   });
   bot.market = {
@@ -371,6 +384,68 @@ test('price touching former TP or SL levels does not exit main or shadow positio
   assert.equal(bot.orders.some((order) => order.action === 'SELL'), false);
   assert.equal(bot.snapshot().strategy.exits.takeProfit, false);
   assert.equal(bot.snapshot().strategy.exits.stopLoss, false);
+});
+
+test('current Polymarket prices come from the CLOB feed cache, not repeated REST book polling', async () => {
+  const quoteByToken = new Map([
+    ['up-token', {
+      status: 'LIVE',
+      source: 'POLYMARKET_CLOB_WEBSOCKET',
+      bestBid: 0.40,
+      bestAsk: 0.42,
+      bidSize: 400,
+      askSize: 300,
+      mid: 0.41,
+      bidLevels: [{ price: 0.40, size: 400 }],
+      askLevels: [{ price: 0.42, size: 300 }],
+      updatedAt: NOW,
+    }],
+    ['down-token', {
+      status: 'LIVE',
+      source: 'POLYMARKET_CLOB_WEBSOCKET',
+      bestBid: 0.58,
+      bestAsk: 0.60,
+      bidSize: 300,
+      askSize: 400,
+      mid: 0.59,
+      bidLevels: [{ price: 0.58, size: 300 }],
+      askLevels: [{ price: 0.60, size: 400 }],
+      updatedAt: NOW,
+    }],
+  ]);
+  let restBookCalls = 0;
+  let feedOptions;
+  const bot = makeBot({
+    marketData: {
+      getBook: async () => {
+        restBookCalls += 1;
+        throw new Error('REST book polling should not run');
+      },
+    },
+    clobFeedFactory: (options) => {
+      feedOptions = options;
+      return {
+        start() {},
+        stop() {},
+        getQuote: (tokenId) => quoteByToken.get(String(tokenId)) || null,
+        snapshot: () => ({
+          status: 'CONNECTED',
+          connected: true,
+          source: 'Polymarket CLOB market WebSocket',
+          quoteAgesMs: { 'up-token': 0, 'down-token': 0 },
+        }),
+      };
+    },
+  });
+  bot.lastMarketAt = NOW;
+
+  await bot.tick();
+
+  assert.deepEqual(feedOptions.assetIds, ['up-token', 'down-token']);
+  assert.equal(restBookCalls, 0);
+  assert.equal(bot.liveQuotes.UP.bestAsk, 0.42);
+  assert.equal(bot.liveQuotes.DOWN.bestBid, 0.58);
+  assert.equal(bot.snapshot().clobFeed.connected, true);
 });
 
 test('shadow-only positions roll over and settle from official market resolution', async () => {

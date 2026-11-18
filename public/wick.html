@@ -506,8 +506,15 @@
       document.querySelector('#resolutions').innerHTML = renderTable(resolutions, 'resolution');
       document.querySelector('#events').innerHTML = renderEvents(state.events||[]);
       document.querySelector('#error').textContent = state.error || '';
-      const ages = Object.values(market.quotes||{}).map(q=>q?.updatedAt).filter(Boolean);
-      document.querySelector('#quoteAge').textContent = ages.length ? `Quotes ${Math.max(0,Math.round((Date.now()-Math.max(...ages))/1000))}s ago · refresh 1s` : 'Waiting for live state';
+      const quoteAge = quote => {
+        const updatedAt = num(quote?.updatedAt);
+        return updatedAt == null ? '—' : `${Math.max(0,Math.round(Date.now()-updatedAt))}ms`;
+      };
+      const clob = state.clobFeed || {};
+      const binanceTickAt = num(state.strategy?.priceFeed?.tickAt);
+      const binanceAge = binanceTickAt == null ? '—' : `${Math.max(0,Math.round(Date.now()-binanceTickAt))}ms`;
+      document.querySelector('#quoteAge').textContent =
+        `Polymarket WS ${clob.status || 'WAITING'} · UP ${quoteAge(market.quotes?.UP)} · DOWN ${quoteAge(market.quotes?.DOWN)} · Binance ${binanceAge}`;
     } catch (error) {
       document.querySelector('#error').textContent = error.message || String(error);
     }
