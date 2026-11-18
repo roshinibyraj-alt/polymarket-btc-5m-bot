@@ -178,6 +178,47 @@ function summarizeWindowPositions(positions, windowStart) {
   }));
 }
 
+function summarizeWindowOutcomeScenarios(positions, windowStart) {
+  const matching = positions.filter((position) =>
+    Number(position.windowStart) === Number(windowStart)
+    && Number(position.initialShares ?? position.shares) > 0);
+  const totalEntryCost = matching.reduce((total, position) => {
+    const shares = Number(position.initialShares ?? position.shares);
+    const cost = position.totalCost != null && Number.isFinite(Number(position.totalCost))
+      ? Number(position.totalCost)
+      : (Number(position.avgEntry ?? position.averagePrice ?? 0) * shares)
+        + Number(position.entryFees ?? position.fees ?? 0);
+    return total + cost;
+  }, 0);
+  const knownExitProceeds = matching.reduce((total, position) => {
+    if (position.status === 'OPEN' || position.status === 'PENDING_CLOB_RESULT') return total;
+    const proceeds = position.exitProceeds ?? position.proceeds;
+    return total + (Number.isFinite(Number(proceeds)) ? Number(proceeds) : 0);
+  }, 0);
+  const openShares = Object.fromEntries(SIDES.map((side) => [
+    side,
+    matching.filter((position) => position.side === side && position.status === 'OPEN')
+      .reduce((total, position) => total + Number(position.shares || 0), 0),
+  ]));
+  const upPayoutIfUpWins = knownExitProceeds + openShares.UP;
+  const downPayoutIfDownWins = knownExitProceeds + openShares.DOWN;
+  return {
+    windowStart,
+    totalEntryCost,
+    knownExitProceeds,
+    openShares,
+    positionCount: matching.length,
+    upWins: {
+      payout: upPayoutIfUpWins,
+      netPnl: upPayoutIfUpWins - totalEntryCost,
+    },
+    downWins: {
+      payout: downPayoutIfDownWins,
+      netPnl: downPayoutIfDownWins - totalEntryCost,
+    },
+  };
+}
+
 function sweepBook(levels, shares, action, market, {
   minimumPrice = 0,
   maximumPrice = Infinity,
@@ -657,6 +698,9 @@ class PressureForecastBot extends WickBot {
       windowStart: start,
       samplesRequired: config.PRESSURE_SAMPLE_COUNT,
       entryShares: config.PRESSURE_ENTRY_SHARES,
+      entryDelayMs: config.PRESSURE_ENTRY_DELAY_MS,
+      takeProfitTrigger: config.PRESSURE_TAKE_PROFIT_TRIGGER,
+      stopLossTrigger: config.PRESSURE_STOP_LOSS_TRIGGER,
     });
   }
 
@@ -681,6 +725,7 @@ class PressureForecastBot extends WickBot {
       if (this.orderWindowStart !== start) this.openStrategyWindow(start, now);
       this.ensureClobFeed();
       await this.refreshLiveQuotes(now);
+      this.processPositionExits(start, now);
       this.processPressureStrategy(start, now);
       this.lastScanAt = now;
       this.error = null;
@@ -855,6 +900,47 @@ class PressureForecastBot extends WickBot {
     }
   }
 
+  processPositionExits(windowStart, now) {
+    const positions = [
+      ...this.positions.filter((position) => position.windowStart === windowStart
+        && position.status === 'OPEN'),
+      ...this.shadowPositions.filter((position) => position.windowStart === windowStart
+        && position.status === 'OPEN'),
+    ];
+    for (const position of positions) {
+      const quote = this.liveQuotes[position.side];
+      const updatedAt = Number(quote?.updatedAt);
+      const bid = Number(quote?.bestBid);
+      if (!quote || quote.status !== 'LIVE' || quote.stale
+        || !Number.isFinite(updatedAt) || now < updatedAt
+        || now - updatedAt > config.PRESSURE_MAX_QUOTE_AGE_MS
+        || !Number.isFinite(bid) || bid <= 0 || bid > 1) continue;
+      const takeProfitHit = bid >= config.PRESSURE_TAKE_PROFIT_TRIGGER;
+      const stopLossHit = bid <= config.PRESSURE_STOP_LOSS_TRIGGER;
+      if (!takeProfitHit && !stopLossHit) continue;
+      const payout = takeProfitHit ? 1 : 0;
+      const reason = takeProfitHit
+        ? 'TAKE_PROFIT_BID_0.99_ACCOUNTED_AS_1'
+        : 'STOP_LOSS_BID_0.01_ACCOUNTED_AS_0';
+      if (position.shadowOnly) {
+        this.finalizeShadowPosition(position, payout, reason, now, false, bid);
+        this.log(takeProfitHit
+          ? 'PAPER_PRESSURE_SHADOW_TAKE_PROFIT'
+          : 'PAPER_PRESSURE_SHADOW_STOP_LOSS', {
+          positionId: position.id,
+          side: position.side,
+          status: position.realizedPnl > 0 ? 'WIN' : position.realizedPnl < 0 ? 'LOSS' : 'BREAK_EVEN',
+          shares: position.shares,
+          triggerPrice: bid,
+          payoutPerShare: payout,
+          realizedPnl: position.realizedPnl,
+        });
+        continue;
+      }
+      this.finalizePosition(position, payout, reason, now, bid, takeProfitHit);
+    }
+  }
+
   freshQuote(side, now) {
     const quote = this.liveQuotes[side];
     if (!quote || quote.status !== 'LIVE' || quote.stale
@@ -956,6 +1042,18 @@ class PressureForecastBot extends WickBot {
       start,
       this.shadowSamplesRequired,
     );
+    const entryDelayRemainingMs = start + config.PRESSURE_ENTRY_DELAY_MS - now;
+    if (entryDelayRemainingMs > 0) {
+      const seconds = Math.ceil(entryDelayRemainingMs / 1000);
+      const waitReason = `Waiting for the 30-second window-start delay; entries become eligible in ${seconds} seconds.`;
+      this.forecast.status = 'WINDOW_ENTRY_DELAY';
+      this.forecast.entryDelayRemainingMs = entryDelayRemainingMs;
+      this.forecast.reason = waitReason;
+      this.shadowForecast.status = 'WINDOW_ENTRY_DELAY';
+      this.shadowForecast.entryDelayRemainingMs = entryDelayRemainingMs;
+      this.shadowForecast.reason = waitReason;
+      return false;
+    }
     if (evaluationDue && this.shadowForecast.ready) {
       this.processShadowEntry(start, now, read, this.shadowForecast);
     }
@@ -1326,10 +1424,42 @@ class PressureForecastBot extends WickBot {
     return order;
   }
 
-  finalizeShadowPosition(position, payout, reason, now, resolved = false) {
+  finalizePosition(position, payout, reason, now, triggerPrice, takeProfitHit) {
+    if (position.status !== 'OPEN') return;
+    const shares = Number(position.shares);
+    const grossPayout = Number(payout) * shares;
+    position.exitTriggerPrice = Number(triggerPrice);
+    position.exitPrice = Number(triggerPrice);
+    position.payoutPerShare = Number(payout);
+    position.exitProceeds = grossPayout;
+    position.proceeds = grossPayout;
+    position.realizedPnl = grossPayout - Number(position.totalCost || 0);
+    position.status = 'SETTLED_EXIT';
+    position.exitReason = reason;
+    position.settlementBasis = 'PAPER_PRICE_THRESHOLD';
+    position.closedAt = now;
+    position.settledAt = now;
+    this.cash += grossPayout;
+    const kind = takeProfitHit ? 'SELL_TAKE_PROFIT' : 'SELL_STOP_LOSS';
+    this.recordThresholdOrder(position, now, kind, payout, triggerPrice);
+    this.log(takeProfitHit ? 'PAPER_PRESSURE_TAKE_PROFIT' : 'PAPER_PRESSURE_STOP_LOSS', {
+      positionId: position.id,
+      side: position.side,
+      status: position.realizedPnl > 0 ? 'WIN' : position.realizedPnl < 0 ? 'LOSS' : 'BREAK_EVEN',
+      shares,
+      triggerPrice,
+      payoutPerShare: payout,
+      realizedPnl: position.realizedPnl,
+      reason,
+    });
+  }
+
+  finalizeShadowPosition(position, payout, reason, now, resolved = false, triggerPrice = payout) {
     if (!['OPEN', 'PENDING_CLOB_RESULT'].includes(position.status)) return;
     const grossPayout = Number(payout) * Number(position.shares);
-    position.exitPrice = Number(payout);
+    position.exitTriggerPrice = Number(triggerPrice);
+    position.exitPrice = Number(triggerPrice);
+    position.payoutPerShare = Number(payout);
     position.exitProceeds = grossPayout;
     position.proceeds = grossPayout;
     position.realizedPnl = grossPayout - Number(position.totalCost || 0);
@@ -1349,19 +1479,22 @@ class PressureForecastBot extends WickBot {
     this.shadowCash += grossPayout;
   }
 
-  recordThresholdOrder(position, now, kind, payout) {
+  recordThresholdOrder(position, now, kind, payout, triggerPrice = payout) {
     const order = this.createOrder(kind, position.side, position.initialShares || position.shares, now, {
       complete: true,
       filledShares: position.initialShares || position.shares,
-      averagePrice: payout,
+      averagePrice: triggerPrice,
     });
     order.status = 'FILLED';
     order.matchedShares = order.shares;
-    order.price = payout;
+    order.price = triggerPrice;
+    order.payoutPerShare = payout;
+    order.exitProceeds = Number(payout) * Number(order.shares);
     order.positionId = position.id;
     order.exitReason = position.exitReason;
     order.filledAt = now;
     order.fee = 0;
+    order.fillConfirmation = 'PRICE_THRESHOLD_TOUCHED';
   }
 
   async completeWindow(windowStart, triggerPosition, triggerReason, now = this.now()) {
@@ -1534,6 +1667,7 @@ class PressureForecastBot extends WickBot {
     };
     const currentOrders = this.orders.filter((order) => Number(order.windowStart) === Number(windowStart));
     const accumulatedPositions = summarizeWindowPositions(this.positions, windowStart);
+    const outcomeCalculator = summarizeWindowOutcomeScenarios(this.positions, windowStart);
     const positions = this.positions.map((position) => ({
       ...position,
       avgPrice: position.avgEntry,
@@ -1552,6 +1686,7 @@ class PressureForecastBot extends WickBot {
       forecast: this.forecast,
       orders: currentOrders,
       accumulatedPositions,
+      outcomeCalculator,
     };
     const settledEquityCurve = state.account.equityCurve || [];
     return {
@@ -1576,7 +1711,7 @@ class PressureForecastBot extends WickBot {
         execution: 'PAPER ONLY',
         markets: ['BTC 5m'],
         orderType: 'NEXT_CLOB_ASK_TICK_FULL_SIZE',
-        exit: 'No take-profit or stop-loss orders; positions stay open until official resolution.',
+        exit: 'Best bid at $0.99 closes for $1/share; best bid at $0.01 closes for $0/share; otherwise official resolution.',
         liveTradingEnabled: false,
         realOrderModulesLoaded: false,
         entryShares: config.PRESSURE_ENTRY_SHARES,
@@ -1590,12 +1725,15 @@ class PressureForecastBot extends WickBot {
           entryCooldownMs: config.PRESSURE_ENTRY_COOLDOWN_MS,
           maxEntriesPerWindow: 'No fixed cap; limited by qualifying signals and available cash.',
         },
-        repeatEntryRule: `A pressure-weighted projection estimates the BTC close from current price, Binance pressure, recent volatility, and seconds remaining. Projected close above the previous candle close selects UP; below selects DOWN. Each side has its own 15-second entry cooldown; entries are ${config.PRESSURE_ENTRY_SHARES} shares and settle at official resolution.`,
+        entryDelayMs: config.PRESSURE_ENTRY_DELAY_MS,
+        repeatEntryRule: `Ignore entry signals for the first ${config.PRESSURE_ENTRY_DELAY_MS / 1000} seconds of each window, then use the pressure-weighted close projection. Projected close above the previous candle close selects UP; below selects DOWN. Each side has its own 15-second entry cooldown; entries are ${config.PRESSURE_ENTRY_SHARES} shares.`,
         priceFeed: this.priceFeed?.snapshot?.() || null,
         exits: {
-          mode: 'OFFICIAL_RESOLUTION_ONLY',
-          takeProfit: false,
-          stopLoss: false,
+          mode: 'CLOB_BID_THRESHOLDS_THEN_OFFICIAL_RESOLUTION',
+          takeProfit: config.PRESSURE_TAKE_PROFIT_TRIGGER,
+          takeProfitPayout: 1,
+          stopLoss: config.PRESSURE_STOP_LOSS_TRIGGER,
+          stopLossPayout: 0,
           resolutionPollMs: config.RESOLUTION_POLL_MS,
           otherwise: 'Hold positions until the original Polymarket market officially resolves.',
         },
@@ -1624,7 +1762,7 @@ class PressureForecastBot extends WickBot {
           this.shadowInitialCapital,
           this.shadowStatsOffset,
         ),
-        assumptions: `Separate paper cash; Binance-pressure projection versus the previous candle close, fixed ${config.PRESSURE_ENTRY_SHARES}-share entries, independent 15-second cooldowns, the existing $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} execution cap, visible ask-depth sweep for shadow entries, taker fees, and official-resolution-only settlement.`,
+        assumptions: `Separate paper cash; entries start after ${config.PRESSURE_ENTRY_DELAY_MS / 1000} seconds, with a Binance-pressure projection, fixed ${config.PRESSURE_ENTRY_SHARES}-share entries, independent 15-second cooldowns, the existing $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} cap, visible ask-depth sweep and modeled taker fees. Best-bid $0.99/$0.01 exits are accounted as $1/$0 per share; otherwise positions settle at official resolution.`,
       },
       portfolioAnalytics: {
         equityCurve: settledEquityCurve,
@@ -1673,6 +1811,7 @@ PressureForecastBot._test = {
   adaptiveShadowSampleCount,
   summarizePortfolio,
   summarizeWindowPositions,
+  summarizeWindowOutcomeScenarios,
   sweepBook,
   evaluatePressureCandidate,
   resolvedPayout,

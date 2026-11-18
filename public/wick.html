@@ -57,6 +57,23 @@
     .accumulated-cost{margin-top:7px;padding-top:7px;border-top:1px solid var(--line)}
     .accumulated-cost strong{font:700 13px var(--mono)}
     .accumulated-note{display:block;margin-top:5px;color:var(--muted);font-size:9px}
+    .outcome-calculator{margin:0 0 15px;padding:18px 19px;border:1px solid #cbdde5;border-radius:18px;background:linear-gradient(140deg,#143b53,#205c68);color:#f5fbfc;box-shadow:0 12px 30px rgba(20,59,83,.2)}
+    .outcome-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;margin-bottom:12px}
+    .outcome-kicker{font:700 10px var(--mono);letter-spacing:.13em;text-transform:uppercase;color:#bfe3db}
+    .outcome-head h2{font:700 17px var(--display);margin:3px 0 0;letter-spacing:-.025em}
+    .outcome-window{font:600 10px var(--mono);text-align:right;color:#d5e7e8}
+    .scenario-grid{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+    .scenario-card{min-width:0;padding:14px 15px;border:1px solid rgba(255,255,255,.28);border-radius:13px;background:rgba(255,255,255,.96);color:var(--ink)}
+    .scenario-card.up{border-left:5px solid #0a9973}
+    .scenario-card.down{border-left:5px solid #d14d43}
+    .scenario-label{font:800 11px var(--mono);letter-spacing:.11em}
+    .scenario-card.up .scenario-label{color:#08765f}
+    .scenario-card.down .scenario-label{color:#b43c36}
+    .scenario-pnl{display:block;margin:3px 0;font:700 clamp(32px,5vw,52px)/1.05 var(--display);letter-spacing:-.055em;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+    .scenario-pnl.positive{color:#08765f}.scenario-pnl.negative{color:#b43c36}.scenario-pnl.neutral{color:#183a53}
+    .scenario-card small{display:block;color:#4f697d;font-size:10px;font-weight:600}
+    .scenario-detail{display:block;margin-top:5px;color:#536d80;font:10px var(--mono)}
+    .outcome-foot{margin-top:10px;color:#d4e7e7;font-size:10px}
     .price-head{display:flex;justify-content:space-between;align-items:center;gap:6px}.side{font:700 10px var(--mono);letter-spacing:.1em}.up{color:var(--teal)}.down{color:var(--coral)}
     .mid{font:700 28px/1 var(--display);letter-spacing:-.06em;margin:9px 0 5px;font-variant-numeric:tabular-nums}
     .quote-detail{font:10px var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
@@ -218,6 +235,7 @@
     .error{color:#a6332d}
     @media(hover:hover){.stat,.panel,.market,.candidate,.shadow-card{transition:box-shadow .18s ease,border-color .18s ease}.stat:hover,.panel:hover,.market:hover{box-shadow:0 12px 29px rgba(26,62,83,.11);border-color:#bfd3df}}
     @media(prefers-reduced-motion:reduce){.stat,.panel,.market,.candidate,.shadow-card{transition:none!important}}
+    @media(max-width:640px){.outcome-calculator{padding:14px}.outcome-head{align-items:flex-start}.outcome-head h2{font-size:15px}.outcome-window{max-width:110px}.scenario-grid{gap:7px}.scenario-card{padding:11px 9px}.scenario-pnl{font-size:clamp(28px,9vw,40px)}.scenario-detail{font-size:9px}}
   </style>
 </head>
 <body>
@@ -227,8 +245,30 @@
     <div class="header-right"><span class="refresh-label" id="quoteAge">Connecting to live state…</span><div class="badge"><i class="dot"></i><span>Paper only</span></div></div>
   </header>
 
+  <section class="outcome-calculator" id="outcomeCalculatorPanel" aria-label="Current window outcome calculator">
+    <div class="outcome-head">
+      <div><div class="outcome-kicker">Live outcome calculator</div><h2>Potential net result if this window resolves</h2></div>
+      <div class="outcome-window" id="outcomeWindowLabel">Waiting for current window</div>
+    </div>
+    <div class="scenario-grid">
+      <article class="scenario-card up">
+        <span class="scenario-label">IF UP WINS</span>
+        <strong class="scenario-pnl neutral" id="upScenarioPnl">—</strong>
+        <small>Net P&amp;L · after entry costs and modeled fees</small>
+        <span class="scenario-detail" id="upScenarioDetail">Awaiting live positions</span>
+      </article>
+      <article class="scenario-card down">
+        <span class="scenario-label">IF DOWN WINS</span>
+        <strong class="scenario-pnl neutral" id="downScenarioPnl">—</strong>
+        <small>Net P&amp;L · after entry costs and modeled fees</small>
+        <span class="scenario-detail" id="downScenarioDetail">Awaiting live positions</span>
+      </article>
+    </div>
+    <div class="outcome-foot" id="outcomeSummary">Closed TP/SL proceeds are included; the calculator resets with each new window.</div>
+  </section>
+
   <section class="hero" aria-label="Strategy status">
-    <div class="intro"><div class="eyebrow">Binance pressure · BTC 5-minute market</div><h2>Project the close, then choose the side.</h2><p>Binance pressure, recent BTC volatility, and time remaining project the current candle close against the previous candle close. Above selects UP; below selects DOWN.</p></div>
+    <div class="intro"><div class="eyebrow">Binance pressure · BTC 5-minute market</div><h2>Project the close, then choose the side.</h2><p>Wait 30 seconds after the window opens, then compare the projected close with the previous candle close. Above selects UP; below selects DOWN. Best-bid TP/SL exits are checked continuously.</p></div>
     <div class="notice"><strong>Experimental projection · uncalibrated</strong><span>Paper trading only. The projected close is a heuristic, not a probability guarantee; real-order modules are inactive.</span></div>
   </section>
 
@@ -274,7 +314,7 @@
   <section class="panel" aria-label="Adaptive sample shadow comparison">
     <div class="panel-head"><h2>Adaptive-sample shadow P&amp;L</h2><span class="pill wait" id="shadowStatus">Shadow only</span></div>
     <div id="shadowComparison"><div class="empty">Waiting for pressure data. This comparison never submits orders.</div></div>
-    <div class="shadow-note">The trading model uses ten one-second Binance pressure samples. The adaptive shadow changes to 9, 8, 7, then 6 samples at each minute mark. Both use fixed 100-share entries, separate 15-second cooldowns for UP and DOWN, and modeled taker fees. CLOB books do not contribute to the signal; the existing $0.95 ask cap and execution checks remain. Positions stay open until official resolution; pending results are checked every 10 seconds. P&amp;L includes settled results and open-position marks; unresolved positions are shown separately. Comparison totals reset when the bot restarts.</div>
+    <div class="shadow-note">Both models wait 30 seconds after each window opens. The trading model uses ten one-second Binance pressure samples; the adaptive shadow changes to 9, 8, 7, then 6 samples at each minute mark. Both use fixed 100-share entries, separate 15-second side cooldowns, and modeled taker fees. The $0.95 ask cap remains. A fresh best bid at $0.99 closes for $1/share; a best bid at $0.01 closes for $0/share. Otherwise, positions settle at official resolution, checked every 10 seconds.</div>
   </section>
 
   <section class="panel">
@@ -292,7 +332,7 @@
     <div class="events" id="events"><div class="empty">Waiting for activity…</div></div>
   </section>
 
-  <p class="foot">Paper strategy parameters: the bot uses the last ten one-second Binance pressure scores to estimate pressure direction and strength, scales the projected move by recent BTC volatility and the seconds remaining, and compares projected close with the previous candle close. Above selects UP; below selects DOWN. There is no Polymarket probability or edge filter, and entries are fixed at 100 shares. The existing $0.95 ask cap remains as an execution safeguard; a fresh next-tick CLOB ask confirms the full requested size. UP and DOWN use separate 15-second cooldowns. No take-profit or stop-loss exits: positions stay open until the original Polymarket market officially resolves, checked every 10 seconds. The demo runner does not load real-order modules.</p>
+  <p class="foot">Paper strategy parameters: after a 30-second delay from each window start, the bot uses the last ten one-second Binance pressure scores, recent BTC volatility, and remaining time to project the close relative to the previous candle close. Above selects UP; below selects DOWN. Entries are fixed at 100 shares; the $0.95 ask cap, next-ask-tick fill confirmation, and separate 15-second side cooldowns remain. A fresh held-side best bid at $0.99 books $1/share; at $0.01 it books $0/share. If neither is reached, the position waits for official Polymarket resolution. The demo runner does not load real-order modules.</p>
   <div class="error" id="error" role="status"></div>
 </main>
 <script>
@@ -314,14 +354,15 @@
     return 'warn';
   };
   const escStatus = v => esc(String(v ?? '—').replaceAll('_',' '));
-  function renderCandidate(side, item={}) {
+  function renderCandidate(side, item={}, entryAllowed=true) {
     const up = side === 'UP';
     const cls = up ? 'up-card' : 'down-card';
+    const ready = Boolean(item.qualifies && entryAllowed);
     return `<div class="candidate ${cls}">
-      <div class="candidate-head"><span class="candidate-title ${up?'up':'down'}">${side} PRESSURE ENTRY</span><span class="pill ${item.qualifies?'live':'wait'}">${item.qualifies?'READY':'WAIT'}</span></div>
-      <div class="row"><span>Selected by Binance pressure</span><strong>${item.selectedByPressure?'YES':'NO'}</strong></div>
+      <div class="candidate-head"><span class="candidate-title ${up?'up':'down'}">${side} PRESSURE ENTRY</span><span class="pill ${ready?'live':'wait'}">${ready?'READY':'WAIT'}</span></div>
+      <div class="row"><span>Selected by projected close</span><strong>${item.selectedByPressure?'YES':'NO'}</strong></div>
       <div class="row"><span>Current CLOB ask / cap</span><strong>${price(item.bestAsk)} / ${price(item.priceCap)}</strong></div>
-      <div class="row"><span>Qualified size</span><strong>${item.qualifies ? Number(item.requestedShares||100) + ' shares' : '—'}</strong></div>
+      <div class="row"><span>Qualified size</span><strong>${ready ? Number(item.requestedShares||100) + ' shares' : '—'}</strong></div>
       <div class="row"><span>Candidate note</span><strong>${esc(item.reason||'—')}</strong></div>
     </div>`;
   }
@@ -333,11 +374,33 @@
       <span class="accumulated-note">${money(summary.totalCost || 0)} committed including fees · ${Number(summary.positionCount || 0)} fills</span>
     </article>`;
   }
+  function renderOutcomeCalculator(state={}) {
+    const value = state?.outcomeCalculator || {};
+    const up = value.upWins || {};
+    const down = value.downWins || {};
+    const pnlClass = result => Number(result) > 0 ? 'positive'
+      : Number(result) < 0 ? 'negative' : 'neutral';
+    document.querySelector('#upScenarioPnl').className = `scenario-pnl ${pnlClass(up.netPnl)}`;
+    document.querySelector('#downScenarioPnl').className = `scenario-pnl ${pnlClass(down.netPnl)}`;
+    document.querySelector('#upScenarioPnl').textContent = money(up.netPnl);
+    document.querySelector('#downScenarioPnl').textContent = money(down.netPnl);
+    document.querySelector('#upScenarioDetail').textContent =
+      `${money(up.payout)} payout · ${Number(value.openShares?.UP || 0).toLocaleString()} open UP shares`;
+    document.querySelector('#downScenarioDetail').textContent =
+      `${money(down.payout)} payout · ${Number(value.openShares?.DOWN || 0).toLocaleString()} open DOWN shares`;
+    document.querySelector('#outcomeWindowLabel').textContent = state.windowEnd
+      ? `Ends ${time(state.windowEnd)}`
+      : 'Waiting for current window';
+    document.querySelector('#outcomeSummary').textContent = Number(value.positionCount || 0) === 0
+      ? 'No filled entries yet this window. Closed TP/SL proceeds are included; totals reset at the next window.'
+      : `${money(value.totalEntryCost)} total entry cost including fees · ${money(value.knownExitProceeds)} TP/SL proceeds credited · ${Number(value.positionCount || 0)} filled positions.`;
+  }
   function renderMarket(state) {
     const q = state?.quotes || {};
     const f = state?.forecast || state?.marketForecast;
     const accumulated = state?.accumulatedPositions || {};
     const title = state?.title || state?.slug || 'Waiting for market discovery';
+    const entryAllowed = f?.status !== 'WINDOW_ENTRY_DELAY';
     const orders = (state?.orders || []).map(o => `${o.side} ${price(o.price)} ${o.status}`).join(' · ') || 'None';
     const quoteBox = (side, cls) => {
       const v = q[side] || {};
@@ -361,7 +424,7 @@
         <div class="metric"><span>Acceleration</span><strong>${num(f.pressureAcceleration)?.toFixed(4) ?? '—'}</strong></div>
         <div class="metric"><span>Volatility / sec</span><strong>${num(f.volatilityPerSecond)?.toFixed(5) ?? '—'}</strong></div>
       </div>
-      <div class="candidates">${renderCandidate('UP',f.candidateBySide?.UP)}${renderCandidate('DOWN',f.candidateBySide?.DOWN)}</div>
+      <div class="candidates">${renderCandidate('UP',f.candidateBySide?.UP,entryAllowed)}${renderCandidate('DOWN',f.candidateBySide?.DOWN,entryAllowed)}</div>
     </section>` : `<section class="forecast"><div class="forecast-head"><div><div class="forecast-title">Projected candle close</div><div class="forecast-caption">Close projection unavailable; market quotes and account data continue to update.</div></div><span class="uncal">BINANCE ONLY</span></div><div class="empty">Waiting for fresh Binance pressure data. No signal inferred.</div></section>`;
     const selectedSide = f?.selectedSide || '—';
     const status = f?.status || 'forecast unavailable';
@@ -382,9 +445,11 @@
     if (!orders?.length) return '<div class="empty">No paper orders in this 5m window.</div>';
     const rows = orders.map(o => {
       const outcome = o.outcome || o.side || '—';
-      const exit = o.kind === 'ENTRY'
-        ? (o.sourceExitKind ? `${esc(o.sourceExitKind)} ${price(o.sourceExitLimitPrice)}` : o.takeProfitPrice ? `TP ${price(o.takeProfitPrice)} / SL ${price(o.stopLossPrice)}` : 'Paper hold / resolution')
-        : '—';
+      const isEntry = o.action === 'BUY' || String(o.kind || '').startsWith('BUY');
+      const isExit = o.action === 'SELL' || String(o.kind || '').startsWith('SELL');
+      const exit = isEntry
+        ? `TP ${price(0.99)} → $1 / SL ${price(0.01)} → $0`
+        : isExit ? `${money(o.exitProceeds)} payout (${price(o.price)} trigger)` : '—';
       const status = String(o.status || 'unknown');
       return `<tr><td>${esc(o.timeframe||'—')}</td><td>${esc(o.kind||'—')}${o.testOnly?' · TEST':''}</td><td class="${outcome==='UP'?'up':'down'}">${esc(outcome)}</td><td>${price(o.price)}</td><td>${Number(o.shares||0).toFixed(2)}</td><td>${Number(o.matchedShares||0).toFixed(2)}</td><td>${exit}</td><td><span class="pill ${statusClass(status)==='good'?'live':statusClass(status)==='bad'?'fail':'wait'}">${esc(status)}</span></td><td>${esc(o.error||o.exitBlockedReason||o.resolutionError||'—')}</td></tr>`;
     }).join('');
@@ -541,6 +606,7 @@
         : `Real-order modules are inactive.${flowWindow}`;
       const market = state.markets?.['5m'] || {};
       const marketView = {...market, forecast: market.forecast || state.forecast || state.marketForecast};
+      renderOutcomeCalculator(marketView);
       document.querySelector('#markets').innerHTML = renderMarket(marketView);
       document.querySelector('#marketStatus').textContent = marketView.forecast
         ? `${marketView.forecast.ready ? 'Close projection ready' : 'Close projection pending'} · ${marketView.forecast.selectedSide || 'no side'}`
