@@ -508,6 +508,8 @@ test('the final fresh in-window bid triggers TP before rollover moves a position
   assert.equal(position.exitReason, 'TAKE_PROFIT_BID_AT_0.99');
   assert.equal(position.closedAt, finalQuoteAt);
   assert.equal(bot.cash, 10_060);
+  assert.equal(bot.snapshot().account.startingCapital, 10_000);
+  assert.equal(bot.snapshot().account.currentCapital, 10_060);
   assert.equal(bot.events.find((event) => event.event === 'PAPER_PRESSURE_WINDOW_ENDED')
     .pendingResolutionCount, 0);
 });
@@ -557,6 +559,8 @@ test('paper snapshot identifies only the uncalibrated BTC 5-minute demo strategy
   assert.equal(state.strategy.exits.stopLoss, false);
   assert.equal(state.strategy.signalState.calibrated, false);
   assert.equal(state.strategy.priceFeed.source, 'Binance BTCUSDT aggregate trades');
+  assert.equal(state.account.startingCapital, 10_000);
+  assert.equal(state.account.currentCapital, state.account.equity);
   assert.equal(Object.hasOwn(state, 'shadowComparison'), false);
   assert.equal(state.markets['5m'].forecast.calibrated, false);
 });
@@ -645,6 +649,7 @@ test('ended paper positions wait for the original market resolution', async () =
   assert.equal(position.status, 'SETTLED_WIN');
   assert.equal(position.realizedPnl, 60);
   assert.equal(bot.cash, 10_100);
+  assert.equal(bot.snapshot().account.currentCapital, 10_100);
   assert.equal(bot.resolutions[0].outcome, 'UP');
 });
 

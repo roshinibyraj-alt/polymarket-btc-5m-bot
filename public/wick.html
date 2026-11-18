@@ -196,8 +196,8 @@
   <section class="grid" aria-label="Paper strategy and account snapshot">
     <div class="stat"><div class="label">Strategy mode</div><div class="value good" id="tradingState">PAPER</div><span class="note" id="modeNote">No real orders are enabled</span></div>
     <div class="stat"><div class="label">Real-order modules</div><div class="value good" id="accountReady">INACTIVE</div><span class="note" id="accountNote">Not loaded by the demo runner</span></div>
-    <div class="stat"><div class="label">Paper cash</div><div class="value" id="collateral">—</div><span class="note">Available for simulated positions</span></div>
-    <div class="stat"><div class="label">Paper equity</div><div class="value" id="equity">—</div><span class="note" id="snapshotTime">Demo account value</span></div>
+    <div class="stat"><div class="label">Available paper cash</div><div class="value" id="collateral">—</div><span class="note">Cash not committed to simulated positions</span></div>
+    <div class="stat"><div class="label">Current paper capital</div><div class="value" id="equity">—</div><span class="note" id="snapshotTime">Cash plus open-position value</span></div>
   </section>
 
   <section class="panel">
@@ -353,8 +353,8 @@
   function renderGlobalEquity(state) {
     const account = state.account || {};
     const analytics = state.portfolioAnalytics || {};
-    const capital = num(account.capital);
-    const currentEquity = num(account.equity);
+    const capital = num(account.startingCapital ?? account.capital);
+    const currentEquity = num(account.currentCapital ?? account.equity);
     const history = Array.isArray(analytics.equityCurve) ? analytics.equityCurve : [];
     const points = history
       .map(point => ({ts:num(point.ts), equity:num(point.equity), live:false}))
@@ -396,7 +396,7 @@
     }
     document.querySelector('#equitySummary').textContent = currentEquity == null
       ? 'Settled account history'
-      : `Current equity ${money(currentEquity)} · ${points.length} points`;
+      : `Current capital ${money(currentEquity)} · ${points.length} points`;
 
     const exposure=analytics.maxWindowExposure||{};
     const exposureValue=num(exposure.amount);
@@ -424,8 +424,10 @@
       document.querySelector('#accountReady').className = 'value good';
       document.querySelector('#accountNote').textContent = 'Real-order modules are not loaded by this demo runner.';
       document.querySelector('#collateral').textContent = money(account.cash);
-      document.querySelector('#equity').textContent = money(account.equity);
-      document.querySelector('#snapshotTime').textContent = account.asOf ? `Updated ${new Date(account.asOf).toLocaleTimeString()}` : 'Demo account value';
+      document.querySelector('#equity').textContent = money(account.currentCapital ?? account.equity);
+      const startingCapital = account.startingCapital ?? account.capital;
+      const updatedAt = account.asOf ? ` · Updated ${new Date(account.asOf).toLocaleTimeString()}` : '';
+      document.querySelector('#snapshotTime').textContent = `${startingCapital == null ? 'Starting capital unavailable' : `Starting capital ${money(startingCapital)}`}${updatedAt}`;
       renderGlobalEquity(state);
       const flowTest = state.flowTest || {};
       const flowPanel = document.querySelector('#flowTestPanel');

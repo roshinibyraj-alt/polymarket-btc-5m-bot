@@ -1373,6 +1373,8 @@ class PressureForecastBot extends WickBot {
         ...state.account,
         accountReady: false,
         collateral: null,
+        startingCapital: this.capital,
+        currentCapital: this.cash + Number(state.account.markedValue || 0),
         equity: this.cash + Number(state.account.markedValue || 0),
         cash: this.cash,
         asOf: now,
