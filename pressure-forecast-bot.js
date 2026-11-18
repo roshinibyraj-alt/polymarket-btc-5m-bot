@@ -489,8 +489,7 @@ class PressureForecastBot extends WickBot {
     try {
       await this.closePreviousWindows(start, now);
       await this.resolvePendingPositions(now);
-      if (!this.market || this.market.start !== start
-        || now - this.lastMarketAt > config.MARKET_REFRESH_MS) {
+      if (!this.market || this.market.start !== start) {
         this.market = await this.marketData.getBtcMarket(start, this.windowMs);
         this.lastMarketAt = now;
         if (!this.market) {

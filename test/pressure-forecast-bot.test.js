@@ -311,6 +311,26 @@ test('current Polymarket prices come from the CLOB feed cache, not repeated REST
   assert.equal(bot.snapshot().clobFeed.connected, true);
 });
 
+test('reuses the current-window market instead of re-fetching Gamma every refresh interval', async () => {
+  let marketRefreshCalls = 0;
+  const bot = makeBot({
+    marketData: {
+      getBtcMarket: async () => {
+        marketRefreshCalls += 1;
+        throw new Error('Gamma request timed out');
+      },
+    },
+  });
+  bot.lastMarketAt = NOW - config.MARKET_REFRESH_MS * 10;
+
+  await bot.tick();
+
+  assert.equal(marketRefreshCalls, 0);
+  assert.equal(bot.market.start, WINDOW_START);
+  assert.equal(bot.status, 'scanning');
+  assert.equal(bot.error, null);
+});
+
 test('fresh $0.99 best bid pays $1 per share with no stop-loss', async () => {
   const bot = makeBot();
   const position = {
