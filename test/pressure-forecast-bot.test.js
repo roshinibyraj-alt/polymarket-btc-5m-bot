@@ -106,23 +106,6 @@ test('ten one-second pressure samples expose direction, persistence, and acceler
   assert.ok(result.pressureImpulse > 0);
 });
 
-test('adaptive shadow sample count steps down once per minute and floors at six', () => {
-  for (const [elapsed, expected] of [
-    [0, 10],
-    [59_999, 10],
-    [60_000, 9],
-    [120_000, 8],
-    [180_000, 7],
-    [240_000, 6],
-    [299_000, 6],
-  ]) {
-    assert.equal(
-      PressureForecastBot._test.adaptiveShadowSampleCount(WINDOW_START, WINDOW_START + elapsed),
-      expected,
-    );
-  }
-});
-
 test('taker sweep observes the buy ceiling, sell floor, and per-level fees', () => {
   const market = { feesEnabled: true, feeSchedule: { rate: 0.07, exponent: 1 } };
   const buy = PressureForecastBot._test.sweepBook([
@@ -145,22 +128,34 @@ test('taker sweep observes the buy ceiling, sell floor, and per-level fees', () 
   assert.equal(sell.filledShares, 100);
 });
 
-test('entry probability floor is strict and edge scales size by ten shares per cent', () => {
-  const quote = {
+test('entry requires probability above 50%, $0.02 net edge, and retains $0.10 sizing base', () => {
+  const evaluate = PressureForecastBot._test.evaluateEntryCandidate;
+  const probabilityFloor = evaluate(0.50, {
+    bestAsk: 0.30,
+    askLevels: [{ price: 0.30, size: 500 }],
+  }, { feesEnabled: false });
+  const exactEdge = evaluate(0.51, {
+    bestAsk: 0.49,
+    askLevels: [{ price: 0.49, size: 500 }],
+  }, { feesEnabled: false });
+  const oneCentAboveSizingBase = evaluate(0.71, {
     bestAsk: 0.60,
     askLevels: [{ price: 0.60, size: 500 }],
-  };
-  const evaluate = PressureForecastBot._test.evaluateEntryCandidate;
-  const atFloor = evaluate(0.70, quote, { feesEnabled: false });
-  const oneCentOver = evaluate(0.71, quote, { feesEnabled: false });
-  const capped = evaluate(0.99, quote, { feesEnabled: false });
+  }, { feesEnabled: false });
+  const capped = evaluate(0.99, {
+    bestAsk: 0.60,
+    askLevels: [{ price: 0.60, size: 500 }],
+  }, { feesEnabled: false });
 
-  assert.equal(atFloor.qualifies, false);
-  assert.equal(atFloor.requestedShares, 100);
-  assert.equal(oneCentOver.qualifies, true);
-  assert.ok(Math.abs(oneCentOver.expectedNetEdgePerShare - 0.11) < 1e-12);
-  assert.equal(oneCentOver.requestedShares, 110);
+  assert.equal(probabilityFloor.qualifies, false);
+  assert.equal(exactEdge.qualifies, true);
+  assert.ok(Math.abs(exactEdge.expectedNetEdgePerShare - 0.02) < 1e-12);
+  assert.equal(exactEdge.requestedShares, 100);
+  assert.equal(oneCentAboveSizingBase.qualifies, true);
+  assert.equal(oneCentAboveSizingBase.requestedShares, 110);
   assert.equal(capped.requestedShares, 200);
+  assert.equal(PressureForecastBot._test.sharesAllowedByEdge(0.10), 100);
+  assert.equal(PressureForecastBot._test.sharesAllowedByEdge(0.11), 110);
   assert.equal(PressureForecastBot._test.sharesAllowedByEdge(0.20), 200);
 });
 
@@ -274,7 +269,7 @@ test('opposite qualifying signal adds a position without selling the existing on
   assert.equal(bot.orders[0].maxPrice, 0.95);
 });
 
-test('same-side entries are blocked until the 15-second cooldown elapses', () => {
+test('same-side entries are blocked until the 5-second cooldown elapses', () => {
   const bot = makeBot();
   setQuote(bot, 'UP', 0.30, 0.32);
   setQuote(bot, 'DOWN', 0.68, 0.70);
@@ -316,49 +311,7 @@ test('same-side entries are blocked until the 15-second cooldown elapses', () =>
   assert.equal(bot.lastEntryAtBySide.UP, NOW + 1000);
 });
 
-test('shadow entries use separate fee-aware paper cash and never add main orders', () => {
-  const bot = makeBot();
-  setQuote(bot, 'UP', 0.30, 0.32);
-  setQuote(bot, 'DOWN', 0.68, 0.70);
-  addSamples(bot, 1);
-  bot.market.feesEnabled = true;
-  bot.market.feeSchedule = { rate: 0.07, exponent: 1 };
-
-  const changed = bot.processPressureStrategy(WINDOW_START, NOW);
-
-  assert.equal(changed, true);
-  assert.equal(bot.forecast.requiredSamples, 10);
-  assert.equal(bot.shadowForecast.requiredSamples, 10);
-  assert.equal(bot.positions.filter((position) => position.status === 'OPEN').length, 1);
-  assert.equal(bot.shadowPositions.filter((position) => position.status === 'OPEN').length, 1);
-  assert.equal(bot.orders.length, 1);
-  assert.equal(bot.orders[0].kind, 'BUY_ENTRY');
-  assert.ok(bot.positions[0].fees > 0);
-  assert.ok(bot.shadowPositions[0].fees > 0);
-  assert.equal(bot.cash, 10_000 - bot.positions[0].totalCost);
-  assert.equal(bot.shadowCash, 10_000 - bot.shadowPositions[0].totalCost);
-  assert.notStrictEqual(bot.positions, bot.shadowPositions);
-});
-
-test('shadow-only entry leaves the trading portfolio completely untouched', () => {
-  const bot = makeBot();
-  setQuote(bot, 'UP', 0.30, 0.32);
-  setQuote(bot, 'DOWN', 0.68, 0.70);
-  addSamples(bot, 1);
-  const read = bot.buildPressureRead(NOW);
-  const forecast = bot.createForecast(read, NOW, WINDOW_START);
-
-  const simulated = bot.processShadowEntry(WINDOW_START, NOW, read, forecast);
-
-  assert.equal(simulated, true);
-  assert.equal(bot.cash, 10_000);
-  assert.equal(bot.orders.length, 0);
-  assert.equal(bot.positions.length, 0);
-  assert.equal(bot.shadowPositions.length, 1);
-  assert.ok(bot.shadowCash < 10_000);
-});
-
-test('missing quotes do not exit main or shadow positions', async () => {
+test('missing quotes do not exit open positions', async () => {
   const bot = makeBot({
     marketData: {
       getBook: async (tokenId) => ({
@@ -372,15 +325,10 @@ test('missing quotes do not exit main or shadow positions', async () => {
     { id: 'main-up', side: 'UP', shares: 100, totalCost: 40, windowStart: WINDOW_START, status: 'OPEN' },
     { id: 'main-down', side: 'DOWN', shares: 100, totalCost: 40, windowStart: WINDOW_START, status: 'OPEN' },
   );
-  bot.shadowPositions.push(
-    { id: 'shadow-up', side: 'UP', shares: 100, totalCost: 40, windowStart: WINDOW_START, status: 'OPEN' },
-    { id: 'shadow-down', side: 'DOWN', shares: 100, totalCost: 40, windowStart: WINDOW_START, status: 'OPEN' },
-  );
 
   await bot.tick();
 
   assert.deepEqual(bot.positions.map((position) => position.status), ['OPEN', 'OPEN']);
-  assert.deepEqual(bot.shadowPositions.map((position) => position.status), ['OPEN', 'OPEN']);
   assert.equal(bot.orders.some((order) => order.action === 'SELL'), false);
   assert.equal(bot.snapshot().strategy.exits.takeProfit, true);
   assert.equal(bot.snapshot().strategy.exits.stopLoss, false);
@@ -448,43 +396,6 @@ test('current Polymarket prices come from the CLOB feed cache, not repeated REST
   assert.equal(bot.snapshot().clobFeed.connected, true);
 });
 
-test('shadow-only positions roll over and settle from official market resolution', async () => {
-  const bot = makeBot({
-    marketData: {
-      getMarket: async () => ({
-        closed: true,
-        outcomes: '["Up","Down"]',
-        outcomePrices: '["1","0"]',
-        clobTokenIds: '["up-token","down-token"]',
-      }),
-    },
-  });
-  const position = {
-    id: 'shadow-pending-up',
-    shadowOnly: true,
-    side: 'UP',
-    shares: 100,
-    totalCost: 40,
-    windowStart: WINDOW_START,
-    marketId: 'condition',
-    tokenId: 'up-token',
-    slug: bot.market.slug,
-    status: 'OPEN',
-  };
-  bot.shadowPositions.push(position);
-  bot.shadowCash = 9960;
-
-  await bot.closePreviousWindows(WINDOW_START + config.WINDOW_MS_5M, NOW + 1000);
-  assert.equal(position.status, 'PENDING_CLOB_RESULT');
-  assert.equal(bot.positions.length, 0);
-
-  await bot.resolvePendingPositions(NOW + 60_000);
-  assert.equal(position.status, 'SETTLED_WIN');
-  assert.equal(position.realizedPnl, 60);
-  assert.equal(bot.shadowCash, 10_060);
-  assert.equal(bot.resolutions.length, 0);
-});
-
 test('fresh $0.99 best bid pays $1 per share with no stop-loss', async () => {
   const bot = makeBot();
   const position = {
@@ -536,12 +447,13 @@ test('paper snapshot identifies only the uncalibrated BTC 5-minute demo strategy
   assert.equal(state.strategy.liveTradingEnabled, false);
   assert.equal(state.strategy.realOrderModulesLoaded, false);
   assert.equal(state.strategy.orders.type, 'Visible-book taker-style paper sweeps');
-  assert.equal(state.strategy.orders.entryCooldownMs, 15_000);
-  assert.match(state.strategy.repeatEntryRule, /separate 15-second entry cooldowns/i);
+  assert.equal(state.strategy.orders.entryCooldownMs, 5_000);
+  assert.match(state.strategy.repeatEntryRule, /separate 5-second entry cooldowns/i);
   assert.match(state.strategy.repeatEntryRule, /increasing by 10 shares per \$0\.01 edge/i);
-  assert.equal(state.strategy.minEstimatedProbability, 0.70);
+  assert.equal(state.strategy.minEstimatedProbability, 0.50);
   assert.equal(state.strategy.maxBuyPrice, 0.95);
-  assert.equal(state.strategy.minNetEdgePerShare, 0.10);
+  assert.equal(state.strategy.minNetEdgePerShare, 0.02);
+  assert.equal(state.strategy.orders.edgeSizeBase, 0.10);
   assert.equal(state.strategy.maxEntryShares, 200);
   assert.match(state.strategy.exit, /take-profit.*official resolution/i);
   assert.equal(state.strategy.exits.takeProfit, true);
@@ -550,11 +462,7 @@ test('paper snapshot identifies only the uncalibrated BTC 5-minute demo strategy
   assert.equal(state.strategy.exits.stopLoss, false);
   assert.equal(state.strategy.signalState.calibrated, false);
   assert.equal(state.strategy.priceFeed.source, 'Binance BTCUSDT aggregate trades');
-  assert.equal(state.shadowComparison.mode, 'SHADOW_ONLY');
-  assert.equal(state.shadowComparison.baseSampleCount, 10);
-  assert.equal(state.shadowComparison.activeSampleCount, 10);
-  assert.equal(state.shadowComparison.baseline.initialCapital, 10_000);
-  assert.equal(state.shadowComparison.adaptive.initialCapital, 10_000);
+  assert.equal(Object.hasOwn(state, 'shadowComparison'), false);
   assert.equal(state.markets['5m'].forecast.calibrated, false);
 });
 
@@ -697,7 +605,7 @@ test('Binance public aggregate trades record direction and the current 5-minute 
   assert.equal(feed.snapshot().tradeFlow.tradeCount, 3);
 });
 
-test('paper history migration restores positions, cash, cooldowns, and shadow totals', () => {
+test('paper history migration restores positions, cash, and cooldowns', () => {
   const bot = makeBot();
   const position = {
     id: 'btc-5m-1800000000000-buy_entry-up-23',
@@ -735,22 +643,6 @@ test('paper history migration restores positions, cash, cooldowns, and shadow to
     events: [{ at: NOW - 4000, type: 'BUY_FILLED', message: 'entry retained' }],
     resolutions: [{ slug: 'prior-window', outcome: 'DOWN', status: 'RESOLVED', pnl: 12 }],
     forecast: { ready: false, reason: 'restored forecast' },
-    shadowComparison: {
-      activeSampleCount: 8,
-      adaptive: {
-        initialCapital: 10_000,
-        cash: 9_900,
-        entries: 4,
-        settledEntries: 3,
-        wins: 2,
-        losses: 1,
-        openPositions: 1,
-        awaitingResolution: 0,
-        realizedPnl: 15,
-        floatingPnl: -5,
-        totalPnl: 10,
-      },
-    },
   };
 
   bot.restoreFromSnapshot(snapshot);
@@ -763,15 +655,11 @@ test('paper history migration restores positions, cash, cooldowns, and shadow to
   assert.equal(bot.pressureSamples.length, 0);
   assert.equal(bot.forecast.reason, 'restored forecast');
 
-  const shadow = bot.snapshot().shadowComparison.adaptive;
-  assert.equal(shadow.entries, 4);
-  assert.equal(shadow.wins, 2);
-  assert.equal(shadow.cash, 9_900);
-  assert.equal(shadow.realizedPnl, 15);
+  assert.equal(Object.hasOwn(bot.snapshot(), 'shadowComparison'), false);
 
   const reloadedBot = makeBot();
   reloadedBot.restorePersistentState(bot.serializePersistentState());
   assert.equal(reloadedBot.positions[0].id, position.id);
   assert.equal(reloadedBot.cash, 9_952);
-  assert.equal(reloadedBot.shadowStatsOffset.entries, 4);
+  assert.equal(Object.hasOwn(reloadedBot.serializePersistentState(), 'shadowPositions'), false);
 });
