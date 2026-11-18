@@ -108,6 +108,79 @@ test('ten one-second pressure samples expose direction, persistence, and acceler
   assert.ok(result.pressureImpulse > 0);
 });
 
+test('pressure projection uses remaining time to compare the projected close with the prior close', () => {
+  const project = PressureForecastBot._test.projectPressureClose;
+  const withTime = project({
+    currentPrice: 99.99,
+    previousClose: 100,
+    pressureImpulse: 0.5,
+    volatilityPerSecond: 0.0001,
+    secondsRemaining: 240,
+  });
+  const nearClose = project({
+    currentPrice: 99.99,
+    previousClose: 100,
+    pressureImpulse: 0.5,
+    volatilityPerSecond: 0.0001,
+    secondsRemaining: 1,
+  });
+  const reversedPressure = project({
+    currentPrice: 100.01,
+    previousClose: 100,
+    pressureImpulse: -0.5,
+    volatilityPerSecond: 0.0001,
+    secondsRemaining: 240,
+  });
+
+  assert.equal(withTime.side, 'UP');
+  assert.ok(withTime.projectedClose > 100);
+  assert.equal(nearClose.side, 'DOWN');
+  assert.ok(nearClose.projectedClose < 100);
+  assert.equal(reversedPressure.side, 'DOWN');
+});
+
+test('forecast direction changes when remaining time changes the projected candle close', () => {
+  function forecastWithTimeRemaining(secondsRemaining) {
+    const now = WINDOW_START + config.WINDOW_MS_5M - secondsRemaining * 1000;
+    const bot = makeBot({ now, price: 99.99 });
+    setQuote(bot, 'UP', 0.30, 0.32, 1000, now);
+    setQuote(bot, 'DOWN', 0.68, 0.70, 1000, now);
+    bot.pressureSamples = Array.from({ length: 10 }, (_, index) => ({
+      at: now - (9 - index) * 1000,
+      scoreSource: 'BINANCE_PRESSURE_V1',
+      score: 0.8,
+      price: 99.90 + index * 0.01,
+      windowOpenPrice: 100,
+    }));
+    const read = bot.buildPressureRead(now);
+    return bot.createForecast(read, now, WINDOW_START);
+  }
+
+  const early = forecastWithTimeRemaining(240);
+  const late = forecastWithTimeRemaining(1);
+  assert.equal(early.previousCandleClose, 100);
+  assert.equal(early.selectedSide, 'UP');
+  assert.ok(early.projectedClose > early.previousCandleClose);
+  assert.equal(late.selectedSide, 'DOWN');
+  assert.ok(late.projectedClose < late.previousCandleClose);
+});
+
+test('forecast compares with the prior candle close when the Binance feed has it', () => {
+  const bot = makeBot();
+  setQuote(bot, 'UP', 0.30, 0.32);
+  setQuote(bot, 'DOWN', 0.68, 0.70);
+  addSamples(bot, 1);
+  bot.priceFeed.previousClosedCandle = {
+    start: WINDOW_START - config.WINDOW_MS_5M,
+    close: 100.7,
+  };
+
+  const forecast = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
+  assert.equal(forecast.previousCandleClose, 100.7);
+  assert.equal(forecast.previousCloseSource, 'PREVIOUS_CLOSED_CANDLE');
+  assert.equal(forecast.selectedSide, 'DOWN');
+});
+
 test('adaptive shadow sample count steps down once per minute and floors at six', () => {
   for (const [elapsed, expected] of [
     [0, 10],
@@ -159,8 +232,10 @@ test('Binance pressure can select a side without CLOB odds or probability inputs
   addSamples(bot, 1);
   const forecast = bot.createForecast(bot.buildPressureRead(NOW), NOW, WINDOW_START);
   assert.equal(forecast.ready, true);
-  assert.equal(forecast.signalSource, 'BINANCE_PRESSURE_ONLY');
+  assert.equal(forecast.signalSource, 'BINANCE_PRESSURE_CLOSE_PROJECTION');
   assert.equal(forecast.selectedSide, 'UP');
+  assert.equal(forecast.previousCandleClose, 100);
+  assert.ok(forecast.projectedClose > forecast.previousCandleClose);
   assert.equal(forecast.candidateBySide.UP.qualifies, true);
   assert.equal(forecast.candidateBySide.DOWN.qualifies, false);
   assert.equal(forecast.candidateBySide.UP.requestedShares, config.PRESSURE_ENTRY_SHARES);
@@ -564,10 +639,10 @@ test('shadow-only positions roll over and settle from official market resolution
   assert.equal(bot.resolutions.length, 0);
 });
 
-test('paper snapshot identifies the Binance-pressure-only BTC 5-minute demo strategy', () => {
+test('paper snapshot identifies the pressure-projection BTC 5-minute demo strategy', () => {
   const bot = makeBot();
   const state = bot.snapshot();
-  assert.equal(state.strategy.name, 'BTC 5-minute Binance pressure-only paper bot');
+  assert.equal(state.strategy.name, 'BTC 5-minute Binance pressure projection paper bot');
   assert.deepEqual(state.strategy.markets, ['BTC 5m']);
   assert.equal(state.strategy.execution, 'PAPER ONLY');
   assert.equal(state.strategy.liveTradingEnabled, false);
@@ -575,7 +650,7 @@ test('paper snapshot identifies the Binance-pressure-only BTC 5-minute demo stra
   assert.equal(state.strategy.orders.type, 'Full requested-size paper fill at the next Polymarket ask tick');
   assert.equal(state.strategy.orders.entryCooldownMs, 15_000);
   assert.match(state.strategy.repeatEntryRule, /each side has its own 15-second entry cooldown/i);
-  assert.match(state.strategy.repeatEntryRule, /Binance pressure impulse selects UP when positive/i);
+  assert.match(state.strategy.repeatEntryRule, /projected close above the previous candle close selects UP/i);
   assert.equal('minEstimatedProbability' in state.strategy, false);
   assert.equal(state.strategy.maxBuyPrice, 0.95);
   assert.equal('minNetEdgePerShare' in state.strategy, false);
@@ -589,6 +664,26 @@ test('paper snapshot identifies the Binance-pressure-only BTC 5-minute demo stra
   assert.equal(state.shadowComparison.baseline.initialCapital, 10_000);
   assert.equal(state.shadowComparison.adaptive.initialCapital, 10_000);
   assert.equal(state.markets['5m'].forecast.calibrated, false);
+});
+
+test('dashboard window totals show filled open shares and weighted cost by side', () => {
+  const bot = makeBot();
+  bot.positions = [
+    { windowStart: WINDOW_START, side: 'UP', status: 'OPEN', shares: 100, totalCost: 41 },
+    { windowStart: WINDOW_START, side: 'UP', status: 'OPEN', shares: 50, totalCost: 24 },
+    { windowStart: WINDOW_START, side: 'DOWN', status: 'OPEN', shares: 80, totalCost: 36 },
+    { windowStart: WINDOW_START - config.WINDOW_MS_5M, side: 'UP', status: 'OPEN', shares: 500, totalCost: 100 },
+    { windowStart: WINDOW_START, side: 'DOWN', status: 'PENDING_CLOB_RESULT', shares: 200, totalCost: 40 },
+  ];
+
+  const summary = bot.snapshot().markets['5m'].accumulatedPositions;
+  assert.equal(summary.UP.shares, 150);
+  assert.ok(Math.abs(summary.UP.averageCostPerShare - (65 / 150)) < 1e-12);
+  assert.equal(summary.UP.totalCost, 65);
+  assert.equal(summary.UP.positionCount, 2);
+  assert.equal(summary.DOWN.shares, 80);
+  assert.equal(summary.DOWN.averageCostPerShare, 0.45);
+  assert.equal(summary.DOWN.positionCount, 1);
 });
 
 test('paper snapshot adds global analytics without dropping position history', () => {
@@ -728,6 +823,37 @@ test('Binance public aggregate trades record direction and the current 5-minute 
   assert.equal(snapshot.tradeFlow.tradeCount, 2);
   feed.handleMessage({ data: { p: '100.5', q: '3', T: NOW + 2, m: false } });
   assert.equal(feed.snapshot().tradeFlow.tradeCount, 3);
+});
+
+test('Binance feed retains the previous completed five-minute candle close', () => {
+  const feed = new BinanceTickFeed({ now: () => NOW, WebSocketImpl: class FakeSocket {} });
+  feed.handleMessage(JSON.stringify({
+    stream: 'btcusdt@kline_5m',
+    data: {
+      E: NOW - 1,
+      k: {
+        t: WINDOW_START - config.WINDOW_MS_5M,
+        o: '99',
+        h: '101',
+        l: '98',
+        c: '100.5',
+        x: true,
+        T: WINDOW_START - 1,
+      },
+    },
+  }));
+  feed.handleMessage(JSON.stringify({
+    stream: 'btcusdt@kline_5m',
+    data: {
+      E: NOW,
+      k: { t: WINDOW_START, o: '100.5', h: '100.8', l: '100.4', c: '100.7', x: false },
+    },
+  }));
+
+  const snapshot = feed.snapshot();
+  assert.equal(snapshot.previousClosedCandle.start, WINDOW_START - config.WINDOW_MS_5M);
+  assert.equal(snapshot.previousClosedCandle.close, 100.5);
+  assert.equal(snapshot.currentCandle.start, WINDOW_START);
 });
 
 test('paper history migration restores positions, cash, cooldowns, and shadow totals', () => {

@@ -47,6 +47,16 @@
     .countdown{font:700 15px var(--mono);color:var(--navy);white-space:nowrap;background:#edf4f0;border-radius:9px;padding:5px 8px}
     .prices{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0}
     .price-box{background:#f3f7f4;border:1px solid var(--line);border-radius:12px;padding:12px;min-width:0}
+    .accumulated-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:10px 0}
+    .accumulated-card{border:1px solid var(--line);border-radius:12px;padding:11px 12px;background:#f8fbfc;min-width:0}
+    .accumulated-card.up{border-left:4px solid var(--teal);background:linear-gradient(145deg,#eaf8f1,#fbfefd)}
+    .accumulated-card.down{border-left:4px solid var(--coral);background:linear-gradient(145deg,#fff0ec,#fffdfc)}
+    .accumulated-head,.accumulated-cost{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+    .accumulated-head span,.accumulated-cost span{font:700 9px var(--mono);letter-spacing:.06em;color:var(--muted);text-transform:uppercase}
+    .accumulated-head strong{font:700 19px var(--display);font-variant-numeric:tabular-nums}
+    .accumulated-cost{margin-top:7px;padding-top:7px;border-top:1px solid var(--line)}
+    .accumulated-cost strong{font:700 13px var(--mono)}
+    .accumulated-note{display:block;margin-top:5px;color:var(--muted);font-size:9px}
     .price-head{display:flex;justify-content:space-between;align-items:center;gap:6px}.side{font:700 10px var(--mono);letter-spacing:.1em}.up{color:var(--teal)}.down{color:var(--coral)}
     .mid{font:700 28px/1 var(--display);letter-spacing:-.06em;margin:9px 0 5px;font-variant-numeric:tabular-nums}
     .quote-detail{font:10px var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
@@ -87,6 +97,10 @@
     .scroll{overflow:auto;overscroll-behavior-x:contain}table{width:100%;border-collapse:collapse;min-width:760px}th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);font-size:10px;white-space:nowrap}th{color:var(--muted);font:700 9px var(--mono);text-transform:uppercase;letter-spacing:.08em}td.muted{color:var(--muted)}
     .empty{padding:17px;color:var(--muted);text-align:center;font-size:11px;background:#f7f9f6;border-radius:10px}
     .events{display:grid;gap:0}.event{display:grid;grid-template-columns:145px 105px 1fr;gap:12px;padding:9px 0;border-bottom:1px solid var(--line);font-size:10px}.event:last-child{border:0}.event time,.event-type{color:var(--muted)}.event-type{font:700 9px var(--mono);letter-spacing:.06em}
+    .event.win,.event.loss{padding-left:8px;border-left:3px solid;border-radius:5px}
+    .event.win{border-left-color:#0b8c68;background:#e8f7ef}
+    .event.loss{border-left-color:#c4473e;background:#fff0ec}
+    .event.win .event-type{color:#08765f}.event.loss .event-type{color:#b43c36}
     .foot{color:var(--muted);font-size:10px;margin:14px 2px 0;line-height:1.65;max-width:940px}.error{color:var(--coral);font:11px var(--mono);margin-top:10px}
     .performance-layout{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(260px,.8fr);gap:12px;align-items:stretch}
     .equity-wrap{min-width:0;padding:12px;border:1px solid var(--line);border-radius:12px;background:#f8faf7}
@@ -109,6 +123,7 @@
       .panel{padding:13px;margin-top:10px;border-radius:13px}.panel-head{align-items:flex-start;margin-bottom:10px}.panel h2{font-size:13px}.hint{font-size:9px;text-align:right}
       .market{padding:12px;border-radius:13px}.market-title h3{font-size:14px}.slug{max-width:245px;font-size:9px}.countdown{font-size:13px;padding:5px 7px}
       .prices{gap:7px;margin:11px 0}.price-box{padding:10px 9px;border-radius:10px}.mid{font-size:25px;margin:8px 0 4px}.quote-detail{font-size:9px}
+      .accumulated-grid{gap:6px;margin:8px 0}.accumulated-card{padding:9px}.accumulated-head strong{font-size:17px}.accumulated-cost span,.accumulated-head span{font-size:8px}.accumulated-cost strong{font-size:11px}
       .forecast{padding:11px;margin-top:12px}.forecast-head{margin-bottom:9px}.forecast-title{font-size:12px}.forecast-caption{font-size:9px}.uncal{font-size:8px;padding:5px 6px}
       .estimate-grid{gap:6px}.estimate{padding:9px;border-radius:9px}.estimate .prob{font-size:18px}.estimate .implied{font-size:9px}.estimate-foot{font-size:8px}
       .metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px 10px}.metric{padding-top:7px}.metric span{font-size:8px}.metric strong{font-size:12px}
@@ -119,7 +134,7 @@
        .performance-metrics{gap:6px}.performance-stat{padding:9px}.performance-stat .value{font-size:16px}
        .performance-note{font-size:9px}
     }
-    @media(max-width:360px){.grid{grid-template-columns:1fr 1fr}.estimate-foot{flex-direction:column;gap:2px}.candidates,.shadow-grid{grid-template-columns:1fr}}
+    @media(max-width:360px){.grid{grid-template-columns:1fr 1fr}.estimate-foot{flex-direction:column;gap:2px}.candidates,.shadow-grid,.accumulated-grid{grid-template-columns:1fr}}
     @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
     /* A vivid, instrument-panel finish: saturated signal colors, cool paper surfaces,
        and crisp data hierarchy. Layout and responsive breakpoints remain unchanged. */
@@ -148,6 +163,14 @@
     .panel h2{color:#193b53}
     .hint{color:#587084}
     .market{border-top:4px solid #12a07a;background:linear-gradient(160deg,#fdffff,#f5fbfa)}
+    .accumulated-card.up{border-color:#b8e2d1;border-left-color:#0c9b77}
+    .accumulated-card.down{border-color:#efc9c1;border-left-color:#cf5145}
+    .event.win{border-left-color:#0c9b77;background:#e5f7ed}
+    .event.loss{border-left-color:#cf5145;background:#fff0ec}
+    tbody tr.result-win{background:#e5f7ed!important}
+    tbody tr.result-loss{background:#fff0ec!important}
+    tbody tr.result-win td{color:#08765f}
+    tbody tr.result-loss td{color:#b43c36}
     .countdown{color:#153b53;background:#e1f0f4;border:1px solid #c8e0e7}
     .price-box{background:#f1f8f8;border-color:#cfe3e3}
     .price-box:has(.side.up){background:linear-gradient(145deg,#e6f7f0,#f7fcfa);border-color:#b8e2d1}
@@ -205,8 +228,8 @@
   </header>
 
   <section class="hero" aria-label="Strategy status">
-    <div class="intro"><div class="eyebrow">Binance pressure · BTC 5-minute market</div><h2>Binance pressure selects the side.</h2><p>The last ten one-second Binance pressure scores determine UP or DOWN. Polymarket odds and edge estimates do not select or qualify the signal.</p></div>
-    <div class="notice"><strong>Paper trading only</strong><span>Binance pressure selects direction. CLOB quotes are used only for order pricing and paper-fill confirmation. Real-order modules are inactive.</span></div>
+    <div class="intro"><div class="eyebrow">Binance pressure · BTC 5-minute market</div><h2>Project the close, then choose the side.</h2><p>Binance pressure, recent BTC volatility, and time remaining project the current candle close against the previous candle close. Above selects UP; below selects DOWN.</p></div>
+    <div class="notice"><strong>Experimental projection · uncalibrated</strong><span>Paper trading only. The projected close is a heuristic, not a probability guarantee; real-order modules are inactive.</span></div>
   </section>
 
   <section class="grid" aria-label="Paper strategy and account snapshot">
@@ -269,7 +292,7 @@
     <div class="events" id="events"><div class="empty">Waiting for activity…</div></div>
   </section>
 
-  <p class="foot">Paper strategy parameters: the last ten one-second Binance pressure scores select UP when the pressure impulse is positive and DOWN when it is negative. There is no Polymarket probability or edge filter, and entries are fixed at 100 shares. The existing $0.95 ask cap remains as an execution safeguard; a fresh next-tick CLOB ask confirms the full requested size. UP and DOWN use separate 15-second cooldowns. No take-profit or stop-loss exits: positions stay open until the original Polymarket market officially resolves, checked every 10 seconds. The demo runner does not load real-order modules.</p>
+  <p class="foot">Paper strategy parameters: the bot uses the last ten one-second Binance pressure scores to estimate pressure direction and strength, scales the projected move by recent BTC volatility and the seconds remaining, and compares projected close with the previous candle close. Above selects UP; below selects DOWN. There is no Polymarket probability or edge filter, and entries are fixed at 100 shares. The existing $0.95 ask cap remains as an execution safeguard; a fresh next-tick CLOB ask confirms the full requested size. UP and DOWN use separate 15-second cooldowns. No take-profit or stop-loss exits: positions stay open until the original Polymarket market officially resolves, checked every 10 seconds. The demo runner does not load real-order modules.</p>
   <div class="error" id="error" role="status"></div>
 </main>
 <script>
@@ -277,6 +300,7 @@
   const num = value => value == null || !Number.isFinite(Number(value)) ? null : Number(value);
   const money = value => num(value) == null ? '—' : '$' + Number(value).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
   const price = value => num(value) == null ? '—' : '$' + Number(value).toFixed(3);
+  const btcPrice = value => num(value) == null ? '—' : '$' + Number(value).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
   const pct = value => num(value) == null ? '—' : `${Number(value).toFixed(2)}%`;
   const time = value => value ? new Date(value).toLocaleTimeString() : '—';
   const remaining = end => {
@@ -301,9 +325,18 @@
       <div class="row"><span>Candidate note</span><strong>${esc(item.reason||'—')}</strong></div>
     </div>`;
   }
+  function renderAccumulated(side, summary={}) {
+    const shares = Number(summary.shares || 0);
+    return `<article class="accumulated-card ${side.toLowerCase()}">
+      <div class="accumulated-head"><span>${side} accumulated · this window</span><strong>${shares.toLocaleString(undefined,{maximumFractionDigits:2})} shares</strong></div>
+      <div class="accumulated-cost"><span>Average cost / share incl. fees</span><strong>${price(summary.averageCostPerShare)}</strong></div>
+      <span class="accumulated-note">${money(summary.totalCost || 0)} committed including fees · ${Number(summary.positionCount || 0)} fills</span>
+    </article>`;
+  }
   function renderMarket(state) {
     const q = state?.quotes || {};
     const f = state?.forecast || state?.marketForecast;
+    const accumulated = state?.accumulatedPositions || {};
     const title = state?.title || state?.slug || 'Waiting for market discovery';
     const orders = (state?.orders || []).map(o => `${o.side} ${price(o.price)} ${o.status}`).join(' · ') || 'None';
     const quoteBox = (side, cls) => {
@@ -311,13 +344,14 @@
       const live = v.status === 'LIVE' && !v.stale;
       return `<div class="price-box"><div class="price-head"><span class="side ${cls}">${side}</span><span class="pill ${live?'live':'wait'}">${esc(live?'LIVE':v.status||'WAITING')}${v.stale?' · STALE':''}</span></div><div class="mid ${cls}">${price(v.mid)}</div><div class="quote-detail">Bid ${price(v.bestBid)} · Ask ${price(v.bestAsk)}</div></div>`;
     };
-    const forecast = f ? `<section class="forecast" aria-label="Binance pressure signal">
-      <div class="forecast-head"><div><div class="forecast-title">Binance pressure signal</div><div class="forecast-caption">${esc(f.reason || f.status || 'Waiting for pressure signal')} · ${Number(f.sampleCount||0)} / ${Number(f.requiredSamples||10)} samples</div></div><span class="uncal">BINANCE ONLY</span></div>
+    const forecast = f ? `<section class="forecast" aria-label="Projected candle close">
+      <div class="forecast-head"><div><div class="forecast-title">Projected candle close</div><div class="forecast-caption">${esc(f.reason || f.status || 'Waiting for close projection')} · ${Number(f.sampleCount||0)} / ${Number(f.requiredSamples||10)} samples</div></div><span class="uncal">BINANCE ONLY</span></div>
       <div class="estimate-grid">
-        <div class="estimate"><div class="estimate-top"><span class="side up">BINANCE SELECTED SIDE</span><strong class="prob up">${esc(f.selectedSide||'NEUTRAL')}</strong></div><div class="bar"><i style="width:${Math.max(0,Math.min(100,Math.abs((num(f.pressureImpulse)??0))*100))}%"></i></div><div class="estimate-foot"><span>Positive impulse → UP</span><span>Negative impulse → DOWN</span></div></div>
-        <div class="estimate downside"><div class="estimate-top"><span class="side down">CURRENT BINANCE SCORE</span><strong class="prob down">${num(f.pressureScore)?.toFixed(3) ?? '—'}</strong></div><div class="bar"><i style="width:${Math.max(0,Math.min(100,Math.abs((num(f.pressureScore)??0))*100))}%"></i></div><div class="estimate-foot"><span>10-sample impulse ${num(f.pressureImpulse)?.toFixed(3) ?? '—'}</span><span>Fixed ${Number(f.entryShares||100)} shares</span></div></div>
+        <div class="estimate"><div class="estimate-top"><span class="side up">PROJECTED 5M CLOSE</span><strong class="prob up">${btcPrice(f.projectedClose)}</strong></div><div class="bar"><i style="width:${Math.max(0,Math.min(100,Math.abs(num(f.projectedMoveFromPreviousPct)??0)*1000))}%"></i></div><div class="estimate-foot"><span>${esc(f.selectedSide||'No side')} projected</span><span>${num(f.secondsRemaining)==null?'—':`${Math.max(0,Math.floor(Number(f.secondsRemaining)))}s left`}</span></div></div>
+        <div class="estimate downside"><div class="estimate-top"><span class="side down">${f.previousCloseSource === 'WINDOW_OPEN_FALLBACK' ? 'WINDOW OPEN · CLOSE FALLBACK' : 'PREVIOUS CANDLE CLOSE'}</span><strong class="prob down">${btcPrice(f.previousCandleClose)}</strong></div><div class="bar"><i style="width:${Math.max(0,Math.min(100,Math.abs((num(f.pressureImpulse)??0))*100))}%"></i></div><div class="estimate-foot"><span>Above → UP</span><span>Below → DOWN</span></div></div>
       </div>
       <div class="metrics">
+        <div class="metric"><span>Projected gap to previous close</span><strong>${pct(f.projectedMoveFromPreviousPct)}</strong></div>
         <div class="metric"><span>Binance pressure score</span><strong>${num(f.pressureScore)?.toFixed(4) ?? '—'}</strong></div>
         <div class="metric"><span>Pressure impulse</span><strong>${num(f.pressureImpulse)?.toFixed(4) ?? '—'}</strong></div>
         <div class="metric"><span>BTC from open</span><strong>${pct(f.btcMoveFromOpenPct)}</strong></div>
@@ -328,15 +362,16 @@
         <div class="metric"><span>Volatility / sec</span><strong>${num(f.volatilityPerSecond)?.toFixed(5) ?? '—'}</strong></div>
       </div>
       <div class="candidates">${renderCandidate('UP',f.candidateBySide?.UP)}${renderCandidate('DOWN',f.candidateBySide?.DOWN)}</div>
-    </section>` : `<section class="forecast"><div class="forecast-head"><div><div class="forecast-title">Binance pressure signal</div><div class="forecast-caption">Pressure signal unavailable; market quotes and account data continue to update.</div></div><span class="uncal">BINANCE ONLY</span></div><div class="empty">Waiting for fresh Binance pressure data. No signal inferred.</div></section>`;
+    </section>` : `<section class="forecast"><div class="forecast-head"><div><div class="forecast-title">Projected candle close</div><div class="forecast-caption">Close projection unavailable; market quotes and account data continue to update.</div></div><span class="uncal">BINANCE ONLY</span></div><div class="empty">Waiting for fresh Binance pressure data. No signal inferred.</div></section>`;
     const selectedSide = f?.selectedSide || '—';
     const status = f?.status || 'forecast unavailable';
     return `<article class="market">
       <div class="market-title"><div><h3>BTC · 5 minute</h3><div class="slug">${esc(title)}</div></div><div class="countdown">${remaining(state?.windowEnd)}</div></div>
       <div class="prices">${quoteBox('UP','up')}${quoteBox('DOWN','down')}</div>
+      <div class="accumulated-grid">${renderAccumulated('UP', accumulated.UP)}${renderAccumulated('DOWN', accumulated.DOWN)}</div>
       ${forecast}
       <div class="rows">
-        <div class="row"><span>Forecast state</span><strong class="status-text ${statusClass(status)}">${escStatus(status)}</strong></div>
+        <div class="row"><span>Projected-close state</span><strong class="status-text ${statusClass(status)}">${escStatus(status)}</strong></div>
         <div class="row"><span>Forecast reason</span><strong>${esc(f?.reason || 'Waiting for forecast state')}</strong></div>
         <div class="row"><span>Selected paper side</span><strong>${esc(selectedSide)}</strong></div>
         <div class="row"><span>Paper orders this window</span><strong>${esc(orders)}</strong></div>
@@ -358,7 +393,14 @@
   function renderTable(items, kind) {
     if (!Array.isArray(items) || !items.length) return `<div class="empty">No ${kind} records in the latest state.</div>`;
     if (kind === 'position') {
-      const rows = items.map(p => `<tr><td>${esc(p.slug||p.market||p.title||'—')}</td><td>${esc(p.outcome||p.side||'—')}</td><td>${Number(p.shares??p.size??0).toFixed(2)}</td><td>${price(p.avgPrice??p.averagePrice)}</td><td>${money(p.currentValue??p.value)}</td><td>${esc(p.status||'Open')}</td></tr>`).join('');
+      const rows = items.map(p => {
+        const status = String(p.status || '').toUpperCase();
+        const pnl = num(p.pnl ?? p.realizedPnl);
+        const tone = status.includes('WIN') ? 'result-win'
+          : status.includes('LOSS') ? 'result-loss'
+            : pnl > 0 ? 'result-win' : pnl < 0 ? 'result-loss' : '';
+        return `<tr class="${tone}"><td>${esc(p.slug||p.market||p.title||'—')}</td><td>${esc(p.outcome||p.side||'—')}</td><td>${Number(p.shares??p.size??0).toFixed(2)}</td><td>${price(p.avgPrice??p.averagePrice)}</td><td>${money(p.currentValue??p.value)}</td><td>${esc(p.status||'Open')}</td></tr>`;
+      }).join('');
       return `<table><thead><tr><th>Market</th><th>Side</th><th>Shares</th><th>Avg. price</th><th>Value</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
     }
     const rows = items.map(r => `<tr><td>${esc(r.slug||r.market||r.title||'—')}</td><td>${esc(r.outcome||r.winningSide||r.result||'—')}</td><td>${esc(r.status||'resolved')}</td><td>${money(r.pnl??r.realizedPnl??r.profit)}</td><td>${esc(r.resolvedAt?time(r.resolvedAt):r.error||'—')}</td></tr>`).join('');
@@ -366,7 +408,23 @@
   }
   function renderEvents(events) {
     if (!events?.length) return '<div class="empty">Waiting for activity…</div>';
-    return events.slice(0,24).map(e => `<div class="event"><time>${esc(new Date(e.at).toLocaleString())}</time><span class="event-type">${esc(e.type)}</span><span>${esc(e.message)}${e.error?` · ${esc(e.error)}`:''}</span></div>`).join('');
+    return events.slice(0,24).map(e => {
+      const side = String(e.side || '').toUpperCase();
+      const winner = String(e.winningSide || e.resolvedOutcome || '').toUpperCase();
+      const status = String(e.status || '').toUpperCase();
+      const type = String(e.type || '').toUpperCase();
+      const pnl = num(e.realizedPnl ?? e.pnl);
+      const result = side && winner
+        ? (side === winner ? 'win' : 'loss')
+        : ['WIN', 'SETTLED_WIN', 'RESOLVED_WIN'].includes(status)
+          || type.endsWith('_WIN') || type.endsWith('_SETTLED_WIN')
+          ? 'win'
+          : ['LOSS', 'SETTLED_LOSS', 'RESOLVED_LOSS'].includes(status)
+            || type.endsWith('_LOSS') || type.endsWith('_SETTLED_LOSS')
+            ? 'loss'
+            : pnl > 0 ? 'win' : pnl < 0 ? 'loss' : '';
+      return `<div class="event ${result}"><time>${esc(new Date(e.at).toLocaleString())}</time><span class="event-type">${esc(e.type)}</span><span>${esc(e.message)}${e.error?` · ${esc(e.error)}`:''}</span></div>`;
+    }).join('');
   }
   function renderShadowComparison(comparison) {
     if (!comparison) return '<div class="empty">Shadow comparison is unavailable.</div>';
@@ -485,8 +543,8 @@
       const marketView = {...market, forecast: market.forecast || state.forecast || state.marketForecast};
       document.querySelector('#markets').innerHTML = renderMarket(marketView);
       document.querySelector('#marketStatus').textContent = marketView.forecast
-        ? `${marketView.forecast.ready ? 'Forecast ready' : 'Forecast not ready'} · uncalibrated`
-        : 'Quotes live · forecast pending';
+        ? `${marketView.forecast.ready ? 'Close projection ready' : 'Close projection pending'} · ${marketView.forecast.selectedSide || 'no side'}`
+        : 'Quotes live · close projection pending';
       const shadow = state.shadowComparison;
       document.querySelector('#shadowStatus').textContent = shadow
         ? `NO ORDERS · ${Number(shadow.activeSampleCount || 0)}/${Number(shadow.baseSampleCount || 10)} samples`

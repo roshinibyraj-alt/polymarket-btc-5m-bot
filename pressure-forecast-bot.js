@@ -69,6 +69,39 @@ function pressureTrend(samples, sampleLimit = config.PRESSURE_SAMPLE_COUNT) {
   };
 }
 
+function projectPressureClose({
+  currentPrice,
+  previousClose,
+  pressureImpulse,
+  volatilityPerSecond: volatility,
+  secondsRemaining,
+}) {
+  const price = Number(currentPrice);
+  const reference = Number(previousClose);
+  const impulse = Number(pressureImpulse);
+  const perSecondVolatility = Number(volatility);
+  const remaining = Number(secondsRemaining);
+  if (!(price > 0 && reference > 0)
+    || !Number.isFinite(impulse)
+    || !Number.isFinite(perSecondVolatility)
+    || perSecondVolatility < 0
+    || !(remaining > 0)) return null;
+
+  const pressureWeightedReturn = clamp(impulse) * perSecondVolatility * Math.sqrt(remaining);
+  const projectedClose = price * Math.exp(pressureWeightedReturn);
+  if (!Number.isFinite(projectedClose)) return null;
+  const projectedMoveFromPreviousPct = ((projectedClose - reference) / reference) * 100;
+  const side = projectedClose > reference
+    ? 'UP'
+    : projectedClose < reference ? 'DOWN' : null;
+  return {
+    projectedClose,
+    pressureWeightedReturn,
+    projectedMoveFromPreviousPct,
+    side,
+  };
+}
+
 function volatilityPerSecond(samples, sampleLimit = config.PRESSURE_SAMPLE_COUNT) {
   const prices = samples.slice(-sampleLimit)
     .map((sample) => Number(sample.price))
@@ -119,6 +152,30 @@ function summarizePortfolio(positions, cash, initialCapital, historicalOffset = 
     floatingPnl,
     totalPnl: realizedPnl + floatingPnl,
   };
+}
+
+function summarizeWindowPositions(positions, windowStart) {
+  return Object.fromEntries(SIDES.map((side) => {
+    const matching = positions.filter((position) => Number(position.windowStart) === Number(windowStart)
+      && position.side === side
+      && position.status === 'OPEN'
+      && Number(position.shares) > 0);
+    const shares = matching.reduce((total, position) => total + Number(position.shares), 0);
+    const totalCost = matching.reduce((total, position) => {
+      const sharesForPosition = Number(position.shares);
+      const cost = position.totalCost != null && Number.isFinite(Number(position.totalCost))
+        ? Number(position.totalCost)
+        : Number(position.avgEntry ?? position.averagePrice ?? 0) * sharesForPosition;
+      return total + cost;
+    }, 0);
+    return [side, {
+      side,
+      shares,
+      totalCost,
+      averageCostPerShare: shares > EPSILON ? totalCost / shares : null,
+      positionCount: matching.length,
+    }];
+  }));
 }
 
 function sweepBook(levels, shares, action, market, {
@@ -178,14 +235,14 @@ function evaluatePressureCandidate(side, signalSide, quote) {
   const hasUsableAsk = Number.isFinite(bestAsk) && bestAsk > 0 && bestAsk < 1;
   const underPriceCap = hasUsableAsk
     && bestAsk <= config.PRESSURE_MAX_BUY_PRICE + EPSILON;
-  let reason = `${side} is not the side selected by Binance pressure.`;
+  let reason = `${side} is not the side selected by the projected close.`;
 
   if (isSelected && !hasUsableAsk) {
-    reason = `Binance pressure selected ${side}; waiting for a fresh CLOB ask to execute.`;
+    reason = `The projected close selected ${side}; waiting for a fresh CLOB ask to execute.`;
   } else if (isSelected && !underPriceCap) {
-    reason = `Binance pressure selected ${side}, but its ask is above the existing $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} execution cap.`;
+    reason = `The projected close selected ${side}, but its ask is above the existing $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} execution cap.`;
   } else if (isSelected) {
-    reason = `Binance pressure selected ${side}; the current ask is within the execution cap.`;
+    reason = `The projected close selected ${side}; the current ask is within the execution cap.`;
   }
 
   return {
@@ -256,7 +313,7 @@ class PressureForecastBot extends WickBot {
     this.clobFeed = null;
     this.clobFeedMarketKey = null;
     this.initialCapital = initialCapital;
-    this.strategyName = 'BTC 5-minute Binance pressure-only paper bot';
+    this.strategyName = 'BTC 5-minute Binance pressure projection paper bot';
     this.strategyMode = 'pressure-forecast';
     this.pressureSamples = [];
     this.lastSampleAt = null;
@@ -526,9 +583,13 @@ class PressureForecastBot extends WickBot {
       calibrated: false,
       status,
       reason,
-      signalSource: 'BINANCE_PRESSURE_ONLY',
+      signalSource: 'BINANCE_PRESSURE_CLOSE_PROJECTION',
       pressureScore: null,
       pressureImpulse: null,
+      previousCandleClose: null,
+      previousCloseSource: null,
+      projectedClose: null,
+      projectedMoveFromPreviousPct: null,
       selectedSide: null,
       executionPriceCap: config.PRESSURE_MAX_BUY_PRICE,
       entryShares: config.PRESSURE_ENTRY_SHARES,
@@ -1033,12 +1094,26 @@ class PressureForecastBot extends WickBot {
     const currentPrice = Number(read.feed.price);
     const candle = read.feed.currentCandle;
     const windowOpenPrice = Number(candle?.start) === start ? Number(candle.open) : null;
+    const closedCandle = read.feed.previousClosedCandle;
+    const hasPreviousClosedCandle = Number(candle?.start) === start
+      && Number(closedCandle?.start) === start - this.windowMs
+      && Number(closedCandle.close) > 0;
+    const previousCandleClose = hasPreviousClosedCandle
+      ? Number(closedCandle.close)
+      : windowOpenPrice;
+    const previousCloseSource = hasPreviousClosedCandle
+      ? 'PREVIOUS_CLOSED_CANDLE'
+      : windowOpenPrice > 0 ? 'WINDOW_OPEN_FALLBACK' : null;
     const btcMoveFromOpenPct = currentPrice > 0 && windowOpenPrice > 0
       ? ((currentPrice - windowOpenPrice) / windowOpenPrice) * 100
       : null;
     const volatility = volatilityPerSecond(samples, requiredSamples);
     const ready = samples.length >= requiredSamples
       && Number.isFinite(Number(trend.pressureImpulse))
+      && currentPrice > 0
+      && windowOpenPrice > 0
+      && previousCandleClose > 0
+      && volatility != null
       && secondsRemaining > 0;
     if (!ready) {
       return {
@@ -1051,6 +1126,8 @@ class PressureForecastBot extends WickBot {
         btcMoveFromOpenPct,
         volatilityPerSecond: volatility,
         pressureScore: read.binanceScore ?? null,
+        previousCandleClose,
+        previousCloseSource,
         secondsRemaining,
         pressureTrendSlope: trend.pressureTrendSlope,
         pressurePersistence: trend.pressurePersistence,
@@ -1059,9 +1136,14 @@ class PressureForecastBot extends WickBot {
       };
     }
 
-    const selectedSide = trend.pressureImpulse > 0
-      ? 'UP'
-      : trend.pressureImpulse < 0 ? 'DOWN' : null;
+    const projection = projectPressureClose({
+      currentPrice,
+      previousClose: previousCandleClose,
+      pressureImpulse: trend.pressureImpulse,
+      volatilityPerSecond: volatility,
+      secondsRemaining,
+    });
+    const selectedSide = projection?.side || null;
     for (const side of SIDES) {
       candidateBySide[side] = evaluatePressureCandidate(
         side,
@@ -1079,16 +1161,20 @@ class PressureForecastBot extends WickBot {
           ? 'SIGNAL_WAITING_FOR_EXECUTION_QUOTE'
           : 'SIGNAL_PRICE_CAP';
     const reason = !selectedSide
-      ? 'Binance pressure is neutral; no side is selected.'
-      : selectedCandidate.reason;
+      ? 'The projected BTC close is equal to the previous candle close; no side is selected.'
+      : `${selectedSide} selected: projected BTC close $${projection.projectedClose.toFixed(2)} is ${selectedSide === 'UP' ? 'above' : 'below'} the previous close $${previousCandleClose.toFixed(2)} with ${Math.floor(secondsRemaining)} seconds left. ${selectedCandidate.reason}`;
     return {
       ready: true,
       calibrated: false,
-      signalSource: 'BINANCE_PRESSURE_ONLY',
+      signalSource: 'BINANCE_PRESSURE_CLOSE_PROJECTION',
       status,
       reason,
       pressureScore: read.binanceScore ?? null,
       selectedSide,
+      previousCandleClose,
+      previousCloseSource,
+      projectedClose: projection?.projectedClose ?? null,
+      projectedMoveFromPreviousPct: projection?.projectedMoveFromPreviousPct ?? null,
       executionPriceCap: config.PRESSURE_MAX_BUY_PRICE,
       entryShares: config.PRESSURE_ENTRY_SHARES,
       sampleCount: samples.length,
@@ -1447,6 +1533,7 @@ class PressureForecastBot extends WickBot {
       DOWN: { ...this.liveQuotes.DOWN },
     };
     const currentOrders = this.orders.filter((order) => Number(order.windowStart) === Number(windowStart));
+    const accumulatedPositions = summarizeWindowPositions(this.positions, windowStart);
     const positions = this.positions.map((position) => ({
       ...position,
       avgPrice: position.avgEntry,
@@ -1464,6 +1551,7 @@ class PressureForecastBot extends WickBot {
       quotes,
       forecast: this.forecast,
       orders: currentOrders,
+      accumulatedPositions,
     };
     const settledEquityCurve = state.account.equityCurve || [];
     return {
@@ -1493,7 +1581,7 @@ class PressureForecastBot extends WickBot {
         realOrderModulesLoaded: false,
         entryShares: config.PRESSURE_ENTRY_SHARES,
         maxBuyPrice: config.PRESSURE_MAX_BUY_PRICE,
-        signal: 'The direction is selected from ten one-second Binance pressure scores only. Polymarket quotes are used only to execute the paper order.',
+        signal: 'Projects the BTC 5-minute close relative to the previous candle close using ten one-second Binance pressure scores, recent volatility, and time remaining. Polymarket quotes are used only for execution.',
         signalState: this.forecast,
         orders: {
           type: 'Full requested-size paper fill at the next Polymarket ask tick',
@@ -1502,7 +1590,7 @@ class PressureForecastBot extends WickBot {
           entryCooldownMs: config.PRESSURE_ENTRY_COOLDOWN_MS,
           maxEntriesPerWindow: 'No fixed cap; limited by qualifying signals and available cash.',
         },
-        repeatEntryRule: `The Binance pressure impulse selects UP when positive and DOWN when negative. Each side has its own 15-second entry cooldown; each entry is ${config.PRESSURE_ENTRY_SHARES} shares, then held through the window until official resolution.`,
+        repeatEntryRule: `A pressure-weighted projection estimates the BTC close from current price, Binance pressure, recent volatility, and seconds remaining. Projected close above the previous candle close selects UP; below selects DOWN. Each side has its own 15-second entry cooldown; entries are ${config.PRESSURE_ENTRY_SHARES} shares and settle at official resolution.`,
         priceFeed: this.priceFeed?.snapshot?.() || null,
         exits: {
           mode: 'OFFICIAL_RESOLUTION_ONLY',
@@ -1536,7 +1624,7 @@ class PressureForecastBot extends WickBot {
           this.shadowInitialCapital,
           this.shadowStatsOffset,
         ),
-        assumptions: `Separate paper cash; Binance-pressure-only direction, fixed ${config.PRESSURE_ENTRY_SHARES}-share entries, independent 15-second cooldowns, the existing $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} execution cap, visible ask-depth sweep for shadow entries, taker fees, and official-resolution-only settlement.`,
+        assumptions: `Separate paper cash; Binance-pressure projection versus the previous candle close, fixed ${config.PRESSURE_ENTRY_SHARES}-share entries, independent 15-second cooldowns, the existing $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} execution cap, visible ask-depth sweep for shadow entries, taker fees, and official-resolution-only settlement.`,
       },
       portfolioAnalytics: {
         equityCurve: settledEquityCurve,
@@ -1580,9 +1668,11 @@ class PressureForecastBot extends WickBot {
 PressureForecastBot._test = {
   clamp,
   pressureTrend,
+  projectPressureClose,
   volatilityPerSecond,
   adaptiveShadowSampleCount,
   summarizePortfolio,
+  summarizeWindowPositions,
   sweepBook,
   evaluatePressureCandidate,
   resolvedPayout,

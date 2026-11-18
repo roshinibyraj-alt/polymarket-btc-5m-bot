@@ -29,6 +29,11 @@ test('dashboard serves global analytics and retains existing position and resolu
   assert.match(html, /id="combinedWinsLosses"/);
   assert.match(html, /id="positions"/);
   assert.match(html, /id="resolutions"/);
+  assert.match(html, /accumulated-grid/);
+  assert.match(html, /Average cost \/ share/);
+  assert.match(html, /event\.win/);
+  assert.match(html, /event\.loss/);
+  assert.match(html, /PROJECTED 5M CLOSE/);
 });
 
 test('unknown dashboard paths still return 404', async (t) => {

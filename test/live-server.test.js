@@ -54,7 +54,7 @@ test('legacy live server serves the current pressure dashboard without implying 
   const html = await page.text();
   assert.match(html, /Five Minute \| BTC Paper Monitor/);
   assert.match(html, /Real-order modules/);
-  assert.match(html, /Binance pressure selects the side/i);
+  assert.match(html, /Project the close, then choose the side/i);
   assert.doesNotMatch(html, /15m/i);
   assert.match(html, /Paper only/i);
   assert.match(html, /sampleCount/);
