@@ -251,7 +251,7 @@
   <section class="panel" aria-label="Adaptive sample shadow comparison">
     <div class="panel-head"><h2>Adaptive-sample shadow P&amp;L</h2><span class="pill wait" id="shadowStatus">Shadow only</span></div>
     <div id="shadowComparison"><div class="empty">Waiting for pressure data. This comparison never submits orders.</div></div>
-    <div class="shadow-note">The trading model stays at 10 samples. The adaptive shadow changes to 9, 8, 7, then 6 samples at each minute mark. The trading model records the full requested size at the next Polymarket ask tick; the shadow still uses visible ask depth. Both use 100–200 share edge-based sizing, separate 15-second cooldowns for UP and DOWN, and modeled taker fees. Positions stay open until official resolution; pending results are checked every 10 seconds. P&amp;L includes settled results and open-position marks; unresolved positions are shown separately. Comparison totals reset when the bot restarts.</div>
+    <div class="shadow-note">The model keeps its 10-sample signal; the adaptive shadow changes to 9, 8, 7, then 6 samples at each minute mark. A qualifying UP signal buys DOWN, and a qualifying DOWN signal buys UP. The trading model records the full requested size at the next ask tick; the shadow still uses visible ask depth. Both use signal-edge sizing, separate 15-second cooldowns for the side actually bought, and modeled taker fees. Positions stay open until official resolution; pending results are checked every 10 seconds. P&amp;L includes settled results and open-position marks; unresolved positions are shown separately. Comparison totals reset when the bot restarts.</div>
   </section>
 
   <section class="panel">
@@ -269,7 +269,7 @@
     <div class="events" id="events"><div class="empty">Waiting for activity…</div></div>
   </section>
 
-  <p class="foot">Paper strategy parameters: probability must exceed 60%; net edge at signal time after modeled taker fees must be at least $0.10 per share; the next-tick ask remains capped at $0.95. The full requested share size is recorded at the next Polymarket ask tick without checking visible ask depth. Orders start at 100 shares, add 10 shares per additional $0.01 of signal-time net edge, and cap at 200 shares. UP and DOWN use separate 15-second cooldowns; either side can qualify at any price. No take-profit or stop-loss exits: positions stay open until the original Polymarket market officially resolves, checked every 10 seconds. The demo runner does not load real-order modules. Forecasts are uncalibrated experimental estimates; no predictive accuracy or backtest performance is implied.</p>
+  <p class="foot">Paper strategy parameters: the signal side must exceed 60% estimated probability and clear at least $0.10 net edge per share after modeled taker fees. The bot buys the opposite side; that side’s next-tick ask must be at or below $0.95. The full requested size is recorded at the next ask tick without checking visible ask depth. Size starts at 100 shares, adds 10 shares per extra $0.01 of signal-side edge, and caps at 200. UP and DOWN purchase sides use separate 15-second cooldowns. Positions stay open until official resolution, checked every 10 seconds; there are no TP/SL exits. This is an experimental paper estimate, not a validated prediction. Real-order modules are not loaded.</p>
   <div class="error" id="error" role="status"></div>
 </main>
 <script>
@@ -291,25 +291,27 @@
     return 'warn';
   };
   const escStatus = v => esc(String(v ?? '—').replaceAll('_',' '));
-  function renderCandidate(side, item={}) {
+  function renderCandidate(side, item={}, buyItem={}) {
     const up = side === 'UP';
     const cls = up ? 'up-card' : 'down-card';
     const p = num(item.estimatedProbability);
     const edge = item.expectedNetEdgePerShare;
+    const buySide = side === 'UP' ? 'DOWN' : 'UP';
     return `<div class="candidate ${cls}">
-      <div class="candidate-head"><span class="candidate-title ${up?'up':'down'}">${side} PAPER CANDIDATE</span><span class="pill ${item.qualifies?'live':'wait'}">${item.qualifies?'QUALIFIES':'NO ACTION'}</span></div>
-      <div class="row"><span>Estimated probability</span><strong>${prob(p)}</strong></div>
-      <div class="row"><span>Best ask / all-in</span><strong>${price(item.bestAsk)} / ${price(item.allInCostPerShare)}</strong></div>
-      <div class="row"><span>Expected net edge / share</span><strong class="${num(edge)>0?'good':''}">${price(edge)}</strong></div>
-      <div class="row"><span>Qualified size</span><strong>${item.qualifies ? Number(item.requestedShares||100) + ' shares' : '—'}</strong></div>
-      <div class="row"><span>Candidate note</span><strong>${esc(item.reason||'—')}</strong></div>
+      <div class="candidate-head"><span class="candidate-title ${up?'up':'down'}">${side} SIGNAL → BUY ${buySide}</span><span class="pill ${item.qualifies?'live':'wait'}">${item.qualifies?'QUALIFIES':'NO ACTION'}</span></div>
+      <div class="row"><span>Signal probability</span><strong>${prob(p)}</strong></div>
+      <div class="row"><span>${buySide} ask / all-in</span><strong>${price(buyItem.bestAsk)} / ${price(buyItem.allInCostPerShare)}</strong></div>
+      <div class="row"><span>${buySide} estimated probability</span><strong>${prob(buyItem.estimatedProbability)}</strong></div>
+      <div class="row"><span>Signal net edge / share</span><strong class="${num(edge)>0?'good':''}">${price(edge)}</strong></div>
+      <div class="row"><span>Shares if triggered</span><strong>${item.qualifies ? Number(item.requestedShares||100) + ' shares' : '—'}</strong></div>
+      <div class="row"><span>Signal check</span><strong>${esc(item.reason||'—')}</strong></div>
     </div>`;
   }
   function renderMarket(state) {
     const q = state?.quotes || {};
     const f = state?.forecast || state?.marketForecast;
     const title = state?.title || state?.slug || 'Waiting for market discovery';
-    const orders = (state?.orders || []).map(o => `${o.side} ${price(o.price)} ${o.status}`).join(' · ') || 'None';
+    const orders = (state?.orders || []).map(o => `${o.signalSide ? `${o.signalSide}→` : ''}${o.side} ${price(o.price)} ${o.status}`).join(' · ') || 'None';
     const quoteBox = (side, cls) => {
       const v = q[side] || {};
       const live = v.status === 'LIVE' && !v.stale;
@@ -318,11 +320,11 @@
     const forecast = f ? `<section class="forecast" aria-label="Uncalibrated forecast">
       <div class="forecast-head"><div><div class="forecast-title">Pressure estimate vs. market odds</div><div class="forecast-caption">${esc(f.reason || f.status || 'Experimental estimate')} · ${Number(f.sampleCount||0)} / ${Number(f.requiredSamples||10)} samples</div></div><span class="uncal">UNCALIBRATED</span></div>
       <div class="estimate-grid">
-        <div class="estimate"><div class="estimate-top"><span class="side up">EST. UP</span><strong class="prob up">${prob(f.estimateUp)}</strong></div><div class="bar"><i style="width:${Math.max(0,Math.min(100,(num(f.estimateUp)??0)*100))}%"></i></div><div class="estimate-foot"><span>Market ${prob(f.marketImpliedUp)}</span><span>Cheaper (info) ${esc(f.laggingSide||'—')}</span></div></div>
-        <div class="estimate downside"><div class="estimate-top"><span class="side down">EST. DOWN</span><strong class="prob down">${prob(f.estimateDown)}</strong></div><div class="bar"><i style="width:${Math.max(0,Math.min(100,(num(f.estimateDown)??0)*100))}%"></i></div><div class="estimate-foot"><span>Market ${prob(f.marketImpliedDown)}</span><span>Selected ${esc(f.selectedSide||'—')}</span></div></div>
+        <div class="estimate"><div class="estimate-top"><span class="side up">EST. UP</span><strong class="prob up">${prob(f.estimateUp)}</strong></div><div class="bar"><i style="width:${Math.max(0,Math.min(100,(num(f.estimateUp)??0)*100))}%"></i></div><div class="estimate-foot"><span>Market ${prob(f.marketImpliedUp)}</span><span>${f.selectedSide==='UP'?'SIGNAL':'—'} · BUY ${f.buySide==='DOWN'?'DOWN':'—'}</span></div></div>
+        <div class="estimate downside"><div class="estimate-top"><span class="side down">EST. DOWN</span><strong class="prob down">${prob(f.estimateDown)}</strong></div><div class="bar"><i style="width:${Math.max(0,Math.min(100,(num(f.estimateDown)??0)*100))}%"></i></div><div class="estimate-foot"><span>Market ${prob(f.marketImpliedDown)}</span><span>${f.selectedSide==='DOWN'?'SIGNAL':'—'} · BUY ${f.buySide==='UP'?'UP':'—'}</span></div></div>
       </div>
       <div class="metrics">
-        <div class="metric"><span>Net edge / share</span><strong>${price(f.expectedNetEdgePerShare)}</strong></div>
+        <div class="metric"><span>Signal edge / share</span><strong>${price(f.expectedNetEdgePerShare)}</strong></div>
         <div class="metric"><span>Required edge</span><strong>${price(f.minRequiredEdgePerShare)}</strong></div>
         <div class="metric"><span>BTC from open</span><strong>${pct(f.btcMoveFromOpenPct)}</strong></div>
         <div class="metric"><span>Time left</span><strong>${num(f.secondsRemaining)==null?'—':`${Math.max(0,Math.floor(Number(f.secondsRemaining)))}s`}</strong></div>
@@ -331,9 +333,10 @@
         <div class="metric"><span>Acceleration</span><strong>${num(f.pressureAcceleration)?.toFixed(4) ?? '—'}</strong></div>
         <div class="metric"><span>Volatility / sec</span><strong>${num(f.volatilityPerSecond)?.toFixed(5) ?? '—'}</strong></div>
       </div>
-      <div class="candidates">${renderCandidate('UP',f.candidateBySide?.UP)}${renderCandidate('DOWN',f.candidateBySide?.DOWN)}</div>
+      <div class="candidates">${renderCandidate('UP',f.candidateBySide?.UP,f.candidateBySide?.DOWN)}${renderCandidate('DOWN',f.candidateBySide?.DOWN,f.candidateBySide?.UP)}</div>
     </section>` : `<section class="forecast"><div class="forecast-head"><div><div class="forecast-title">Pressure estimate vs. market odds</div><div class="forecast-caption">Forecast unavailable in the latest state; market quotes and account data continue to update.</div></div><span class="uncal">UNCALIBRATED</span></div><div class="empty">Waiting for forecast data. No estimates or paper action inferred.</div></section>`;
     const selectedSide = f?.selectedSide || '—';
+    const buySide = f?.buySide || '—';
     const status = f?.status || 'forecast unavailable';
     return `<article class="market">
       <div class="market-title"><div><h3>BTC · 5 minute</h3><div class="slug">${esc(title)}</div></div><div class="countdown">${remaining(state?.windowEnd)}</div></div>
@@ -342,7 +345,8 @@
       <div class="rows">
         <div class="row"><span>Forecast state</span><strong class="status-text ${statusClass(status)}">${escStatus(status)}</strong></div>
         <div class="row"><span>Forecast reason</span><strong>${esc(f?.reason || 'Waiting for forecast state')}</strong></div>
-        <div class="row"><span>Selected paper side</span><strong>${esc(selectedSide)}</strong></div>
+        <div class="row"><span>Signal side</span><strong>${esc(selectedSide)}</strong></div>
+        <div class="row"><span>Side bot buys</span><strong>${esc(buySide)}</strong></div>
         <div class="row"><span>Paper orders this window</span><strong>${esc(orders)}</strong></div>
       </div>
     </article>`;
@@ -355,7 +359,8 @@
         ? (o.sourceExitKind ? `${esc(o.sourceExitKind)} ${price(o.sourceExitLimitPrice)}` : o.takeProfitPrice ? `TP ${price(o.takeProfitPrice)} / SL ${price(o.stopLossPrice)}` : 'Paper hold / resolution')
         : '—';
       const status = String(o.status || 'unknown');
-      return `<tr><td>${esc(o.timeframe||'—')}</td><td>${esc(o.kind||'—')}${o.testOnly?' · TEST':''}</td><td class="${outcome==='UP'?'up':'down'}">${esc(outcome)}</td><td>${price(o.price)}</td><td>${Number(o.shares||0).toFixed(2)}</td><td>${Number(o.matchedShares||0).toFixed(2)}</td><td>${exit}</td><td><span class="pill ${statusClass(status)==='good'?'live':statusClass(status)==='bad'?'fail':'wait'}">${esc(status)}</span></td><td>${esc(o.error||o.exitBlockedReason||o.resolutionError||'—')}</td></tr>`;
+      const sideLabel = o.signalSide ? `${o.signalSide} signal → ${outcome}` : outcome;
+      return `<tr><td>${esc(o.timeframe||'—')}</td><td>${esc(o.kind||'—')}${o.testOnly?' · TEST':''}</td><td class="${outcome==='UP'?'up':'down'}">${esc(sideLabel)}</td><td>${price(o.price)}</td><td>${Number(o.shares||0).toFixed(2)}</td><td>${Number(o.matchedShares||0).toFixed(2)}</td><td>${exit}</td><td><span class="pill ${statusClass(status)==='good'?'live':statusClass(status)==='bad'?'fail':'wait'}">${esc(status)}</span></td><td>${esc(o.error||o.exitBlockedReason||o.resolutionError||'—')}</td></tr>`;
     }).join('');
     return `<table><thead><tr><th>Window</th><th>Action</th><th>Side</th><th>Price</th><th>Shares</th><th>Matched</th><th>Exit rule</th><th>Status</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
