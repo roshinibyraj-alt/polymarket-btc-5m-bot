@@ -14,10 +14,6 @@ const {
 const EPSILON = 1e-9;
 const SIDES = ['UP', 'DOWN'];
 
-function oppositeSide(side) {
-  return side === 'UP' ? 'DOWN' : side === 'DOWN' ? 'UP' : null;
-}
-
 function clamp(value, minimum = -1, maximum = 1) {
   return Math.max(minimum, Math.min(maximum, Number(value) || 0));
 }
@@ -628,7 +624,6 @@ class PressureForecastBot extends WickBot {
       marketImpliedDown: null,
       laggingSide: null,
       selectedSide: null,
-      buySide: null,
       expectedNetEdgePerShare: null,
       minRequiredEdgePerShare: config.PRESSURE_MIN_NET_EDGE_PER_SHARE,
       sampleCount: 0,
@@ -806,10 +801,9 @@ class PressureForecastBot extends WickBot {
     if (!Number.isFinite(nextAsk) || nextAsk <= 0 || quote.stale
       || quoteAgeMs > config.PRESSURE_MAX_QUOTE_AGE_MS) {
       this.forecast.status = 'ENTRY_SKIPPED_NO_NEXT_TICK_ASK';
-      this.forecast.reason = `${pending.signalSide || oppositeSide(side)} signal entry was skipped because the next ${side} ask tick was missing or stale.`;
+      this.forecast.reason = `${side} entry was skipped because the next Polymarket tick had no fresh ask price.`;
       this.log('PAPER_PRESSURE_ENTRY_SKIPPED_NEXT_TICK', {
         side,
-        signalSide: pending.signalSide,
         shares: pending.shares,
         triggerPrice: pending.triggerPrice,
         reason: 'NEXT_TICK_ASK_MISSING_OR_STALE',
@@ -819,10 +813,9 @@ class PressureForecastBot extends WickBot {
 
     if (nextAsk > config.PRESSURE_MAX_BUY_PRICE + EPSILON) {
       this.forecast.status = 'ENTRY_SKIPPED_PRICE_CAP';
-      this.forecast.reason = `${pending.signalSide || oppositeSide(side)} signal entry was skipped because the opposite-side ${side} next-tick ask exceeded the $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} cap.`;
+      this.forecast.reason = `${side} entry was skipped because the next-tick ask exceeded the $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} cap.`;
       this.log('PAPER_PRESSURE_ENTRY_SKIPPED_NEXT_TICK', {
         side,
-        signalSide: pending.signalSide,
         shares: pending.shares,
         triggerPrice: pending.triggerPrice,
         nextTickAsk: nextAsk,
@@ -834,8 +827,6 @@ class PressureForecastBot extends WickBot {
     const opened = this.executeBuy(side, pending.shares, now, {
       kind: 'BUY_ENTRY',
       candidate: pending.candidate,
-      signalSide: pending.signalSide,
-      signalCandidate: pending.signalCandidate,
       signal: { combinedScore: pending.signalScore },
       fillQuote: quote,
       fillPrice: nextAsk,
@@ -850,8 +841,7 @@ class PressureForecastBot extends WickBot {
     this.lastEntryAt = now;
     this.lastEntryAtBySide[side] = now;
     this.forecast.status = 'ENTRY_FILLED';
-    this.forecast.buySide = side;
-    this.forecast.reason = `${pending.signalSide} signal bought the opposite ${side} side: filled all ${opened.shares} shares at the next ask tick ($${opened.avgEntry.toFixed(3)}).`;
+    this.forecast.reason = `Filled all ${opened.shares} ${side} shares at the next Polymarket ask tick ($${opened.avgEntry.toFixed(3)}).`;
     this.signal = { side, action: 'BUY_ENTRY', reason: this.forecast.reason };
     return true;
   }
@@ -1017,18 +1007,15 @@ class PressureForecastBot extends WickBot {
       if (pendingSide) {
         const pending = this.pendingEntries[pendingSide];
         this.forecast.status = 'ENTRY_PENDING_NEXT_TICK';
-        this.forecast.buySide = pendingSide;
-        this.forecast.reason = `${pending.signalSide} signal is waiting for the next ${pendingSide} ask tick to confirm its opposite-side buy of ${pending.shares} shares.`;
+        this.forecast.reason = `${pendingSide} is waiting for the next Polymarket ask tick to confirm all ${pending.shares} shares.`;
       }
       return false;
     }
 
-    const signalSide = forecast.selectedSide;
-    const side = oppositeSide(signalSide);
+    const side = forecast.selectedSide;
     if (this.pendingEntries[side]) {
       this.forecast.status = 'ENTRY_PENDING_NEXT_TICK';
-      this.forecast.buySide = side;
-      this.forecast.reason = `${signalSide} signal is waiting to buy the opposite ${side} side at its next Polymarket ask tick.`;
+      this.forecast.reason = `${side} is waiting for the next Polymarket ask tick to confirm all ${this.pendingEntries[side].shares} shares.`;
       return false;
     }
     const lastSideEntryAt = this.lastEntryAtBySide[side];
@@ -1036,69 +1023,44 @@ class PressureForecastBot extends WickBot {
       - (now - Number(lastSideEntryAt || 0));
     if (lastSideEntryAt != null && cooldownRemaining > 0) {
       this.forecast.status = 'ENTRY_COOLDOWN';
-      this.forecast.buySide = side;
-      this.forecast.reason = `${signalSide} signal qualifies, but the opposite ${side} buy is cooling down for ${Math.ceil(cooldownRemaining / 1000)} more seconds. Cooldowns follow the side bought.`;
+      this.forecast.reason = `${side} signal qualifies; another ${side} entry is available in ${Math.ceil(cooldownRemaining / 1000)} seconds. The other side has its own cooldown.`;
       return false;
     }
 
-    const signalCandidate = forecast.candidateBySide[signalSide];
     const candidate = forecast.candidateBySide[side];
-    const requestedShares = Number(signalCandidate?.requestedShares) || config.PRESSURE_ENTRY_SHARES;
+    const requestedShares = Number(candidate?.requestedShares) || config.PRESSURE_ENTRY_SHARES;
     const triggerQuote = read.quotes[side];
-    if (Number(triggerQuote?.bestAsk) > config.PRESSURE_MAX_BUY_PRICE + EPSILON) {
-      this.forecast.status = 'ENTRY_SKIPPED_PRICE_CAP';
-      this.forecast.buySide = side;
-      this.forecast.reason = `${signalSide} signal qualifies, but the opposite ${side} ask is above the $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)} buy cap.`;
-      return false;
-    }
     this.pendingEntries[side] = {
       side,
-      signalSide,
       shares: requestedShares,
       windowStart: start,
       triggerPrice: Number(triggerQuote.bestAsk),
       quoteUpdateSequence: Number(this.quoteUpdateSequence[side] || 0),
       triggeredAt: now,
       signalScore: read.combinedScore,
-      candidate: { ...candidate, requestedShares },
-      signalCandidate,
+      candidate,
     };
     this.forecast.status = 'ENTRY_PENDING_NEXT_TICK';
-    this.forecast.buySide = side;
-    this.forecast.reason = `${signalSide} signal qualifies; buying the opposite ${side} side and waiting for its next ask tick to confirm all ${requestedShares} shares.`;
-    this.signal = {
-      side,
-      signalSide,
-      action: 'BUY_OPPOSITE_ENTRY_PENDING',
-      reason: this.forecast.reason,
-    };
+    this.forecast.reason = `${side} signal qualifies; waiting for its next Polymarket ask tick to confirm all ${requestedShares} shares.`;
+    this.signal = { side, action: 'BUY_ENTRY_PENDING', reason: this.forecast.reason };
     return true;
   }
 
   processShadowEntry(start, now, read, forecast) {
-    const signalSide = forecast.selectedSide;
-    const side = oppositeSide(signalSide);
-    if (!forecast.ready || !signalSide || !forecast.candidateBySide[signalSide]?.qualifies) return false;
+    const side = forecast.selectedSide;
+    if (!forecast.ready || !side || !forecast.candidateBySide[side]?.qualifies) return false;
 
     const lastSideEntryAt = this.shadowLastEntryAtBySide[side];
     const cooldownRemaining = config.PRESSURE_ENTRY_COOLDOWN_MS
       - (now - Number(lastSideEntryAt || 0));
     if (lastSideEntryAt != null && cooldownRemaining > 0) {
       forecast.status = 'ENTRY_COOLDOWN';
-      forecast.buySide = side;
-      forecast.reason = `Shadow ${signalSide} signal qualifies; its opposite ${side} buy is available in ${Math.ceil(cooldownRemaining / 1000)} seconds.`;
+      forecast.reason = `Shadow ${side} signal qualifies; another ${side} entry is available in ${Math.ceil(cooldownRemaining / 1000)} seconds.`;
       return false;
     }
 
-    const signalCandidate = forecast.candidateBySide[signalSide];
     const candidate = forecast.candidateBySide[side];
-    const requestedShares = Number(signalCandidate?.requestedShares) || config.PRESSURE_ENTRY_SHARES;
-    if (Number(read.quotes[side]?.bestAsk) > config.PRESSURE_MAX_BUY_PRICE + EPSILON) {
-      forecast.status = 'SHADOW_SKIPPED_PRICE_CAP';
-      forecast.buySide = side;
-      forecast.reason = `Shadow ${signalSide} signal skipped because the opposite ${side} ask exceeded the buy cap.`;
-      return false;
-    }
+    const requestedShares = Number(candidate?.requestedShares) || config.PRESSURE_ENTRY_SHARES;
     const execution = sweepBook(
       read.quotes[side]?.askLevels,
       requestedShares,
@@ -1127,10 +1089,8 @@ class PressureForecastBot extends WickBot {
       marketId: this.market?.id ?? null,
       slug: this.market?.slug ?? null,
       title: this.market?.title ?? null,
-      signalSide,
       side,
       outcome: side,
-      entryLabel: `Shadow ${signalSide} signal · buy ${side}`,
       tokenId: this.market?.tokens?.[side] ?? null,
       shares: execution.filledShares,
       initialShares: execution.filledShares,
@@ -1150,9 +1110,7 @@ class PressureForecastBot extends WickBot {
       markStatus: 'LIVE',
       entryFills: execution.fills.map((fill) => ({ ...fill, at: now })),
       expectedProbability: candidate.estimatedProbability,
-      expectedNetEdgePerShare: candidate.estimatedProbability
-        - (execution.totalCost / execution.filledShares),
-      signalExpectedNetEdgePerShare: signalCandidate.expectedNetEdgePerShare,
+      expectedNetEdgePerShare: candidate.expectedNetEdgePerShare,
       signalScore: read.combinedScore,
       settlementBasis: 'ADAPTIVE_SAMPLE_SHADOW',
     };
@@ -1161,8 +1119,7 @@ class PressureForecastBot extends WickBot {
     this.shadowLastEntryAt = now;
     this.shadowLastEntryAtBySide[side] = now;
     forecast.status = 'SHADOW_ENTRY';
-    forecast.buySide = side;
-    forecast.reason = `Shadow only: ${signalSide} signal simulated a ${position.shares}-share buy on ${side}; the trading portfolio was not changed.`;
+    forecast.reason = `Shadow only: simulated a ${position.shares}-share ${side} entry; the trading portfolio was not changed.`;
     return true;
   }
 
@@ -1236,10 +1193,9 @@ class PressureForecastBot extends WickBot {
       .sort((a, b) => candidateBySide[b].expectedNetEdgePerShare
         - candidateBySide[a].expectedNetEdgePerShare);
     const selectedSide = qualifying[0] || null;
-    const buySide = oppositeSide(selectedSide);
     const status = selectedSide ? 'QUALIFIED' : 'NO_EDGE';
     const reason = selectedSide
-      ? `${selectedSide} signal clears the probability and $${config.PRESSURE_MIN_NET_EDGE_PER_SHARE.toFixed(2)} net-edge checks; the bot buys the opposite ${buySide} side.`
+      ? `${selectedSide} clears the probability and $${config.PRESSURE_MIN_NET_EDGE_PER_SHARE.toFixed(2)} net-edge checks; the share size is scaled by edge and capped at ${config.PRESSURE_MAX_ENTRY_SHARES}.`
       : 'Neither UP nor DOWN currently clears the probability, ask-cap, and net-edge checks.';
     return {
       ready: true,
@@ -1254,7 +1210,6 @@ class PressureForecastBot extends WickBot {
       marketImpliedDown,
       laggingSide,
       selectedSide,
-      buySide,
       expectedNetEdgePerShare: selectedSide
         ? candidateBySide[selectedSide].expectedNetEdgePerShare
         : null,
@@ -1276,8 +1231,6 @@ class PressureForecastBot extends WickBot {
   executeBuy(side, shares, now, {
     kind,
     candidate,
-    signalSide,
-    signalCandidate,
     signal,
     fillQuote,
     fillPrice,
@@ -1299,10 +1252,6 @@ class PressureForecastBot extends WickBot {
       { maximumPrice: config.PRESSURE_MAX_BUY_PRICE },
     );
     const order = this.createOrder(kind || 'BUY_ENTRY', side, shares, now, preview);
-    order.signalSide = signalSide || null;
-    order.signalExpectedNetEdgePerShare = signalCandidate?.expectedNetEdgePerShare
-      ?? candidate?.expectedNetEdgePerShare
-      ?? null;
     if (!preview.complete) {
       order.status = 'SKIPPED_PRICE_CAP_OR_DEPTH';
       order.error = `Full requested size was not available at or below $${config.PRESSURE_MAX_BUY_PRICE.toFixed(2)}.`;
@@ -1335,19 +1284,16 @@ class PressureForecastBot extends WickBot {
       marketId: this.market.id,
       slug: this.market.slug,
       title: this.market.title,
-      signalSide: signalSide || null,
       side,
       outcome: side,
       tokenId: this.market.tokens[side],
       entryKey: order.id,
-      entryLabel: signalSide ? `Pressure ${signalSide} signal · buy ${side}` : `Pressure entry · ${side}`,
+      entryLabel: `Pressure entry · ${side}`,
       entryType: 'PAPER_TAKER_PRESSURE',
       orderType: 'PAPER_TAKER_MARKET',
       fillModel: 'NEXT_CLOB_ASK_TICK_FULL_REQUESTED_SIZE',
       triggerPrice: Number.isFinite(Number(triggerPrice)) ? Number(triggerPrice) : null,
-      signalExpectedNetEdgePerShare: signalCandidate?.expectedNetEdgePerShare
-        ?? candidate?.expectedNetEdgePerShare
-        ?? null,
+      signalExpectedNetEdgePerShare: candidate?.expectedNetEdgePerShare ?? null,
       shares: execution.filledShares,
       initialShares: execution.filledShares,
       avgEntry: execution.averagePrice,
@@ -1376,7 +1322,6 @@ class PressureForecastBot extends WickBot {
     order.status = 'FILLED';
     order.filledAt = now;
     order.positionId = position.id;
-    order.signalSide = signalSide || null;
     order.fee = execution.fees;
     order.grossCost = execution.gross;
     order.totalCost = execution.totalCost;
@@ -1384,9 +1329,7 @@ class PressureForecastBot extends WickBot {
     order.maxPrice = config.PRESSURE_MAX_BUY_PRICE;
     order.triggerPrice = Number.isFinite(Number(triggerPrice)) ? Number(triggerPrice) : null;
     order.fillConfirmation = 'NEXT_CLOB_ASK_TICK';
-    order.signalExpectedNetEdgePerShare = signalCandidate?.expectedNetEdgePerShare
-      ?? candidate?.expectedNetEdgePerShare
-      ?? null;
+    order.signalExpectedNetEdgePerShare = candidate?.expectedNetEdgePerShare ?? null;
     order.expectedNetEdgePerShare = position.expectedNetEdgePerShare;
     this.log('PAPER_PRESSURE_ENTRY_FILLED', {
       orderId: order.id,
@@ -1677,7 +1620,6 @@ class PressureForecastBot extends WickBot {
         execution: 'PAPER ONLY',
         markets: ['BTC 5m'],
         orderType: 'NEXT_CLOB_ASK_TICK_FULL_SIZE',
-        entryDirection: 'OPPOSITE_SIGNAL',
         exit: 'No take-profit or stop-loss orders; positions stay open until official resolution.',
         liveTradingEnabled: false,
         realOrderModulesLoaded: false,
@@ -1688,11 +1630,10 @@ class PressureForecastBot extends WickBot {
         minEstimatedProbability: config.PRESSURE_MIN_ESTIMATED_PROBABILITY,
         maxBuyPrice: config.PRESSURE_MAX_BUY_PRICE,
         minNetEdgePerShare: config.PRESSURE_MIN_NET_EDGE_PER_SHARE,
-        signal: 'Uncalibrated estimate blends BTC price/volatility, current Polymarket odds, and ten one-second pressure samples; buys the outcome opposite the qualified signal.',
+        signal: 'Uncalibrated resolution estimate blends BTC price/volatility, current Polymarket odds, and ten one-second pressure samples.',
         signalState: this.forecast,
         orders: {
-          type: 'Full requested-size paper buy on the opposite signal side at the next Polymarket ask tick',
-          signalMapping: 'UP signal buys DOWN; DOWN signal buys UP.',
+          type: 'Full requested-size paper fill at the next Polymarket ask tick',
           initialShares: config.PRESSURE_ENTRY_SHARES,
           maxShares: config.PRESSURE_MAX_ENTRY_SHARES,
           sizeStepShares: config.PRESSURE_ENTRY_SIZE_STEP_SHARES,
@@ -1703,7 +1644,7 @@ class PressureForecastBot extends WickBot {
           entryCooldownMs: config.PRESSURE_ENTRY_COOLDOWN_MS,
           maxEntriesPerWindow: 'No fixed cap; limited by qualifying signals and available cash.',
         },
-        repeatEntryRule: `Each qualifying signal buys the opposite outcome. UP and DOWN buy sides have separate 15-second cooldowns. Each can independently open repeated ${config.PRESSURE_ENTRY_SHARES}-${config.PRESSURE_MAX_ENTRY_SHARES} share entries, with size increasing by ${config.PRESSURE_ENTRY_SIZE_STEP_SHARES} shares per $${config.PRESSURE_EDGE_SIZE_STEP.toFixed(2)} signal-edge above the minimum, then hold through the window and settle only after official resolution.`,
+        repeatEntryRule: `UP and DOWN have separate 15-second entry cooldowns. Each side can independently open repeated ${config.PRESSURE_ENTRY_SHARES}-${config.PRESSURE_MAX_ENTRY_SHARES} share entries, with size increasing by ${config.PRESSURE_ENTRY_SIZE_STEP_SHARES} shares per $${config.PRESSURE_EDGE_SIZE_STEP.toFixed(2)} edge above the minimum, then hold through the window and settle only after official resolution.`,
         priceFeed: this.priceFeed?.snapshot?.() || null,
         exits: {
           mode: 'OFFICIAL_RESOLUTION_ONLY',
@@ -1737,7 +1678,7 @@ class PressureForecastBot extends WickBot {
           this.shadowInitialCapital,
           this.shadowStatsOffset,
         ),
-        assumptions: `Separate paper cash; the opposite outcome is bought after the signal-side probability and net-edge filters qualify; 100–${config.PRESSURE_MAX_ENTRY_SHARES} share signal-edge sizing, independent 15-second buy-side cooldowns, visible ask-depth sweep for shadow entries, taker fees, and official-resolution-only settlement.`,
+        assumptions: `Separate paper cash; 100–${config.PRESSURE_MAX_ENTRY_SHARES} share edge-based sizing, probability and net-edge filters, independent 15-second cooldowns, visible ask-depth sweep for shadow entries, taker fees, and official-resolution-only settlement.`,
       },
       portfolioAnalytics: {
         equityCurve: settledEquityCurve,
