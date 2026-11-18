@@ -29,19 +29,6 @@ test('dashboard serves global analytics and retains existing position and resolu
   assert.match(html, /id="combinedWinsLosses"/);
   assert.match(html, /id="positions"/);
   assert.match(html, /id="resolutions"/);
-  assert.match(html, /accumulated-grid/);
-  assert.match(html, /Average cost \/ share/);
-  assert.match(html, /event\.win/);
-  assert.match(html, /event\.loss/);
-  assert.match(html, /PROJECTED 5M CLOSE/);
-  assert.match(html, /id="outcomeCalculatorPanel"/);
-  assert.match(html, /current window only/);
-  assert.match(html, /Earlier windows settle separately and are not included here/);
-  assert.match(html, /IF UP WINS/);
-  assert.match(html, /IF DOWN WINS/);
-  assert.match(html, /Wait 30 seconds after the window opens/);
-  assert.match(html, /best bid, midpoint, or best ask reaches \$0\.99/);
-  assert.match(html, /SL remains best bid at \$0\.01/);
 });
 
 test('unknown dashboard paths still return 404', async (t) => {

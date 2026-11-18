@@ -17,15 +17,15 @@ The active app is paper-only. Its startup file loads the demo strategy and does 
 - Enter only when that side's uncalibrated estimate is above 70%, the full visible ask sweep stays at or below $0.95, paper cash covers it, and expected net edge after the market's taker fees is at least $0.10 per share.
 - Start at 100 shares. For every full $0.01 of net edge above $0.10, increase the order by 10 shares, up to 200 shares. Calculate the edge using the all-in cost for the selected share size; require the selected size itself to retain at least $0.10 edge.
 - UP and DOWN have separate 15-second entry cooldowns. After its own cooldown, either side may add another independent 100–200 share position; there is no fixed per-window entry cap beyond available paper cash and qualifying signals.
-- Do not sell or settle a position from a price threshold, or because a signal points to the opposite side. Each position remains open independently through the window.
-- After the original market window ends, check Polymarket for official resolution every 10 seconds. Settle only when the original market is confirmed resolved with a definitive UP/DOWN outcome.
+- Before the window ends, close an open paper position when its fresh best bid reaches $0.99, crediting $1 per share. Do not apply a stop-loss or close because a signal points to the opposite side.
+- If take-profit is not reached, keep the position open through the window and check Polymarket for official resolution every 10 seconds afterward. Settle only when the original market is confirmed resolved with a definitive UP/DOWN outcome.
 - When visible depth is insufficient to complete the requested sweep within the cap/floor, skip the action rather than simulate a partial position.
 
 ## Adaptive-sample shadow comparison
 
 - Keep the active trading signal on ten one-second samples throughout each window.
 - In parallel, calculate a shadow-only forecast using 10 samples through the first minute, then 9, 8, 7, and 6 samples at the 60-, 120-, 180-, and 240-second marks.
-- Simulate an independent paper portfolio with the same 100–200 share sizing, signal filters, per-side 15-second cooldowns, visible ask-sweep cap, taker-fee estimate, and official-resolution-only settlement.
+- Simulate an independent paper portfolio with the same 100–200 share sizing, signal filters, per-side 15-second cooldowns, visible ask-sweep cap, taker-fee estimate, $0.99 best-bid take-profit credited at $1 per share, and official-resolution fallback.
 - Shadow entries never create orders, consume the trading portfolio's cash, or influence the selected trading side.
 - Compare settled and floating P&L, entry counts, wins/losses, and unresolved positions. Floating P&L marks open shares at the latest bid; unresolved positions are excluded until the official result arrives.
 - The comparison is an experimental fill simulation, not a live execution guarantee. Its in-memory portfolio resets when the process restarts.
