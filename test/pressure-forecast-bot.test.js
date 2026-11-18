@@ -856,6 +856,29 @@ test('Binance feed retains the previous completed five-minute candle close', () 
   assert.equal(snapshot.currentCandle.start, WINDOW_START);
 });
 
+test('Binance feed loads the previous closed candle on startup', async () => {
+  const currentStart = Math.floor(NOW / config.WINDOW_MS_5M) * config.WINDOW_MS_5M;
+  const feed = new BinanceTickFeed({
+    now: () => NOW,
+    WebSocketImpl: class FakeSocket {},
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        return [
+          [currentStart - config.WINDOW_MS_5M, '100', '102', '99', '101.25', '12', currentStart - 1],
+          [currentStart, '101.25', '103', '100', '102', '15', currentStart + config.WINDOW_MS_5M - 1],
+        ];
+      },
+    }),
+  });
+
+  const candle = await feed.refreshPreviousClosedCandle();
+  assert.equal(candle.start, currentStart - config.WINDOW_MS_5M);
+  assert.equal(candle.close, 101.25);
+  assert.equal(candle.source, 'BINANCE_REST_KLINE');
+  assert.equal(feed.snapshot().previousCloseError, null);
+});
+
 test('paper history migration restores positions, cash, cooldowns, and shadow totals', () => {
   const bot = makeBot();
   const position = {

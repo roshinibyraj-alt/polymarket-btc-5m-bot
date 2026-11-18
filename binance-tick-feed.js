@@ -7,9 +7,10 @@ const WINDOW_MS = 5 * 60 * 1000;
 const RETAIN_MS = 60 * 1000;
 
 class BinanceTickFeed {
-  constructor({ WebSocketImpl = WebSocket, now = Date.now } = {}) {
+  constructor({ WebSocketImpl = WebSocket, now = Date.now, fetchImpl = globalThis.fetch } = {}) {
     this.WebSocketImpl = WebSocketImpl;
     this.now = now;
+    this.fetchImpl = fetchImpl;
     this.socket = null;
     this.started = false;
     this.status = 'WAITING';
@@ -18,6 +19,7 @@ class BinanceTickFeed {
     this.tickAt = null;
     this.currentCandle = null;
     this.previousClosedCandle = null;
+    this.previousCloseError = null;
     this.recentTrades = [];
     this.priceSamples = [];
     this.retryMs = 1000;
@@ -27,7 +29,45 @@ class BinanceTickFeed {
   start() {
     if (this.started) return;
     this.started = true;
+    this.refreshPreviousClosedCandle();
     this.connect();
+  }
+
+  async refreshPreviousClosedCandle() {
+    if (typeof this.fetchImpl !== 'function') return null;
+    try {
+      const currentStart = Math.floor(this.now() / WINDOW_MS) * WINDOW_MS;
+      const response = await this.fetchImpl(
+        'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=2',
+        { signal: AbortSignal.timeout(3000) },
+      );
+      if (!response.ok) throw new Error(`Binance candle request returned ${response.status}`);
+      const rows = await response.json();
+      const previous = Array.isArray(rows)
+        ? rows.filter((row) => Number(row?.[0]) < currentStart).at(-1)
+        : null;
+      const start = Number(previous?.[0]);
+      const close = Number(previous?.[4]);
+      if (!Number.isFinite(start) || !(close > 0)) {
+        throw new Error('Binance did not return the previous completed 5-minute candle');
+      }
+      if (!this.previousClosedCandle || start >= this.previousClosedCandle.start) {
+        this.previousClosedCandle = {
+          start,
+          open: Number(previous[1]),
+          high: Number(previous[2]),
+          low: Number(previous[3]),
+          close,
+          source: 'BINANCE_REST_KLINE',
+          closedAt: Number(previous[6]) || start + WINDOW_MS - 1,
+        };
+      }
+      this.previousCloseError = null;
+      return this.previousClosedCandle;
+    } catch (error) {
+      this.previousCloseError = error?.message || 'Could not load the previous Binance candle';
+      return null;
+    }
   }
 
   connect() {
@@ -152,6 +192,7 @@ class BinanceTickFeed {
     if (kline.x === true
       && (!this.previousClosedCandle || start >= this.previousClosedCandle.start)) {
       this.previousClosedCandle = { ...candle, closedAt: Number(kline.T) || this.now() };
+      this.previousCloseError = null;
     } else if (this.currentCandle && this.currentCandle.start < start
       && (!this.previousClosedCandle || this.currentCandle.start >= this.previousClosedCandle.start)) {
       this.previousClosedCandle = { ...this.currentCandle, closedAt: this.now() };
@@ -207,6 +248,7 @@ class BinanceTickFeed {
       tickAgeMs: this.tickAt == null ? null : Math.max(0, now - this.tickAt),
       currentCandle: this.currentCandle ? { ...this.currentCandle } : null,
       previousClosedCandle: this.previousClosedCandle ? { ...this.previousClosedCandle } : null,
+      previousCloseError: this.previousCloseError,
       priceSamples: this.priceSamples.slice(-1000).map((sample) => ({ ...sample })),
       tradeFlow: this.tradeFlow(now),
     };
