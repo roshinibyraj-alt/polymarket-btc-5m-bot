@@ -1,34 +1,34 @@
-# BTC 5-minute reversed-signal dip-and-spike paper bot
+# BTC dual-engine paper strategy
 
-The active app is paper-only. Startup does not load the real-order bot or Polymarket trading adapter. `LIVE_TRADING=true` is ignored and logged as a safety warning.
+This runner is strictly paper-only. It subscribes to the current BTC 5-minute Polymarket CLOB WebSocket and does not load live order execution.
 
-## Data
+## Engine rules
 
-- Subscribe to the current BTC 5-minute market's UP and DOWN Polymarket CLOB WebSocket books.
-- Use each side's midpoint history independently. Binance remains connected for dashboard context but does not select a side or gate the strategy.
-- A trigger needs a fresh midpoint history for its signal side and a fresh quote book for the opposite side that would be bought.
+### UP
 
-## Entries: buy a confirmed dip
+1. Start each five-minute window armed for one 50-share UP entry.
+2. When the UP best ask reaches $0.71, submit a simulated taker sweep of 50 shares. Sweep no higher than $0.99. If the full requested quantity is not available within that ceiling, record no fill.
+3. A fresh UP best bid at $0.99 or higher records a take-profit payout of $1 per share.
+4. The realized net UP take-profit profit, after the modeled taker entry fee, is added to the next DOWN order's notional. The next DOWN quantity is `50 + positive UP profit / $0.30` shares. UP remains at 50 shares.
 
-- Trade only from the market's start through second 239. At second 240, stop buys and attempt to close remaining positions at current executable bids.
-- Keep a rolling 20-second midpoint history for each side. Require at least six quotes spanning eight seconds.
-- Define a dip as a recent trough at least $0.04 below the high observed before the latest five-second trough window.
-- Do not buy during the fall. Wait until the midpoint has bounced at least $0.01 from that trough and the last three quotes are rising.
-- Reverse only the outcome bought: a confirmed UP dip signal buys 20 DOWN shares; a confirmed DOWN dip signal buys 20 UP shares.
-- Sweep the opposite side's visible asks, capped at $0.85. Include modeled taker fees; skip rather than inventing a fill if the full amount is unavailable or paper cash is insufficient.
-- UP and DOWN signal sides have separate entry state. Each signal side has a 10-second cooldown, must recover $0.02 from its last trigger before it rearms, and can enter at most twice per window. These caps limit planned exposure to 40 shares per bought side and 80 shares across both sides.
+### DOWN
 
-## Exits: sell all shares into a profitable spike
+1. At window start, place one simulated resting DOWN limit order at $0.30.
+2. A later midpoint tick below $0.30 confirms the full requested quantity at $0.30 in this paper fill model. A quote that was already below $0.30 when the order was placed does not count; a later tick is required.
+3. If it has not filled by window end, expire the order. No partial fill or maker rebate is modeled.
+4. A fresh DOWN best bid at $0.99 or higher records a take-profit payout of $1 per share. A DOWN take-profit clears carried profit, returning both engines to the 50-share base for the next window.
 
-- For a side with open shares, sweep its visible bid book for the entire side's current-window inventory.
-- A spike exit is eligible only when the complete sweep's average price is at least $0.05 above that side's weighted gross entry price, and the estimated net profit remains at least $0.01 per share after entry and modeled exit fees.
-- Close all current-window open positions on that side together; do not sell or block the opposite side.
-- If there is not enough visible bid depth for the complete side inventory, do not claim a full sale.
-- If a bought side's combined realized and current executable net P&L for the window reaches -$5, sweep its entire open position at available bids and block further signals that would buy that side for the window. This is a trigger, not a guaranteed maximum loss: gaps, fees, and shallow books can produce a larger realized loss.
-- At second 240, stop triggering new buys and attempt a full bid-book sweep for any remaining shares, regardless of profit. If a fresh full sweep is unavailable, retain the unsold shares for official resolution of their original market, checked every 10 seconds.
+## Window close and settlement
 
-## Dashboard and verification
+- Both engines operate independently; both sides may hold positions in one window.
+- There is no stop-loss, signal flip, or timed exit.
+- Open shares that did not hit take-profit are held for the official resolution of their original market. Resolution is checked every 10 seconds.
+- Entry fees are modeled for UP taker buys when fee data is available. DOWN limit orders have zero modeled taker fee and no modeled rebate.
 
-The dashboard reports the signal side, opposite buy side, each side's midpoint and bid/ask, recent reference high and trough, dip and bounce sizes, entries used, and why a setup is waiting or eligible. Paper orders use visible-book taker-style sweeps and include modeled fees; this is a simulation, not an exchange fill guarantee.
+## Dashboard and checks
 
-Run `npm test`, then `npm start`. `/api/state` reports the active strategy, quotes, paper orders, positions, and resolutions. Railway paper history is stored on its existing volume and can be reset with a new `PAPER_HISTORY_RESET_VERSION`.
+The dashboard prioritizes each engine's status, current bid/ask, trigger or limit, size, average entry, take-profit, carried profit, and next-window DOWN size. It also shows paper equity, orders, positions, completed transactions, and resolution records.
+
+Run `npm test` and `npm start`. Check `/api/healthz` for app readiness and `/api/state` for current paper state. A new `PAPER_HISTORY_RESET_VERSION` intentionally clears the persisted paper ledger at deployment.
+
+The fill rules are simplified paper assumptions; they do not guarantee execution at a live exchange or profitable results.

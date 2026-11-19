@@ -124,7 +124,160 @@ test('taker sweep observes the buy ceiling, sell floor, and per-level fees', () 
   assert.equal(sell.filledShares, 100);
 });
 
-test('dip analysis waits for a pullback, rebound, and two rising quote updates', () => {
+test('UP engine waits for a $0.71 best ask and then sweeps 50 shares up to $0.99', () => {
+  const bot = makeBot();
+  bot.openStrategyWindow(WINDOW_START, NOW - 1);
+  setQuote(bot, 'UP', 0.69, 0.70, 1000, NOW);
+  setQuote(bot, 'DOWN', 0.49, 0.51, 1000, NOW);
+  bot.processEngineTriggers(NOW);
+  assert.equal(bot.positions.length, 0);
+
+  setQuote(bot, 'UP', 0.70, 0.71, 1000, NOW + 1);
+  bot.processEngineTriggers(NOW + 1);
+  assert.equal(bot.positions.length, 1);
+  assert.equal(bot.positions[0].side, 'UP');
+  assert.equal(bot.positions[0].shares, 50);
+  assert.equal(bot.positions[0].avgEntry, 0.71);
+  assert.equal(bot.orders.find((order) => order.kind === 'BUY_UP_MARKET').maxPrice, 0.99);
+  assert.equal(bot.upEngine.status, 'OPEN');
+});
+
+test('UP engine rejects the full entry if asks exceed its $0.99 sweep ceiling', () => {
+  const bot = makeBot();
+  bot.openStrategyWindow(WINDOW_START, NOW - 1);
+  setQuote(bot, 'UP', 0.98, 0.995, 1000, NOW);
+  setQuote(bot, 'DOWN', 0.49, 0.51, 1000, NOW);
+
+  bot.processEngineTriggers(NOW);
+
+  assert.equal(bot.positions.length, 0);
+  assert.equal(bot.upEngine.status, 'NO_FILL');
+  assert.equal(bot.orders.find((order) => order.kind === 'BUY_UP_MARKET').status, 'SKIPPED_SLIPPAGE_OR_DEPTH');
+});
+
+test('DOWN order rests at $0.30 and fills all shares only on a later tick below $0.30', () => {
+  const bot = makeBot();
+  bot.downProfitCarry = 3;
+  bot.openStrategyWindow(WINDOW_START, NOW - 1);
+  const order = bot.orders.find((item) => item.kind === 'BUY_DOWN_LIMIT');
+  assert.equal(order.status, 'LIVE');
+  assert.equal(order.limitPrice, 0.30);
+  assert.equal(order.shares, 60);
+
+  setQuote(bot, 'DOWN', 0.28, 0.30, 1000, NOW - 1);
+  bot.processEngineTriggers(NOW - 1);
+  assert.equal(order.status, 'LIVE');
+
+  setQuote(bot, 'DOWN', 0.28, 0.30, 1000, NOW);
+  bot.processEngineTriggers(NOW);
+  assert.equal(order.status, 'FILLED');
+  assert.equal(order.matchedShares, 60);
+  assert.equal(order.price, 0.30);
+  assert.equal(bot.positions[0].side, 'DOWN');
+  assert.equal(bot.positions[0].shares, 60);
+  assert.equal(bot.positions[0].fees, 0);
+});
+
+test('UP take-profit carries realized net profit into next-window DOWN shares', () => {
+  const bot = makeBot();
+  const position = {
+    id: 'up-tp',
+    side: 'UP',
+    engine: 'UP',
+    shares: 50,
+    totalCost: 20,
+    windowStart: WINDOW_START,
+    windowMs: config.WINDOW_MS_5M,
+    status: 'OPEN',
+  };
+  bot.positions.push(position);
+  bot.cash = 9_980;
+  bot.upEngine = bot.emptyEngine('UP', { status: 'OPEN', positionId: position.id });
+  setQuote(bot, 'UP', 0.99, 1, 1000, NOW);
+
+  bot.applyTakeProfitExits(NOW);
+
+  assert.equal(position.status, 'SETTLED_EXIT');
+  assert.equal(position.exitPrice, 1);
+  assert.equal(position.realizedPnl, 30);
+  assert.equal(bot.downProfitCarry, 30);
+  assert.equal(bot.snapshot().strategy.downSharesNextWindow, 150);
+  assert.equal(bot.upEngine.status, 'TAKE_PROFIT');
+});
+
+test('DOWN take-profit clears UP profit carry and restores both engines to base', () => {
+  const bot = makeBot();
+  const position = {
+    id: 'down-tp',
+    side: 'DOWN',
+    engine: 'DOWN',
+    shares: 50,
+    totalCost: 15,
+    windowStart: WINDOW_START,
+    windowMs: config.WINDOW_MS_5M,
+    status: 'OPEN',
+  };
+  bot.positions.push(position);
+  bot.downProfitCarry = 24;
+  bot.downEngine = bot.emptyEngine('DOWN', { status: 'OPEN', positionId: position.id });
+  setQuote(bot, 'DOWN', 0.99, 1, 1000, NOW);
+
+  bot.applyTakeProfitExits(NOW);
+
+  assert.equal(position.status, 'SETTLED_EXIT');
+  assert.equal(position.realizedPnl, 35);
+  assert.equal(bot.downProfitCarry, 0);
+  assert.equal(bot.snapshot().strategy.downSharesNextWindow, 50);
+  assert.equal(bot.downEngine.status, 'TAKE_PROFIT');
+});
+
+test('positions without take-profit remain open and move to official resolution at window end', async () => {
+  const bot = makeBot();
+  bot.openStrategyWindow(WINDOW_START, NOW - 1);
+  const position = {
+    id: 'open-up',
+    side: 'UP',
+    engine: 'UP',
+    shares: 50,
+    totalCost: 20,
+    windowStart: WINDOW_START,
+    windowMs: config.WINDOW_MS_5M,
+    marketId: 'condition',
+    status: 'OPEN',
+  };
+  bot.positions.push(position);
+  setQuote(bot, 'UP', 0.01, 0.02, 1000, NOW);
+
+  await bot.completeWindow(
+    WINDOW_START,
+    null,
+    'WINDOW_ROLLOVER',
+    WINDOW_START + config.WINDOW_MS_5M + 100,
+  );
+
+  assert.equal(position.status, 'PENDING_CLOB_RESULT');
+  assert.equal(bot.orders.find((order) => order.kind === 'BUY_DOWN_LIMIT').status, 'EXPIRED_WINDOW_ROLLOVER');
+  assert.equal(bot.orders.some((order) => order.action === 'SELL'), false);
+  assert.equal(bot.snapshot().strategy.exits.stopLoss, false);
+});
+
+test('strategy snapshot exposes two paper engines and disables live trading', () => {
+  const state = makeBot().snapshot();
+  assert.equal(state.strategy.name, 'BTC 5-minute dual-engine paper bot');
+  assert.equal(state.strategy.execution, 'PAPER ONLY');
+  assert.equal(state.strategy.liveTradingEnabled, false);
+  assert.equal(state.strategy.realOrderModulesLoaded, false);
+  assert.equal(state.strategy.baseShares, 50);
+  assert.equal(state.strategy.upTriggerAsk, 0.71);
+  assert.equal(state.strategy.upMaxSweepPrice, 0.99);
+  assert.equal(state.strategy.downLimitPrice, 0.30);
+  assert.equal(state.strategy.takeProfitBidTrigger, 0.99);
+  assert.equal(state.strategy.takeProfitPayout, 1);
+  assert.equal(state.strategy.exits.stopLoss, false);
+  assert.equal(state.strategy.exits.timedExitAtSeconds, null);
+});
+
+test.skip('retired dip analysis is not part of the dual-engine strategy', () => {
   const bot = makeBot();
   addDipHistory(bot, 'UP');
   const candidate = bot.buildDipCandidate('UP', NOW, WINDOW_START, true);
@@ -141,7 +294,7 @@ test('dip analysis waits for a pullback, rebound, and two rising quote updates',
   assert.equal(falling.qualifies, false);
 });
 
-test('the buy-price ceiling applies to the opposite entry side, not the signal side', () => {
+test.skip('retired reverse-side buy ceiling is not part of the dual-engine strategy', () => {
   const bot = makeBot();
   addDipHistory(bot, 'UP');
   setQuote(bot, 'UP', 0.94, 0.96, 500, NOW);
@@ -158,7 +311,7 @@ test('the buy-price ceiling applies to the opposite entry side, not the signal s
   assert.match(capped.reason, /DOWN entry ask is above the \$0\.85 ceiling/);
 });
 
-test('UP and DOWN signals independently buy their opposite sides', () => {
+test.skip('retired reverse-side signal strategy is not part of the dual-engine strategy', () => {
   const bot = makeBot();
   addDipHistory(bot, 'UP', { base: 0.50 });
   addDipHistory(bot, 'DOWN', { base: 0.52 });
@@ -188,7 +341,7 @@ test('UP and DOWN signals independently buy their opposite sides', () => {
   assert.equal(bot.dipArmedBySide.DOWN, false);
 });
 
-test('one side can rearm only after recovery, cooldown, and another confirmed dip', () => {
+test.skip('retired per-side rearm behavior is not part of the dual-engine strategy', () => {
   const bot = makeBot();
   addDipHistory(bot, 'UP');
   assert.equal(bot.processDipStrategy(WINDOW_START, NOW, 'UP'), true);
@@ -210,7 +363,7 @@ test('one side can rearm only after recovery, cooldown, and another confirmed di
   assert.equal(bot.dipEntryCountBySide.UP, 2);
 });
 
-test('the strategy stops entries at second 240 and sweeps remaining shares', () => {
+test.skip('retired 240-second exit is not part of the dual-engine strategy', () => {
   const bot = makeBot();
   addDipHistory(bot, 'UP', { now: WINDOW_START + 241_000, start: WINDOW_START + 229_000 });
   const now = WINDOW_START + 241_000;
@@ -238,7 +391,7 @@ test('the strategy stops entries at second 240 and sweeps remaining shares', () 
   assert.equal(bot.forecast.status, 'TRADE_WINDOW_CLOSED');
 });
 
-test('a $5 cumulative side loss is swept and blocks further entries that window', () => {
+test.skip('retired side loss stop is not part of the dual-engine strategy', () => {
   const bot = makeBot();
   const position = {
     id: 'loss-up',
@@ -264,7 +417,7 @@ test('a $5 cumulative side loss is swept and blocks further entries that window'
   assert.equal(bot.dipArmedBySide.DOWN, false);
 });
 
-test('a profitable spike sells all same-side shares together and leaves the other side alone', () => {
+test.skip('retired spike exit is not part of the dual-engine strategy', () => {
   const bot = makeBot();
   bot.market.feesEnabled = true;
   bot.market.feeSchedule = { rate: 0.07, exponent: 1 };
@@ -308,7 +461,7 @@ test('missing quotes do not exit open positions', async () => {
   assert.deepEqual(bot.positions.map((position) => position.status), ['OPEN', 'OPEN']);
   assert.equal(bot.orders.some((order) => order.action === 'SELL'), false);
   assert.equal(bot.snapshot().strategy.exits.takeProfit, true);
-  assert.equal(bot.snapshot().strategy.exits.stopLoss, true);
+  assert.equal(bot.snapshot().strategy.exits.stopLoss, false);
 });
 
 test('current Polymarket prices come from the CLOB feed cache, not repeated REST book polling', async () => {
@@ -373,7 +526,7 @@ test('current Polymarket prices come from the CLOB feed cache, not repeated REST
   assert.equal(bot.snapshot().clobFeed.connected, true);
 });
 
-test('bounds dip-history sampling at 50ms while preserving accepted quotes', () => {
+test.skip('retired dip-history sampling is not used by the dual-engine strategy', () => {
   const bot = makeBot();
   const quote = {
     status: 'LIVE',
@@ -415,7 +568,7 @@ test('reuses the current-window market instead of re-fetching Gamma every refres
   assert.equal(bot.error, null);
 });
 
-test('fresh $0.99 best bid pays $1 per share while risk exits remain enabled', async () => {
+test('fresh $0.99 best bid pays $1 per share and no stop-loss is applied', async () => {
   const bot = makeBot();
   const position = {
     id: 'tp-up',
@@ -529,7 +682,7 @@ test('the final fresh in-window bid triggers TP before rollover moves a position
   assert.equal(bot.cash, 10_060);
   assert.equal(bot.snapshot().account.startingCapital, 10_000);
   assert.equal(bot.snapshot().account.currentCapital, 10_060);
-  assert.equal(bot.events.find((event) => event.event === 'PAPER_DIP_WINDOW_ENDED')
+  assert.equal(bot.events.find((event) => event.event === 'PAPER_DUAL_ENGINE_WINDOW_ENDED')
     .pendingResolutionCount, 0);
 });
 
@@ -554,33 +707,27 @@ test('a bid timestamped at the window end does not count as an in-window take-pr
   assert.equal(bot.orders.some((order) => order.kind === 'SELL_TAKE_PROFIT'), false);
 });
 
-test('paper snapshot identifies the reversed-signal dip-and-spike demo strategy', () => {
+test('paper snapshot describes the current dual-engine strategy and inactive live modules', () => {
   const bot = makeBot();
   const state = bot.snapshot();
-  assert.equal(state.strategy.name, 'BTC 5-minute reversed-signal dip-and-spike paper bot');
-  assert.equal(state.strategy.signalMapping, 'OPPOSITE_SIDE');
-  assert.match(state.strategy.orders.signalMapping, /UP signal buys DOWN/i);
+  assert.equal(state.strategy.name, 'BTC 5-minute dual-engine paper bot');
+  assert.equal(state.strategy.signalMapping, 'UP trigger buys UP; DOWN resting limit buys DOWN.');
   assert.deepEqual(state.strategy.markets, ['BTC 5m']);
   assert.equal(state.strategy.execution, 'PAPER ONLY');
   assert.equal(state.strategy.liveTradingEnabled, false);
   assert.equal(state.strategy.realOrderModulesLoaded, false);
-  assert.equal(state.strategy.orders.type, 'Visible-book taker-style paper sweeps');
-  assert.equal(state.strategy.orders.entryCooldownMs, 10_000);
-  assert.match(state.strategy.repeatEntryRule, /10-second cooldown/i);
-  assert.match(state.strategy.repeatEntryRule, /recover/i);
-  assert.equal(state.strategy.maxBuyPrice, 0.85);
-  assert.equal(state.strategy.entryShares, 20);
-  assert.equal(state.strategy.maxEntriesPerSide, 2);
-  assert.equal(state.strategy.tradeWindowMs, 240_000);
-  assert.match(state.strategy.exit, /net window P&L reaches -\$5\.00/i);
+  assert.equal(state.strategy.orders.type, 'UP taker sweep; DOWN resting limit with tick-through paper fill');
+  assert.match(state.strategy.repeatEntryRule, /50 shares/);
+  assert.match(state.strategy.repeatEntryRule, /profit \/ \$0\.30/);
+  assert.equal(state.strategy.upMaxSweepPrice, 0.99);
+  assert.equal(state.strategy.entryShares, 50);
+  assert.equal(state.strategy.downLimitPrice, 0.30);
   assert.equal(state.strategy.exits.takeProfit, true);
-  assert.equal(state.strategy.exits.takeProfitTrigger, 0.05);
-  assert.equal(state.strategy.exits.takeProfitPayout, null);
-  assert.equal(state.strategy.exits.stopLoss, true);
-  assert.equal(state.strategy.exits.stopLossDollarsPerSidePerWindow, 5);
-  assert.equal(state.strategy.exits.timedExitAtSeconds, 240);
+  assert.equal(state.strategy.exits.takeProfitTrigger, 0.99);
+  assert.equal(state.strategy.exits.takeProfitPayout, 1);
+  assert.equal(state.strategy.exits.stopLoss, false);
+  assert.equal(state.strategy.exits.timedExitAtSeconds, null);
   assert.equal(state.strategy.signalState.status, 'WAITING_FOR_DATA');
-  assert.equal(state.strategy.priceFeed.source, 'Binance BTCUSDT aggregate trades');
   assert.equal(state.account.startingCapital, 10_000);
   assert.equal(state.account.currentCapital, state.account.equity);
   assert.equal(Object.hasOwn(state, 'shadowComparison'), false);
@@ -774,7 +921,7 @@ test('paper history migration restores positions, cash, and cooldowns', () => {
   assert.equal(bot.resolutions[0].slug, 'prior-window');
   assert.equal(bot.lastEntryAtBySide.UP, NOW - 5000);
   assert.equal(bot.orderWindowStart, WINDOW_START);
-  assert.equal(bot.forecast.status, 'COLLECTING_PRICE_HISTORY');
+  assert.equal(bot.forecast.status, 'WAITING_FOR_CLOB');
   assert.equal(bot.forecast.reason, 'Collecting fresh Polymarket quotes after restart.');
 
   assert.equal(Object.hasOwn(bot.snapshot(), 'shadowComparison'), false);

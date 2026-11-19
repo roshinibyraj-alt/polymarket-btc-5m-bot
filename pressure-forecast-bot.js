@@ -13,81 +13,12 @@ const {
 
 const EPSILON = 1e-9;
 const SIDES = ['UP', 'DOWN'];
-const DIP_STRATEGY_VERSION = 'DIP_REBOUND_REVERSED_V1';
+const DUAL_ENGINE_STRATEGY_VERSION = 'BTC_DUAL_ENGINE_071_030_V1';
 
 function oppositeSide(side) {
   if (side === 'UP') return 'DOWN';
   if (side === 'DOWN') return 'UP';
   return null;
-}
-
-function isDipPosition(position) {
-  return position?.strategyVersion === DIP_STRATEGY_VERSION
-    || position?.strategyVersion === 'DIP_REBOUND_V1';
-}
-
-function analyzeDipRebound(samples, now) {
-  const lookback = samples
-    .filter((sample) => Number(sample.at) >= now - config.DIP_LOOKBACK_MS
-      && Number(sample.at) <= now
-      && Number(sample.mid) > 0
-      && Number(sample.mid) < 1)
-    .sort((a, b) => Number(a.at) - Number(b.at));
-  const empty = {
-    ready: false,
-    qualifies: false,
-    sampleCount: lookback.length,
-    referenceHigh: null,
-    trough: null,
-    currentMid: lookback.length ? Number(lookback.at(-1).mid) : null,
-    dipAmount: null,
-    reboundAmount: null,
-    reason: 'Collecting fresh Polymarket price history.',
-  };
-  if (lookback.length < config.DIP_MIN_HISTORY_SAMPLES
-    || Number(lookback.at(-1).at) - Number(lookback[0].at) < config.DIP_MIN_HISTORY_SPAN_MS) {
-    return empty;
-  }
-
-  const troughStart = now - config.DIP_TROUGH_WINDOW_MS;
-  const reference = lookback.filter((sample) => Number(sample.at) < troughStart);
-  const troughSamples = lookback.filter((sample) => Number(sample.at) >= troughStart);
-  if (reference.length < 3 || troughSamples.length < 2) {
-    return { ...empty, reason: 'Waiting for enough older prices to define a dip and a recent trough.' };
-  }
-
-  const referenceHigh = Math.max(...reference.map((sample) => Number(sample.mid)));
-  const trough = Math.min(...troughSamples.map((sample) => Number(sample.mid)));
-  const currentMid = Number(lookback.at(-1).mid);
-  const previous = Number(lookback.at(-2)?.mid);
-  const previousPrevious = Number(lookback.at(-3)?.mid);
-  const dipAmount = referenceHigh - trough;
-  const reboundAmount = currentMid - trough;
-  const hasTurn = previousPrevious < previous && previous < currentMid;
-  const qualifies = dipAmount + EPSILON >= config.DIP_DROP_FROM_REFERENCE
-    && reboundAmount + EPSILON >= config.DIP_REBOUND_FROM_TROUGH
-    && hasTurn;
-
-  let reason = 'No confirmed dip-and-rebound setup yet.';
-  if (dipAmount + EPSILON < config.DIP_DROP_FROM_REFERENCE) {
-    reason = `Waiting for a $${config.DIP_DROP_FROM_REFERENCE.toFixed(2)} dip from the recent reference high.`;
-  } else if (reboundAmount + EPSILON < config.DIP_REBOUND_FROM_TROUGH || !hasTurn) {
-    reason = `Dip detected; waiting for a $${config.DIP_REBOUND_FROM_TROUGH.toFixed(2)} rebound with two rising quotes.`;
-  } else {
-    reason = `Dip-and-rebound confirmed: $${dipAmount.toFixed(3)} below the recent high, then $${reboundAmount.toFixed(3)} off the trough.`;
-  }
-
-  return {
-    ready: true,
-    qualifies,
-    sampleCount: lookback.length,
-    referenceHigh,
-    trough,
-    currentMid,
-    dipAmount,
-    reboundAmount,
-    reason,
-  };
 }
 
 function sweepBook(levels, shares, action, market, {
@@ -190,7 +121,7 @@ class PressureForecastBot extends WickBot {
       timeframe: '5m',
       windowMs: config.WINDOW_MS_5M,
       capital: initialCapital,
-      strategyMode: 'dip-rebound',
+      strategyMode: 'dual-engine',
       priceFeed: feed,
     });
     this.now = now;
@@ -199,17 +130,15 @@ class PressureForecastBot extends WickBot {
     this.clobFeed = null;
     this.clobFeedMarketKey = null;
     this.initialCapital = initialCapital;
-    this.strategyName = 'BTC 5-minute reversed-signal dip-and-spike paper bot';
-    this.strategyMode = 'dip-rebound';
-    this.forecast = this.emptyForecast('Waiting for fresh Polymarket UP and DOWN quotes.');
+    this.strategyName = 'BTC 5-minute dual-engine paper bot';
+    this.strategyMode = 'dual-engine';
+    this.downProfitCarry = 0;
+    this.downSharesThisWindow = config.ENGINE_BASE_SHARES;
+    this.upEngine = this.emptyEngine('UP');
+    this.downEngine = this.emptyEngine('DOWN');
+    this.forecast = this.emptyForecast('Waiting for the current BTC 5-minute market.');
     this.lastEntryAt = null;
     this.lastEntryAtBySide = { UP: null, DOWN: null };
-    this.lastDipAttemptAtBySide = { UP: null, DOWN: null };
-    this.dipHistory = { UP: [], DOWN: [] };
-    this.lastHistoryQuoteAtBySide = { UP: null, DOWN: null };
-    this.dipEntryCountBySide = { UP: 0, DOWN: 0 };
-    this.dipArmedBySide = { UP: true, DOWN: true };
-    this.dipRearmPriceBySide = { UP: null, DOWN: null };
     this.lastResolutionCheckAt = new Map();
     this.actionSequence = 0;
     this.resolutions = [];
@@ -255,12 +184,12 @@ class PressureForecastBot extends WickBot {
       liveQuotes: this.liveQuotes,
       lastEntryAt: this.lastEntryAt,
       lastEntryAtBySide: this.lastEntryAtBySide,
-      lastDipAttemptAtBySide: this.lastDipAttemptAtBySide,
-      dipEntryCountBySide: this.dipEntryCountBySide,
-      dipArmedBySide: this.dipArmedBySide,
-      dipRearmPriceBySide: this.dipRearmPriceBySide,
-      strategyVersion: DIP_STRATEGY_VERSION,
+      strategyVersion: DUAL_ENGINE_STRATEGY_VERSION,
       forecast: this.forecast,
+      downProfitCarry: this.downProfitCarry,
+      downSharesThisWindow: this.downSharesThisWindow,
+      upEngine: this.upEngine,
+      downEngine: this.downEngine,
       actionSequence: this.actionSequence,
       completedWindows: [...this.completedWindows.entries()],
       lastResolutionCheckAt: [...this.lastResolutionCheckAt.entries()],
@@ -299,35 +228,11 @@ class PressureForecastBot extends WickBot {
     this.liveQuotes = state.liveQuotes || { UP: { status: 'MISSING' }, DOWN: { status: 'MISSING' } };
     this.lastEntryAt = Number.isFinite(Number(state.lastEntryAt)) ? Number(state.lastEntryAt) : null;
     this.lastEntryAtBySide = state.lastEntryAtBySide || { UP: null, DOWN: null };
-    this.lastDipAttemptAtBySide = state.lastDipAttemptAtBySide || { ...this.lastEntryAtBySide };
-    this.dipHistory = { UP: [], DOWN: [] };
-    this.lastHistoryQuoteAtBySide = { UP: null, DOWN: null };
-    const currentWindowPositions = this.positions.filter((position) =>
-      Number(position.windowStart) === Number(this.orderWindowStart)
-      && isDipPosition(position));
-    this.dipEntryCountBySide = state.dipEntryCountBySide || Object.fromEntries(
-      SIDES.map((side) => [side, currentWindowPositions.filter((position) =>
-        (SIDES.includes(position.signalSide) ? position.signalSide : position.side) === side).length]),
-    );
-    this.dipArmedBySide = state.dipArmedBySide || Object.fromEntries(
-      SIDES.map((side) => [side, currentWindowPositions.every((position) =>
-        (SIDES.includes(position.signalSide) ? position.signalSide : position.side) !== side)]),
-    );
-    this.dipRearmPriceBySide = state.dipRearmPriceBySide || Object.fromEntries(
-      SIDES.map((side) => {
-        const latest = currentWindowPositions
-          .filter((position) =>
-            (SIDES.includes(position.signalSide) ? position.signalSide : position.side) === side)
-          .sort((a, b) => Number(b.filledAt || b.openedAt || 0) - Number(a.filledAt || a.openedAt || 0))[0];
-        return [side, latest
-          ? Math.min(0.99, Number(latest.dipTriggerMid ?? latest.avgEntry ?? 0) + config.DIP_REARM_RECOVERY)
-          : null];
-      }),
-    );
-    this.forecast = this.emptyForecast(
-      'Collecting fresh Polymarket quotes after restart.',
-      'COLLECTING_PRICE_HISTORY',
-    );
+    this.downProfitCarry = Math.max(0, Number(state.downProfitCarry) || 0);
+    this.downSharesThisWindow = Number(state.downSharesThisWindow) || config.ENGINE_BASE_SHARES;
+    this.upEngine = state.upEngine || this.emptyEngine('UP');
+    this.downEngine = state.downEngine || this.emptyEngine('DOWN');
+    this.forecast = this.emptyForecast('Collecting fresh Polymarket quotes after restart.', 'WAITING_FOR_CLOB');
     this.actionSequence = Number(state.actionSequence) || 0;
     this.completedWindows = new Map(Array.isArray(state.completedWindows) ? state.completedWindows : []);
     this.lastResolutionCheckAt = new Map(
@@ -436,43 +341,32 @@ class PressureForecastBot extends WickBot {
     this.lastPersistedAt = now;
   }
 
+  emptyEngine(side, extra = {}) {
+    return {
+      side,
+      status: side === 'DOWN' ? 'WAITING_FOR_WINDOW' : 'ARMED',
+      shares: config.ENGINE_BASE_SHARES,
+      orderId: null,
+      positionId: null,
+      triggerAt: null,
+      takeProfitAt: null,
+      ...extra,
+    };
+  }
+
   emptyForecast(reason, status = 'WAITING_FOR_DATA') {
     return {
       ready: false,
       status,
       reason,
-      signalSource: 'POLYMARKET_CLOB_PRICE_ONLY_REVERSED_SIDE',
-      selectedSide: null,
-      qualifyingSides: [],
-      qualifyingSignalSides: [],
+      strategyVersion: DUAL_ENGINE_STRATEGY_VERSION,
+      signalSource: 'POLYMARKET_CLOB_PRICE_ONLY_TWO_ENGINE',
       secondsIntoWindow: null,
       secondsRemaining: null,
-      tradeWindowMs: config.DIP_TRADE_WINDOW_MS,
-      candidateBySide: {
-        UP: this.emptyCandidate('Waiting for fresh UP quotes.'),
-        DOWN: this.emptyCandidate('Waiting for fresh DOWN quotes.'),
-      },
-    };
-  }
-
-  emptyCandidate(reason) {
-    return {
-      ready: false,
-      signalSide: null,
-      entrySide: null,
-      currentMid: null,
-      bestAsk: null,
-      referenceHigh: null,
-      trough: null,
-      dipAmount: null,
-      reboundAmount: null,
-      sampleCount: 0,
-      entriesThisWindow: 0,
-      maxEntries: config.DIP_MAX_ENTRIES_PER_SIDE,
-      requestedShares: config.DIP_ENTRY_SHARES,
-      armed: true,
-      qualifies: false,
-      reason,
+      baseShares: config.ENGINE_BASE_SHARES,
+      downProfitCarry: this.downProfitCarry,
+      up: this.upEngine,
+      down: this.downEngine,
     };
   }
 
@@ -487,19 +381,31 @@ class PressureForecastBot extends WickBot {
     this.liveQuotes = { UP: { status: 'MISSING' }, DOWN: { status: 'MISSING' } };
     this.lastEntryAt = null;
     this.lastEntryAtBySide = { UP: null, DOWN: null };
-    this.lastDipAttemptAtBySide = { UP: null, DOWN: null };
-    this.dipHistory = { UP: [], DOWN: [] };
-    this.lastHistoryQuoteAtBySide = { UP: null, DOWN: null };
-    this.dipEntryCountBySide = { UP: 0, DOWN: 0 };
-    this.dipArmedBySide = { UP: true, DOWN: true };
-    this.dipRearmPriceBySide = { UP: null, DOWN: null };
     this.signal = null;
-    this.forecast = this.emptyForecast('Collecting a fresh rolling UP and DOWN price history.', 'COLLECTING_PRICE_HISTORY');
-    this.log('PAPER_DIP_WINDOW_STARTED', {
+    const downShares = config.ENGINE_BASE_SHARES + this.downProfitCarry / config.ENGINE_DOWN_SHARE_PRICE;
+    this.downSharesThisWindow = Math.round(downShares * 100) / 100;
+    this.upEngine = this.emptyEngine('UP', {
+      status: 'ARMED',
+      shares: config.ENGINE_BASE_SHARES,
+      triggerPrice: config.ENGINE_UP_TRIGGER_ASK,
+      maxSweepPrice: config.ENGINE_UP_MAX_SWEEP_PRICE,
+    });
+    this.downEngine = this.emptyEngine('DOWN', {
+      status: 'RESTING',
+      shares: this.downSharesThisWindow,
+      limitPrice: config.ENGINE_DOWN_LIMIT_PRICE,
+      profitCarry: this.downProfitCarry,
+      profitCarryShares: Math.round((this.downProfitCarry / config.ENGINE_DOWN_SHARE_PRICE) * 100) / 100,
+    });
+    this.forecast = this.emptyForecast('UP waits for its trigger; the DOWN limit is being placed.', 'ENGINES_ARMING');
+    this.placeDownLimitOrder(start, now);
+    this.log('PAPER_ENGINES_WINDOW_STARTED', {
       windowStart: start,
-      entryShares: config.DIP_ENTRY_SHARES,
-      maxEntriesPerSide: config.DIP_MAX_ENTRIES_PER_SIDE,
-      tradeWindowMs: config.DIP_TRADE_WINDOW_MS,
+      upShares: config.ENGINE_BASE_SHARES,
+      upTriggerAsk: config.ENGINE_UP_TRIGGER_ASK,
+      downLimitPrice: config.ENGINE_DOWN_LIMIT_PRICE,
+      downShares: this.downSharesThisWindow,
+      downProfitCarry: this.downProfitCarry,
     });
   }
 
@@ -523,7 +429,7 @@ class PressureForecastBot extends WickBot {
       if (this.orderWindowStart !== start) this.openStrategyWindow(start, now);
       this.ensureClobFeed();
       await this.refreshLiveQuotes(now);
-      this.processDipStrategy(start, now);
+       this.processEngineTriggers(now);
       this.lastScanAt = now;
       this.error = null;
       this.status = this.positions.some((position) =>
@@ -536,7 +442,7 @@ class PressureForecastBot extends WickBot {
       if (this.lastError !== this.error || now - (this.lastErrorAt || 0) > 30_000) {
         this.lastError = this.error;
         this.lastErrorAt = now;
-        this.log('PAPER_DIP_SCAN_ERROR', { error: this.error });
+        this.log('PAPER_DUAL_ENGINE_SCAN_ERROR', { error: this.error });
       }
     }
   }
@@ -582,10 +488,9 @@ class PressureForecastBot extends WickBot {
       status: ageMs <= config.CLOB_MAX_QUOTE_AGE_MS ? quote.status : 'STALE',
       stale: ageMs > config.CLOB_MAX_QUOTE_AGE_MS,
     };
-    const sampleRecorded = this.recordDipQuote(side, this.liveQuotes[side]);
     this.updatePositionMarks(side, this.liveQuotes[side], now);
     this.applyTakeProfitExits(now);
-    if (sampleRecorded) this.processDipStrategy(this.market?.start, now);
+    this.processEngineTriggers(now);
   }
 
   async refreshLiveQuotes(now) {
@@ -613,30 +518,12 @@ class PressureForecastBot extends WickBot {
           error: this.clobFeed?.snapshot?.().error || null,
         };
       }
-      this.recordDipQuote(side, this.liveQuotes[side]);
     }
     for (const side of SIDES) {
       this.updatePositionMarks(side, this.liveQuotes[side], now);
     }
     this.applyTakeProfitExits(now);
-  }
-
-  recordDipQuote(side, quote) {
-    if (!quote || quote.status !== 'LIVE' || quote.stale) return false;
-    const updatedAt = Number(quote.updatedAt);
-    const lastSampleAt = this.lastHistoryQuoteAtBySide[side];
-    if (!Number.isFinite(updatedAt)
-      || (lastSampleAt != null
-        && updatedAt - Number(lastSampleAt) < config.DIP_SAMPLE_INTERVAL_MS)) return false;
-    const mid = Number.isFinite(Number(quote.mid))
-      ? Number(quote.mid)
-      : (Number(quote.bestBid) + Number(quote.bestAsk)) / 2;
-    if (!(mid > 0 && mid < 1)) return false;
-    this.lastHistoryQuoteAtBySide[side] = updatedAt;
-    this.dipHistory[side].push({ at: updatedAt, mid });
-    this.dipHistory[side] = this.dipHistory[side].filter((sample) =>
-      sample.at >= updatedAt - config.DIP_LOOKBACK_MS);
-    return true;
+    this.processEngineTriggers(now);
   }
 
   updatePositionMarks(side, quote, now) {
@@ -654,21 +541,11 @@ class PressureForecastBot extends WickBot {
     if (!this.market || now >= Number(this.market.end)) return;
     for (const position of this.positions) {
       if (position.windowStart !== this.market.start || position.status !== 'OPEN') continue;
-      if (isDipPosition(position)) continue;
       const quote = this.liveQuotes[position.side];
       if (!this.isTakeProfitQuote(quote, now, position)) continue;
       this.finalizeTakeProfit(position, Number(quote.updatedAt));
     }
-
-    const elapsed = now - Number(this.market.start);
-    for (const side of SIDES) {
-      if (!this.openDipPositions(this.market.start, side).length) continue;
-      if (elapsed >= config.DIP_TRADE_WINDOW_MS) {
-        this.processTimeCutoffExit(side, now);
-      } else if (!this.processSideLossStop(side, now)) {
-        this.processSpikeExit(side, now);
-      }
-    }
+    this.updateEngineForecast(now);
   }
 
   isTakeProfitQuote(quote, now, position = null) {
@@ -686,12 +563,12 @@ class PressureForecastBot extends WickBot {
       && ageMs <= config.CLOB_MAX_QUOTE_AGE_MS
       && (windowEnd == null || (updatedAt >= windowStart && updatedAt < windowEnd))
       && Number.isFinite(bestBid)
-      && bestBid >= config.LEGACY_TAKE_PROFIT_TRIGGER;
+       && bestBid >= config.ENGINE_TAKE_PROFIT_BID_TRIGGER;
   }
 
   finalizeTakeProfit(position, now) {
     if (position.status !== 'OPEN') return;
-    const payout = config.LEGACY_TAKE_PROFIT_PAYOUT;
+    const payout = config.ENGINE_TAKE_PROFIT_PAYOUT;
     const grossPayout = payout * Number(position.shares);
     position.exitPrice = payout;
     position.exitProceeds = grossPayout;
@@ -699,21 +576,23 @@ class PressureForecastBot extends WickBot {
     position.exitFees = 0;
     position.realizedPnl = grossPayout - Number(position.totalCost || 0);
     position.status = 'SETTLED_EXIT';
-    position.exitReason = `TAKE_PROFIT_BID_AT_${config.LEGACY_TAKE_PROFIT_TRIGGER.toFixed(2)}`;
+    position.exitReason = `TAKE_PROFIT_BID_AT_${config.ENGINE_TAKE_PROFIT_BID_TRIGGER.toFixed(2)}`;
     position.settlementBasis = 'PAPER_TAKE_PROFIT';
     position.closedAt = now;
     position.settledAt = now;
     this.cash += grossPayout;
     this.recordThresholdOrder(position, now, 'SELL_TAKE_PROFIT', payout);
-    this.log('PAPER_LEGACY_TAKE_PROFIT_HIT', {
+    this.log('PAPER_ENGINE_TAKE_PROFIT_HIT', {
       positionId: position.id,
+      engine: position.engine || position.side,
       side: position.side,
-      triggerBid: config.LEGACY_TAKE_PROFIT_TRIGGER,
+      triggerBid: config.ENGINE_TAKE_PROFIT_BID_TRIGGER,
       payoutPerShare: payout,
       shares: position.shares,
       proceeds: grossPayout,
       realizedPnl: position.realizedPnl,
     });
+    this.applyEngineTakeProfit(position, now);
   }
 
   freshQuote(side, now) {
@@ -725,6 +604,237 @@ class PressureForecastBot extends WickBot {
       || !(Number(quote.bestBid) > 0 && Number(quote.bestAsk) < 1)
       || !Array.isArray(quote.bidLevels) || !Array.isArray(quote.askLevels)) return null;
     return quote;
+  }
+
+  placeDownLimitOrder(start, now) {
+    const shares = this.downSharesThisWindow;
+    const order = this.createOrder('BUY_DOWN_LIMIT', 'DOWN', shares, now, {
+      complete: false,
+      filledShares: 0,
+      averagePrice: config.ENGINE_DOWN_LIMIT_PRICE,
+      fees: 0,
+    });
+    order.status = 'LIVE';
+    order.orderType = 'PAPER_LIMIT_RESTING';
+    order.price = config.ENGINE_DOWN_LIMIT_PRICE;
+    order.limitPrice = config.ENGINE_DOWN_LIMIT_PRICE;
+    order.maxPrice = null;
+    order.matchedShares = 0;
+    order.fee = 0;
+    order.fillModel = 'FULL_FILL_ON_POST_ORDER_MIDPOINT_TICK_THROUGH';
+    this.downEngine.orderId = order.id;
+    this.downEngine.status = 'RESTING';
+    this.log('PAPER_DOWN_LIMIT_PLACED', {
+      orderId: order.id,
+      windowStart: start,
+      limitPrice: order.limitPrice,
+      shares,
+      downProfitCarry: this.downProfitCarry,
+    });
+    return order;
+  }
+
+  updateEngineForecast(now) {
+    const start = this.market?.start;
+    if (!Number.isFinite(Number(start))) return;
+    const upQuote = this.liveQuotes.UP || {};
+    const downQuote = this.liveQuotes.DOWN || {};
+    const elapsed = Number(now) - Number(start);
+    const downPosition = this.downEngine.positionId
+      ? this.positions.find((position) => position.id === this.downEngine.positionId)
+      : null;
+    this.forecast = {
+      ready: Boolean(this.freshQuote('UP', now) && this.freshQuote('DOWN', now)),
+      status: elapsed >= this.windowMs ? 'WINDOW_CLOSED'
+        : this.upEngine.status === 'OPEN' || this.downEngine.status === 'OPEN' ? 'POSITION_OPEN'
+          : this.upEngine.status === 'TAKE_PROFIT' || this.downEngine.status === 'TAKE_PROFIT' ? 'TAKE_PROFIT_HIT'
+            : 'ENGINES_ACTIVE',
+      reason: 'UP buys on its $0.71 ask trigger; DOWN rests at $0.30. Each engine manages its own position.',
+      strategyVersion: DUAL_ENGINE_STRATEGY_VERSION,
+      signalSource: 'POLYMARKET_CLOB_PRICE_ONLY_TWO_ENGINE',
+      secondsIntoWindow: Math.max(0, elapsed / 1000),
+      secondsRemaining: Math.max(0, (Number(this.market?.end) - now) / 1000),
+      baseShares: config.ENGINE_BASE_SHARES,
+      downProfitCarry: this.downProfitCarry,
+      downSharesThisWindow: this.downSharesThisWindow,
+      downSharesNextWindow: Math.round(
+        (config.ENGINE_BASE_SHARES + this.downProfitCarry / config.ENGINE_DOWN_SHARE_PRICE) * 100,
+      ) / 100,
+      upQuote: { ...upQuote },
+      downQuote: { ...downQuote },
+      up: { ...this.upEngine, position: this.upEngine.positionId
+        ? this.positions.find((position) => position.id === this.upEngine.positionId) || null
+        : null },
+      down: { ...this.downEngine, position: downPosition },
+    };
+  }
+
+  processEngineTriggers(now) {
+    if (!this.market || !Number.isFinite(Number(this.market.start))) return false;
+    const start = Number(this.market.start);
+    const elapsed = now - start;
+    if (elapsed < 0 || elapsed >= this.windowMs) {
+      this.updateEngineForecast(now);
+      return false;
+    }
+
+    let changed = false;
+    const upQuote = this.freshQuote('UP', now);
+    if (this.upEngine.status === 'ARMED'
+      && upQuote
+      && Number(upQuote.updatedAt) >= start
+      && Number(upQuote.bestAsk) + EPSILON >= config.ENGINE_UP_TRIGGER_ASK) {
+      this.upEngine.status = 'ORDER_ATTEMPTED';
+      this.upEngine.triggerAt = Number(upQuote.updatedAt);
+      this.log('PAPER_UP_TRIGGER_HIT', {
+        windowStart: start,
+        triggerAsk: upQuote.bestAsk,
+        triggerPrice: config.ENGINE_UP_TRIGGER_ASK,
+        requestedShares: config.ENGINE_BASE_SHARES,
+      });
+      const position = this.executeBuy('UP', config.ENGINE_BASE_SHARES, now, {
+        kind: 'BUY_UP_MARKET',
+        engine: 'UP',
+        signalSide: 'UP',
+        maximumPrice: config.ENGINE_UP_MAX_SWEEP_PRICE,
+      });
+      const order = this.orders[0];
+      this.upEngine.orderId = order?.windowStart === start && order.side === 'UP'
+        ? order.id
+        : null;
+      this.upEngine.positionId = position?.id || null;
+      this.upEngine.status = position ? 'OPEN' : 'NO_FILL';
+      changed = Boolean(position);
+    }
+
+    const downQuote = this.freshQuote('DOWN', now);
+    const downOrder = this.downEngine.orderId
+      ? this.orders.find((order) => order.id === this.downEngine.orderId)
+      : null;
+    if (this.downEngine.status === 'RESTING'
+      && downOrder?.status === 'LIVE'
+      && downQuote
+      && Number(downQuote.updatedAt) > Number(downOrder.createdAt)
+      && Number(downQuote.updatedAt) < Number(this.market.end)
+      && Number(downQuote.mid) < config.ENGINE_DOWN_LIMIT_PRICE - EPSILON) {
+      changed = this.fillDownLimitOrder(downOrder, downQuote) || changed;
+    }
+
+    this.updateEngineForecast(now);
+    return changed;
+  }
+
+  fillDownLimitOrder(order, quote) {
+    const shares = Number(order.shares);
+    const price = Number(order.limitPrice);
+    const cost = shares * price;
+    if (!(shares > 0) || cost > this.cash + EPSILON) {
+      order.status = 'REJECTED_INSUFFICIENT_CASH';
+      order.error = 'Insufficient paper cash to fill the full DOWN limit order.';
+      this.downEngine.status = 'REJECTED';
+      this.log('PAPER_DOWN_LIMIT_REJECTED', {
+        orderId: order.id,
+        shares,
+        requiredCash: cost,
+        availableCash: this.cash,
+      });
+      return false;
+    }
+    const filledAt = Number(quote.updatedAt);
+    const position = {
+      id: order.id,
+      asset: 'BTC',
+      timeframe: '5m',
+      windowMs: this.windowMs,
+      windowStart: this.market.start,
+      marketId: this.market.id,
+      slug: this.market.slug,
+      title: this.market.title,
+      side: 'DOWN',
+      outcome: 'DOWN',
+      engine: 'DOWN',
+      signalSide: 'DOWN',
+      tokenId: this.market.tokens.DOWN,
+      entryKey: order.id,
+      entryLabel: 'DOWN resting limit at $0.30',
+      entryType: 'PAPER_LIMIT_DOWN_ENGINE',
+      strategyVersion: DUAL_ENGINE_STRATEGY_VERSION,
+      orderType: 'PAPER_LIMIT_RESTING',
+      fillModel: 'FULL_FILL_ON_POST_ORDER_MIDPOINT_TICK_THROUGH',
+      shares,
+      initialShares: shares,
+      avgEntry: price,
+      averagePrice: price,
+      cost,
+      totalCost: cost,
+      fees: 0,
+      entryFees: 0,
+      exitFees: 0,
+      status: 'OPEN',
+      submittedAt: Number(order.createdAt),
+      openedAt: filledAt,
+      filledAt,
+      markBid: quote.bestBid,
+      markUpdatedAt: quote.updatedAt,
+      markStatus: 'LIVE',
+      entryFills: [{ price, shares, at: filledAt }],
+      limitPrice: price,
+      triggerMid: Number(quote.mid),
+      signalSource: 'POLYMARKET_CLOB_DOWN_LIMIT_TICK_THROUGH',
+    };
+    this.cash -= cost;
+    this.positions.unshift(position);
+    order.status = 'FILLED';
+    order.filledAt = filledAt;
+    order.matchedShares = shares;
+    order.price = price;
+    order.grossCost = cost;
+    order.totalCost = cost;
+    order.fee = 0;
+    order.positionId = position.id;
+    order.triggerMid = Number(quote.mid);
+    order.fills = [{ price, shares }];
+    this.downEngine.status = 'OPEN';
+    this.downEngine.positionId = position.id;
+    this.downEngine.triggerAt = filledAt;
+    this.lastEntryAtBySide.DOWN = filledAt;
+    this.log('PAPER_DOWN_LIMIT_FILLED', {
+      orderId: order.id,
+      positionId: position.id,
+      triggerMid: Number(quote.mid),
+      limitPrice: price,
+      shares,
+      fees: 0,
+    });
+    return true;
+  }
+
+  applyEngineTakeProfit(position, now) {
+    if (position.engine === 'UP') {
+      this.upEngine.status = 'TAKE_PROFIT';
+      this.upEngine.takeProfitAt = now;
+      const addedProfit = Math.max(0, Number(position.realizedPnl) || 0);
+      this.downProfitCarry += addedProfit;
+      this.log('PAPER_UP_PROFIT_ADDED_TO_DOWN_STAKE', {
+        positionId: position.id,
+        realizedProfit: position.realizedPnl,
+        addedProfit,
+        nextDownShares: Math.round(
+          (config.ENGINE_BASE_SHARES + this.downProfitCarry / config.ENGINE_DOWN_SHARE_PRICE) * 100,
+        ) / 100,
+      });
+    } else if (position.engine === 'DOWN') {
+      this.downEngine.status = 'TAKE_PROFIT';
+      this.downEngine.takeProfitAt = now;
+      this.downProfitCarry = 0;
+      this.log('PAPER_DOWN_TP_RESET_BOTH_ENGINES_TO_BASE', {
+        positionId: position.id,
+        realizedProfit: position.realizedPnl,
+        nextUpShares: config.ENGINE_BASE_SHARES,
+        nextDownShares: config.ENGINE_BASE_SHARES,
+      });
+    }
+    this.updateEngineForecast(now);
   }
 
   buildDipCandidate(side, now, start, tradeOpen) {
@@ -1089,7 +1199,12 @@ class PressureForecastBot extends WickBot {
     return true;
   }
 
-  executeBuy(side, shares, now, { kind, candidate, signal, signalSide } = {}) {
+  executeBuy(side, shares, now, {
+    kind = 'BUY_UP_MARKET',
+    engine = side,
+    signalSide = side,
+    maximumPrice = config.ENGINE_UP_MAX_SWEEP_PRICE,
+  } = {}) {
     const quote = this.freshQuote(side, now);
     if (!quote) return null;
     const preview = sweepBook(
@@ -1097,16 +1212,15 @@ class PressureForecastBot extends WickBot {
       shares,
       'BUY',
       this.market,
-      { maximumPrice: config.DIP_MAX_BUY_PRICE },
+      { maximumPrice },
     );
-    const order = this.createOrder(kind || 'BUY_ENTRY', side, shares, now, preview);
-    const triggerSide = SIDES.includes(signalSide)
-      ? signalSide
-      : (SIDES.includes(candidate?.signalSide) ? candidate.signalSide : oppositeSide(side));
-    order.signalSide = triggerSide;
+    const order = this.createOrder(kind, side, shares, now, preview);
+    order.engine = engine;
+    order.signalSide = signalSide;
+    order.maxPrice = maximumPrice;
     if (!preview.complete) {
-      order.status = 'SKIPPED_PRICE_CAP_OR_DEPTH';
-      order.error = `Full requested size was not available at or below $${config.DIP_MAX_BUY_PRICE.toFixed(2)}.`;
+      order.status = 'SKIPPED_SLIPPAGE_OR_DEPTH';
+      order.error = `Full requested size was not available at or below $${maximumPrice.toFixed(2)}.`;
       return null;
     }
     if (preview.totalCost > this.cash + EPSILON) {
@@ -1119,7 +1233,7 @@ class PressureForecastBot extends WickBot {
       shares,
       'BUY',
       this.market,
-      { maximumPrice: config.DIP_MAX_BUY_PRICE, consume: true },
+       { maximumPrice, consume: true },
     );
     if (!execution.complete) {
       order.status = 'CANCELLED_BOOK_CHANGED';
@@ -1138,12 +1252,13 @@ class PressureForecastBot extends WickBot {
       title: this.market.title,
       side,
       outcome: side,
-      signalSide: triggerSide,
+      engine,
+      signalSide,
       tokenId: this.market.tokens[side],
       entryKey: order.id,
-      entryLabel: `${triggerSide} dip signal → ${side} entry`,
-      entryType: 'PAPER_TAKER_REVERSED_DIP_REBOUND',
-      strategyVersion: DIP_STRATEGY_VERSION,
+      entryLabel: `${engine} engine market entry`,
+      entryType: 'PAPER_TAKER_UP_ENGINE',
+      strategyVersion: DUAL_ENGINE_STRATEGY_VERSION,
       orderType: 'PAPER_TAKER_MARKET',
       fillModel: 'VISIBLE_ASK_SWEEP_WITH_CONFIGURED_MAX_PRICE',
       shares: execution.filledShares,
@@ -1163,11 +1278,8 @@ class PressureForecastBot extends WickBot {
       markUpdatedAt: quote.updatedAt,
       markStatus: 'LIVE',
       entryFills: execution.fills.map((fill) => ({ ...fill, at: now })),
-      dipReferenceHigh: candidate?.referenceHigh ?? null,
-      dipTrough: candidate?.trough ?? null,
-      dipReboundAmount: candidate?.reboundAmount ?? null,
-      dipTriggerMid: candidate?.currentMid ?? null,
-      signalSource: 'POLYMARKET_CLOB_PRICE_ONLY_REVERSED_SIDE',
+      triggerPrice: config.ENGINE_UP_TRIGGER_ASK,
+      signalSource: 'POLYMARKET_CLOB_UP_ASK_TRIGGER',
       signalScore: null,
     };
     this.cash -= execution.totalCost;
@@ -1179,25 +1291,22 @@ class PressureForecastBot extends WickBot {
     order.grossCost = execution.gross;
     order.totalCost = execution.totalCost;
     order.fills = execution.fills;
-    order.maxPrice = config.DIP_MAX_BUY_PRICE;
-    order.signalSide = triggerSide;
-    order.signalSource = 'POLYMARKET_CLOB_PRICE_ONLY_REVERSED_SIDE';
-    order.dipReferenceHigh = candidate?.referenceHigh ?? null;
-    order.dipTrough = candidate?.trough ?? null;
-    order.dipReboundAmount = candidate?.reboundAmount ?? null;
-    order.dipTriggerMid = candidate?.currentMid ?? null;
-    this.log('PAPER_DIP_ENTRY_FILLED', {
+    order.maxPrice = maximumPrice;
+    order.signalSide = signalSide;
+    order.signalSource = 'POLYMARKET_CLOB_UP_ASK_TRIGGER';
+    order.engine = engine;
+    this.log('PAPER_UP_TAKER_ENTRY_FILLED', {
       orderId: order.id,
       positionId: position.id,
       side,
-      signalSide: triggerSide,
-      signalMapping: `${triggerSide}->${side}`,
+      engine,
+      signalSide,
       shares: position.shares,
       averagePrice: position.avgEntry,
       fees: position.fees,
-      dipReferenceHigh: position.dipReferenceHigh,
-      dipTrough: position.dipTrough,
-      dipReboundAmount: position.dipReboundAmount,
+      triggerAsk: quote.bestAsk,
+      triggerPrice: config.ENGINE_UP_TRIGGER_ASK,
+      maxSweepPrice: maximumPrice,
     });
     return position;
   }
@@ -1217,7 +1326,7 @@ class PressureForecastBot extends WickBot {
       matchedShares: execution?.complete ? execution.filledShares : 0,
       price: execution?.averagePrice ?? null,
       orderType: 'PAPER_TAKER_MARKET',
-      maxPrice: kind.startsWith('BUY') ? config.DIP_MAX_BUY_PRICE : null,
+      maxPrice: kind === 'BUY_UP_MARKET' ? config.ENGINE_UP_MAX_SWEEP_PRICE : null,
       status: 'SUBMITTED',
       createdAt: now,
       fee: 0,
@@ -1256,7 +1365,6 @@ class PressureForecastBot extends WickBot {
       position.windowStart === windowStart && position.status === 'OPEN');
     const windowEnd = windowStart + this.windowMs;
     for (const position of positions) {
-      if (isDipPosition(position)) continue;
       const quote = this.market?.start === windowStart
         ? this.liveQuotes[position.side]
         : null;
@@ -1273,12 +1381,22 @@ class PressureForecastBot extends WickBot {
       position.pendingResolutionAt = now;
       position.exitReason = 'WAITING_FOR_OFFICIAL_RESOLUTION';
       position.settlementBasis = 'POLYMARKET_RESOLUTION_PENDING';
+      if (position.engine === 'UP') this.upEngine.status = 'RESOLUTION_PENDING';
+      if (position.engine === 'DOWN') this.downEngine.status = 'RESOLUTION_PENDING';
     }
-    this.log('PAPER_DIP_WINDOW_ENDED', {
+    if (this.downEngine.orderId) {
+      const downOrder = this.orders.find((order) => order.id === this.downEngine.orderId);
+      if (downOrder && downOrder.status.startsWith('EXPIRED') && !this.downEngine.positionId) {
+        this.downEngine.status = 'EXPIRED_UNFILLED';
+      }
+    }
+    this.log('PAPER_DUAL_ENGINE_WINDOW_ENDED', {
       windowStart,
       pendingResolutionCount: pendingPositions.length,
       triggerReason,
+      downOrderStatus: this.downEngine.status,
     });
+    this.updateEngineForecast(now);
   }
 
   async resolvePendingPositions(now) {
@@ -1321,7 +1439,7 @@ class PressureForecastBot extends WickBot {
             resolvedAt: now,
             marketId: position.marketId,
           });
-          this.log('PAPER_DIP_RESOLVED', {
+          this.log('PAPER_ENGINE_RESOLVED', {
             positionId: position.id,
             side: position.side,
             winningSide: position.resolvedOutcome,
@@ -1342,11 +1460,12 @@ class PressureForecastBot extends WickBot {
     if (this.running) return;
     this.running = true;
     this.priceFeed.start?.();
-    this.log('PAPER_DIP_BOT_STARTED', {
-      note: 'Paper-only CLOB dip-and-rebound entries with fee-aware spike exits. Real-order modules are not loaded.',
-      entryShares: config.DIP_ENTRY_SHARES,
-      maxEntriesPerSide: config.DIP_MAX_ENTRIES_PER_SIDE,
-      tradingSeconds: config.DIP_TRADE_WINDOW_MS / 1000,
+    this.log('PAPER_DUAL_ENGINE_BOT_STARTED', {
+      note: 'Paper-only UP taker threshold engine and DOWN resting-limit engine. Real-order modules are not loaded.',
+      baseShares: config.ENGINE_BASE_SHARES,
+      upTriggerAsk: config.ENGINE_UP_TRIGGER_ASK,
+      downLimitPrice: config.ENGINE_DOWN_LIMIT_PRICE,
+      takeProfitBid: config.ENGINE_TAKE_PROFIT_BID_TRIGGER,
     });
     const loop = async () => {
       if (!this.running) return;
@@ -1437,41 +1556,45 @@ class PressureForecastBot extends WickBot {
         name: this.strategyName,
         execution: 'PAPER ONLY',
         markets: ['BTC 5m'],
-        orderType: 'VISIBLE_BOOK_TAKER_SWEEP',
-        exit: `Before ${config.DIP_TRADE_WINDOW_MS / 1000}s, keep the existing profitable-spike exit and stop a side when its net window P&L reaches -$${config.DIP_MAX_SIDE_LOSS.toFixed(2)}. At ${config.DIP_TRADE_WINDOW_MS / 1000}s, attempt a full executable bid sweep; if fresh depth cannot fill the whole side, remaining shares go to official resolution.`,
+        orderType: 'UP_VISIBLE_BOOK_TAKER_SWEEP_AND_DOWN_RESTING_LIMIT',
+        exit: `Take profit when the held side's best bid reaches $${config.ENGINE_TAKE_PROFIT_BID_TRIGGER.toFixed(2)}; count payout as $${config.ENGINE_TAKE_PROFIT_PAYOUT.toFixed(2)} per share. Otherwise, hold for official resolution.`,
         liveTradingEnabled: false,
         realOrderModulesLoaded: false,
-        entryShares: config.DIP_ENTRY_SHARES,
-        maxEntriesPerSide: config.DIP_MAX_ENTRIES_PER_SIDE,
-        maxBuyPrice: config.DIP_MAX_BUY_PRICE,
-        tradeWindowMs: config.DIP_TRADE_WINDOW_MS,
-        signal: 'CLOB midpoint only: a four-cent dip and one-cent rebound with two rising quotes on one side triggers a buy of the opposite side.',
-        signalMapping: 'OPPOSITE_SIDE',
+        entryShares: config.ENGINE_BASE_SHARES,
+        baseShares: config.ENGINE_BASE_SHARES,
+        upTriggerAsk: config.ENGINE_UP_TRIGGER_ASK,
+        upMaxSweepPrice: config.ENGINE_UP_MAX_SWEEP_PRICE,
+        downLimitPrice: config.ENGINE_DOWN_LIMIT_PRICE,
+        takeProfitBidTrigger: config.ENGINE_TAKE_PROFIT_BID_TRIGGER,
+        takeProfitPayout: config.ENGINE_TAKE_PROFIT_PAYOUT,
+        downProfitCarry: this.downProfitCarry,
+        downSharesThisWindow: this.downSharesThisWindow,
+        downSharesNextWindow: Math.round(
+          (config.ENGINE_BASE_SHARES + this.downProfitCarry / config.ENGINE_DOWN_SHARE_PRICE) * 100,
+        ) / 100,
+        signal: 'Independent engines: UP buys 50 shares by taker sweep when its best ask reaches $0.71; DOWN rests a limit buy at $0.30 on window open.',
+        signalMapping: 'UP trigger buys UP; DOWN resting limit buys DOWN.',
         signalState: this.forecast,
         orders: {
-          type: 'Visible-book taker-style paper sweeps',
-          initialShares: config.DIP_ENTRY_SHARES,
-          maxEntriesPerSide: config.DIP_MAX_ENTRIES_PER_SIDE,
-          maxBuyPrice: config.DIP_MAX_BUY_PRICE,
-          entryCooldownMs: config.DIP_ENTRY_COOLDOWN_MS,
-          rearmRecovery: config.DIP_REARM_RECOVERY,
-          maxEntriesPerWindow: `${config.DIP_MAX_ENTRIES_PER_SIDE} per signal side`,
-          signalMapping: 'A qualifying UP signal buys DOWN; a qualifying DOWN signal buys UP.',
+          type: 'UP taker sweep; DOWN resting limit with tick-through paper fill',
+          initialShares: config.ENGINE_BASE_SHARES,
+          upTriggerAsk: config.ENGINE_UP_TRIGGER_ASK,
+          upMaxSweepPrice: config.ENGINE_UP_MAX_SWEEP_PRICE,
+          downLimitPrice: config.ENGINE_DOWN_LIMIT_PRICE,
+          downSharesThisWindow: this.downSharesThisWindow,
         },
-        repeatEntryRule: `UP and DOWN dip signals are evaluated independently. Each qualifying signal buys ${config.DIP_ENTRY_SHARES} shares of the opposite side, up to ${config.DIP_MAX_ENTRIES_PER_SIDE} entries per signal side, with a ${config.DIP_ENTRY_COOLDOWN_MS / 1000}-second cooldown and a $${config.DIP_REARM_RECOVERY.toFixed(2)} recovery before rearming. Loss limits still apply to the side actually held.`,
+        repeatEntryRule: `One UP taker entry of ${config.ENGINE_BASE_SHARES} shares when UP best ask reaches $${config.ENGINE_UP_TRIGGER_ASK.toFixed(2)}; one DOWN resting limit at $${config.ENGINE_DOWN_LIMIT_PRICE.toFixed(2)} per window. UP stays at base. Positive UP TP profit increases next-window DOWN shares by profit / $${config.ENGINE_DOWN_SHARE_PRICE.toFixed(2)}. A DOWN TP resets both to base.`,
         priceFeed: this.priceFeed?.snapshot?.() || null,
         exits: {
-          mode: 'SPIKE_EXIT_SIDE_LOSS_LIMIT_AND_TIME_CUTOFF',
+          mode: 'TAKE_PROFIT_OR_OFFICIAL_RESOLUTION',
           takeProfit: true,
-          takeProfitTrigger: config.DIP_SPIKE_MIN_PRICE_MOVE,
-          takeProfitPayout: null,
-          stopLoss: true,
-          stopLossDollarsPerSidePerWindow: config.DIP_MAX_SIDE_LOSS,
-          timedExitAtSeconds: config.DIP_TRADE_WINDOW_MS / 1000,
-          tradeWindowMs: config.DIP_TRADE_WINDOW_MS,
-          minimumNetProfitPerShare: config.DIP_SPIKE_MIN_NET_PROFIT_PER_SHARE,
+          takeProfitTrigger: config.ENGINE_TAKE_PROFIT_BID_TRIGGER,
+          takeProfitPayout: config.ENGINE_TAKE_PROFIT_PAYOUT,
+          stopLoss: false,
+          timedExitAtSeconds: null,
+          tradeWindowMs: null,
           resolutionPollMs: config.RESOLUTION_POLL_MS,
-          otherwise: 'At 240 seconds, sweep all same-side shares at fresh executable bids. If a full fill is unavailable, hold the remainder for official resolution.',
+          otherwise: 'Unfilled DOWN limits expire at window end. Open shares remain for official resolution, checked every 10 seconds.',
         },
       },
       forecast: this.forecast,
@@ -1525,7 +1648,6 @@ class PressureForecastBot extends WickBot {
 }
 
 PressureForecastBot._test = {
-  analyzeDipRebound,
   sweepBook,
   resolvedPayout,
 };

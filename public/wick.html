@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#f2f5f2">
-  <title>Five Minute | BTC Paper Monitor</title>
+  <meta name="theme-color" content="#11172e">
+  <title>BTC Dual Engine | Paper Trading</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
     :root{
@@ -34,7 +34,7 @@
     .notice{display:flex;flex-direction:column;justify-content:center;border:1px solid #e2d4ad;background:var(--gold-soft);border-radius:18px;padding:15px 17px}
     .notice strong{font:700 12px var(--display);color:#735318;text-transform:uppercase;letter-spacing:.08em}
     .notice span{font-size:11px;color:#745f37;margin-top:5px}
-    .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+    .grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}
     .stat,.panel,.market{background:var(--panel);border:1px solid var(--line);border-radius:15px;box-shadow:var(--shadow)}
     .stat{padding:13px 15px;min-height:84px}.label{color:var(--muted);font:700 9px var(--mono);letter-spacing:.11em;text-transform:uppercase}
     .value{font:700 21px/1.15 var(--display);letter-spacing:-.04em;margin-top:7px;font-variant-numeric:tabular-nums}
@@ -89,8 +89,26 @@
     .performance-stat .label{font-size:8px}.performance-stat .value{font-size:18px;margin-top:6px}
     .performance-stat .note{font-size:9px}
     .performance-note{margin-top:10px;color:var(--muted);font-size:10px;line-height:1.5}
+    .engine-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px}
+    .engine-card{border-radius:15px;padding:15px;border:1px solid var(--line);min-width:0;box-shadow:0 8px 22px rgba(26,62,83,.075)}
+    .engine-card.up-engine{background:linear-gradient(135deg,#e2fbf2 0%,#f8fffc 72%);border-color:#94d8bf}
+    .engine-card.down-engine{background:linear-gradient(135deg,#f0eaff 0%,#fcfaff 72%);border-color:#c5adef}
+    .engine-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+    .engine-name{font:800 14px var(--display);letter-spacing:.02em}
+    .engine-number{font:800 clamp(23px,3vw,34px)/1 var(--display);letter-spacing:-.06em;margin:7px 0}
+    .engine-rule{font-size:11px;font-weight:700}
+    .engine-details{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:12px}
+    .engine-detail{background:rgba(255,255,255,.72);border:1px solid rgba(94,126,156,.16);border-radius:10px;padding:8px 9px;min-width:0}
+    .engine-detail span{display:block;color:var(--muted);font:700 8px var(--mono);text-transform:uppercase;letter-spacing:.07em}
+    .engine-detail strong{display:block;margin-top:4px;font:700 13px var(--mono);overflow-wrap:anywhere}
+    .engine-foot{margin-top:10px;color:var(--muted);font-size:10px;line-height:1.45}
+    .engine-card .pill{font-size:9px}
+    .engine-card .pill.live{color:#075a42;border-color:#55bd94;background:#d0f6e4}
+    .engine-card .pill.wait{color:#684aaf;border-color:#bca7e7;background:#eee5ff}
+    .engine-card .pill.fail{color:#a72d45;border-color:#e8a5b1;background:#ffe2e8}
     .analytics-empty{padding:30px 12px;text-align:center;color:var(--muted);font-size:11px}
     [hidden]{display:none!important}
+    @media(max-width:1000px){.grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
     @media(max-width:800px){main{padding:20px}.hero{grid-template-columns:1fr 220px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
     @media(max-width:600px){main{padding:14px 12px 25px}header{align-items:flex-start;margin-bottom:14px}.brand{align-items:flex-start;gap:10px}.mark{width:36px;height:36px;border-radius:11px;font-size:13px}h1{font-size:21px}.subtitle{font-size:10px;max-width:225px}.header-right{align-items:flex-end;flex-direction:column-reverse;gap:5px}.refresh-label{font-size:9px}.badge{font-size:9px;padding:7px 9px}
       .hero{grid-template-columns:1fr;gap:8px}.intro{padding:15px 15px 16px;border-radius:15px}.intro h2{font-size:22px}.intro p{font-size:11px;max-width:90%}.notice{padding:10px 13px;border-radius:13px}.notice span{font-size:10px}
@@ -105,7 +123,8 @@
       .row{font-size:10px;padding:7px 0}.event{grid-template-columns:1fr;gap:1px;padding:8px 0}.event time{font-size:9px}.event-type{font-size:9px}
        .performance-layout{grid-template-columns:1fr;gap:8px}.equity-wrap{padding:9px}.equity-head strong{font-size:11px}
        .performance-metrics{gap:6px}.performance-stat{padding:9px}.performance-stat .value{font-size:16px}
-       .performance-note{font-size:9px}
+        .performance-note{font-size:9px}
+       .engine-grid{grid-template-columns:1fr;gap:9px}.engine-card{padding:13px}.engine-number{font-size:29px}
     }
     @media(max-width:360px){.grid{grid-template-columns:1fr 1fr}.estimate-foot{flex-direction:column;gap:2px}.candidates{grid-template-columns:1fr}}
     @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
@@ -184,32 +203,33 @@
 <body>
 <main>
   <header>
-    <div class="brand"><div class="mark" aria-hidden="true">5m</div><div><h1>BTC reverse-signal dip &amp; spike monitor</h1><div class="subtitle">Five-minute paper strategy · each signal buys the opposite side</div></div></div>
+    <div class="brand"><div class="mark" aria-hidden="true">5m</div><div><h1>BTC Dual-Engine Trader</h1><div class="subtitle">Two independent paper engines · UP taker · DOWN limit</div></div></div>
     <div class="header-right"><span class="refresh-label" id="quoteAge">Connecting to live state…</span><div class="badge"><i class="dot"></i><span>Paper only</span></div></div>
   </header>
 
   <section class="hero" aria-label="Strategy status">
-    <div class="intro"><div class="eyebrow">Polymarket CLOB · BTC 5-minute market</div><h2>Signal one side. Buy the other.</h2><p>The same dip-and-rebound trigger remains on UP and DOWN. An UP signal buys DOWN; a DOWN signal buys UP. Existing entry limits and exits stay in place.</p></div>
-    <div class="notice"><strong>Paper trading only</strong><span>Entries and spike exits simulate taker sweeps against visible CLOB depth and include modeled fees. Real-order modules are inactive.</span></div>
-  </section>
-
-  <section class="grid" aria-label="Paper strategy and account snapshot">
-    <div class="stat"><div class="label">Strategy mode</div><div class="value good" id="tradingState">PAPER</div><span class="note" id="modeNote">No real orders are enabled</span></div>
-    <div class="stat"><div class="label">Real-order modules</div><div class="value good" id="accountReady">INACTIVE</div><span class="note" id="accountNote">Not loaded by the demo runner</span></div>
-    <div class="stat"><div class="label">Available paper cash</div><div class="value" id="collateral">—</div><span class="note">Cash not committed to simulated positions</span></div>
-    <div class="stat"><div class="label">Current paper capital</div><div class="value" id="equity">—</div><span class="note" id="snapshotTime">Cash plus open-position value</span></div>
+    <div class="intro"><div class="eyebrow">Polymarket CLOB · BTC 5-minute market</div><h2>Two engines, separate rules, one $0.99 take-profit.</h2><p>UP buys 50 shares by taker sweep after its ask reaches $0.71. DOWN rests a limit order at $0.30 from window open. UP profits increase the next DOWN stake; a DOWN take-profit resets it.</p></div>
+    <div class="notice"><strong>Paper trading only</strong><span>The UP engine sweeps asks up to $0.99. DOWN fills are simulated on a later midpoint tick below $0.30. Open shares not taking profit wait for official resolution.</span></div>
   </section>
 
   <section class="panel">
-    <div class="panel-head"><h2>Paper actions &amp; orders</h2><span class="hint" id="orderCount">0 current-window orders</span></div>
-    <div class="scroll" id="orders"><div class="empty">No paper orders in this 5m window.</div></div>
-  </section>
-
-  <section class="panel">
-    <div class="panel-head"><h2>Live BTC market &amp; reversed signals</h2><span class="hint" id="marketStatus">Waiting for market data</span></div>
+    <div class="panel-head"><h2>Live market &amp; engine controls</h2><span class="hint" id="marketStatus">Waiting for market data</span></div>
     <div id="markets"><div class="empty">Waiting for BTC market data…</div></div>
   </section>
 
+  <section class="grid" aria-label="Paper capital and engine sizing">
+    <div class="stat"><div class="label">UP base size</div><div class="value up">50 shares</div><span class="note">Fixed for every window</span></div>
+    <div class="stat"><div class="label">DOWN size this window</div><div class="value down" id="downSharesThisWindow">50 shares</div><span class="note">Limit order at $0.30</span></div>
+    <div class="stat"><div class="label">UP profit carried</div><div class="value" id="downProfitCarry">$0.00</div><span class="note">Added to next DOWN stake</span></div>
+    <div class="stat"><div class="label">DOWN size next window</div><div class="value" id="downSharesNextWindow">50 shares</div><span class="note">Base 50 + carry ÷ $0.30</span></div>
+    <div class="stat"><div class="label">Available paper cash</div><div class="value" id="collateral">—</div><span class="note">Uncommitted cash</span></div>
+    <div class="stat"><div class="label">Paper equity</div><div class="value" id="equity">—</div><span class="note" id="snapshotTime">Cash plus open-position value</span></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Current-window orders</h2><span class="hint" id="orderCount">0 orders</span></div>
+    <div class="scroll" id="orders"><div class="empty">No paper orders in this 5m window.</div></div>
+  </section>
   <section class="panel" aria-label="Global paper performance">
     <div class="panel-head"><h2>Global equity &amp; risk</h2><span class="hint">UP + DOWN combined · existing history</span></div>
     <div class="performance-layout">
@@ -252,7 +272,7 @@
     <div class="events" id="events"><div class="empty">Waiting for activity…</div></div>
   </section>
 
-  <p class="foot">Paper-only strategy: monitor each outcome's Polymarket midpoint independently. A $0.04 dip from that signal side's reference high over 20 seconds, followed by a $0.01 rebound and two rising quotes, buys 20 shares of the opposite outcome. Each signal side has at most two entries per 5-minute window, a 10-second cooldown, and a $0.02 recovery before rearming. The buy-side taker sweep remains capped at $0.85. Profitable-spike exits, the -$5 loss limit per held side, and the 240-second bid-sweep/resolution fallback are unchanged. The demo runner does not load real-order modules. These risk controls do not guarantee a profit or cap losses during price gaps or thin books.</p>
+  <p class="foot">Paper-only strategy: UP makes one 50-share taker buy when its best ask reaches $0.71, sweeping visible asks only through $0.99. DOWN places one resting $0.30 limit at window open; a later midpoint tick below $0.30 records the full requested fill at $0.30 in the paper model. A fresh best bid of $0.99 triggers a $1-per-share paper take-profit. Positive realized UP profit is added to next-window DOWN shares at 50 + profit ÷ $0.30; UP stays at 50. A DOWN take-profit resets both sides to base. Unfilled DOWN orders expire at window end; open positions without take-profit remain pending official resolution. No stop-loss or timed exit is used. The fill model is a simulation, not a guarantee of exchange execution.</p>
   <div class="error" id="error" role="status"></div>
 </main>
 <script>
@@ -270,53 +290,59 @@
   const statusClass = status => {
     const s = String(status || '').toLowerCase();
     if (s === 'ready' || s === 'live' || s === 'matched' || s === 'filled' || s === 'qualifies'
-      || s === 'dip_rebound_ready' || s === 'dip_entry_filled') return 'good';
+      || s === 'open' || s === 'armed' || s === 'resting' || s === 'take_profit') return 'good';
     if (s.includes('error') || s.includes('halt') || s.includes('blocked') || s.includes('reject')) return 'bad';
     return 'warn';
   };
   const escStatus = v => esc(String(v ?? '—').replaceAll('_',' '));
-  function renderCandidate(side, item={}) {
+  function renderEngineCard(side, engine={}, quote={}) {
     const up = side === 'UP';
-    const cls = up ? 'up-card' : 'down-card';
-    const entrySide = item.entrySide || (up ? 'DOWN' : 'UP');
-    return `<div class="candidate ${cls}">
-      <div class="candidate-head"><span class="candidate-title ${up?'up':'down'}">${side} SIGNAL → BUY ${entrySide}</span><span class="pill ${item.qualifies?'live':'wait'}">${item.qualifies?'READY':'WATCHING'}</span></div>
-      <div class="row"><span>Signal mid / buy-side ask</span><strong>${price(item.currentMid)} / ${price(item.bestAsk)}</strong></div>
-      <div class="row"><span>Recent high / trough</span><strong>${price(item.referenceHigh)} / ${price(item.trough)}</strong></div>
-      <div class="row"><span>Drop / bounce</span><strong>${price(item.dipAmount)} / ${price(item.reboundAmount)}</strong></div>
-      <div class="row"><span>Signal entries used</span><strong>${Number(item.entriesThisWindow||0)} / ${Number(item.maxEntries||4)} · ${Number(item.requestedShares||20)} shares each</strong></div>
-      <div class="row"><span>State</span><strong>${esc(item.reason||'Waiting for fresh quotes')}</strong></div>
-    </div>`;
+    const status = engine.status || 'WAITING';
+    const position = engine.position || null;
+    const cardClass = up ? 'up-engine' : 'down-engine';
+    const sideClass = up ? 'up' : 'down';
+    const size = up ? 50 : Number(engine.shares || position?.shares || 50);
+    const details = up
+      ? [
+          ['Trigger · best ask', '$0.71'],
+          ['Taker sweep cap', '$0.99'],
+          ['Shares per window', '50'],
+          ['Position average', price(position?.avgEntry)],
+          ['Position shares', Number(position?.shares || 0).toFixed(2)],
+          ['TP trigger / payout', '$0.99 / $1.00'],
+        ]
+      : [
+          ['Resting limit', '$0.30'],
+          ['Order size', `${size.toFixed(2)} shares`],
+          ['Fill confirmation', 'Later midpoint < $0.30'],
+          ['Position average', price(position?.avgEntry)],
+          ['Position shares', Number(position?.shares || 0).toFixed(2)],
+          ['TP trigger / payout', '$0.99 / $1.00'],
+        ];
+    const currentQuote = `<div class="engine-rule">Best bid ${price(quote.bestBid)} <span aria-hidden="true">·</span> Best ask ${price(quote.bestAsk)}</div>`;
+    return `<article class="engine-card ${cardClass}">
+      <div class="engine-head"><div><div class="engine-name ${sideClass}">${side} ENGINE</div>${currentQuote}</div><span class="pill ${statusClass(status)==='good'?'live':statusClass(status)==='bad'?'fail':'wait'}">${escStatus(status)}</span></div>
+      <div class="engine-number ${sideClass}">${position ? `${Number(position.shares||0).toFixed(2)} shares` : `${size.toFixed(2)} shares`}</div>
+      <div class="engine-rule">${up ? 'Market buy when UP ask reaches $0.71' : 'Limit order rests at $0.30 from window open'}</div>
+      <div class="engine-details">${details.map(([label,value]) => `<div class="engine-detail"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}</div>
+      <div class="engine-foot">${up ? 'Each UP take-profit adds its realized net profit to the next DOWN stake. No stop-loss; otherwise hold to resolution.' : 'The order expires at window end if unfilled. A DOWN take-profit resets both engines to 50 shares.'}</div>
+    </article>`;
   }
   function renderMarket(state) {
     const q = state?.quotes || {};
     const f = state?.forecast || state?.marketForecast;
     const title = state?.title || state?.slug || 'Waiting for market discovery';
-    const orders = (state?.orders || []).map(o => `${o.side} ${price(o.price)} ${o.status}`).join(' · ') || 'None';
-    const quoteBox = (side, cls) => {
-      const v = q[side] || {};
-      const live = v.status === 'LIVE' && !v.stale;
-      return `<div class="price-box"><div class="price-head"><span class="side ${cls}">${side}</span><span class="pill ${live?'live':'wait'}">${esc(live?'LIVE':v.status||'WAITING')}${v.stale?' · STALE':''}</span></div><div class="mid ${cls}">${price(v.mid)}</div><div class="quote-detail">Bid ${price(v.bestBid)} · Ask ${price(v.bestAsk)}</div></div>`;
-    };
-    const forecast = f ? `<section class="forecast" aria-label="Reversed-signal dip and spike strategy">
-      <div class="forecast-head"><div><div class="forecast-title">Reversed-signal dip monitor</div><div class="forecast-caption">${esc(f.reason || f.status || 'Watching CLOB prices')} · ${Number(f.secondsIntoWindow||0).toFixed(0)}s elapsed</div></div><span class="uncal">CLOB · OPPOSITE BUY</span></div>
-      <div class="metrics">
-        <div class="metric"><span>Trade window</span><strong>0–240s</strong></div>
-        <div class="metric"><span>Dip required</span><strong>$0.040</strong></div>
-        <div class="metric"><span>Rebound required</span><strong>$0.010 + 2 rising ticks</strong></div>
-        <div class="metric"><span>Spike exit</span><strong>+$0.050, net profitable</strong></div>
-      </div>
-      <div class="candidates">${renderCandidate('UP',f.candidateBySide?.UP)}${renderCandidate('DOWN',f.candidateBySide?.DOWN)}</div>
-    </section>` : `<section class="forecast"><div class="forecast-head"><div><div class="forecast-title">Reversed-signal dip monitor</div><div class="forecast-caption">Waiting for fresh Polymarket quotes.</div></div><span class="uncal">CLOB · OPPOSITE BUY</span></div><div class="empty">No dip signal is inferred without live book updates.</div></section>`;
-    const status = f?.status || 'forecast unavailable';
+    const upEngine = f?.up || {};
+    const downEngine = f?.down || {};
+    const orders = (state?.orders || []).map(o => `${o.side} ${price(o.price)} · ${o.status}`).join(' · ') || 'No orders submitted';
     return `<article class="market">
       <div class="market-title"><div><h3>BTC · 5 minute</h3><div class="slug">${esc(title)}</div></div><div class="countdown">${remaining(state?.windowEnd)}</div></div>
-      <div class="prices">${quoteBox('UP','up')}${quoteBox('DOWN','down')}</div>
-      ${forecast}
+      <div class="engine-grid">${renderEngineCard('UP',upEngine,q.UP||{})}${renderEngineCard('DOWN',downEngine,q.DOWN||{})}</div>
       <div class="rows">
-        <div class="row"><span>Strategy state</span><strong class="status-text ${statusClass(status)}">${escStatus(status)}</strong></div>
-        <div class="row"><span>Qualifying signal → buy</span><strong>${esc((f?.qualifyingSignalSides||[]).map(signalSide => `${signalSide} → ${f.candidateBySide?.[signalSide]?.entrySide || (signalSide==='UP'?'DOWN':'UP')}`).join(', ')||'None')}</strong></div>
-        <div class="row"><span>Paper orders this window</span><strong>${esc(orders)}</strong></div>
+        <div class="row"><span>Window state</span><strong class="status-text ${statusClass(f?.status)}">${escStatus(f?.status || 'waiting for market')}</strong></div>
+        <div class="row"><span>UP profit carried to DOWN</span><strong>${money(f?.downProfitCarry || 0)}</strong></div>
+        <div class="row"><span>DOWN shares next window</span><strong>${Number(f?.downSharesNextWindow || 50).toFixed(2)}</strong></div>
+        <div class="row"><span>Orders this window</span><strong>${esc(orders)}</strong></div>
       </div>
     </article>`;
   }
@@ -324,17 +350,13 @@
     if (!orders?.length) return '<div class="empty">No paper orders in this 5m window.</div>';
     const rows = orders.map(o => {
       const outcome = o.outcome || o.side || '—';
-      const exit = o.kind === 'BUY_DIP'
-        ? 'Spike TP, $5 side loss cap, or 240s exit'
-        : o.kind === 'SELL_SPIKE'
-          ? 'Taker sweep of all open shares on this side'
-          : o.kind === 'SELL_RISK_STOP'
-            ? 'Taker sweep at the side loss limit'
-            : o.kind === 'SELL_TIME_CUTOFF'
-              ? 'Taker sweep at 240 seconds'
-          : o.kind === 'ENTRY'
-            ? (o.sourceExitKind ? `${esc(o.sourceExitKind)} ${price(o.sourceExitLimitPrice)}` : o.takeProfitPrice ? `TP ${price(o.takeProfitPrice)} / SL ${price(o.stopLossPrice)}` : 'Paper hold / resolution')
-            : '—';
+      const exit = o.kind === 'BUY_UP_MARKET'
+        ? 'UP ask trigger $0.71; sweep cap $0.99; TP bid $0.99 → $1'
+        : o.kind === 'BUY_DOWN_LIMIT'
+          ? 'Resting $0.30; full fill on later midpoint tick below limit'
+          : o.kind === 'SELL_TAKE_PROFIT'
+            ? 'TP at $0.99 bid; paper payout $1/share'
+            : 'Hold for official resolution';
       const status = String(o.status || 'unknown');
       const sideLabel = o.signalSide ? `${o.signalSide} signal → ${outcome}` : outcome;
       return `<tr><td>${esc(o.timeframe||'—')}</td><td>${esc(o.kind||'—')}${o.testOnly?' · TEST':''}</td><td class="${outcome==='UP'?'up':'down'}">${esc(sideLabel)}</td><td>${price(o.price)}</td><td>${Number(o.shares||0).toFixed(2)}</td><td>${Number(o.matchedShares||0).toFixed(2)}</td><td>${exit}</td><td><span class="pill ${statusClass(status)==='good'?'live':statusClass(status)==='bad'?'fail':'wait'}">${esc(status)}</span></td><td>${esc(o.error||o.exitBlockedReason||o.resolutionError||'—')}</td></tr>`;
@@ -447,9 +469,6 @@
       if (!response.ok) throw new Error(`Dashboard API returned ${response.status}`);
       const state = await response.json();
       const account = state.account || {};
-      document.querySelector('#accountReady').textContent = 'INACTIVE';
-      document.querySelector('#accountReady').className = 'value good';
-      document.querySelector('#accountNote').textContent = 'Real-order modules are not loaded by this demo runner.';
       document.querySelector('#collateral').textContent = money(account.cash);
       document.querySelector('#equity').textContent = money(account.currentCapital ?? account.equity);
       const startingCapital = account.startingCapital ?? account.capital;
@@ -469,10 +488,14 @@
         : `Real-order modules are inactive.${flowWindow}`;
       const market = state.markets?.['5m'] || {};
       const marketView = {...market, forecast: market.forecast || state.forecast || state.marketForecast};
+      const engineState = marketView.forecast || state.strategy || {};
+      document.querySelector('#downSharesThisWindow').textContent = `${Number(engineState.downSharesThisWindow || state.strategy?.downSharesThisWindow || 50).toFixed(2)} shares`;
+      document.querySelector('#downProfitCarry').textContent = money(engineState.downProfitCarry ?? state.strategy?.downProfitCarry ?? 0);
+      document.querySelector('#downSharesNextWindow').textContent = `${Number(engineState.downSharesNextWindow || state.strategy?.downSharesNextWindow || 50).toFixed(2)} shares`;
       document.querySelector('#markets').innerHTML = renderMarket(marketView);
       document.querySelector('#marketStatus').textContent = marketView.forecast
-        ? `${marketView.forecast.status || 'Watching dips'} · trade seconds 0–240`
-        : 'Quotes live · waiting for dip history';
+        ? `UP ask trigger $0.71 · DOWN limit $0.30 · TP $0.99`
+        : 'Waiting for current market and CLOB quotes';
       const currentWindowOrders = (state.orders||[]).filter(order => !market.slug || order.slug === market.slug);
       document.querySelector('#orders').innerHTML = renderOrders(currentWindowOrders);
       document.querySelector('#orderCount').textContent = `${currentWindowOrders.length} current-window orders`;
@@ -492,10 +515,8 @@
         return updatedAt == null ? '—' : `${Math.max(0,Math.round(Date.now()-updatedAt))}ms`;
       };
       const clob = state.clobFeed || {};
-      const binanceTickAt = num(state.strategy?.priceFeed?.tickAt);
-      const binanceAge = binanceTickAt == null ? '—' : `${Math.max(0,Math.round(Date.now()-binanceTickAt))}ms`;
       document.querySelector('#quoteAge').textContent =
-        `Polymarket WS ${clob.status || 'WAITING'} · UP ${quoteAge(market.quotes?.UP)} · DOWN ${quoteAge(market.quotes?.DOWN)} · Binance ${binanceAge}`;
+        `Polymarket WS ${clob.status || 'WAITING'} · UP ${quoteAge(market.quotes?.UP)} · DOWN ${quoteAge(market.quotes?.DOWN)}`;
     } catch (error) {
       document.querySelector('#error').textContent = error.message || String(error);
     }

@@ -39,7 +39,7 @@ test('live server exposes the bot state and health status', async t => {
   assert.equal((await healthResponse.json()).ok, true);
 });
 
-test('legacy live server serves the current dip-and-spike dashboard without implying active real trading', async t => {
+test('live server serves the dual-engine dashboard without implying active real trading', async t => {
   const server = startLiveServer(mockBot('error'), 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -52,11 +52,11 @@ test('legacy live server serves the current dip-and-spike dashboard without impl
   const page = await fetch(base);
   assert.equal(page.status, 200);
   const html = await page.text();
-  assert.match(html, /Five Minute \| BTC Paper Monitor/);
-  assert.match(html, /Real-order modules/);
-  assert.match(html, /Signal one side\. Buy the other\./);
+  assert.match(html, /BTC Dual Engine\s*\|\s*Paper Trading/);
+  assert.match(html, /Real-order module status/);
+  assert.match(html, /Two engines, separate rules/);
   assert.doesNotMatch(html, /15m/i);
   assert.match(html, /Paper only/i);
-  assert.match(html, /CLOB · OPPOSITE BUY/);
+  assert.match(html, /UP taker/);
   assert.doesNotMatch(html, /expected net edge/i);
 });
