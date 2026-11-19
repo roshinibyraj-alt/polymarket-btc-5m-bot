@@ -184,12 +184,12 @@
 <body>
 <main>
   <header>
-    <div class="brand"><div class="mark" aria-hidden="true">5m</div><div><h1>BTC dip &amp; spike monitor</h1><div class="subtitle">Five-minute paper strategy · independent UP and DOWN</div></div></div>
+    <div class="brand"><div class="mark" aria-hidden="true">5m</div><div><h1>BTC reverse-signal dip &amp; spike monitor</h1><div class="subtitle">Five-minute paper strategy · each signal buys the opposite side</div></div></div>
     <div class="header-right"><span class="refresh-label" id="quoteAge">Connecting to live state…</span><div class="badge"><i class="dot"></i><span>Paper only</span></div></div>
   </header>
 
   <section class="hero" aria-label="Strategy status">
-    <div class="intro"><div class="eyebrow">Polymarket CLOB · BTC 5-minute market</div><h2>Buy confirmed dips. Sell profitable spikes.</h2><p>UP and DOWN use separate price histories, entry limits, and exits. Trading pauses after the first 240 seconds; unsold shares wait for official resolution.</p></div>
+    <div class="intro"><div class="eyebrow">Polymarket CLOB · BTC 5-minute market</div><h2>Signal one side. Buy the other.</h2><p>The same dip-and-rebound trigger remains on UP and DOWN. An UP signal buys DOWN; a DOWN signal buys UP. Existing entry limits and exits stay in place.</p></div>
     <div class="notice"><strong>Paper trading only</strong><span>Entries and spike exits simulate taker sweeps against visible CLOB depth and include modeled fees. Real-order modules are inactive.</span></div>
   </section>
 
@@ -206,7 +206,7 @@
   </section>
 
   <section class="panel">
-    <div class="panel-head"><h2>Live BTC market &amp; dip setups</h2><span class="hint" id="marketStatus">Waiting for market data</span></div>
+    <div class="panel-head"><h2>Live BTC market &amp; reversed signals</h2><span class="hint" id="marketStatus">Waiting for market data</span></div>
     <div id="markets"><div class="empty">Waiting for BTC market data…</div></div>
   </section>
 
@@ -252,7 +252,7 @@
     <div class="events" id="events"><div class="empty">Waiting for activity…</div></div>
   </section>
 
-  <p class="foot">Paper-only strategy: monitor UP and DOWN independently using Polymarket midpoint history. A side may buy 20 shares when it has fallen at least $0.04 from the reference high over the last 20 seconds, then rebounds at least $0.01 from a recent trough with two rising quotes. Maximum two entries per side per 5-minute window, at least 10 seconds apart; that side must recover $0.02 from its last trigger before it rearms. Buy taker sweeps are capped at $0.85. Keep the existing profitable-spike exit; sell the side if its combined net window P&amp;L reaches -$5. At second 240, try to sweep remaining shares at current bids; if the full position cannot fill, send the unsold shares to official resolution. The demo runner does not load real-order modules. These risk controls do not guarantee a profit or cap losses during price gaps or thin books.</p>
+  <p class="foot">Paper-only strategy: monitor each outcome's Polymarket midpoint independently. A $0.04 dip from that signal side's reference high over 20 seconds, followed by a $0.01 rebound and two rising quotes, buys 20 shares of the opposite outcome. Each signal side has at most two entries per 5-minute window, a 10-second cooldown, and a $0.02 recovery before rearming. The buy-side taker sweep remains capped at $0.85. Profitable-spike exits, the -$5 loss limit per held side, and the 240-second bid-sweep/resolution fallback are unchanged. The demo runner does not load real-order modules. These risk controls do not guarantee a profit or cap losses during price gaps or thin books.</p>
   <div class="error" id="error" role="status"></div>
 </main>
 <script>
@@ -278,12 +278,13 @@
   function renderCandidate(side, item={}) {
     const up = side === 'UP';
     const cls = up ? 'up-card' : 'down-card';
+    const entrySide = item.entrySide || (up ? 'DOWN' : 'UP');
     return `<div class="candidate ${cls}">
-      <div class="candidate-head"><span class="candidate-title ${up?'up':'down'}">${side} DIP SETUP</span><span class="pill ${item.qualifies?'live':'wait'}">${item.qualifies?'READY':'WATCHING'}</span></div>
-      <div class="row"><span>Mid / best ask</span><strong>${price(item.currentMid)} / ${price(item.bestAsk)}</strong></div>
+      <div class="candidate-head"><span class="candidate-title ${up?'up':'down'}">${side} SIGNAL → BUY ${entrySide}</span><span class="pill ${item.qualifies?'live':'wait'}">${item.qualifies?'READY':'WATCHING'}</span></div>
+      <div class="row"><span>Signal mid / buy-side ask</span><strong>${price(item.currentMid)} / ${price(item.bestAsk)}</strong></div>
       <div class="row"><span>Recent high / trough</span><strong>${price(item.referenceHigh)} / ${price(item.trough)}</strong></div>
       <div class="row"><span>Drop / bounce</span><strong>${price(item.dipAmount)} / ${price(item.reboundAmount)}</strong></div>
-      <div class="row"><span>Entries used</span><strong>${Number(item.entriesThisWindow||0)} / ${Number(item.maxEntries||4)} · ${Number(item.requestedShares||20)} shares each</strong></div>
+      <div class="row"><span>Signal entries used</span><strong>${Number(item.entriesThisWindow||0)} / ${Number(item.maxEntries||4)} · ${Number(item.requestedShares||20)} shares each</strong></div>
       <div class="row"><span>State</span><strong>${esc(item.reason||'Waiting for fresh quotes')}</strong></div>
     </div>`;
   }
@@ -297,8 +298,8 @@
       const live = v.status === 'LIVE' && !v.stale;
       return `<div class="price-box"><div class="price-head"><span class="side ${cls}">${side}</span><span class="pill ${live?'live':'wait'}">${esc(live?'LIVE':v.status||'WAITING')}${v.stale?' · STALE':''}</span></div><div class="mid ${cls}">${price(v.mid)}</div><div class="quote-detail">Bid ${price(v.bestBid)} · Ask ${price(v.bestAsk)}</div></div>`;
     };
-    const forecast = f ? `<section class="forecast" aria-label="Independent dip and spike strategy">
-      <div class="forecast-head"><div><div class="forecast-title">Independent side-by-side dip monitor</div><div class="forecast-caption">${esc(f.reason || f.status || 'Watching CLOB prices')} · ${Number(f.secondsIntoWindow||0).toFixed(0)}s elapsed</div></div><span class="uncal">CLOB PRICE ONLY</span></div>
+    const forecast = f ? `<section class="forecast" aria-label="Reversed-signal dip and spike strategy">
+      <div class="forecast-head"><div><div class="forecast-title">Reversed-signal dip monitor</div><div class="forecast-caption">${esc(f.reason || f.status || 'Watching CLOB prices')} · ${Number(f.secondsIntoWindow||0).toFixed(0)}s elapsed</div></div><span class="uncal">CLOB · OPPOSITE BUY</span></div>
       <div class="metrics">
         <div class="metric"><span>Trade window</span><strong>0–240s</strong></div>
         <div class="metric"><span>Dip required</span><strong>$0.040</strong></div>
@@ -306,7 +307,7 @@
         <div class="metric"><span>Spike exit</span><strong>+$0.050, net profitable</strong></div>
       </div>
       <div class="candidates">${renderCandidate('UP',f.candidateBySide?.UP)}${renderCandidate('DOWN',f.candidateBySide?.DOWN)}</div>
-    </section>` : `<section class="forecast"><div class="forecast-head"><div><div class="forecast-title">Independent dip monitor</div><div class="forecast-caption">Waiting for fresh Polymarket quotes.</div></div><span class="uncal">CLOB PRICE ONLY</span></div><div class="empty">No dip signal is inferred without live book updates.</div></section>`;
+    </section>` : `<section class="forecast"><div class="forecast-head"><div><div class="forecast-title">Reversed-signal dip monitor</div><div class="forecast-caption">Waiting for fresh Polymarket quotes.</div></div><span class="uncal">CLOB · OPPOSITE BUY</span></div><div class="empty">No dip signal is inferred without live book updates.</div></section>`;
     const status = f?.status || 'forecast unavailable';
     return `<article class="market">
       <div class="market-title"><div><h3>BTC · 5 minute</h3><div class="slug">${esc(title)}</div></div><div class="countdown">${remaining(state?.windowEnd)}</div></div>
@@ -314,7 +315,7 @@
       ${forecast}
       <div class="rows">
         <div class="row"><span>Strategy state</span><strong class="status-text ${statusClass(status)}">${escStatus(status)}</strong></div>
-        <div class="row"><span>Independent qualifying sides</span><strong>${esc((f?.qualifyingSides||[]).join(', ')||'None')}</strong></div>
+        <div class="row"><span>Qualifying signal → buy</span><strong>${esc((f?.qualifyingSignalSides||[]).map(signalSide => `${signalSide} → ${f.candidateBySide?.[signalSide]?.entrySide || (signalSide==='UP'?'DOWN':'UP')}`).join(', ')||'None')}</strong></div>
         <div class="row"><span>Paper orders this window</span><strong>${esc(orders)}</strong></div>
       </div>
     </article>`;
@@ -335,14 +336,15 @@
             ? (o.sourceExitKind ? `${esc(o.sourceExitKind)} ${price(o.sourceExitLimitPrice)}` : o.takeProfitPrice ? `TP ${price(o.takeProfitPrice)} / SL ${price(o.stopLossPrice)}` : 'Paper hold / resolution')
             : '—';
       const status = String(o.status || 'unknown');
-      return `<tr><td>${esc(o.timeframe||'—')}</td><td>${esc(o.kind||'—')}${o.testOnly?' · TEST':''}</td><td class="${outcome==='UP'?'up':'down'}">${esc(outcome)}</td><td>${price(o.price)}</td><td>${Number(o.shares||0).toFixed(2)}</td><td>${Number(o.matchedShares||0).toFixed(2)}</td><td>${exit}</td><td><span class="pill ${statusClass(status)==='good'?'live':statusClass(status)==='bad'?'fail':'wait'}">${esc(status)}</span></td><td>${esc(o.error||o.exitBlockedReason||o.resolutionError||'—')}</td></tr>`;
+      const sideLabel = o.signalSide ? `${o.signalSide} signal → ${outcome}` : outcome;
+      return `<tr><td>${esc(o.timeframe||'—')}</td><td>${esc(o.kind||'—')}${o.testOnly?' · TEST':''}</td><td class="${outcome==='UP'?'up':'down'}">${esc(sideLabel)}</td><td>${price(o.price)}</td><td>${Number(o.shares||0).toFixed(2)}</td><td>${Number(o.matchedShares||0).toFixed(2)}</td><td>${exit}</td><td><span class="pill ${statusClass(status)==='good'?'live':statusClass(status)==='bad'?'fail':'wait'}">${esc(status)}</span></td><td>${esc(o.error||o.exitBlockedReason||o.resolutionError||'—')}</td></tr>`;
     }).join('');
     return `<table><thead><tr><th>Window</th><th>Action</th><th>Side</th><th>Price</th><th>Shares</th><th>Matched</th><th>Exit rule</th><th>Status</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
   function renderTable(items, kind) {
     if (!Array.isArray(items) || !items.length) return `<div class="empty">No ${kind} records in the latest state.</div>`;
     if (kind === 'position') {
-      const rows = items.map(p => `<tr><td>${esc(p.slug||p.market||p.title||'—')}</td><td>${esc(p.outcome||p.side||'—')}</td><td>${Number(p.shares??p.size??0).toFixed(2)}</td><td>${price(p.avgPrice??p.averagePrice)}</td><td>${money(p.currentValue??p.value)}</td><td>${esc(p.status||'Open')}</td></tr>`).join('');
+      const rows = items.map(p => `<tr><td>${esc(p.slug||p.market||p.title||'—')}</td><td>${esc(p.signalSide ? `${p.side} (from ${p.signalSide} signal)` : p.outcome||p.side||'—')}</td><td>${Number(p.shares??p.size??0).toFixed(2)}</td><td>${price(p.avgPrice??p.averagePrice)}</td><td>${money(p.currentValue??p.value)}</td><td>${esc(p.status||'Open')}</td></tr>`).join('');
       return `<table><thead><tr><th>Market</th><th>Side</th><th>Shares</th><th>Avg. price</th><th>Value</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
     }
     const rows = items.map(r => `<tr><td>${esc(r.slug||r.market||r.title||'—')}</td><td>${esc(r.outcome||r.winningSide||r.result||'—')}</td><td>${esc(r.status||'resolved')}</td><td>${money(r.pnl??r.realizedPnl??r.profit)}</td><td>${esc(r.resolvedAt?time(r.resolvedAt):r.error||'—')}</td></tr>`).join('');
@@ -361,7 +363,7 @@
       return `<tr>
         <td>${esc(closedAt ? time(closedAt) : '—')}</td>
         <td>${esc(position.slug||position.market||position.title||'—')}</td>
-        <td class="${position.side==='UP'?'up':position.side==='DOWN'?'down':''}">${esc(position.side||'—')}</td>
+        <td class="${position.side==='UP'?'up':position.side==='DOWN'?'down':''}">${esc(position.signalSide ? `${position.side} (from ${position.signalSide} signal)` : position.side||'—')}</td>
         <td>${Number(position.shares||0).toFixed(2)}</td>
         <td>${price(position.avgPrice??position.avgEntry)}</td>
         <td>${price(position.exitPrice)}</td>

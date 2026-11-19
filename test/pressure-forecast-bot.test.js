@@ -96,6 +96,10 @@ function addDipHistory(bot, side, { start = WINDOW_START, now = NOW, base = 0.50
   bot.lastHistoryQuoteAtBySide[side] = now;
   const mid = points.at(-1)[1];
   setQuote(bot, side, mid - 0.01, mid + 0.01, 500, now);
+  const opposite = side === 'UP' ? 'DOWN' : 'UP';
+  if (bot.liveQuotes[opposite]?.status !== 'LIVE') {
+    setQuote(bot, opposite, 0.49, 0.51, 500, now);
+  }
 }
 
 test('taker sweep observes the buy ceiling, sell floor, and per-level fees', () => {
@@ -126,6 +130,8 @@ test('dip analysis waits for a pullback, rebound, and two rising quote updates',
   const candidate = bot.buildDipCandidate('UP', NOW, WINDOW_START, true);
   assert.equal(candidate.ready, true);
   assert.equal(candidate.qualifies, true);
+  assert.equal(candidate.signalSide, 'UP');
+  assert.equal(candidate.entrySide, 'DOWN');
   assert.ok(Math.abs(candidate.dipAmount - 0.06) < 1e-9);
   assert.ok(Math.abs(candidate.reboundAmount - 0.02) < 1e-9);
   assert.equal(candidate.requestedShares, 20);
@@ -135,7 +141,24 @@ test('dip analysis waits for a pullback, rebound, and two rising quote updates',
   assert.equal(falling.qualifies, false);
 });
 
-test('UP and DOWN can enter independently with separate per-side limits', () => {
+test('the buy-price ceiling applies to the opposite entry side, not the signal side', () => {
+  const bot = makeBot();
+  addDipHistory(bot, 'UP');
+  setQuote(bot, 'UP', 0.94, 0.96, 500, NOW);
+  setQuote(bot, 'DOWN', 0.82, 0.84, 500, NOW);
+
+  const eligible = bot.buildDipCandidate('UP', NOW, WINDOW_START, true);
+  assert.equal(eligible.qualifies, true);
+  assert.equal(eligible.signalBestAsk, 0.96);
+  assert.equal(eligible.bestAsk, 0.84);
+
+  setQuote(bot, 'DOWN', 0.86, 0.87, 500, NOW);
+  const capped = bot.buildDipCandidate('UP', NOW, WINDOW_START, true);
+  assert.equal(capped.qualifies, false);
+  assert.match(capped.reason, /DOWN entry ask is above the \$0\.85 ceiling/);
+});
+
+test('UP and DOWN signals independently buy their opposite sides', () => {
   const bot = makeBot();
   addDipHistory(bot, 'UP', { base: 0.50 });
   addDipHistory(bot, 'DOWN', { base: 0.52 });
@@ -146,10 +169,18 @@ test('UP and DOWN can enter independently with separate per-side limits', () => 
   const open = bot.positions.filter((position) => position.status === 'OPEN');
   assert.equal(open.length, 2);
   assert.deepEqual(open.map((position) => position.side).sort(), ['DOWN', 'UP']);
+  assert.equal(open.find((position) => position.signalSide === 'UP').side, 'DOWN');
+  assert.equal(open.find((position) => position.signalSide === 'DOWN').side, 'UP');
+  assert.equal(
+    open.find((position) => position.signalSide === 'UP').avgEntry,
+    bot.liveQuotes.DOWN.bestAsk,
+  );
+  assert.equal(bot.orders.find((order) => order.signalSide === 'UP').side, 'DOWN');
   assert.ok(open.every((position) => position.shares === 20));
-  assert.ok(open.every((position) => position.strategyVersion === 'DIP_REBOUND_V1'));
+  assert.ok(open.every((position) => position.strategyVersion === 'DIP_REBOUND_REVERSED_V1'));
   assert.ok(open.every((position) => position.fees > 0));
   assert.deepEqual(bot.orders.map((order) => order.kind).sort(), ['BUY_DIP', 'BUY_DIP']);
+  assert.ok(bot.orders.every((order) => order.side !== order.signalSide));
   assert.ok(bot.orders.every((order) => order.maxPrice === 0.85));
   assert.equal(bot.dipEntryCountBySide.UP, 1);
   assert.equal(bot.dipEntryCountBySide.DOWN, 1);
@@ -173,6 +204,7 @@ test('one side can rearm only after recovery, cooldown, and another confirmed di
     { at: NOW + 12_000, mid: 0.49 },
   );
   setQuote(bot, 'UP', 0.485, 0.505, 500, NOW + 12_000);
+  setQuote(bot, 'DOWN', 0.49, 0.51, 500, NOW + 12_000);
   bot.recordDipQuote('UP', bot.liveQuotes.UP);
   assert.equal(bot.processDipStrategy(WINDOW_START, NOW + 12_000, 'UP'), true);
   assert.equal(bot.dipEntryCountBySide.UP, 2);
@@ -228,8 +260,8 @@ test('a $5 cumulative side loss is swept and blocks further entries that window'
   assert.equal(position.exitReason, 'MAX_SIDE_LOSS_STOP');
   assert.equal(bot.orders[0].kind, 'SELL_RISK_STOP');
   assert.equal(bot.orders[0].matchedShares, 20);
-  assert.equal(bot.dipEntryCountBySide.UP, config.DIP_MAX_ENTRIES_PER_SIDE);
-  assert.equal(bot.dipArmedBySide.UP, false);
+  assert.equal(bot.dipEntryCountBySide.DOWN, config.DIP_MAX_ENTRIES_PER_SIDE);
+  assert.equal(bot.dipArmedBySide.DOWN, false);
 });
 
 test('a profitable spike sells all same-side shares together and leaves the other side alone', () => {
@@ -522,10 +554,12 @@ test('a bid timestamped at the window end does not count as an in-window take-pr
   assert.equal(bot.orders.some((order) => order.kind === 'SELL_TAKE_PROFIT'), false);
 });
 
-test('paper snapshot identifies the independent dip-and-spike demo strategy', () => {
+test('paper snapshot identifies the reversed-signal dip-and-spike demo strategy', () => {
   const bot = makeBot();
   const state = bot.snapshot();
-  assert.equal(state.strategy.name, 'BTC 5-minute independent dip-and-spike paper bot');
+  assert.equal(state.strategy.name, 'BTC 5-minute reversed-signal dip-and-spike paper bot');
+  assert.equal(state.strategy.signalMapping, 'OPPOSITE_SIDE');
+  assert.match(state.strategy.orders.signalMapping, /UP signal buys DOWN/i);
   assert.deepEqual(state.strategy.markets, ['BTC 5m']);
   assert.equal(state.strategy.execution, 'PAPER ONLY');
   assert.equal(state.strategy.liveTradingEnabled, false);

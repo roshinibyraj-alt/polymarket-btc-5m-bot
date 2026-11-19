@@ -13,6 +13,18 @@ const {
 
 const EPSILON = 1e-9;
 const SIDES = ['UP', 'DOWN'];
+const DIP_STRATEGY_VERSION = 'DIP_REBOUND_REVERSED_V1';
+
+function oppositeSide(side) {
+  if (side === 'UP') return 'DOWN';
+  if (side === 'DOWN') return 'UP';
+  return null;
+}
+
+function isDipPosition(position) {
+  return position?.strategyVersion === DIP_STRATEGY_VERSION
+    || position?.strategyVersion === 'DIP_REBOUND_V1';
+}
 
 function analyzeDipRebound(samples, now) {
   const lookback = samples
@@ -187,7 +199,7 @@ class PressureForecastBot extends WickBot {
     this.clobFeed = null;
     this.clobFeedMarketKey = null;
     this.initialCapital = initialCapital;
-    this.strategyName = 'BTC 5-minute independent dip-and-spike paper bot';
+    this.strategyName = 'BTC 5-minute reversed-signal dip-and-spike paper bot';
     this.strategyMode = 'dip-rebound';
     this.forecast = this.emptyForecast('Waiting for fresh Polymarket UP and DOWN quotes.');
     this.lastEntryAt = null;
@@ -247,7 +259,7 @@ class PressureForecastBot extends WickBot {
       dipEntryCountBySide: this.dipEntryCountBySide,
       dipArmedBySide: this.dipArmedBySide,
       dipRearmPriceBySide: this.dipRearmPriceBySide,
-      strategyVersion: 'DIP_REBOUND_V1',
+      strategyVersion: DIP_STRATEGY_VERSION,
       forecast: this.forecast,
       actionSequence: this.actionSequence,
       completedWindows: [...this.completedWindows.entries()],
@@ -292,17 +304,20 @@ class PressureForecastBot extends WickBot {
     this.lastHistoryQuoteAtBySide = { UP: null, DOWN: null };
     const currentWindowPositions = this.positions.filter((position) =>
       Number(position.windowStart) === Number(this.orderWindowStart)
-      && position.strategyVersion === 'DIP_REBOUND_V1');
+      && isDipPosition(position));
     this.dipEntryCountBySide = state.dipEntryCountBySide || Object.fromEntries(
-      SIDES.map((side) => [side, currentWindowPositions.filter((position) => position.side === side).length]),
+      SIDES.map((side) => [side, currentWindowPositions.filter((position) =>
+        (SIDES.includes(position.signalSide) ? position.signalSide : position.side) === side).length]),
     );
     this.dipArmedBySide = state.dipArmedBySide || Object.fromEntries(
-      SIDES.map((side) => [side, currentWindowPositions.every((position) => position.side !== side)]),
+      SIDES.map((side) => [side, currentWindowPositions.every((position) =>
+        (SIDES.includes(position.signalSide) ? position.signalSide : position.side) !== side)]),
     );
     this.dipRearmPriceBySide = state.dipRearmPriceBySide || Object.fromEntries(
       SIDES.map((side) => {
         const latest = currentWindowPositions
-          .filter((position) => position.side === side)
+          .filter((position) =>
+            (SIDES.includes(position.signalSide) ? position.signalSide : position.side) === side)
           .sort((a, b) => Number(b.filledAt || b.openedAt || 0) - Number(a.filledAt || a.openedAt || 0))[0];
         return [side, latest
           ? Math.min(0.99, Number(latest.dipTriggerMid ?? latest.avgEntry ?? 0) + config.DIP_REARM_RECOVERY)
@@ -349,16 +364,18 @@ class PressureForecastBot extends WickBot {
     for (const position of positions) {
       if (Number(position.windowStart) !== windowStart || !SIDES.includes(position.side)) continue;
       const filledAt = Number(position.filledAt ?? position.openedAt ?? position.submittedAt);
+      const signalSide = SIDES.includes(position.signalSide) ? position.signalSide : position.side;
       if (Number.isFinite(filledAt)) {
-        lastEntryAtBySide[position.side] = Math.max(lastEntryAtBySide[position.side] || 0, filledAt);
+        lastEntryAtBySide[signalSide] = Math.max(lastEntryAtBySide[signalSide] || 0, filledAt);
       }
     }
     for (const order of orders) {
       if (Number(order.windowStart) !== windowStart || !SIDES.includes(order.side)) continue;
       if (order.action !== 'BUY' || order.status !== 'FILLED') continue;
       const filledAt = Number(order.filledAt ?? order.createdAt);
+      const signalSide = SIDES.includes(order.signalSide) ? order.signalSide : order.side;
       if (Number.isFinite(filledAt)) {
-        lastEntryAtBySide[order.side] = Math.max(lastEntryAtBySide[order.side] || 0, filledAt);
+        lastEntryAtBySide[signalSide] = Math.max(lastEntryAtBySide[signalSide] || 0, filledAt);
       }
     }
     const sequenceValues = [...positions, ...orders].map((item) => {
@@ -424,9 +441,10 @@ class PressureForecastBot extends WickBot {
       ready: false,
       status,
       reason,
-      signalSource: 'POLYMARKET_CLOB_PRICE_ONLY',
+      signalSource: 'POLYMARKET_CLOB_PRICE_ONLY_REVERSED_SIDE',
       selectedSide: null,
       qualifyingSides: [],
+      qualifyingSignalSides: [],
       secondsIntoWindow: null,
       secondsRemaining: null,
       tradeWindowMs: config.DIP_TRADE_WINDOW_MS,
@@ -440,6 +458,8 @@ class PressureForecastBot extends WickBot {
   emptyCandidate(reason) {
     return {
       ready: false,
+      signalSide: null,
+      entrySide: null,
       currentMid: null,
       bestAsk: null,
       referenceHigh: null,
@@ -565,7 +585,7 @@ class PressureForecastBot extends WickBot {
     const sampleRecorded = this.recordDipQuote(side, this.liveQuotes[side]);
     this.updatePositionMarks(side, this.liveQuotes[side], now);
     this.applyTakeProfitExits(now);
-    if (sampleRecorded) this.processDipStrategy(this.market?.start, now, side);
+    if (sampleRecorded) this.processDipStrategy(this.market?.start, now);
   }
 
   async refreshLiveQuotes(now) {
@@ -634,7 +654,7 @@ class PressureForecastBot extends WickBot {
     if (!this.market || now >= Number(this.market.end)) return;
     for (const position of this.positions) {
       if (position.windowStart !== this.market.start || position.status !== 'OPEN') continue;
-      if (position.strategyVersion === 'DIP_REBOUND_V1') continue;
+      if (isDipPosition(position)) continue;
       const quote = this.liveQuotes[position.side];
       if (!this.isTakeProfitQuote(quote, now, position)) continue;
       this.finalizeTakeProfit(position, Number(quote.updatedAt));
@@ -708,14 +728,20 @@ class PressureForecastBot extends WickBot {
   }
 
   buildDipCandidate(side, now, start, tradeOpen) {
-    const quote = this.freshQuote(side, now);
+    const signalSide = side;
+    const entrySide = oppositeSide(signalSide);
+    const signalQuote = this.freshQuote(signalSide, now);
+    const entryQuote = this.freshQuote(entrySide, now);
     const analysis = analyzeDipRebound(this.dipHistory[side] || [], now);
     const candidate = {
       ...this.emptyCandidate(analysis.reason),
       ...analysis,
+      signalSide,
+      entrySide,
       qualifies: false,
-      ready: analysis.ready && Boolean(quote),
-      bestAsk: quote?.bestAsk ?? null,
+      ready: analysis.ready && Boolean(signalQuote) && Boolean(entryQuote),
+      signalBestAsk: signalQuote?.bestAsk ?? null,
+      bestAsk: entryQuote?.bestAsk ?? null,
       entriesThisWindow: Number(this.dipEntryCountBySide[side] || 0),
       armed: this.dipArmedBySide[side] !== false,
       requestedShares: config.DIP_ENTRY_SHARES,
@@ -733,8 +759,12 @@ class PressureForecastBot extends WickBot {
         : 'Waiting for this five-minute market window to start.';
       return candidate;
     }
-    if (!quote) {
-      candidate.reason = `Waiting for a fresh ${side} CLOB quote. The other side is evaluated independently.`;
+    if (!signalQuote) {
+      candidate.reason = `Waiting for a fresh ${signalSide} signal-side CLOB quote.`;
+      return candidate;
+    }
+    if (!entryQuote) {
+      candidate.reason = `Waiting for a fresh ${entrySide} entry-side CLOB quote for the reversed signal.`;
       return candidate;
     }
 
@@ -757,21 +787,21 @@ class PressureForecastBot extends WickBot {
       return candidate;
     }
     if (candidate.entriesThisWindow >= config.DIP_MAX_ENTRIES_PER_SIDE) {
-      candidate.reason = `${side} has reached its ${config.DIP_MAX_ENTRIES_PER_SIDE}-entry limit for this window.`;
+      candidate.reason = `${signalSide} signals have reached their ${config.DIP_MAX_ENTRIES_PER_SIDE}-entry limit for this window.`;
       return candidate;
     }
     if (cooldownRemaining > 0) {
-      candidate.reason = `${side} is cooling down for ${Math.ceil(cooldownRemaining / 1000)} more seconds.`;
+      candidate.reason = `${signalSide} signal is cooling down for ${Math.ceil(cooldownRemaining / 1000)} more seconds.`;
       return candidate;
     }
-    if (Number(quote.bestAsk) > config.DIP_MAX_BUY_PRICE + EPSILON) {
-      candidate.reason = `${side} ask is above the $${config.DIP_MAX_BUY_PRICE.toFixed(2)} entry ceiling.`;
+    if (Number(entryQuote.bestAsk) > config.DIP_MAX_BUY_PRICE + EPSILON) {
+      candidate.reason = `${entrySide} entry ask is above the $${config.DIP_MAX_BUY_PRICE.toFixed(2)} ceiling; the ${signalSide} signal cannot enter.`;
       return candidate;
     }
     if (!analysis.qualifies) return candidate;
 
     candidate.qualifies = true;
-    candidate.reason = `${analysis.reason} Buy ${config.DIP_ENTRY_SHARES} ${side} shares at the ask.`;
+    candidate.reason = `${analysis.reason} Reversed signal: buy ${config.DIP_ENTRY_SHARES} ${entrySide} shares at that side's ask.`;
     return candidate;
   }
 
@@ -782,10 +812,11 @@ class PressureForecastBot extends WickBot {
       side,
       this.buildDipCandidate(side, now, start, tradeOpen),
     ]));
-    const qualifyingSides = SIDES.filter((side) => candidateBySide[side].qualifies);
+    const qualifyingSignalSides = SIDES.filter((side) => candidateBySide[side].qualifies);
+    const qualifyingSides = qualifyingSignalSides.map(oppositeSide);
     const ready = SIDES.some((side) => this.freshQuote(side, now));
     let status = 'SCANNING_FOR_DIP';
-    let reason = 'UP and DOWN are monitored separately for a dip followed by a confirmed rebound.';
+    let reason = 'UP and DOWN dip signals are checked independently; each qualifying signal buys the opposite side.';
     if (elapsed >= config.DIP_TRADE_WINDOW_MS) {
       status = 'TRADE_WINDOW_CLOSED';
       reason = `Entries close after ${config.DIP_TRADE_WINDOW_MS / 1000} seconds; remaining shares are swept at executable bids or sent to official resolution if a full exit is unavailable.`;
@@ -794,16 +825,19 @@ class PressureForecastBot extends WickBot {
       reason = 'Waiting for fresh Polymarket quotes; no Binance or model signal is required.';
     } else if (qualifyingSides.length) {
       status = 'DIP_REBOUND_READY';
-      reason = `${qualifyingSides.join(' and ')} ${qualifyingSides.length === 1 ? 'has' : 'have'} a confirmed dip-and-rebound setup. Each side may enter independently.`;
+      reason = qualifyingSignalSides
+        .map((signalSide) => `${signalSide} signal → buy ${oppositeSide(signalSide)}`)
+        .join(' · ');
     }
 
     return {
       ready,
       status,
       reason,
-      signalSource: 'POLYMARKET_CLOB_PRICE_ONLY',
+      signalSource: 'POLYMARKET_CLOB_PRICE_ONLY_REVERSED_SIDE',
       selectedSide: null,
       qualifyingSides,
+      qualifyingSignalSides,
       secondsIntoWindow: Math.max(0, elapsed / 1000),
       secondsRemaining: Math.max(0, (start + this.windowMs - now) / 1000),
       tradeWindowMs: config.DIP_TRADE_WINDOW_MS,
@@ -820,42 +854,50 @@ class PressureForecastBot extends WickBot {
     const sides = onlySide && SIDES.includes(onlySide) ? [onlySide] : SIDES;
     let changed = false;
 
-    for (const side of sides) {
-      const candidate = forecast.candidateBySide[side];
+    for (const signalSide of sides) {
+      const candidate = forecast.candidateBySide[signalSide];
       if (!candidate?.qualifies) continue;
-      this.lastDipAttemptAtBySide[side] = now;
-      const opened = this.executeBuy(side, config.DIP_ENTRY_SHARES, now, {
+      const entrySide = candidate.entrySide || oppositeSide(signalSide);
+      this.lastDipAttemptAtBySide[signalSide] = now;
+      const opened = this.executeBuy(entrySide, config.DIP_ENTRY_SHARES, now, {
         kind: 'BUY_DIP',
         candidate,
         signal: candidate,
+        signalSide,
       });
       if (!opened) {
         candidate.qualifies = false;
         candidate.reason = this.windowOrders[0]?.error
-          || `${side} paper order was not filled; the next dip setup can be evaluated independently.`;
+          || `${signalSide} signal could not buy ${entrySide}; the next setup remains independent.`;
         continue;
       }
 
       this.lastEntryAt = now;
-      this.lastEntryAtBySide[side] = now;
-      this.dipEntryCountBySide[side] = Number(this.dipEntryCountBySide[side] || 0) + 1;
-      this.dipArmedBySide[side] = false;
-      this.dipRearmPriceBySide[side] = Math.min(
+      this.lastEntryAtBySide[signalSide] = now;
+      this.dipEntryCountBySide[signalSide] = Number(this.dipEntryCountBySide[signalSide] || 0) + 1;
+      this.dipArmedBySide[signalSide] = false;
+      this.dipRearmPriceBySide[signalSide] = Math.min(
         0.99,
         Number(candidate.currentMid) + config.DIP_REARM_RECOVERY,
       );
       candidate.qualifies = false;
-      candidate.entriesThisWindow = this.dipEntryCountBySide[side];
+      candidate.entriesThisWindow = this.dipEntryCountBySide[signalSide];
       candidate.armed = false;
-      candidate.reason = `Bought ${opened.shares} ${side} shares. This side rearms after recovering to $${this.dipRearmPriceBySide[side].toFixed(3)}; the other side remains independent.`;
-      this.signal = { side, action: 'BUY_DIP', reason: candidate.reason };
+      candidate.reason = `${signalSide} dip signal bought ${opened.shares} ${entrySide} shares. This signal rearms after ${signalSide} recovers to $${this.dipRearmPriceBySide[signalSide].toFixed(3)}.`;
+      this.signal = {
+        side: entrySide,
+        signalSide,
+        action: 'BUY_REVERSED_DIP',
+        reason: candidate.reason,
+      };
       changed = true;
     }
 
-    forecast.qualifyingSides = SIDES.filter((side) => forecast.candidateBySide[side].qualifies);
+    forecast.qualifyingSignalSides = SIDES.filter((side) => forecast.candidateBySide[side].qualifies);
+    forecast.qualifyingSides = forecast.qualifyingSignalSides.map(oppositeSide);
     if (changed) {
       forecast.status = 'DIP_ENTRY_FILLED';
-      forecast.reason = 'Paper dip entry recorded. UP and DOWN have separate histories, cooldowns, and exposure limits.';
+      forecast.reason = 'Paper reversed-signal entry recorded. Trigger history remains separate by signal side; positions and exits follow the side bought.';
     }
     return changed;
   }
@@ -907,7 +949,7 @@ class PressureForecastBot extends WickBot {
     return this.positions.filter((position) =>
       Number(position.windowStart) === Number(windowStart)
       && position.side === side
-      && position.strategyVersion === 'DIP_REBOUND_V1'
+      && isDipPosition(position)
       && position.status === 'OPEN');
   }
 
@@ -929,7 +971,7 @@ class PressureForecastBot extends WickBot {
       .filter((position) =>
         Number(position.windowStart) === windowStart
         && position.side === side
-        && position.strategyVersion === 'DIP_REBOUND_V1'
+        && isDipPosition(position)
         && position.status !== 'OPEN'
         && position.status !== 'PENDING_CLOB_RESULT')
       .reduce((total, position) => total + Number(position.realizedPnl || 0), 0);
@@ -940,9 +982,10 @@ class PressureForecastBot extends WickBot {
     if (!execution.complete) return false;
 
     // A side that reaches its loss budget cannot re-enter during this window.
-    this.dipEntryCountBySide[side] = config.DIP_MAX_ENTRIES_PER_SIDE;
-    this.dipArmedBySide[side] = false;
-    this.dipRearmPriceBySide[side] = null;
+    const blockedSignalSide = oppositeSide(side);
+    this.dipEntryCountBySide[blockedSignalSide] = config.DIP_MAX_ENTRIES_PER_SIDE;
+    this.dipArmedBySide[blockedSignalSide] = false;
+    this.dipRearmPriceBySide[blockedSignalSide] = null;
     return this.executeSideExit({
       side,
       now,
@@ -956,6 +999,7 @@ class PressureForecastBot extends WickBot {
         sideWindowPnlBeforeExit: sideWindowPnl,
         lossLimit: config.DIP_MAX_SIDE_LOSS,
         realizedEarlierThisWindow,
+        blockedSignalSide,
       },
     });
   }
@@ -1045,7 +1089,7 @@ class PressureForecastBot extends WickBot {
     return true;
   }
 
-  executeBuy(side, shares, now, { kind, candidate, signal } = {}) {
+  executeBuy(side, shares, now, { kind, candidate, signal, signalSide } = {}) {
     const quote = this.freshQuote(side, now);
     if (!quote) return null;
     const preview = sweepBook(
@@ -1056,6 +1100,10 @@ class PressureForecastBot extends WickBot {
       { maximumPrice: config.DIP_MAX_BUY_PRICE },
     );
     const order = this.createOrder(kind || 'BUY_ENTRY', side, shares, now, preview);
+    const triggerSide = SIDES.includes(signalSide)
+      ? signalSide
+      : (SIDES.includes(candidate?.signalSide) ? candidate.signalSide : oppositeSide(side));
+    order.signalSide = triggerSide;
     if (!preview.complete) {
       order.status = 'SKIPPED_PRICE_CAP_OR_DEPTH';
       order.error = `Full requested size was not available at or below $${config.DIP_MAX_BUY_PRICE.toFixed(2)}.`;
@@ -1090,11 +1138,12 @@ class PressureForecastBot extends WickBot {
       title: this.market.title,
       side,
       outcome: side,
+      signalSide: triggerSide,
       tokenId: this.market.tokens[side],
       entryKey: order.id,
-      entryLabel: `Dip-and-rebound entry · ${side}`,
-      entryType: 'PAPER_TAKER_DIP_REBOUND',
-      strategyVersion: 'DIP_REBOUND_V1',
+      entryLabel: `${triggerSide} dip signal → ${side} entry`,
+      entryType: 'PAPER_TAKER_REVERSED_DIP_REBOUND',
+      strategyVersion: DIP_STRATEGY_VERSION,
       orderType: 'PAPER_TAKER_MARKET',
       fillModel: 'VISIBLE_ASK_SWEEP_WITH_CONFIGURED_MAX_PRICE',
       shares: execution.filledShares,
@@ -1118,7 +1167,7 @@ class PressureForecastBot extends WickBot {
       dipTrough: candidate?.trough ?? null,
       dipReboundAmount: candidate?.reboundAmount ?? null,
       dipTriggerMid: candidate?.currentMid ?? null,
-      signalSource: 'POLYMARKET_CLOB_PRICE_ONLY',
+      signalSource: 'POLYMARKET_CLOB_PRICE_ONLY_REVERSED_SIDE',
       signalScore: null,
     };
     this.cash -= execution.totalCost;
@@ -1131,7 +1180,8 @@ class PressureForecastBot extends WickBot {
     order.totalCost = execution.totalCost;
     order.fills = execution.fills;
     order.maxPrice = config.DIP_MAX_BUY_PRICE;
-    order.signalSource = 'POLYMARKET_CLOB_PRICE_ONLY';
+    order.signalSide = triggerSide;
+    order.signalSource = 'POLYMARKET_CLOB_PRICE_ONLY_REVERSED_SIDE';
     order.dipReferenceHigh = candidate?.referenceHigh ?? null;
     order.dipTrough = candidate?.trough ?? null;
     order.dipReboundAmount = candidate?.reboundAmount ?? null;
@@ -1140,6 +1190,8 @@ class PressureForecastBot extends WickBot {
       orderId: order.id,
       positionId: position.id,
       side,
+      signalSide: triggerSide,
+      signalMapping: `${triggerSide}->${side}`,
       shares: position.shares,
       averagePrice: position.avgEntry,
       fees: position.fees,
@@ -1204,7 +1256,7 @@ class PressureForecastBot extends WickBot {
       position.windowStart === windowStart && position.status === 'OPEN');
     const windowEnd = windowStart + this.windowMs;
     for (const position of positions) {
-      if (position.strategyVersion === 'DIP_REBOUND_V1') continue;
+      if (isDipPosition(position)) continue;
       const quote = this.market?.start === windowStart
         ? this.liveQuotes[position.side]
         : null;
@@ -1393,7 +1445,8 @@ class PressureForecastBot extends WickBot {
         maxEntriesPerSide: config.DIP_MAX_ENTRIES_PER_SIDE,
         maxBuyPrice: config.DIP_MAX_BUY_PRICE,
         tradeWindowMs: config.DIP_TRADE_WINDOW_MS,
-        signal: 'CLOB midpoint only: a four-cent dip from the prior rolling high, followed by a one-cent rebound and two rising quote updates.',
+        signal: 'CLOB midpoint only: a four-cent dip and one-cent rebound with two rising quotes on one side triggers a buy of the opposite side.',
+        signalMapping: 'OPPOSITE_SIDE',
         signalState: this.forecast,
         orders: {
           type: 'Visible-book taker-style paper sweeps',
@@ -1402,9 +1455,10 @@ class PressureForecastBot extends WickBot {
           maxBuyPrice: config.DIP_MAX_BUY_PRICE,
           entryCooldownMs: config.DIP_ENTRY_COOLDOWN_MS,
           rearmRecovery: config.DIP_REARM_RECOVERY,
-          maxEntriesPerWindow: `${config.DIP_MAX_ENTRIES_PER_SIDE} per side`,
+          maxEntriesPerWindow: `${config.DIP_MAX_ENTRIES_PER_SIDE} per signal side`,
+          signalMapping: 'A qualifying UP signal buys DOWN; a qualifying DOWN signal buys UP.',
         },
-        repeatEntryRule: `UP and DOWN are independent. Each can buy ${config.DIP_ENTRY_SHARES} shares on up to ${config.DIP_MAX_ENTRIES_PER_SIDE} dip setups per window, with a ${config.DIP_ENTRY_COOLDOWN_MS / 1000}-second cooldown and a $${config.DIP_REARM_RECOVERY.toFixed(2)} recovery before rearming. A side that hits its loss limit cannot re-enter that window.`,
+        repeatEntryRule: `UP and DOWN dip signals are evaluated independently. Each qualifying signal buys ${config.DIP_ENTRY_SHARES} shares of the opposite side, up to ${config.DIP_MAX_ENTRIES_PER_SIDE} entries per signal side, with a ${config.DIP_ENTRY_COOLDOWN_MS / 1000}-second cooldown and a $${config.DIP_REARM_RECOVERY.toFixed(2)} recovery before rearming. Loss limits still apply to the side actually held.`,
         priceFeed: this.priceFeed?.snapshot?.() || null,
         exits: {
           mode: 'SPIKE_EXIT_SIDE_LOSS_LIMIT_AND_TIME_CUTOFF',

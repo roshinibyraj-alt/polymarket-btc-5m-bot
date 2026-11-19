@@ -54,9 +54,9 @@ test('legacy live server serves the current dip-and-spike dashboard without impl
   const html = await page.text();
   assert.match(html, /Five Minute \| BTC Paper Monitor/);
   assert.match(html, /Real-order modules/);
-  assert.match(html, /Buy confirmed dips\. Sell profitable spikes\./);
+  assert.match(html, /Signal one side\. Buy the other\./);
   assert.doesNotMatch(html, /15m/i);
   assert.match(html, /Paper only/i);
-  assert.match(html, /CLOB PRICE ONLY/);
+  assert.match(html, /CLOB · OPPOSITE BUY/);
   assert.doesNotMatch(html, /expected net edge/i);
 });

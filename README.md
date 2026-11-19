@@ -1,4 +1,4 @@
-# Polymarket BTC 5-minute dip-and-spike paper demo
+# Polymarket BTC 5-minute reversed-signal dip-and-spike paper demo
 
 The active entrypoint runs a paper-only BTC five-minute dip-and-spike strategy. UP and DOWN are monitored and traded independently using Polymarket CLOB midpoint history. It loads `pressure-forecast-bot.js` but does not import or start the real-order bot or Polymarket trading adapter. The detailed live-order sections later in this file are dormant reference material and are not part of the active runtime.
 
@@ -13,9 +13,9 @@ This document does not authorize a real order or a production deployment. Never 
 
 ## 2. Current strategy
 
-The full active rules are in `DEMO_RUNBOOK.md`. In short, during seconds 0–240 the bot may buy 20 shares on either side after a $0.04 pullback from its 20-second reference high, followed by a $0.01 bounce and two rising quotes. Each side has a separate 10-second cooldown, must recover $0.02 before rearming, and is capped at two entries per five-minute window. Entries sweep visible asks up to $0.85 and include modeled taker fees. Profitable spikes retain the existing exit; a side also exits when its cumulative net window loss reaches $5. At second 240, the bot attempts to sweep any remaining shares at fresh bids; if the full position cannot be sold, the remainder waits for official resolution, checked every 10 seconds.
+The full active rules are in `DEMO_RUNBOOK.md`. In short, during seconds 0–240 the bot monitors each side's midpoint independently. A $0.04 pullback from that signal side's 20-second reference high, followed by a $0.01 bounce and two rising quotes, buys 20 shares of the opposite side. Each signal side has a separate 10-second cooldown, must recover $0.02 before rearming, and is capped at two entries per five-minute window. Entries sweep the bought side's visible asks up to $0.85 and include modeled taker fees. Profitable-spike exits remain unchanged; a held side also exits when its cumulative net window loss reaches $5. At second 240, the bot attempts to sweep any remaining shares at fresh bids; if the full position cannot be sold, the remainder waits for official resolution, checked every 10 seconds.
 
-The dashboard shows live prices, recent high/trough, pullback/bounce size, entries used, and current trade-window status for UP and DOWN separately.
+The dashboard shows the triggering side and opposite side to be bought, live prices, recent high/trough, pullback/bounce size, entries used, and current trade-window status. Orders, positions, and exits are labeled by the side actually bought.
 
 The demo paper ledger is stored separately from the live-order ledger on the existing Railway volume at `/data/pressure-paper-state.json`. On first startup, the app imports the current demo snapshot from its existing dashboard before opening the new service; if that import or validation fails, it does not start a fresh empty bot. Afterward, trade/history changes and periodic checkpoints are saved atomically and restored on restart. A one-time `PAPER_HISTORY_RESET_VERSION` change intentionally starts a fresh demo ledger.
 
