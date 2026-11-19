@@ -13,7 +13,7 @@ This document does not authorize a real order or a production deployment. Never 
 
 ## 2. Current strategy
 
-The full active rules are in `DEMO_RUNBOOK.md`. In short, during seconds 0–240 the bot may buy 20 shares on either side after a $0.04 pullback from its 20-second reference high, followed by a $0.01 bounce and two rising quotes. Each side has a separate 10-second cooldown, must recover $0.02 before rearming, and is capped at four entries per five-minute window. Entries sweep visible asks up to $0.85 and include modeled taker fees. The bot sells all current-window shares on one side together only when the full visible bid sweep is at least $0.05 above weighted entry and net profitable after modeled fees. After second 240 it makes no strategy trades; unsold shares wait for official resolution, checked every 10 seconds.
+The full active rules are in `DEMO_RUNBOOK.md`. In short, during seconds 0–240 the bot may buy 20 shares on either side after a $0.04 pullback from its 20-second reference high, followed by a $0.01 bounce and two rising quotes. Each side has a separate 10-second cooldown, must recover $0.02 before rearming, and is capped at two entries per five-minute window. Entries sweep visible asks up to $0.85 and include modeled taker fees. Profitable spikes retain the existing exit; a side also exits when its cumulative net window loss reaches $5. At second 240, the bot attempts to sweep any remaining shares at fresh bids; if the full position cannot be sold, the remainder waits for official resolution, checked every 10 seconds.
 
 The dashboard shows live prices, recent high/trough, pullback/bounce size, entries used, and current trade-window status for UP and DOWN separately.
 

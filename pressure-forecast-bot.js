@@ -634,13 +634,20 @@ class PressureForecastBot extends WickBot {
     if (!this.market || now >= Number(this.market.end)) return;
     for (const position of this.positions) {
       if (position.windowStart !== this.market.start || position.status !== 'OPEN') continue;
+      if (position.strategyVersion === 'DIP_REBOUND_V1') continue;
       const quote = this.liveQuotes[position.side];
-      if (position.strategyVersion === 'DIP_REBOUND_V1') {
-        this.processSpikeExit(position.side, now);
-        continue;
-      }
       if (!this.isTakeProfitQuote(quote, now, position)) continue;
       this.finalizeTakeProfit(position, Number(quote.updatedAt));
+    }
+
+    const elapsed = now - Number(this.market.start);
+    for (const side of SIDES) {
+      if (!this.openDipPositions(this.market.start, side).length) continue;
+      if (elapsed >= config.DIP_TRADE_WINDOW_MS) {
+        this.processTimeCutoffExit(side, now);
+      } else if (!this.processSideLossStop(side, now)) {
+        this.processSpikeExit(side, now);
+      }
     }
   }
 
@@ -722,7 +729,7 @@ class PressureForecastBot extends WickBot {
 
     if (!tradeOpen) {
       candidate.reason = elapsed >= config.DIP_TRADE_WINDOW_MS
-        ? 'Entry and spike-trading window is closed; remaining shares wait for official resolution.'
+        ? 'Entry window is closed; the bot is attempting a timed bid-sweep exit, then falls back to official resolution if it cannot fill.'
         : 'Waiting for this five-minute market window to start.';
       return candidate;
     }
@@ -781,7 +788,7 @@ class PressureForecastBot extends WickBot {
     let reason = 'UP and DOWN are monitored separately for a dip followed by a confirmed rebound.';
     if (elapsed >= config.DIP_TRADE_WINDOW_MS) {
       status = 'TRADE_WINDOW_CLOSED';
-      reason = 'Trading is limited to the first 240 seconds; open shares now wait for official resolution.';
+      reason = `Entries close after ${config.DIP_TRADE_WINDOW_MS / 1000} seconds; remaining shares are swept at executable bids or sent to official resolution if a full exit is unavailable.`;
     } else if (!ready) {
       status = 'WAITING_FOR_CLOB';
       reason = 'Waiting for fresh Polymarket quotes; no Binance or model signal is required.';
@@ -859,11 +866,7 @@ class PressureForecastBot extends WickBot {
     const tradeCutoff = windowStart + config.DIP_TRADE_WINDOW_MS;
     if (now >= tradeCutoff) return false;
 
-    const positions = this.positions.filter((position) =>
-      position.windowStart === windowStart
-      && position.side === side
-      && position.strategyVersion === 'DIP_REBOUND_V1'
-      && position.status === 'OPEN');
+    const positions = this.openDipPositions(windowStart, side);
     if (!positions.length) return false;
     const quote = this.freshQuote(side, now);
     if (!quote || Number(quote.updatedAt) >= tradeCutoff) return false;
@@ -884,7 +887,117 @@ class PressureForecastBot extends WickBot {
 
     const execution = sweepBook(quote.bidLevels, shares, 'SELL', this.market, { consume: true });
     if (!execution.complete) return false;
-    const order = this.createOrder('SELL_SPIKE', side, shares, now, execution);
+    return this.executeSideExit({
+      side,
+      now,
+      positions,
+      execution,
+      kind: 'SELL_SPIKE',
+      exitReason: 'PROFITABLE_SPIKE_TAKER_SWEEP',
+      settlementBasis: 'PAPER_TAKER_SPIKE_EXIT',
+      event: 'PAPER_DIP_SPIKE_EXIT_FILLED',
+      logData: {
+        netProfit,
+        positions: positions.length,
+      },
+    });
+  }
+
+  openDipPositions(windowStart, side) {
+    return this.positions.filter((position) =>
+      Number(position.windowStart) === Number(windowStart)
+      && position.side === side
+      && position.strategyVersion === 'DIP_REBOUND_V1'
+      && position.status === 'OPEN');
+  }
+
+  processSideLossStop(side, now) {
+    if (!SIDES.includes(side) || !this.market) return false;
+    const windowStart = Number(this.market.start);
+    const positions = this.openDipPositions(windowStart, side);
+    if (!positions.length) return false;
+
+    const quote = this.freshQuote(side, now);
+    if (!quote) return false;
+    const shares = positions.reduce((total, position) => total + Number(position.shares || 0), 0);
+    const openCost = positions.reduce((total, position) => total + Number(position.totalCost || 0), 0);
+    if (!(shares > 0)) return false;
+
+    const preview = sweepBook(quote.bidLevels, shares, 'SELL', this.market);
+    if (!preview.complete) return false;
+    const realizedEarlierThisWindow = this.positions
+      .filter((position) =>
+        Number(position.windowStart) === windowStart
+        && position.side === side
+        && position.strategyVersion === 'DIP_REBOUND_V1'
+        && position.status !== 'OPEN'
+        && position.status !== 'PENDING_CLOB_RESULT')
+      .reduce((total, position) => total + Number(position.realizedPnl || 0), 0);
+    const sideWindowPnl = realizedEarlierThisWindow + preview.netProceeds - openCost;
+    if (sideWindowPnl > -config.DIP_MAX_SIDE_LOSS + EPSILON) return false;
+
+    const execution = sweepBook(quote.bidLevels, shares, 'SELL', this.market, { consume: true });
+    if (!execution.complete) return false;
+
+    // A side that reaches its loss budget cannot re-enter during this window.
+    this.dipEntryCountBySide[side] = config.DIP_MAX_ENTRIES_PER_SIDE;
+    this.dipArmedBySide[side] = false;
+    this.dipRearmPriceBySide[side] = null;
+    return this.executeSideExit({
+      side,
+      now,
+      positions,
+      execution,
+      kind: 'SELL_RISK_STOP',
+      exitReason: 'MAX_SIDE_LOSS_STOP',
+      settlementBasis: 'PAPER_TAKER_RISK_STOP',
+      event: 'PAPER_DIP_SIDE_LOSS_STOP_FILLED',
+      logData: {
+        sideWindowPnlBeforeExit: sideWindowPnl,
+        lossLimit: config.DIP_MAX_SIDE_LOSS,
+        realizedEarlierThisWindow,
+      },
+    });
+  }
+
+  processTimeCutoffExit(side, now) {
+    if (!SIDES.includes(side) || !this.market) return false;
+    const positions = this.openDipPositions(this.market.start, side);
+    if (!positions.length) return false;
+    const quote = this.freshQuote(side, now);
+    if (!quote) return false;
+    const shares = positions.reduce((total, position) => total + Number(position.shares || 0), 0);
+    if (!(shares > 0)) return false;
+    const execution = sweepBook(quote.bidLevels, shares, 'SELL', this.market, { consume: true });
+    if (!execution.complete) return false;
+    return this.executeSideExit({
+      side,
+      now,
+      positions,
+      execution,
+      kind: 'SELL_TIME_CUTOFF',
+      exitReason: 'TRADE_WINDOW_CUTOFF_EXIT',
+      settlementBasis: 'PAPER_TAKER_TIME_CUTOFF_EXIT',
+      event: 'PAPER_DIP_TIME_CUTOFF_EXIT_FILLED',
+      logData: {
+        cutoffSeconds: config.DIP_TRADE_WINDOW_MS / 1000,
+      },
+    });
+  }
+
+  executeSideExit({
+    side,
+    now,
+    positions,
+    execution,
+    kind,
+    exitReason,
+    settlementBasis,
+    event,
+    logData = {},
+  }) {
+    const shares = positions.reduce((total, position) => total + Number(position.shares || 0), 0);
+    const order = this.createOrder(kind, side, shares, now, execution);
     order.status = 'FILLED';
     order.filledAt = now;
     order.matchedShares = execution.filledShares;
@@ -893,7 +1006,7 @@ class PressureForecastBot extends WickBot {
     order.grossProceeds = execution.gross;
     order.netProceeds = execution.netProceeds;
     order.positionIds = positions.map((position) => position.id);
-    order.exitReason = 'NET_PROFITABLE_SPIKE';
+    order.exitReason = exitReason;
     order.fills = execution.fills;
     this.cash += execution.netProceeds;
 
@@ -912,21 +1025,22 @@ class PressureForecastBot extends WickBot {
       position.exitFees = fees;
       position.realizedPnl = gross - fees - Number(position.totalCost || 0);
       position.status = 'SETTLED_EXIT';
-      position.exitReason = 'PROFITABLE_SPIKE_TAKER_SWEEP';
-      position.settlementBasis = 'PAPER_TAKER_SPIKE_EXIT';
+      position.exitReason = exitReason;
+      position.settlementBasis = settlementBasis;
       position.closedAt = now;
       position.settledAt = now;
       position.exitOrderId = order.id;
     }
-    this.log('PAPER_DIP_SPIKE_EXIT_FILLED', {
+    this.log(event, {
       orderId: order.id,
       side,
       shares,
       averageExit: execution.averagePrice,
       grossProceeds: execution.gross,
       fees: execution.fees,
-      netProfit,
+      netProceeds: execution.netProceeds,
       positions: positions.length,
+      ...logData,
     });
     return true;
   }
@@ -1272,7 +1386,7 @@ class PressureForecastBot extends WickBot {
         execution: 'PAPER ONLY',
         markets: ['BTC 5m'],
         orderType: 'VISIBLE_BOOK_TAKER_SWEEP',
-        exit: `Within the first ${config.DIP_TRADE_WINDOW_MS / 1000} seconds, sell all current-window UP or DOWN shares together only when the executable bid sweep is at least $${config.DIP_SPIKE_MIN_PRICE_MOVE.toFixed(2)} above average entry and net profit after modeled taker fees is at least $${config.DIP_SPIKE_MIN_NET_PROFIT_PER_SHARE.toFixed(2)} per share. Otherwise hold for official resolution.`,
+        exit: `Before ${config.DIP_TRADE_WINDOW_MS / 1000}s, keep the existing profitable-spike exit and stop a side when its net window P&L reaches -$${config.DIP_MAX_SIDE_LOSS.toFixed(2)}. At ${config.DIP_TRADE_WINDOW_MS / 1000}s, attempt a full executable bid sweep; if fresh depth cannot fill the whole side, remaining shares go to official resolution.`,
         liveTradingEnabled: false,
         realOrderModulesLoaded: false,
         entryShares: config.DIP_ENTRY_SHARES,
@@ -1290,18 +1404,20 @@ class PressureForecastBot extends WickBot {
           rearmRecovery: config.DIP_REARM_RECOVERY,
           maxEntriesPerWindow: `${config.DIP_MAX_ENTRIES_PER_SIDE} per side`,
         },
-        repeatEntryRule: `UP and DOWN are independent. Each can buy ${config.DIP_ENTRY_SHARES} shares on up to ${config.DIP_MAX_ENTRIES_PER_SIDE} separate dip setups per window, with a ${config.DIP_ENTRY_COOLDOWN_MS / 1000}-second cooldown and a $${config.DIP_REARM_RECOVERY.toFixed(2)} recovery required before that side rearms.`,
+        repeatEntryRule: `UP and DOWN are independent. Each can buy ${config.DIP_ENTRY_SHARES} shares on up to ${config.DIP_MAX_ENTRIES_PER_SIDE} dip setups per window, with a ${config.DIP_ENTRY_COOLDOWN_MS / 1000}-second cooldown and a $${config.DIP_REARM_RECOVERY.toFixed(2)} recovery before rearming. A side that hits its loss limit cannot re-enter that window.`,
         priceFeed: this.priceFeed?.snapshot?.() || null,
         exits: {
-          mode: 'SPIKE_EXIT_OR_OFFICIAL_RESOLUTION',
+          mode: 'SPIKE_EXIT_SIDE_LOSS_LIMIT_AND_TIME_CUTOFF',
           takeProfit: true,
           takeProfitTrigger: config.DIP_SPIKE_MIN_PRICE_MOVE,
           takeProfitPayout: null,
-          stopLoss: false,
+          stopLoss: true,
+          stopLossDollarsPerSidePerWindow: config.DIP_MAX_SIDE_LOSS,
+          timedExitAtSeconds: config.DIP_TRADE_WINDOW_MS / 1000,
           tradeWindowMs: config.DIP_TRADE_WINDOW_MS,
           minimumNetProfitPerShare: config.DIP_SPIKE_MIN_NET_PROFIT_PER_SHARE,
           resolutionPollMs: config.RESOLUTION_POLL_MS,
-          otherwise: 'After 240 seconds, stop strategy orders. Hold unsold shares until the original Polymarket market officially resolves.',
+          otherwise: 'At 240 seconds, sweep all same-side shares at fresh executable bids. If a full fill is unavailable, hold the remainder for official resolution.',
         },
       },
       forecast: this.forecast,

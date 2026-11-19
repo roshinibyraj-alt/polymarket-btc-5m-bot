@@ -252,7 +252,7 @@
     <div class="events" id="events"><div class="empty">Waiting for activity…</div></div>
   </section>
 
-  <p class="foot">Paper-only strategy: monitor UP and DOWN independently using Polymarket midpoint history. A side may buy 20 shares when it has fallen at least $0.04 from the reference high over the last 20 seconds, then rebounds at least $0.01 from a recent trough with two rising quotes. Maximum four entries per side per 5-minute window, at least 10 seconds apart; that side must recover $0.02 from its last trigger before it rearms. Buy taker sweeps are capped at $0.85. Through second 240, sell all open shares on a side only when the visible bid sweep is at least $0.05 above weighted entry and remains profitable after modeled fees. After second 240, make no strategy trades; unsold shares wait for official resolution. The demo runner does not load real-order modules. This experimental approach is not a claim of profitability.</p>
+  <p class="foot">Paper-only strategy: monitor UP and DOWN independently using Polymarket midpoint history. A side may buy 20 shares when it has fallen at least $0.04 from the reference high over the last 20 seconds, then rebounds at least $0.01 from a recent trough with two rising quotes. Maximum two entries per side per 5-minute window, at least 10 seconds apart; that side must recover $0.02 from its last trigger before it rearms. Buy taker sweeps are capped at $0.85. Keep the existing profitable-spike exit; sell the side if its combined net window P&amp;L reaches -$5. At second 240, try to sweep remaining shares at current bids; if the full position cannot fill, send the unsold shares to official resolution. The demo runner does not load real-order modules. These risk controls do not guarantee a profit or cap losses during price gaps or thin books.</p>
   <div class="error" id="error" role="status"></div>
 </main>
 <script>
@@ -324,9 +324,13 @@
     const rows = orders.map(o => {
       const outcome = o.outcome || o.side || '—';
       const exit = o.kind === 'BUY_DIP'
-        ? 'Sell full side on profitable spike / resolution'
+        ? 'Spike TP, $5 side loss cap, or 240s exit'
         : o.kind === 'SELL_SPIKE'
           ? 'Taker sweep of all open shares on this side'
+          : o.kind === 'SELL_RISK_STOP'
+            ? 'Taker sweep at the side loss limit'
+            : o.kind === 'SELL_TIME_CUTOFF'
+              ? 'Taker sweep at 240 seconds'
           : o.kind === 'ENTRY'
             ? (o.sourceExitKind ? `${esc(o.sourceExitKind)} ${price(o.sourceExitLimitPrice)}` : o.takeProfitPrice ? `TP ${price(o.takeProfitPrice)} / SL ${price(o.stopLossPrice)}` : 'Paper hold / resolution')
             : '—';

@@ -178,7 +178,7 @@ test('one side can rearm only after recovery, cooldown, and another confirmed di
   assert.equal(bot.dipEntryCountBySide.UP, 2);
 });
 
-test('the strategy stops both entries and spike sales at second 240', () => {
+test('the strategy stops entries at second 240 and sweeps remaining shares', () => {
   const bot = makeBot();
   addDipHistory(bot, 'UP', { now: WINDOW_START + 241_000, start: WINDOW_START + 229_000 });
   const now = WINDOW_START + 241_000;
@@ -198,8 +198,38 @@ test('the strategy stops both entries and spike sales at second 240', () => {
   bot.positions.push(position);
   setQuote(bot, 'UP', 0.50, 0.52, 100, now);
   assert.equal(bot.processSpikeExit('UP', now), false);
-  assert.equal(position.status, 'OPEN');
+  bot.applyTakeProfitExits(now);
+  assert.equal(position.status, 'SETTLED_EXIT');
+  assert.equal(position.exitReason, 'TRADE_WINDOW_CUTOFF_EXIT');
+  assert.equal(bot.orders[0].kind, 'SELL_TIME_CUTOFF');
+  assert.equal(bot.orders[0].matchedShares, 20);
   assert.equal(bot.forecast.status, 'TRADE_WINDOW_CLOSED');
+});
+
+test('a $5 cumulative side loss is swept and blocks further entries that window', () => {
+  const bot = makeBot();
+  const position = {
+    id: 'loss-up',
+    side: 'UP',
+    strategyVersion: 'DIP_REBOUND_V1',
+    shares: 20,
+    cost: 8,
+    totalCost: 8,
+    avgEntry: 0.40,
+    windowStart: WINDOW_START,
+    status: 'OPEN',
+  };
+  bot.positions.push(position);
+  setQuote(bot, 'UP', 0.14, 0.16, 100, NOW);
+
+  bot.applyTakeProfitExits(NOW);
+
+  assert.equal(position.status, 'SETTLED_EXIT');
+  assert.equal(position.exitReason, 'MAX_SIDE_LOSS_STOP');
+  assert.equal(bot.orders[0].kind, 'SELL_RISK_STOP');
+  assert.equal(bot.orders[0].matchedShares, 20);
+  assert.equal(bot.dipEntryCountBySide.UP, config.DIP_MAX_ENTRIES_PER_SIDE);
+  assert.equal(bot.dipArmedBySide.UP, false);
 });
 
 test('a profitable spike sells all same-side shares together and leaves the other side alone', () => {
@@ -246,7 +276,7 @@ test('missing quotes do not exit open positions', async () => {
   assert.deepEqual(bot.positions.map((position) => position.status), ['OPEN', 'OPEN']);
   assert.equal(bot.orders.some((order) => order.action === 'SELL'), false);
   assert.equal(bot.snapshot().strategy.exits.takeProfit, true);
-  assert.equal(bot.snapshot().strategy.exits.stopLoss, false);
+  assert.equal(bot.snapshot().strategy.exits.stopLoss, true);
 });
 
 test('current Polymarket prices come from the CLOB feed cache, not repeated REST book polling', async () => {
@@ -353,7 +383,7 @@ test('reuses the current-window market instead of re-fetching Gamma every refres
   assert.equal(bot.error, null);
 });
 
-test('fresh $0.99 best bid pays $1 per share with no stop-loss', async () => {
+test('fresh $0.99 best bid pays $1 per share while risk exits remain enabled', async () => {
   const bot = makeBot();
   const position = {
     id: 'tp-up',
@@ -506,13 +536,15 @@ test('paper snapshot identifies the independent dip-and-spike demo strategy', ()
   assert.match(state.strategy.repeatEntryRule, /recover/i);
   assert.equal(state.strategy.maxBuyPrice, 0.85);
   assert.equal(state.strategy.entryShares, 20);
-  assert.equal(state.strategy.maxEntriesPerSide, 4);
+  assert.equal(state.strategy.maxEntriesPerSide, 2);
   assert.equal(state.strategy.tradeWindowMs, 240_000);
-  assert.match(state.strategy.exit, /sell all.*official resolution/i);
+  assert.match(state.strategy.exit, /net window P&L reaches -\$5\.00/i);
   assert.equal(state.strategy.exits.takeProfit, true);
   assert.equal(state.strategy.exits.takeProfitTrigger, 0.05);
   assert.equal(state.strategy.exits.takeProfitPayout, null);
-  assert.equal(state.strategy.exits.stopLoss, false);
+  assert.equal(state.strategy.exits.stopLoss, true);
+  assert.equal(state.strategy.exits.stopLossDollarsPerSidePerWindow, 5);
+  assert.equal(state.strategy.exits.timedExitAtSeconds, 240);
   assert.equal(state.strategy.signalState.status, 'WAITING_FOR_DATA');
   assert.equal(state.strategy.priceFeed.source, 'Binance BTCUSDT aggregate trades');
   assert.equal(state.account.startingCapital, 10_000);
