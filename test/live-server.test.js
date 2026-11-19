@@ -54,13 +54,15 @@ test('live server serves the dual-engine dashboard without implying active real 
   const html = await page.text();
   assert.match(html, /BTC Dual Engine\s*\|\s*Paper Trading/);
   assert.match(html, /Real-order module status/);
-  assert.match(html, /Two engines, paired entries/);
+  assert.match(html, /switch sides at \$0\.65/);
+  assert.match(html, /Live side swaps/);
+  assert.match(html, /ENGINE →/);
   assert.match(html, /CLOB best bid mark/);
   assert.match(html, /Floating P&amp;L/);
   assert.match(html, /Capital committed/);
   assert.match(html, /BOTH SIDES FILLED/);
   assert.doesNotMatch(html, /15m/i);
   assert.match(html, /Paper only/i);
-  assert.match(html, /UP taker/);
+  assert.match(html, /Market buy/);
   assert.doesNotMatch(html, /expected net edge/i);
 });

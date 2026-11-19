@@ -127,18 +127,18 @@ test('taker sweep observes the buy ceiling, sell floor, and per-level fees', () 
 test('either entry trigger fills both paired legs and UP still sweeps through $0.99', () => {
   const bot = makeBot();
   bot.openStrategyWindow(WINDOW_START, NOW - 1);
-  setQuote(bot, 'UP', 0.69, 0.70, 1000, NOW);
+  setQuote(bot, 'UP', 0.49, 0.51, 1000, NOW);
   setQuote(bot, 'DOWN', 0.49, 0.51, 1000, NOW);
   bot.processEngineTriggers(NOW);
   assert.equal(bot.positions.length, 0);
 
-  setQuote(bot, 'UP', 0.70, 0.71, 1000, NOW + 1);
+  setQuote(bot, 'UP', 0.50, 0.72, 1000, NOW + 1);
   bot.processEngineTriggers(NOW + 1);
   assert.equal(bot.positions.length, 2);
   const upPosition = bot.positions.find((position) => position.side === 'UP');
   const downPosition = bot.positions.find((position) => position.side === 'DOWN');
   assert.equal(upPosition.shares, 50);
-  assert.equal(upPosition.avgEntry, 0.71);
+  assert.equal(upPosition.avgEntry, 0.72);
   assert.equal(downPosition.shares, 50);
   assert.equal(downPosition.avgEntry, 0.30);
   assert.equal(upPosition.pairId, downPosition.pairId);
@@ -161,10 +161,94 @@ test('either entry trigger fills both paired legs and UP still sweeps through $0
     downPosition.markBid * downPosition.shares - downPosition.totalCost);
 });
 
+test('an unfilled engine pair swaps sides and carries the DOWN-engine stake after a $0.65 midpoint crossing', () => {
+  const bot = makeBot();
+  bot.downProfitCarry = 3;
+  bot.openStrategyWindow(WINDOW_START, NOW - 1);
+  const originalOrder = bot.orders.find((order) => order.kind === 'BUY_DOWN_LIMIT');
+  assert.equal(originalOrder.side, 'DOWN');
+  assert.equal(originalOrder.shares, 60);
+
+  setQuote(bot, 'UP', 0.49, 0.51, 1000, NOW);
+  setQuote(bot, 'DOWN', 0.49, 0.51, 1000, NOW);
+  bot.processEngineTriggers(NOW);
+  assert.equal(bot.sideSwaps.length, 0);
+
+  setQuote(bot, 'UP', 0.34, 0.36, 1000, NOW + 1);
+  setQuote(bot, 'DOWN', 0.64, 0.66, 1000, NOW + 1);
+  bot.processEngineTriggers(NOW + 1);
+
+  assert.equal(originalOrder.status, 'CANCELLED_SIDE_SWAP');
+  assert.equal(bot.upEngine.side, 'DOWN');
+  assert.equal(bot.downEngine.side, 'UP');
+  assert.equal(bot.upEngine.shares, 50);
+  assert.equal(bot.downEngine.shares, 60);
+  const replacement = bot.orders.find((order) => order.id === bot.downEngine.orderId);
+  assert.equal(replacement.side, 'UP');
+  assert.equal(replacement.shares, 60);
+  assert.equal(replacement.limitPrice, 0.30);
+  assert.equal(bot.sideSwaps.length, 1);
+  assert.equal(bot.sideSwaps[0].triggerSide, 'DOWN');
+  assert.deepEqual(bot.sideSwaps[0].to, { UP: 'DOWN', DOWN: 'UP' });
+  assert.equal(bot.snapshot().markets['5m'].forecast.sideSwapCount, 1);
+});
+
+test('side swaps can repeat after a new opposite-side crossing and persist across restart', () => {
+  const bot = makeBot();
+  bot.openStrategyWindow(WINDOW_START, NOW - 1);
+  setQuote(bot, 'UP', 0.49, 0.51, 1000, NOW);
+  setQuote(bot, 'DOWN', 0.49, 0.51, 1000, NOW);
+  bot.processEngineTriggers(NOW);
+
+  setQuote(bot, 'UP', 0.34, 0.36, 1000, NOW + 1);
+  setQuote(bot, 'DOWN', 0.64, 0.66, 1000, NOW + 1);
+  bot.processEngineTriggers(NOW + 1);
+  const firstReplacement = bot.orders.find((order) => order.id === bot.downEngine.orderId);
+  assert.equal(firstReplacement.side, 'UP');
+
+  setQuote(bot, 'UP', 0.39, 0.41, 1000, NOW + 2);
+  setQuote(bot, 'DOWN', 0.59, 0.61, 1000, NOW + 2);
+  bot.processEngineTriggers(NOW + 2);
+  setQuote(bot, 'UP', 0.64, 0.66, 1000, NOW + 3);
+  setQuote(bot, 'DOWN', 0.34, 0.36, 1000, NOW + 3);
+  bot.processEngineTriggers(NOW + 3);
+
+  assert.equal(bot.sideSwaps.length, 2);
+  assert.equal(bot.upEngine.side, 'UP');
+  assert.equal(bot.downEngine.side, 'DOWN');
+  assert.equal(firstReplacement.status, 'CANCELLED_SIDE_SWAP');
+  const secondReplacement = bot.orders.find((order) => order.id === bot.downEngine.orderId);
+  assert.equal(secondReplacement.side, 'DOWN');
+
+  const restored = makeBot();
+  restored.restorePersistentState(bot.serializePersistentState());
+  assert.equal(restored.upEngine.side, 'UP');
+  assert.equal(restored.downEngine.side, 'DOWN');
+  assert.equal(restored.sideSwaps.length, 2);
+});
+
+test('filled paired positions disable all later $0.65 side swaps in that window', () => {
+  const bot = makeBot();
+  bot.openStrategyWindow(WINDOW_START, NOW - 1);
+  setQuote(bot, 'UP', 0.39, 0.41, 1000, NOW);
+  setQuote(bot, 'DOWN', 0.28, 0.30, 1000, NOW);
+  bot.processEngineTriggers(NOW);
+  assert.equal(bot.positions.length, 2);
+
+  setQuote(bot, 'UP', 0.34, 0.36, 1000, NOW + 1);
+  setQuote(bot, 'DOWN', 0.64, 0.66, 1000, NOW + 1);
+  bot.processEngineTriggers(NOW + 1);
+
+  assert.equal(bot.sideSwaps.length, 0);
+  assert.equal(bot.upEngine.side, 'UP');
+  assert.equal(bot.downEngine.side, 'DOWN');
+  assert.equal(bot.positions.length, 2);
+});
+
 test('UP engine rejects the full entry if asks exceed its $0.99 sweep ceiling', () => {
   const bot = makeBot();
   bot.openStrategyWindow(WINDOW_START, NOW - 1);
-  setQuote(bot, 'UP', 0.98, 0.995, 1000, NOW);
+  setQuote(bot, 'UP', 0.30, 0.995, 1000, NOW);
   setQuote(bot, 'DOWN', 0.49, 0.51, 1000, NOW);
 
   bot.processEngineTriggers(NOW);
@@ -300,6 +384,8 @@ test('strategy snapshot exposes two paper engines and disables live trading', ()
   assert.equal(state.strategy.downLimitPrice, 0.30);
   assert.equal(state.strategy.takeProfitBidTrigger, 0.99);
   assert.equal(state.strategy.takeProfitPayout, 1);
+  assert.equal(state.strategy.sideSwapTriggerMid, 0.65);
+  assert.deepEqual(state.strategy.sideAssignments, { UP: 'UP', DOWN: 'DOWN' });
   assert.equal(state.strategy.exits.stopLoss, false);
   assert.equal(state.strategy.exits.timedExitAtSeconds, null);
 });
@@ -743,7 +829,9 @@ test('paper snapshot describes the current dual-engine strategy and inactive liv
   assert.equal(state.strategy.execution, 'PAPER ONLY');
   assert.equal(state.strategy.liveTradingEnabled, false);
   assert.equal(state.strategy.realOrderModulesLoaded, false);
-  assert.equal(state.strategy.orders.type, 'UP taker sweep and DOWN resting limit; either trigger records both paper fills');
+  assert.equal(state.strategy.orders.type, 'UP-engine taker sweep and DOWN-engine resting limit; sides can swap before a fill');
+  assert.equal(state.strategy.sideSwapTriggerMid, 0.65);
+  assert.deepEqual(state.strategy.sideAssignments, { UP: 'UP', DOWN: 'DOWN' });
   assert.match(state.strategy.repeatEntryRule, /50 shares/);
   assert.match(state.strategy.repeatEntryRule, /profit \/ \$0\.30/);
   assert.equal(state.strategy.upMaxSweepPrice, 0.99);

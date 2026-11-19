@@ -13,7 +13,7 @@ const {
 
 const EPSILON = 1e-9;
 const SIDES = ['UP', 'DOWN'];
-const DUAL_ENGINE_STRATEGY_VERSION = 'BTC_DUAL_ENGINE_071_030_V1';
+const DUAL_ENGINE_STRATEGY_VERSION = 'BTC_DUAL_ENGINE_071_030_SWAP_065_V1';
 
 function oppositeSide(side) {
   if (side === 'UP') return 'DOWN';
@@ -136,6 +136,9 @@ class PressureForecastBot extends WickBot {
     this.downSharesThisWindow = config.ENGINE_BASE_SHARES;
     this.upEngine = this.emptyEngine('UP');
     this.downEngine = this.emptyEngine('DOWN');
+    this.sideSwaps = [];
+    this.lastObservedMidBySide = { UP: null, DOWN: null };
+    this.lastObservedAtBySide = { UP: null, DOWN: null };
     this.forecast = this.emptyForecast('Waiting for the current BTC 5-minute market.');
     this.lastEntryAt = null;
     this.lastEntryAtBySide = { UP: null, DOWN: null };
@@ -190,6 +193,9 @@ class PressureForecastBot extends WickBot {
       downSharesThisWindow: this.downSharesThisWindow,
       upEngine: this.upEngine,
       downEngine: this.downEngine,
+      sideSwaps: this.sideSwaps,
+      lastObservedMidBySide: this.lastObservedMidBySide,
+      lastObservedAtBySide: this.lastObservedAtBySide,
       actionSequence: this.actionSequence,
       completedWindows: [...this.completedWindows.entries()],
       lastResolutionCheckAt: [...this.lastResolutionCheckAt.entries()],
@@ -230,8 +236,26 @@ class PressureForecastBot extends WickBot {
     this.lastEntryAtBySide = state.lastEntryAtBySide || { UP: null, DOWN: null };
     this.downProfitCarry = Math.max(0, Number(state.downProfitCarry) || 0);
     this.downSharesThisWindow = Number(state.downSharesThisWindow) || config.ENGINE_BASE_SHARES;
-    this.upEngine = state.upEngine || this.emptyEngine('UP');
-    this.downEngine = state.downEngine || this.emptyEngine('DOWN');
+    this.upEngine = { ...this.emptyEngine('UP'), ...(state.upEngine || {}) };
+    this.downEngine = { ...this.emptyEngine('DOWN'), ...(state.downEngine || {}) };
+    if (!SIDES.includes(this.upEngine.side) || !SIDES.includes(this.downEngine.side)
+      || this.upEngine.side === this.downEngine.side) {
+      this.upEngine.side = 'UP';
+      this.downEngine.side = 'DOWN';
+    }
+    this.sideSwaps = Array.isArray(state.sideSwaps) ? state.sideSwaps.slice(-100) : [];
+    this.lastObservedMidBySide = {
+      UP: Number.isFinite(Number(state.lastObservedMidBySide?.UP))
+        ? Number(state.lastObservedMidBySide.UP) : null,
+      DOWN: Number.isFinite(Number(state.lastObservedMidBySide?.DOWN))
+        ? Number(state.lastObservedMidBySide.DOWN) : null,
+    };
+    this.lastObservedAtBySide = {
+      UP: Number.isFinite(Number(state.lastObservedAtBySide?.UP))
+        ? Number(state.lastObservedAtBySide.UP) : null,
+      DOWN: Number.isFinite(Number(state.lastObservedAtBySide?.DOWN))
+        ? Number(state.lastObservedAtBySide.DOWN) : null,
+    };
     this.forecast = this.emptyForecast('Collecting fresh Polymarket quotes after restart.', 'WAITING_FOR_CLOB');
     this.actionSequence = Number(state.actionSequence) || 0;
     this.completedWindows = new Map(Array.isArray(state.completedWindows) ? state.completedWindows : []);
@@ -368,6 +392,7 @@ class PressureForecastBot extends WickBot {
       downProfitCarry: this.downProfitCarry,
       up: this.upEngine,
       down: this.downEngine,
+      sideSwaps: this.sideSwaps,
     };
   }
 
@@ -400,14 +425,16 @@ class PressureForecastBot extends WickBot {
       profitCarry: this.downProfitCarry,
       profitCarryShares: Math.round((this.downProfitCarry / config.ENGINE_DOWN_SHARE_PRICE) * 100) / 100,
     });
+    this.lastObservedMidBySide = { UP: null, DOWN: null };
+    this.lastObservedAtBySide = { UP: null, DOWN: null };
     this.forecast = this.emptyForecast('UP waits for its trigger; the DOWN limit is being placed.', 'ENGINES_ARMING');
     this.placeDownLimitOrder(start, now);
     this.log('PAPER_ENGINES_WINDOW_STARTED', {
       windowStart: start,
-      upShares: config.ENGINE_BASE_SHARES,
+      upShares: this.upEngine.shares,
       upTriggerAsk: config.ENGINE_UP_TRIGGER_ASK,
       downLimitPrice: config.ENGINE_DOWN_LIMIT_PRICE,
-      downShares: this.downSharesThisWindow,
+      downShares: this.downEngine.shares,
       downProfitCarry: this.downProfitCarry,
     });
   }
@@ -613,8 +640,9 @@ class PressureForecastBot extends WickBot {
   }
 
   placeDownLimitOrder(start, now) {
-    const shares = this.downSharesThisWindow;
-    const order = this.createOrder('BUY_DOWN_LIMIT', 'DOWN', shares, now, {
+    const side = this.downEngine.side;
+    const shares = Number(this.downEngine.shares) || this.downSharesThisWindow;
+    const order = this.createOrder('BUY_DOWN_LIMIT', side, shares, now, {
       complete: false,
       filledShares: 0,
       averagePrice: config.ENGINE_DOWN_LIMIT_PRICE,
@@ -627,6 +655,8 @@ class PressureForecastBot extends WickBot {
     order.maxPrice = null;
     order.matchedShares = 0;
     order.fee = 0;
+    order.engine = 'DOWN';
+    order.signalSide = side;
     order.fillModel = 'ASSUMED_PAIRED_FILL_WHEN_EITHER_ENTRY_TRIGGERS';
     this.downEngine.orderId = order.id;
     this.downEngine.status = 'RESTING';
@@ -634,6 +664,8 @@ class PressureForecastBot extends WickBot {
       orderId: order.id,
       windowStart: start,
       limitPrice: order.limitPrice,
+      side,
+      engine: 'DOWN',
       shares,
       downProfitCarry: this.downProfitCarry,
     });
@@ -643,8 +675,10 @@ class PressureForecastBot extends WickBot {
   updateEngineForecast(now) {
     const start = this.market?.start;
     if (!Number.isFinite(Number(start))) return;
-    const upQuote = this.liveQuotes.UP || {};
-    const downQuote = this.liveQuotes.DOWN || {};
+    const upSide = this.upEngine.side;
+    const downSide = this.downEngine.side;
+    const upQuote = this.liveQuotes[upSide] || {};
+    const downQuote = this.liveQuotes[downSide] || {};
     const elapsed = Number(now) - Number(start);
     const downPosition = this.downEngine.positionId
       ? this.positions.find((position) => position.id === this.downEngine.positionId)
@@ -664,7 +698,7 @@ class PressureForecastBot extends WickBot {
         : this.upEngine.status === 'OPEN' || this.downEngine.status === 'OPEN' ? 'POSITION_OPEN'
           : this.upEngine.status === 'TAKE_PROFIT' || this.downEngine.status === 'TAKE_PROFIT' ? 'TAKE_PROFIT_HIT'
             : 'ENGINES_ACTIVE',
-      reason: 'UP buys on its $0.71 ask trigger; DOWN rests at $0.30. Each engine manages its own position.',
+      reason: `UP engine is assigned to ${upSide}; DOWN engine is assigned to ${downSide}. Unfilled engines swap when either midpoint crosses $${config.ENGINE_SIDE_SWAP_TRIGGER_MID.toFixed(2)}.`,
       strategyVersion: DUAL_ENGINE_STRATEGY_VERSION,
       signalSource: 'POLYMARKET_CLOB_PRICE_ONLY_TWO_ENGINE',
       secondsIntoWindow: Math.max(0, elapsed / 1000),
@@ -675,6 +709,10 @@ class PressureForecastBot extends WickBot {
       downSharesNextWindow: Math.round(
         (config.ENGINE_BASE_SHARES + this.downProfitCarry / config.ENGINE_DOWN_SHARE_PRICE) * 100,
       ) / 100,
+      sideSwapTriggerMid: config.ENGINE_SIDE_SWAP_TRIGGER_MID,
+      sideAssignments: { UP: upSide, DOWN: downSide },
+      sideSwaps: this.sideSwaps.filter((swap) => Number(swap.windowStart) === Number(start)),
+      sideSwapCount: this.sideSwaps.filter((swap) => Number(swap.windowStart) === Number(start)).length,
       upQuote: { ...upQuote },
       downQuote: { ...downQuote },
       pairedEntry: {
@@ -713,6 +751,72 @@ class PressureForecastBot extends WickBot {
     };
   }
 
+  swapUnfilledEngineSides({ triggerSide, triggerMid, now }) {
+    const start = Number(this.market?.start);
+    if (!Number.isFinite(start)
+      || this.upEngine.positionId || this.downEngine.positionId
+      || this.positions.some((position) => Number(position.windowStart) === start
+        && ['OPEN', 'PENDING_CLOB_RESULT'].includes(position.status))) return false;
+
+    const oldUpSide = this.upEngine.side;
+    const oldDownSide = this.downEngine.side;
+    if (!SIDES.includes(oldUpSide) || !SIDES.includes(oldDownSide) || oldUpSide === oldDownSide) return false;
+
+    const canceledOrders = [];
+    for (const order of this.orders) {
+      if (Number(order.windowStart) !== start || order.action !== 'BUY' || order.status !== 'LIVE') continue;
+      order.status = 'CANCELLED_SIDE_SWAP';
+      order.closedAt = now;
+      order.cancelReason = 'Unfilled engine sides swapped at the $0.65 midpoint threshold.';
+      canceledOrders.push(order.id);
+    }
+
+    // Engine sizing travels with its strategy role as the assigned outcome changes.
+    this.upEngine.side = oldDownSide;
+    this.downEngine.side = oldUpSide;
+    this.upEngine.orderId = null;
+    this.upEngine.positionId = null;
+    this.upEngine.status = 'ARMED';
+    this.upEngine.fillStatus = 'NOT FILLED';
+    this.upEngine.triggerAt = null;
+    this.downEngine.orderId = null;
+    this.downEngine.positionId = null;
+    this.downEngine.status = 'RESTING';
+    this.downEngine.fillStatus = 'RESTING';
+    this.downEngine.triggerAt = null;
+
+    const swap = {
+      id: `side-swap-${start}-${this.sideSwaps.length + 1}`,
+      windowStart: start,
+      at: now,
+      triggerSide,
+      triggerMid: Number(triggerMid),
+      from: { UP: oldUpSide, DOWN: oldDownSide },
+      to: { UP: this.upEngine.side, DOWN: this.downEngine.side },
+      engineShares: {
+        UP: Number(this.upEngine.shares) || config.ENGINE_BASE_SHARES,
+        DOWN: Number(this.downEngine.shares) || this.downSharesThisWindow,
+      },
+      canceledOrderIds: canceledOrders,
+    };
+    this.sideSwaps.push(swap);
+    if (this.sideSwaps.length > 100) this.sideSwaps.splice(0, this.sideSwaps.length - 100);
+    this.placeDownLimitOrder(start, now);
+    this.log('PAPER_ENGINE_SIDE_SWAP', {
+      ...swap,
+      thresholdMid: config.ENGINE_SIDE_SWAP_TRIGGER_MID,
+      restingLimitSide: this.downEngine.side,
+      restingLimitPrice: config.ENGINE_DOWN_LIMIT_PRICE,
+      carriedStakeWithEngine: true,
+    });
+    this.forecast = this.emptyForecast(
+      `${triggerSide} midpoint reached $${Number(triggerMid).toFixed(3)}; the unfilled engine sides and stakes were swapped.`,
+      'ENGINE_SIDES_SWAPPED',
+    );
+    this.updateEngineForecast(now);
+    return true;
+  }
+
   processEngineTriggers(now) {
     if (!this.market || !Number.isFinite(Number(this.market.start))) return false;
     const start = Number(this.market.start);
@@ -722,11 +826,49 @@ class PressureForecastBot extends WickBot {
       return false;
     }
 
-    const upQuote = this.freshQuote('UP', now);
-    const downQuote = this.freshQuote('DOWN', now);
+    const outcomeQuotes = {
+      UP: this.freshQuote('UP', now),
+      DOWN: this.freshQuote('DOWN', now),
+    };
+    const upSide = this.upEngine.side;
+    const downSide = this.downEngine.side;
+    const upQuote = outcomeQuotes[upSide];
+    const downQuote = outcomeQuotes[downSide];
     const downOrder = this.downEngine.orderId
       ? this.orders.find((order) => order.id === this.downEngine.orderId)
       : null;
+
+    const hasWindowEntry = Boolean(this.upEngine.positionId || this.downEngine.positionId)
+      || this.positions.some((position) => Number(position.windowStart) === start
+        && ['OPEN', 'PENDING_CLOB_RESULT'].includes(position.status));
+    const thresholdCrossings = [];
+    for (const side of SIDES) {
+      const quote = outcomeQuotes[side];
+      if (!quote || Number(quote.updatedAt) < start || Number(quote.updatedAt) >= Number(this.market.end)) continue;
+      const updatedAt = Number(quote.updatedAt);
+      if (updatedAt <= Number(this.lastObservedAtBySide[side] ?? -Infinity)) continue;
+      const mid = Number(quote.mid);
+      if (!Number.isFinite(mid)) continue;
+      const previousMid = this.lastObservedMidBySide[side];
+      if (!hasWindowEntry
+        && mid + EPSILON >= config.ENGINE_SIDE_SWAP_TRIGGER_MID
+        && (previousMid == null || !Number.isFinite(Number(previousMid))
+          || Number(previousMid) < config.ENGINE_SIDE_SWAP_TRIGGER_MID)) {
+        thresholdCrossings.push({ side, mid, updatedAt });
+      }
+      this.lastObservedMidBySide[side] = mid;
+      this.lastObservedAtBySide[side] = updatedAt;
+    }
+    if (thresholdCrossings.length) {
+      thresholdCrossings.sort((a, b) => a.updatedAt - b.updatedAt);
+      const crossing = thresholdCrossings[thresholdCrossings.length - 1];
+      if (this.swapUnfilledEngineSides({
+        triggerSide: crossing.side,
+        triggerMid: crossing.mid,
+        now,
+      })) return true;
+    }
+
     const upTriggered = this.upEngine.status === 'ARMED'
       && upQuote
       && Number(upQuote.updatedAt) >= start
@@ -739,17 +881,19 @@ class PressureForecastBot extends WickBot {
       && Number(downQuote.mid) < config.ENGINE_DOWN_LIMIT_PRICE - EPSILON;
 
     let changed = false;
-    const hasWindowEntry = Boolean(this.upEngine.positionId || this.downEngine.positionId);
     if (!hasWindowEntry && (upTriggered || downTriggered)) {
-      const triggerSide = upTriggered ? 'UP' : 'DOWN';
+      const triggerSide = upTriggered ? upSide : downSide;
       this.log('PAPER_ENGINE_ENTRY_TRIGGERED', {
         windowStart: start,
         triggerSide,
+        upEngineSide: upSide,
+        downEngineSide: downSide,
         upAsk: upQuote?.bestAsk ?? null,
         downMid: downQuote?.mid ?? null,
         upTriggerAsk: config.ENGINE_UP_TRIGGER_ASK,
         downLimitPrice: config.ENGINE_DOWN_LIMIT_PRICE,
-        requestedUpShares: config.ENGINE_BASE_SHARES,
+        sideAssignments: { UP: upSide, DOWN: downSide },
+        requestedUpShares: Number(this.upEngine.shares) || config.ENGINE_BASE_SHARES,
         requestedDownShares: Number(downOrder?.shares) || this.downSharesThisWindow,
       });
       changed = this.fillPairedEnginePositions({
@@ -780,20 +924,23 @@ class PressureForecastBot extends WickBot {
       return false;
     }
 
+    const upSide = this.upEngine.side;
+    const downSide = this.downEngine.side;
+    const upShares = Number(this.upEngine.shares) || config.ENGINE_BASE_SHARES;
     const downShares = Number(downOrder.shares);
     const downCost = downShares * config.ENGINE_DOWN_LIMIT_PRICE;
     const upPreview = sweepBook(
       upQuote.askLevels,
-      config.ENGINE_BASE_SHARES,
+      upShares,
       'BUY',
       this.market,
       { maximumPrice: config.ENGINE_UP_MAX_SWEEP_PRICE },
     );
     if (!upPreview.complete || upPreview.totalCost + downCost > this.cash + EPSILON) {
       const reason = !upPreview.complete
-        ? `The paired UP leg cannot sweep ${config.ENGINE_BASE_SHARES} shares through $${config.ENGINE_UP_MAX_SWEEP_PRICE.toFixed(2)}.`
+        ? `The paired UP engine cannot sweep ${upShares} ${upSide} shares through $${config.ENGINE_UP_MAX_SWEEP_PRICE.toFixed(2)}.`
         : 'Insufficient paper cash to record both sides of the paired entry.';
-      const failedOrder = this.createOrder('BUY_UP_MARKET', 'UP', config.ENGINE_BASE_SHARES, now, upPreview);
+      const failedOrder = this.createOrder('BUY_UP_MARKET', upSide, upShares, now, upPreview);
       failedOrder.engine = 'UP';
       failedOrder.signalSide = triggerSide;
       failedOrder.pairedTriggerSide = triggerSide;
@@ -808,9 +955,11 @@ class PressureForecastBot extends WickBot {
       this.log('PAPER_PAIRED_ENTRY_BLOCKED', {
         triggerSide,
         reason,
-        upShares: config.ENGINE_BASE_SHARES,
+        upEngineSide: upSide,
+        upShares,
         upAverageAsk: upPreview.averagePrice,
         upCostWithFees: upPreview.totalCost,
+        downEngineSide: downSide,
         downShares,
         downCost,
         availableCash: this.cash,
@@ -822,7 +971,7 @@ class PressureForecastBot extends WickBot {
     this.upEngine.triggerAt = now;
     this.downEngine.status = 'ORDER_ATTEMPTED';
     this.downEngine.triggerAt = now;
-    const upPosition = this.executeBuy('UP', config.ENGINE_BASE_SHARES, now, {
+    const upPosition = this.executeBuy(upSide, upShares, now, {
       kind: 'BUY_UP_MARKET',
       engine: 'UP',
       signalSide: triggerSide,
@@ -831,7 +980,7 @@ class PressureForecastBot extends WickBot {
     });
     if (!upPosition) {
       this.upEngine.orderId = this.orders[0]?.windowStart === Number(this.market.start)
-        && this.orders[0]?.side === 'UP' ? this.orders[0].id : null;
+        && this.orders[0]?.side === upSide ? this.orders[0].id : null;
       this.upEngine.status = 'NO_FILL';
       this.upEngine.fillStatus = 'NOT FILLED';
       this.downEngine.status = 'RESTING';
@@ -925,13 +1074,13 @@ class PressureForecastBot extends WickBot {
       marketId: this.market.id,
       slug: this.market.slug,
       title: this.market.title,
-      side: 'DOWN',
-      outcome: 'DOWN',
+      side: order.side,
+      outcome: order.side,
       engine: 'DOWN',
-      signalSide: 'DOWN',
-      tokenId: this.market.tokens.DOWN,
+      signalSide: pairedTriggerSide || order.side,
+      tokenId: this.market.tokens[order.side],
       entryKey: order.id,
-      entryLabel: 'DOWN resting limit at $0.30',
+      entryLabel: `${order.side} resting limit at $${price.toFixed(2)}`,
       entryType: 'PAPER_LIMIT_DOWN_ENGINE',
       strategyVersion: DUAL_ENGINE_STRATEGY_VERSION,
       orderType: 'PAPER_LIMIT_RESTING',
@@ -964,7 +1113,7 @@ class PressureForecastBot extends WickBot {
       triggerMid: Number(quote.mid),
       signalSource: pairedTriggerSide
         ? 'POLYMARKET_CLOB_PAIRED_ENTRY_TRIGGER'
-        : 'POLYMARKET_CLOB_DOWN_LIMIT_TICK_THROUGH',
+        : 'POLYMARKET_CLOB_ENGINE_LIMIT_TICK_THROUGH',
     };
     this.cash -= cost;
     this.positions.unshift(position);
@@ -991,6 +1140,8 @@ class PressureForecastBot extends WickBot {
     this.log('PAPER_DOWN_LIMIT_FILLED', {
       orderId: order.id,
       positionId: position.id,
+      engine: 'DOWN',
+      side: position.side,
       triggerMid: Number(quote.mid),
       limitPrice: price,
       shares,
@@ -1769,7 +1920,7 @@ class PressureForecastBot extends WickBot {
         name: this.strategyName,
         execution: 'PAPER ONLY',
         markets: ['BTC 5m'],
-        orderType: 'UP_VISIBLE_BOOK_TAKER_SWEEP_AND_DOWN_RESTING_LIMIT',
+        orderType: 'PAPER_UP_ENGINE_TAKER_AND_DOWN_ENGINE_RESTING_LIMIT',
         exit: `Take profit when the held side's best bid reaches $${config.ENGINE_TAKE_PROFIT_BID_TRIGGER.toFixed(2)}; count payout as $${config.ENGINE_TAKE_PROFIT_PAYOUT.toFixed(2)} per share. Otherwise, hold for official resolution.`,
         liveTradingEnabled: false,
         realOrderModulesLoaded: false,
@@ -1782,23 +1933,28 @@ class PressureForecastBot extends WickBot {
         takeProfitPayout: config.ENGINE_TAKE_PROFIT_PAYOUT,
         downProfitCarry: this.downProfitCarry,
         downSharesThisWindow: this.downSharesThisWindow,
+        sideSwapTriggerMid: config.ENGINE_SIDE_SWAP_TRIGGER_MID,
+        sideAssignments: { UP: this.upEngine.side, DOWN: this.downEngine.side },
+        sideSwaps: this.sideSwaps.slice(-100),
         downSharesNextWindow: Math.round(
           (config.ENGINE_BASE_SHARES + this.downProfitCarry / config.ENGINE_DOWN_SHARE_PRICE) * 100,
         ) / 100,
-        signal: 'UP normally triggers at a $0.71 ask and DOWN rests at $0.30; either trigger records both paper legs as filled.',
+        signal: `UP engine triggers at a $0.71 ask and DOWN engine rests at $0.30; either trigger records both paper legs as filled. Before a fill, either side crossing a $${config.ENGINE_SIDE_SWAP_TRIGGER_MID.toFixed(2)} midpoint swaps engine sides and carries each engine's stake.`,
         signalMapping: 'Either entry trigger records both UP and DOWN paper legs as filled.',
         pairedFillAssumption: 'Both sides are recorded filled together when either side triggers; this is a paper assumption, not an exchange fill guarantee.',
         signalState: this.forecast,
         orders: {
-          type: 'UP taker sweep and DOWN resting limit; either trigger records both paper fills',
+          type: 'UP-engine taker sweep and DOWN-engine resting limit; sides can swap before a fill',
           fillAssumption: 'Either entry trigger fills both paper sides at the same event time.',
           initialShares: config.ENGINE_BASE_SHARES,
           upTriggerAsk: config.ENGINE_UP_TRIGGER_ASK,
           upMaxSweepPrice: config.ENGINE_UP_MAX_SWEEP_PRICE,
           downLimitPrice: config.ENGINE_DOWN_LIMIT_PRICE,
           downSharesThisWindow: this.downSharesThisWindow,
+          sideSwapTriggerMid: config.ENGINE_SIDE_SWAP_TRIGGER_MID,
+          sideAssignments: { UP: this.upEngine.side, DOWN: this.downEngine.side },
         },
-        repeatEntryRule: `One paired entry per window: UP taker normally triggers at a $${config.ENGINE_UP_TRIGGER_ASK.toFixed(2)} ask and DOWN rests at $${config.ENGINE_DOWN_LIMIT_PRICE.toFixed(2)}; either trigger records both sides filled. UP stays at 50 shares. Positive UP TP profit increases next-window DOWN shares by profit / $${config.ENGINE_DOWN_SHARE_PRICE.toFixed(2)}. A DOWN TP resets both to base.`,
+        repeatEntryRule: `One paired entry per window: UP engine starts at 50 shares and sweeps its assigned side at a $${config.ENGINE_UP_TRIGGER_ASK.toFixed(2)} ask; DOWN engine rests at $${config.ENGINE_DOWN_LIMIT_PRICE.toFixed(2)} on its assigned side. Before either fills, each new side midpoint crossing at $${config.ENGINE_SIDE_SWAP_TRIGGER_MID.toFixed(2)} cancels the resting order, swaps the engine side assignments, and carries each engine's stake. Either entry trigger records both paper legs as filled. Positive UP-engine TP profit increases next-window DOWN-engine shares by profit / $${config.ENGINE_DOWN_SHARE_PRICE.toFixed(2)}. A DOWN-engine TP resets both stakes to base.`,
         priceFeed: this.priceFeed?.snapshot?.() || null,
         exits: {
           mode: 'TAKE_PROFIT_OR_OFFICIAL_RESOLUTION',

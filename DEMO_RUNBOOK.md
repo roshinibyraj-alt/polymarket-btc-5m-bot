@@ -4,6 +4,14 @@ This runner is strictly paper-only. It subscribes to the current BTC 5-minute Po
 
 ## Engine rules
 
+### Side swaps before entry
+
+1. Both engines start on their matching outcome: UP engine → UP and DOWN engine → DOWN.
+2. While no position has filled, each new CLOB midpoint crossing upward through $0.65 cancels the active resting limit order, swaps the two engine outcome assignments, and places a new $0.30 resting limit for the DOWN engine on its newly assigned side.
+3. Engine share sizes travel with their engine assignments. For example, after a swap, the DOWN engine's carried share size belongs to its new outcome side.
+4. Repeated swaps are allowed after a side moves below $0.65 and later crosses upward again. A fill permanently disables side swaps for that five-minute window.
+5. The dashboard shows the current mapping, swap count, and recent swap timestamps/prices.
+
 ### UP
 
 1. Start each five-minute window armed for one 50-share UP entry.
@@ -28,7 +36,7 @@ This runner is strictly paper-only. It subscribes to the current BTC 5-minute Po
 
 ## Dashboard and checks
 
-The dashboard prioritizes each engine's CLOB best bid, share size, fill status, floating P&L, committed capital, average entry, take-profit, carried profit, and next-window DOWN size. It also shows paper equity, orders, positions, completed transactions, and resolution records.
+The dashboard prioritizes each engine's assigned outcome, CLOB best bid, share size, fill status, floating P&L, committed capital, average entry, take-profit, carried profit, and next-window DOWN size. It also shows live side swaps, paper equity, orders, positions, completed transactions, and resolution records.
 
 Run `npm test` and `npm start`. Check `/api/healthz` for app readiness and `/api/state` for current paper state. A new `PAPER_HISTORY_RESET_VERSION` intentionally clears the persisted paper ledger at deployment.
 
