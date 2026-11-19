@@ -657,7 +657,7 @@ class PressureForecastBot extends WickBot {
     order.fee = 0;
     order.engine = 'DOWN';
     order.signalSide = side;
-    order.fillModel = 'ASSUMED_PAIRED_FILL_WHEN_EITHER_ENTRY_TRIGGERS';
+    order.fillModel = 'FULL_FILL_WHEN_ASSIGNED_SIDE_ASK_OR_MIDPOINT_TOUCHES_LIMIT; PAIRED_WITH_UP_TAKER_TRIGGER';
     this.downEngine.orderId = order.id;
     this.downEngine.status = 'RESTING';
     this.log('PAPER_DOWN_LIMIT_PLACED', {
@@ -667,6 +667,7 @@ class PressureForecastBot extends WickBot {
       side,
       engine: 'DOWN',
       shares,
+      fillRule: 'assigned-side best ask or midpoint at/below the resting limit',
       downProfitCarry: this.downProfitCarry,
     });
     return order;
@@ -873,12 +874,20 @@ class PressureForecastBot extends WickBot {
       && upQuote
       && Number(upQuote.updatedAt) >= start
       && Number(upQuote.bestAsk) + EPSILON >= config.ENGINE_UP_TRIGGER_ASK;
+    const downLimitPrice = Number(downOrder?.limitPrice ?? config.ENGINE_DOWN_LIMIT_PRICE);
+    const downAskAtOrBelowLimit = downQuote
+      && Number.isFinite(Number(downQuote.bestAsk))
+      && Number(downQuote.bestAsk) <= downLimitPrice + EPSILON;
+    const downMidAtOrBelowLimit = downQuote
+      && Number.isFinite(Number(downQuote.mid))
+      && Number(downQuote.mid) <= downLimitPrice + EPSILON;
     const downTriggered = this.downEngine.status === 'RESTING'
       && downOrder?.status === 'LIVE'
       && downQuote
-      && Number(downQuote.updatedAt) > Number(downOrder.createdAt)
+      && now >= Number(downOrder.createdAt)
+      && Number(downQuote.updatedAt) >= start
       && Number(downQuote.updatedAt) < Number(this.market.end)
-      && Number(downQuote.mid) < config.ENGINE_DOWN_LIMIT_PRICE - EPSILON;
+      && (downAskAtOrBelowLimit || downMidAtOrBelowLimit);
 
     let changed = false;
     if (!hasWindowEntry && (upTriggered || downTriggered)) {
@@ -890,6 +899,10 @@ class PressureForecastBot extends WickBot {
         downEngineSide: downSide,
         upAsk: upQuote?.bestAsk ?? null,
         downMid: downQuote?.mid ?? null,
+        downAsk: downQuote?.bestAsk ?? null,
+        downLimitTriggeredBy: downTriggered
+          ? downAskAtOrBelowLimit ? 'BEST_ASK_AT_OR_BELOW_LIMIT' : 'MIDPOINT_AT_OR_BELOW_LIMIT'
+          : null,
         upTriggerAsk: config.ENGINE_UP_TRIGGER_ASK,
         downLimitPrice: config.ENGINE_DOWN_LIMIT_PRICE,
         sideAssignments: { UP: upSide, DOWN: downSide },
@@ -1086,7 +1099,7 @@ class PressureForecastBot extends WickBot {
       orderType: 'PAPER_LIMIT_RESTING',
       fillModel: pairedTriggerSide
         ? 'ASSUMED_PAIRED_FILL_WHEN_EITHER_ENTRY_TRIGGERS'
-        : 'FULL_FILL_ON_POST_ORDER_MIDPOINT_TICK_THROUGH',
+        : 'FULL_FILL_ON_ASSIGNED_SIDE_ASK_OR_MID_AT_OR_BELOW_LIMIT',
       pairId,
       pairedTriggerSide,
       pairedFillAssumption: pairedTriggerSide
@@ -1111,6 +1124,7 @@ class PressureForecastBot extends WickBot {
       entryFills: [{ price, shares, at: filledAt }],
       limitPrice: price,
       triggerMid: Number(quote.mid),
+      triggerAsk: Number(quote.bestAsk),
       signalSource: pairedTriggerSide
         ? 'POLYMARKET_CLOB_PAIRED_ENTRY_TRIGGER'
         : 'POLYMARKET_CLOB_ENGINE_LIMIT_TICK_THROUGH',
@@ -1126,6 +1140,7 @@ class PressureForecastBot extends WickBot {
     order.fee = 0;
     order.positionId = position.id;
     order.triggerMid = Number(quote.mid);
+    order.triggerAsk = Number(quote.bestAsk);
     order.pairId = pairId;
     order.pairedTriggerSide = pairedTriggerSide;
     order.pairedFillAssumption = pairedTriggerSide
@@ -1143,6 +1158,7 @@ class PressureForecastBot extends WickBot {
       engine: 'DOWN',
       side: position.side,
       triggerMid: Number(quote.mid),
+      triggerAsk: Number(quote.bestAsk),
       limitPrice: price,
       shares,
       fees: 0,

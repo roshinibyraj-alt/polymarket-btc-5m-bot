@@ -22,7 +22,7 @@ This runner is strictly paper-only. It subscribes to the current BTC 5-minute Po
 ### DOWN
 
 1. At window start, place one simulated resting DOWN limit order at $0.30.
-2. A later midpoint tick below $0.30 can trigger the paired entry.
+2. The resting limit qualifies when the assigned outcome's best ask or midpoint is at or below $0.30. A fresh quote already at/below the limit when the order is posted and an exact $0.30 touch both qualify; the check does not require a later timestamp.
 3. When either side triggers, both positions are recorded filled at the same event time. UP uses its current visible-ask sweep through $0.99; DOWN is recorded at $0.30. This paired fill is a paper assumption, not proof of two live executions.
 4. If neither side triggers by window end, expire the DOWN order. No partial fill or maker rebate is modeled.
 5. A fresh DOWN best bid at $0.99 or higher records a take-profit payout of $1 per share. A DOWN take-profit clears carried profit, returning both engines to the 50-share base for the next window.

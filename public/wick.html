@@ -339,7 +339,7 @@
           ['Assigned outcome', side],
           ['Resting limit', '$0.30'],
           ['Order size', `${size.toFixed(2)} shares`],
-          ['Fill confirmation', 'Paired when either triggers'],
+           ['Fill confirmation', 'Assigned ask or midpoint ≤ $0.30'],
           ['Position average', price(position?.avgEntry)],
           ['Capital committed', money(capitalCommitted)],
           ['Floating P&L', signedMoney(floatingPnl)],
@@ -399,7 +399,7 @@
       const exit = o.kind === 'BUY_UP_MARKET'
         ? 'UP ask trigger $0.71; sweep cap $0.99; TP bid $0.99 → $1'
         : o.kind === 'BUY_DOWN_LIMIT'
-          ? 'Resting $0.30; paired fill when either side triggers'
+           ? 'Assigned-side ask/mid touches $0.30; paired if either entry triggers'
           : o.kind === 'SELL_TAKE_PROFIT'
             ? 'TP at $0.99 bid; paper payout $1/share'
             : 'Hold for official resolution';

@@ -289,6 +289,22 @@ test('DOWN tick-through pairs both sides even if UP is below its normal trigger'
   assert.equal(bot.downEngine.fillStatus, 'FILLED · PAIRED');
 });
 
+test('DOWN resting limit fills on the same fresh quote when its assigned side is already at the $0.30 limit', () => {
+  const bot = makeBot();
+  bot.openStrategyWindow(WINDOW_START, NOW);
+  const order = bot.orders.find((item) => item.kind === 'BUY_DOWN_LIMIT');
+  setQuote(bot, 'UP', 0.40, 0.42, 1000, NOW);
+  setQuote(bot, 'DOWN', 0.30, 0.30, 1000, NOW);
+
+  bot.processEngineTriggers(NOW);
+
+  assert.equal(order.status, 'FILLED');
+  assert.equal(order.matchedShares, 50);
+  assert.equal(order.triggerAsk, 0.30);
+  assert.equal(bot.positions.length, 2);
+  assert.equal(bot.positions.find((position) => position.engine === 'DOWN').avgEntry, 0.30);
+});
+
 test('UP take-profit carries realized net profit into next-window DOWN shares', () => {
   const bot = makeBot();
   const position = {
