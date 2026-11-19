@@ -95,7 +95,9 @@
     .engine-card.down-engine{background:linear-gradient(135deg,#f0eaff 0%,#fcfaff 72%);border-color:#c5adef}
     .engine-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
     .engine-name{font:800 14px var(--display);letter-spacing:.02em}
-    .engine-number{font:800 clamp(23px,3vw,34px)/1 var(--display);letter-spacing:-.06em;margin:7px 0}
+     .engine-primary{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:end;margin:10px 0 4px}
+     .engine-number{font:800 clamp(23px,3vw,34px)/1 var(--display);letter-spacing:-.06em;margin:0;white-space:nowrap;font-variant-numeric:tabular-nums}
+     .engine-primary-label{display:block;margin-top:5px;color:var(--muted);font:700 8px var(--mono);text-transform:uppercase;letter-spacing:.07em}
     .engine-rule{font-size:11px;font-weight:700}
     .engine-details{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:12px}
     .engine-detail{background:rgba(255,255,255,.72);border:1px solid rgba(94,126,156,.16);border-radius:10px;padding:8px 9px;min-width:0}
@@ -203,13 +205,13 @@
 <body>
 <main>
   <header>
-    <div class="brand"><div class="mark" aria-hidden="true">5m</div><div><h1>BTC Dual-Engine Trader</h1><div class="subtitle">Two independent paper engines · UP taker · DOWN limit</div></div></div>
+    <div class="brand"><div class="mark" aria-hidden="true">5m</div><div><h1>BTC Dual-Engine Trader</h1><div class="subtitle">Separate UP/DOWN position cards · paired paper fills</div></div></div>
     <div class="header-right"><span class="refresh-label" id="quoteAge">Connecting to live state…</span><div class="badge"><i class="dot"></i><span>Paper only</span></div></div>
   </header>
 
   <section class="hero" aria-label="Strategy status">
-    <div class="intro"><div class="eyebrow">Polymarket CLOB · BTC 5-minute market</div><h2>Two engines, separate rules, one $0.99 take-profit.</h2><p>UP buys 50 shares by taker sweep after its ask reaches $0.71. DOWN rests a limit order at $0.30 from window open. UP profits increase the next DOWN stake; a DOWN take-profit resets it.</p></div>
-    <div class="notice"><strong>Paper trading only</strong><span>The UP engine sweeps asks up to $0.99. DOWN fills are simulated on a later midpoint tick below $0.30. Open shares not taking profit wait for official resolution.</span></div>
+    <div class="intro"><div class="eyebrow">Polymarket CLOB · BTC 5-minute market</div><h2>Two engines, paired entries, one $0.99 take-profit.</h2><p>UP and DOWN retain their own entry prices and position tracking. When either entry triggers, both paper legs are recorded filled together.</p></div>
+    <div class="notice"><strong>Paper trading only</strong><span>A fill trigger on either side records both UP and DOWN legs as filled. UP taker sweep uses current asks up to $0.99; the paired DOWN leg is recorded at $0.30.</span></div>
   </section>
 
   <section class="panel">
@@ -272,13 +274,14 @@
     <div class="events" id="events"><div class="empty">Waiting for activity…</div></div>
   </section>
 
-  <p class="foot">Paper-only strategy: UP makes one 50-share taker buy when its best ask reaches $0.71, sweeping visible asks only through $0.99. DOWN places one resting $0.30 limit at window open; a later midpoint tick below $0.30 records the full requested fill at $0.30 in the paper model. A fresh best bid of $0.99 triggers a $1-per-share paper take-profit. Positive realized UP profit is added to next-window DOWN shares at 50 + profit ÷ $0.30; UP stays at 50. A DOWN take-profit resets both sides to base. Unfilled DOWN orders expire at window end; open positions without take-profit remain pending official resolution. No stop-loss or timed exit is used. The fill model is a simulation, not a guarantee of exchange execution.</p>
+   <p class="foot">Paper-only paired-entry model: UP normally triggers when its ask reaches $0.71 and sweeps through $0.99; DOWN normally has a resting $0.30 limit. Once either side triggers, both positions are recorded as filled at the same event time. DOWN is recorded at $0.30; UP uses its current visible-ask sweep. Each card shows current CLOB best bid, committed capital, and floating P&amp;L marked at that bid. This paired assumption does not guarantee that both live exchange orders would fill. A best bid of $0.99 triggers the $1-per-share paper take-profit. Positive realized UP profit increases next-window DOWN shares; DOWN take-profit resets both sides to base. Open positions otherwise wait for official resolution.</p>
   <div class="error" id="error" role="status"></div>
 </main>
 <script>
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const num = value => value == null || !Number.isFinite(Number(value)) ? null : Number(value);
   const money = value => num(value) == null ? '—' : '$' + Number(value).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+  const signedMoney = value => num(value) == null ? '—' : `${Number(value)>0?'+':Number(value)<0?'−':''}${money(Math.abs(Number(value)))}`;
   const price = value => num(value) == null ? '—' : '$' + Number(value).toFixed(3);
   const pct = value => num(value) == null ? '—' : `${Number(value).toFixed(2)}%`;
   const prob = value => num(value) == null ? '—' : `${(Number(value) * 100).toFixed(1)}%`;
@@ -299,6 +302,18 @@
     const up = side === 'UP';
     const status = engine.status || 'WAITING';
     const position = engine.position || null;
+    const positionActive = position && ['OPEN','PENDING_CLOB_RESULT'].includes(position.status);
+    const quoteIsLive = quote.status === 'LIVE' && !quote.stale && num(quote.bestBid) != null;
+    const markBid = quoteIsLive ? Number(quote.bestBid) : null;
+    const floatingPnl = position?.status === 'OPEN' && markBid != null
+      ? markBid * Number(position.shares || 0) - Number(position.totalCost || 0)
+      : null;
+    const capitalCommitted = positionActive ? Number(position.totalCost || 0) : 0;
+    const fillStatus = position
+      ? position.status === 'OPEN' ? 'FILLED · PAIRED'
+        : position.status === 'PENDING_CLOB_RESULT' ? 'FILLED · RESOLUTION'
+          : `FILLED · ${String(position.status).replaceAll('_',' ')}`
+      : engine.fillStatus || (status === 'RESTING' ? 'RESTING · NOT FILLED' : 'NOT FILLED');
     const cardClass = up ? 'up-engine' : 'down-engine';
     const sideClass = up ? 'up' : 'down';
     const size = up ? 50 : Number(engine.shares || position?.shares || 50);
@@ -308,24 +323,36 @@
           ['Taker sweep cap', '$0.99'],
           ['Shares per window', '50'],
           ['Position average', price(position?.avgEntry)],
-          ['Position shares', Number(position?.shares || 0).toFixed(2)],
+          ['Capital committed', money(capitalCommitted)],
+          ['Floating P&L', signedMoney(floatingPnl)],
+          ['Fill status', fillStatus],
           ['TP trigger / payout', '$0.99 / $1.00'],
         ]
       : [
           ['Resting limit', '$0.30'],
           ['Order size', `${size.toFixed(2)} shares`],
-          ['Fill confirmation', 'Later midpoint < $0.30'],
+          ['Fill confirmation', 'Paired when either triggers'],
           ['Position average', price(position?.avgEntry)],
-          ['Position shares', Number(position?.shares || 0).toFixed(2)],
+          ['Capital committed', money(capitalCommitted)],
+          ['Floating P&L', signedMoney(floatingPnl)],
+          ['Fill status', fillStatus],
           ['TP trigger / payout', '$0.99 / $1.00'],
         ];
     const currentQuote = `<div class="engine-rule">Best bid ${price(quote.bestBid)} <span aria-hidden="true">·</span> Best ask ${price(quote.bestAsk)}</div>`;
     return `<article class="engine-card ${cardClass}">
       <div class="engine-head"><div><div class="engine-name ${sideClass}">${side} ENGINE</div>${currentQuote}</div><span class="pill ${statusClass(status)==='good'?'live':statusClass(status)==='bad'?'fail':'wait'}">${escStatus(status)}</span></div>
-      <div class="engine-number ${sideClass}">${position ? `${Number(position.shares||0).toFixed(2)} shares` : `${size.toFixed(2)} shares`}</div>
+      <div class="engine-primary">
+        <div><div class="engine-number ${sideClass}">${position ? `${Number(position.shares||0).toFixed(2)} shares` : `${size.toFixed(2)} shares`}</div><span class="engine-primary-label">Position / order size</span></div>
+        <div><div class="engine-number ${sideClass}">${price(markBid)}</div><span class="engine-primary-label">CLOB best bid mark</span></div>
+      </div>
       <div class="engine-rule">${up ? 'Market buy when UP ask reaches $0.71' : 'Limit order rests at $0.30 from window open'}</div>
-      <div class="engine-details">${details.map(([label,value]) => `<div class="engine-detail"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}</div>
-      <div class="engine-foot">${up ? 'Each UP take-profit adds its realized net profit to the next DOWN stake. No stop-loss; otherwise hold to resolution.' : 'The order expires at window end if unfilled. A DOWN take-profit resets both engines to 50 shares.'}</div>
+      <div class="engine-details">${details.map(([label,value]) => {
+        const detailClass = label === 'Floating P&L'
+          ? floatingPnl > 0 ? 'good' : floatingPnl < 0 ? 'bad' : ''
+          : label === 'Fill status' ? String(fillStatus).includes('FILLED') ? 'good' : 'warn' : '';
+        return `<div class="engine-detail"><span>${esc(label)}</span><strong class="${detailClass}">${esc(value)}</strong></div>`;
+      }).join('')}</div>
+      <div class="engine-foot">${up ? 'Each UP take-profit adds its realized net profit to the next DOWN stake. A paired entry records both sides filled together.' : 'Paired fill is assumed when either side triggers. A DOWN take-profit resets both engines to 50 shares.'}</div>
     </article>`;
   }
   function renderMarket(state) {
@@ -342,6 +369,8 @@
         <div class="row"><span>Window state</span><strong class="status-text ${statusClass(f?.status)}">${escStatus(f?.status || 'waiting for market')}</strong></div>
         <div class="row"><span>UP profit carried to DOWN</span><strong>${money(f?.downProfitCarry || 0)}</strong></div>
         <div class="row"><span>DOWN shares next window</span><strong>${Number(f?.downSharesNextWindow || 50).toFixed(2)}</strong></div>
+        <div class="row"><span>Paired entry status</span><strong class="status-text ${f?.pairedEntry?.active?'good':'warn'}">${esc(f?.pairedEntry?.active?'BOTH SIDES FILLED':'WAITING FOR EITHER TRIGGER')}</strong></div>
+        <div class="row"><span>Combined floating P&amp;L</span><strong>${signedMoney((num(f?.up?.floatingPnl)||0)+(num(f?.down?.floatingPnl)||0))}</strong></div>
         <div class="row"><span>Orders this window</span><strong>${esc(orders)}</strong></div>
       </div>
     </article>`;
@@ -353,7 +382,7 @@
       const exit = o.kind === 'BUY_UP_MARKET'
         ? 'UP ask trigger $0.71; sweep cap $0.99; TP bid $0.99 → $1'
         : o.kind === 'BUY_DOWN_LIMIT'
-          ? 'Resting $0.30; full fill on later midpoint tick below limit'
+          ? 'Resting $0.30; paired fill when either side triggers'
           : o.kind === 'SELL_TAKE_PROFIT'
             ? 'TP at $0.99 bid; paper payout $1/share'
             : 'Hold for official resolution';
@@ -366,8 +395,12 @@
   function renderTable(items, kind) {
     if (!Array.isArray(items) || !items.length) return `<div class="empty">No ${kind} records in the latest state.</div>`;
     if (kind === 'position') {
-      const rows = items.map(p => `<tr><td>${esc(p.slug||p.market||p.title||'—')}</td><td>${esc(p.signalSide ? `${p.side} (from ${p.signalSide} signal)` : p.outcome||p.side||'—')}</td><td>${Number(p.shares??p.size??0).toFixed(2)}</td><td>${price(p.avgPrice??p.averagePrice)}</td><td>${money(p.currentValue??p.value)}</td><td>${esc(p.status||'Open')}</td></tr>`).join('');
-      return `<table><thead><tr><th>Market</th><th>Side</th><th>Shares</th><th>Avg. price</th><th>Value</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
+      const rows = items.map(p => {
+        const pnl = num(p.unrealizedPnl);
+        const pnlClass = pnl == null || pnl === 0 ? 'muted' : pnl > 0 ? 'good' : 'bad';
+        return `<tr><td>${esc(p.slug||p.market||p.title||'—')}</td><td>${esc(p.signalSide ? `${p.side} (from ${p.signalSide} trigger)` : p.outcome||p.side||'—')}</td><td>${Number(p.shares??p.size??0).toFixed(2)}</td><td>${price(p.avgPrice??p.averagePrice)}</td><td>${money(p.capitalCommitted)}</td><td>${money(p.currentValue??p.value)}</td><td class="${pnlClass}">${signedMoney(pnl)}</td><td>${esc(p.status||'Open')}</td></tr>`;
+      }).join('');
+      return `<table><thead><tr><th>Market</th><th>Side</th><th>Shares</th><th>Avg. price</th><th>Capital</th><th>Mark value</th><th>Floating P&amp;L</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
     }
     const rows = items.map(r => `<tr><td>${esc(r.slug||r.market||r.title||'—')}</td><td>${esc(r.outcome||r.winningSide||r.result||'—')}</td><td>${esc(r.status||'resolved')}</td><td>${money(r.pnl??r.realizedPnl??r.profit)}</td><td>${esc(r.resolvedAt?time(r.resolvedAt):r.error||'—')}</td></tr>`).join('');
     return `<table><thead><tr><th>Market</th><th>Outcome</th><th>Status</th><th>Realized P&amp;L</th><th>Resolution</th></tr></thead><tbody>${rows}</tbody></table>`;

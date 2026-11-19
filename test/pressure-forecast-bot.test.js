@@ -124,7 +124,7 @@ test('taker sweep observes the buy ceiling, sell floor, and per-level fees', () 
   assert.equal(sell.filledShares, 100);
 });
 
-test('UP engine waits for a $0.71 best ask and then sweeps 50 shares up to $0.99', () => {
+test('either entry trigger fills both paired legs and UP still sweeps through $0.99', () => {
   const bot = makeBot();
   bot.openStrategyWindow(WINDOW_START, NOW - 1);
   setQuote(bot, 'UP', 0.69, 0.70, 1000, NOW);
@@ -134,12 +134,31 @@ test('UP engine waits for a $0.71 best ask and then sweeps 50 shares up to $0.99
 
   setQuote(bot, 'UP', 0.70, 0.71, 1000, NOW + 1);
   bot.processEngineTriggers(NOW + 1);
-  assert.equal(bot.positions.length, 1);
-  assert.equal(bot.positions[0].side, 'UP');
-  assert.equal(bot.positions[0].shares, 50);
-  assert.equal(bot.positions[0].avgEntry, 0.71);
+  assert.equal(bot.positions.length, 2);
+  const upPosition = bot.positions.find((position) => position.side === 'UP');
+  const downPosition = bot.positions.find((position) => position.side === 'DOWN');
+  assert.equal(upPosition.shares, 50);
+  assert.equal(upPosition.avgEntry, 0.71);
+  assert.equal(downPosition.shares, 50);
+  assert.equal(downPosition.avgEntry, 0.30);
+  assert.equal(upPosition.pairId, downPosition.pairId);
+  assert.equal(upPosition.pairedTriggerSide, 'UP');
+  assert.equal(downPosition.pairedTriggerSide, 'UP');
   assert.equal(bot.orders.find((order) => order.kind === 'BUY_UP_MARKET').maxPrice, 0.99);
   assert.equal(bot.upEngine.status, 'OPEN');
+  assert.equal(bot.downEngine.status, 'OPEN');
+  assert.equal(bot.upEngine.fillStatus, 'FILLED · PAIRED');
+  assert.equal(bot.downEngine.fillStatus, 'FILLED · PAIRED');
+  assert.equal(bot.orders.find((order) => order.kind === 'BUY_DOWN_LIMIT').status, 'FILLED');
+
+  const state = bot.snapshot();
+  assert.equal(state.markets['5m'].forecast.pairedEntry.active, true);
+  assert.equal(state.markets['5m'].forecast.up.capitalCommitted, upPosition.totalCost);
+  assert.equal(state.markets['5m'].forecast.down.capitalCommitted, downPosition.totalCost);
+  assert.equal(state.markets['5m'].forecast.up.floatingPnl,
+    upPosition.markBid * upPosition.shares - upPosition.totalCost);
+  assert.equal(state.markets['5m'].forecast.down.floatingPnl,
+    downPosition.markBid * downPosition.shares - downPosition.totalCost);
 });
 
 test('UP engine rejects the full entry if asks exceed its $0.99 sweep ceiling', () => {
@@ -155,7 +174,7 @@ test('UP engine rejects the full entry if asks exceed its $0.99 sweep ceiling', 
   assert.equal(bot.orders.find((order) => order.kind === 'BUY_UP_MARKET').status, 'SKIPPED_SLIPPAGE_OR_DEPTH');
 });
 
-test('DOWN order rests at $0.30 and fills all shares only on a later tick below $0.30', () => {
+test('DOWN tick-through pairs both sides even if UP is below its normal trigger', () => {
   const bot = makeBot();
   bot.downProfitCarry = 3;
   bot.openStrategyWindow(WINDOW_START, NOW - 1);
@@ -168,14 +187,22 @@ test('DOWN order rests at $0.30 and fills all shares only on a later tick below 
   bot.processEngineTriggers(NOW - 1);
   assert.equal(order.status, 'LIVE');
 
+  setQuote(bot, 'UP', 0.39, 0.41, 1000, NOW);
   setQuote(bot, 'DOWN', 0.28, 0.30, 1000, NOW);
   bot.processEngineTriggers(NOW);
   assert.equal(order.status, 'FILLED');
   assert.equal(order.matchedShares, 60);
   assert.equal(order.price, 0.30);
-  assert.equal(bot.positions[0].side, 'DOWN');
-  assert.equal(bot.positions[0].shares, 60);
-  assert.equal(bot.positions[0].fees, 0);
+  const downPosition = bot.positions.find((position) => position.side === 'DOWN');
+  const upPosition = bot.positions.find((position) => position.side === 'UP');
+  assert.equal(downPosition.shares, 60);
+  assert.equal(downPosition.fees, 0);
+  assert.equal(upPosition.shares, 50);
+  assert.equal(upPosition.avgEntry, 0.41);
+  assert.equal(upPosition.pairedTriggerSide, 'DOWN');
+  assert.equal(downPosition.pairedTriggerSide, 'DOWN');
+  assert.equal(bot.upEngine.fillStatus, 'FILLED · PAIRED');
+  assert.equal(bot.downEngine.fillStatus, 'FILLED · PAIRED');
 });
 
 test('UP take-profit carries realized net profit into next-window DOWN shares', () => {
@@ -711,12 +738,12 @@ test('paper snapshot describes the current dual-engine strategy and inactive liv
   const bot = makeBot();
   const state = bot.snapshot();
   assert.equal(state.strategy.name, 'BTC 5-minute dual-engine paper bot');
-  assert.equal(state.strategy.signalMapping, 'UP trigger buys UP; DOWN resting limit buys DOWN.');
+  assert.equal(state.strategy.signalMapping, 'Either entry trigger records both UP and DOWN paper legs as filled.');
   assert.deepEqual(state.strategy.markets, ['BTC 5m']);
   assert.equal(state.strategy.execution, 'PAPER ONLY');
   assert.equal(state.strategy.liveTradingEnabled, false);
   assert.equal(state.strategy.realOrderModulesLoaded, false);
-  assert.equal(state.strategy.orders.type, 'UP taker sweep; DOWN resting limit with tick-through paper fill');
+  assert.equal(state.strategy.orders.type, 'UP taker sweep and DOWN resting limit; either trigger records both paper fills');
   assert.match(state.strategy.repeatEntryRule, /50 shares/);
   assert.match(state.strategy.repeatEntryRule, /profit \/ \$0\.30/);
   assert.equal(state.strategy.upMaxSweepPrice, 0.99);
