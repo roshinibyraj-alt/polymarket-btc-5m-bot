@@ -170,6 +170,7 @@ class PressureForecastBot extends WickBot {
       tokens: this.market.tokens,
       feesEnabled: this.market.feesEnabled,
       feeSchedule: this.market.feeSchedule,
+      takerFeeRate: this.market.takerFeeRate,
     } : null;
     return {
       schemaVersion: 1,

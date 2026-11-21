@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#081827">
+  <title>BTC Edge Volume | Paper Bot</title>
+  <style>
+    :root{color-scheme:dark;--bg:#071522;--panel:#0f2132;--panel2:#142a3e;--line:#233d54;--ink:#edf6ff;--muted:#9bb1c5;--cyan:#48d6d0;--green:#42dc9a;--red:#ff7185;--gold:#ffc857;--blue:#71aaff;--shadow:0 18px 45px #02091270}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 8% 0%,#123d4b 0,transparent 34%),radial-gradient(ellipse at 96% 5%,#252a5b 0,transparent 30%),var(--bg);color:var(--ink);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;font-variant-numeric:tabular-nums}
+    main{max-width:1320px;margin:auto;padding:26px 24px 42px}header{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:18px}.brand{display:flex;align-items:center;gap:13px}.logo{width:44px;height:44px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,#24c6bf,#477cff);font-weight:900;color:#071522;box-shadow:0 8px 25px #1bbdc544}.eyebrow,.label,.mini-label{font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}h1{font-size:clamp(20px,3vw,28px);line-height:1.1;margin:0;letter-spacing:-.04em}.sub{font-size:12px;color:var(--muted);margin-top:4px}.head-right{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.badge{border:1px solid #308d81;background:#123b3c;color:#8effd3;padding:7px 11px;border-radius:999px;font-size:10px;font-weight:900;letter-spacing:.08em}.badge.demo{border-color:#4872ba;background:#172d4d;color:#aed0ff}.badge.warn{border-color:#93742d;background:#3d3217;color:#ffe18b}
+    .hero{display:grid;grid-template-columns:1.45fr .85fr;gap:12px}.intro,.panel,.stat,.side-card{border:1px solid var(--line);background:linear-gradient(145deg,#112638,#0c1d2c);border-radius:17px;box-shadow:var(--shadow)}.intro{padding:20px 22px;position:relative;overflow:hidden}.intro:after{content:"";position:absolute;width:250px;height:250px;border:1px solid #5de1d733;border-radius:50%;right:-80px;top:-145px;box-shadow:0 0 0 28px #5de1d70a,0 0 0 62px #5de1d708}.intro .eyebrow{color:var(--cyan)}.intro h2{font-size:clamp(20px,3vw,30px);line-height:1.12;letter-spacing:-.04em;margin:8px 0}.intro p{color:#bdd0e0;margin:0;max-width:760px;font-size:12px}.notice{display:flex;flex-direction:column;justify-content:center;padding:16px 18px;border:1px solid #9d7728;background:linear-gradient(145deg,#3a3017,#252316);border-radius:17px}.notice strong{color:#ffdc80;font-size:12px;text-transform:uppercase;letter-spacing:.08em}.notice span{color:#d5c99d;font-size:11px;margin-top:6px}
+    .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:12px}.stat{padding:14px 15px;min-height:93px}.value{font-size:clamp(18px,2.3vw,24px);font-weight:850;letter-spacing:-.04em;margin-top:8px}.note{font-size:10px;color:var(--muted);margin-top:4px}.positive{color:var(--green)}.negative{color:var(--red)}.neutral{color:var(--cyan)}
+    .panel{padding:17px;margin-top:12px}.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}.panel h2{font-size:15px;margin:0;letter-spacing:-.02em}.hint{font-size:10px;color:var(--muted);text-align:right}
+    .market-top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.market-title{font-weight:800}.slug{color:var(--muted);font-size:10px;overflow-wrap:anywhere;margin-top:3px}.timer{font-size:16px;font-weight:900;padding:6px 9px;border-radius:10px;background:#162d43;color:var(--cyan);white-space:nowrap}.model-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:12px 0}.model-cell{padding:10px 11px;background:#0a1a29;border:1px solid var(--line);border-radius:11px;min-width:0}.model-cell strong{display:block;font-size:14px;margin-top:4px;overflow-wrap:anywhere}.prob-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}.prob-card{border:1px solid var(--line);border-radius:13px;padding:13px;background:#0a1a29}.prob-card.up{border-top:3px solid var(--green)}.prob-card.down{border-top:3px solid var(--red)}.prob-head{display:flex;justify-content:space-between;gap:8px;align-items:center}.prob-title{font-weight:900;letter-spacing:.1em}.prob{font-size:28px;font-weight:900;letter-spacing:-.04em;margin:7px 0}.bar{height:6px;border-radius:999px;background:#23384c;overflow:hidden}.bar i{display:block;height:100%;width:0;background:var(--green);border-radius:999px;transition:width .25s}.prob-card.down .bar i{background:var(--red)}.quote-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:10px}.quote{padding:8px 9px;background:#12283a;border-radius:9px}.quote span{display:block;font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}.quote strong{font-size:15px}.candidate-status{font-size:10px;font-weight:900;padding:5px 8px;border-radius:999px;background:#20354a;color:var(--muted)}.candidate-status.yes{background:#123b32;color:#73f1b5}.candidate-status.no{background:#422636;color:#ff9eae}
+    .split{display:grid;grid-template-columns:1fr 1fr;gap:12px}.volume-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.volume-cell{background:#0a1a29;border:1px solid var(--line);border-radius:11px;padding:11px}.volume-cell strong{display:block;font-size:16px;margin-top:5px}.tier-track{margin-top:12px}.tier-line{display:flex;justify-content:space-between;gap:8px;color:var(--muted);font-size:10px}.track{height:7px;border-radius:999px;background:#263a4e;margin:7px 0;overflow:hidden}.track i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--blue));border-radius:999px}
+    .table-wrap{overflow:auto;overscroll-behavior-x:contain}table{width:100%;min-width:680px;border-collapse:collapse}th,td{text-align:left;padding:9px 8px;border-bottom:1px solid #1e3549;font-size:10px;white-space:nowrap}th{color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.08em}td.green{color:var(--green);font-weight:800}td.red{color:var(--red);font-weight:800}.empty{border:1px dashed #35516b;border-radius:12px;padding:18px;text-align:center;color:var(--muted);font-size:11px}.event-list{display:grid;gap:0}.event{display:grid;grid-template-columns:90px 180px 1fr;gap:10px;padding:8px 0;border-bottom:1px solid #1e3549;font-size:10px}.event:last-child{border:0}.event time,.event-type{color:var(--muted)}.event-type{font-weight:900}
+    .disclaimer{margin:13px 3px 0;color:var(--muted);font-size:10px;line-height:1.6}.error{color:var(--red);font-size:11px;margin-top:10px}.loading{opacity:.7}
+    @media(max-width:900px){.hero{grid-template-columns:1fr}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.model-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:600px){main{padding:15px 11px 28px}header{align-items:flex-start}.brand{align-items:flex-start;gap:9px}.logo{width:37px;height:37px;border-radius:12px;font-size:12px}h1{font-size:20px}.sub{font-size:10px;max-width:230px}.head-right{flex-direction:column;align-items:flex-end}.badge{font-size:9px;padding:6px 8px}.intro{padding:16px;border-radius:14px}.intro h2{font-size:21px}.intro p{font-size:11px}.notice{padding:12px 14px;border-radius:14px}.grid{gap:7px}.stat{min-height:78px;padding:10px;border-radius:12px}.label{font-size:8px}.value{font-size:18px;margin-top:6px}.note{font-size:9px}.panel{padding:12px;margin-top:9px;border-radius:14px}.panel h2{font-size:13px}.hint{font-size:9px}.timer{font-size:13px}.model-grid{gap:6px}.model-cell{padding:8px}.model-cell strong{font-size:12px}.prob-grid{gap:6px}.prob-card{padding:10px}.prob{font-size:23px}.quote-grid{gap:5px}.quote{padding:7px}.quote strong{font-size:13px}.split{grid-template-columns:1fr;gap:0}.volume-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.volume-cell{padding:9px}.volume-cell strong{font-size:14px}.event{grid-template-columns:1fr;gap:1px;padding:7px 0}.disclaimer{font-size:9px}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="brand"><div class="logo">EV</div><div><div class="eyebrow">Paper trading · BTC 5m</div><h1>Edge-Gated Volume Bot</h1><div class="sub">Taker-volume and rebate tracking without forced trades</div></div></div>
+    <div class="head-right"><span id="runBadge" class="badge demo">DEMO ONLY</span><span id="statusBadge" class="badge warn">CONNECTING</span></div>
+  </header>
+
+  <section class="hero">
+    <div class="intro"><div class="eyebrow">Current strategy</div><h2>Trade only when the estimated edge survives fees and execution costs.</h2><p>Each entry sweeps the visible asks for up to 10 shares. A FAK-style partial fill is recorded only when at least 5 shares and $1 notional execute; any remainder is cancelled. No resting-order or touch-fill assumptions, no forced churn, and no live order module.</p></div>
+    <div class="notice"><strong>Volume is not free money</strong><span>Polymarket rebates are tiered and delayed. The current BTC 5-minute market may have no direct liquidity-reward allocation; the bot checks each market instead of assuming one.</span></div>
+  </section>
+
+  <section class="grid">
+    <article class="stat"><div class="label">Paper equity</div><div id="equity" class="value">—</div><div class="note">Cash plus marked open positions</div></article>
+    <article class="stat"><div class="label">Available cash</div><div id="cash" class="value">—</div><div class="note">After simulated buys, fees, and any credited paper rebate</div></article>
+    <article class="stat"><div class="label">Realized P&amp;L</div><div id="realized" class="value">—</div><div class="note">Resolved and closed paper positions</div></article>
+    <article class="stat"><div class="label">Open exposure</div><div id="exposure" class="value">—</div><div class="note">Cost of unresolved/open positions</div></article>
+  </section>
+
+  <section class="panel">
+    <div class="market-top"><div><div class="eyebrow">Live Polymarket market</div><div id="marketTitle" class="market-title">Waiting for market…</div><div id="marketSlug" class="slug">—</div></div><div id="timer" class="timer">—</div></div>
+    <div class="model-grid">
+      <div class="model-cell"><div class="mini-label">BTC spot</div><strong id="btcSpot">—</strong></div>
+      <div class="model-cell"><div class="mini-label">Window open</div><strong id="btcOpen">—</strong></div>
+      <div class="model-cell"><div class="mini-label">60-second volatility</div><strong id="volatility">—</strong></div>
+      <div class="model-cell"><div class="mini-label">Binance tick age</div><strong id="tickAge">—</strong></div>
+    </div>
+    <div class="prob-grid">
+      <article class="prob-card up"><div class="prob-head"><span class="prob-title">UP</span><span id="upQualify" class="candidate-status">WAIT</span></div><div id="upProb" class="prob">—</div><div class="bar"><i id="upBar"></i></div><div class="quote-grid"><div class="quote"><span>Best bid</span><strong id="upBid">—</strong></div><div class="quote"><span>Best ask</span><strong id="upAsk">—</strong></div><div class="quote"><span>Executable average</span><strong id="upFill">—</strong></div><div class="quote"><span>Net edge / share</span><strong id="upEdge">—</strong></div></div></article>
+      <article class="prob-card down"><div class="prob-head"><span class="prob-title">DOWN</span><span id="downQualify" class="candidate-status">WAIT</span></div><div id="downProb" class="prob">—</div><div class="bar"><i id="downBar"></i></div><div class="quote-grid"><div class="quote"><span>Best bid</span><strong id="downBid">—</strong></div><div class="quote"><span>Best ask</span><strong id="downAsk">—</strong></div><div class="quote"><span>Executable average</span><strong id="downFill">—</strong></div><div class="quote"><span>Net edge / share</span><strong id="downEdge">—</strong></div></div></article>
+    </div>
+    <div class="panel-head" style="margin:12px 0 0"><div id="forecastReason" class="hint" style="text-align:left">Collecting inputs…</div><div id="flow" class="hint">5-second Binance flow: —</div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Volume and rebate tracker</h2><div id="tierBadge" class="badge warn">TIER UNKNOWN</div></div>
+    <div class="volume-grid">
+      <div class="volume-cell"><div class="mini-label">Gross taker notional · 30d</div><strong id="grossVolume">—</strong></div>
+      <div class="volume-cell"><div class="mini-label">Eligible weighted volume · 30d</div><strong id="weightedVolume">—</strong></div>
+      <div class="volume-cell"><div class="mini-label">Modeled taker fees · 30d</div><strong id="fees">—</strong></div>
+      <div class="volume-cell"><div class="mini-label">Current paper rebate rate</div><strong id="rebateRate">—</strong></div>
+      <div class="volume-cell"><div class="mini-label">Estimated rebate accrued</div><strong id="rebateAccrued">—</strong></div>
+      <div class="volume-cell"><div class="mini-label">Paper rebate credited</div><strong id="rebatePaid">—</strong></div>
+    </div>
+    <div class="tier-track"><div class="tier-line"><span id="tierProgressLabel">Starting at no tier</span><span id="tierNext">—</span></div><div class="track"><i id="tierBar"></i></div><div id="rewardStatus" class="note">Checking market-specific liquidity rewards…</div></div>
+  </section>
+
+  <section class="split">
+    <div class="panel"><div class="panel-head"><h2>Open and pending positions</h2><div id="positionCount" class="hint">0 positions</div></div><div class="table-wrap"><table><thead><tr><th>Window</th><th>Side</th><th>Shares</th><th>Average entry</th><th>Best bid</th><th>Floating P&amp;L</th><th>Status</th></tr></thead><tbody id="positions"></tbody></table></div></div>
+    <div class="panel"><div class="panel-head"><h2>Recent orders</h2><div class="hint">Paper fills use visible book depth and modeled fees</div></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Side</th><th>Filled / asked</th><th>Price</th><th>Fee</th><th>Status</th></tr></thead><tbody id="orders"></tbody></table></div></div>
+  </section>
+  <section class="panel"><div class="panel-head"><h2>Recent activity</h2><div class="hint">Newest first</div></div><div id="events" class="event-list"></div></section>
+  <div id="error" class="error"></div>
+  <p class="disclaimer">This is a paper simulation, not a promise of profit or an exact account rebate quote. The model uses Binance BTCUSDT as a proxy while Polymarket crypto windows resolve from Chainlink; basis differences, book movement, fees, and incomplete historical calibration can make its probability wrong. Polymarket’s official rebate terms can change. No wallet is connected and this dashboard does not place real orders.</p>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const money = (v) => Number.isFinite(Number(v)) ? `$${Number(v).toFixed(2)}` : '—';
+  const percent = (v) => Number.isFinite(Number(v)) ? `${(Number(v) * 100).toFixed(1)}%` : '—';
+  const price = (v) => Number.isFinite(Number(v)) ? `$${Number(v).toFixed(3)}` : '—';
+  const shortTime = (v) => Number.isFinite(Number(v)) ? new Date(Number(v)).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
+  const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  function setText(id, value) { $(id).textContent = value ?? '—'; }
+  function renderCandidate(side, candidate, probability) {
+    const lower = side.toLowerCase();
+    setText(`${lower}Prob`, percent(probability));
+    $(`${lower}Bar`).style.width = `${Math.max(0, Math.min(100, Number(probability) * 100 || 0))}%`;
+    setText(`${lower}Bid`, price(candidate?.bestBid));
+    setText(`${lower}Ask`, price(candidate?.bestAsk));
+    setText(`${lower}Fill`, price(candidate?.averageFillPrice));
+    const edge = candidate?.edgePerShare;
+    setText(`${lower}Edge`, Number.isFinite(Number(edge)) ? `${Number(edge) >= 0 ? '+' : ''}$${Number(edge).toFixed(3)}` : '—');
+    const badge = $(`${lower}Qualify`);
+    badge.textContent = candidate?.qualifies ? 'EDGE OK' : candidate?.reason ? 'WAIT' : 'NO EDGE';
+    badge.className = `candidate-status ${candidate?.qualifies ? 'yes' : 'no'}`;
+  }
+  function renderTableRows(id, rows, emptyText, renderRow) {
+    const body = $(id);
+    body.innerHTML = rows.length ? rows.map(renderRow).join('') : `<tr><td colspan="7"><div class="empty">${escapeHtml(emptyText)}</div></td></tr>`;
+  }
+  function render(state) {
+    if (!state) return;
+    const account = state.account || {};
+    const strategy = state.strategy || {};
+    const volume = state.volumeMetrics || strategy.volume || {};
+    const forecast = state.forecast || {};
+    const badge = $('statusBadge');
+    badge.textContent = String(state.status || 'RUNNING').replaceAll('_', ' ').toUpperCase();
+    badge.className = `badge ${state.error ? 'warn' : 'live'}`;
+    setText('equity', money(account.equity ?? account.currentCapital));
+    setText('cash', money(account.cash));
+    setText('realized', money(account.realizedPnl));
+    $('realized').className = `value ${(Number(account.realizedPnl) || 0) >= 0 ? 'positive' : 'negative'}`;
+    const open = (state.positions || []).filter(p => ['OPEN','PENDING_CLOB_RESULT'].includes(p.status));
+    const exposure = open.reduce((sum,p)=>sum + (Number(p.capitalCommitted ?? p.totalCost)||0),0);
+    setText('exposure', money(exposure));
+    setText('marketTitle', state.window?.title || 'Waiting for current BTC market');
+    setText('marketSlug', state.window?.slug || 'Market will appear when the current 5-minute window is found');
+    const left = Math.max(0, Number(state.window?.end || 0) - Number(state.now || Date.now()));
+    setText('timer', state.window?.end ? `${Math.ceil(left / 1000)}s left` : '—');
+    const priceFeed = strategy.priceFeed || {};
+    setText('btcSpot', Number.isFinite(Number(forecast.binancePrice)) ? `$${Number(forecast.binancePrice).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}` : '—');
+    setText('btcOpen', Number.isFinite(Number(forecast.candleOpen)) ? `$${Number(forecast.candleOpen).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}` : '—');
+    setText('volatility', Number.isFinite(Number(forecast.volatilityPerSecond)) ? `${(Number(forecast.volatilityPerSecond)*Math.sqrt(60)*100).toFixed(3)}% / √60s` : '—');
+    setText('tickAge', priceFeed.tickAgeMs == null ? '—' : `${Math.round(priceFeed.tickAgeMs)} ms`);
+    renderCandidate('UP', forecast.candidates?.UP, forecast.estimatedUpProbability);
+    renderCandidate('DOWN', forecast.candidates?.DOWN, forecast.estimatedDownProbability);
+    setText('forecastReason', forecast.reason || 'Waiting for fresh inputs.');
+    const imbalance = forecast.flowImbalance;
+    setText('flow', `5-second Binance flow: ${imbalance == null ? '—' : `${(Number(imbalance)*100).toFixed(0)}% buy imbalance`} · ${forecast.flowTradeCount || 0} trades`);
+
+    setText('grossVolume', money(volume.grossTakerNotional30d));
+    setText('weightedVolume', money(volume.eligibleWeightedVolume30d));
+    setText('fees', money(volume.modeledTakerFees30d));
+    setText('rebateRate', percent(volume.estimatedRebateRate || 0));
+    setText('rebateAccrued', money(volume.estimatedRebateAccrued));
+    setText('rebatePaid', money(volume.estimatedRebatePaid));
+    const tier = volume.activeTakerTier || {};
+    $('tierBadge').textContent = `${tier.name || 'None'} · ${percent(tier.rate || 0)}`;
+    $('tierBadge').className = 'badge demo';
+    const wv = Number(volume.eligibleWeightedVolume30d) || 0;
+    const next = Number(tier.nextThreshold) || 200000;
+    const current = Number(tier.threshold) || 0;
+    const progress = Math.max(0, Math.min(100, ((wv - current) / Math.max(1, next - current)) * 100));
+    $('tierBar').style.width = `${progress}%`;
+    setText('tierProgressLabel', tier.name === 'Onyx' ? 'Top published taker tier' : `${money(wv)} weighted volume in rolling 30 days`);
+    setText('tierNext', tier.nextName ? `${money(Math.max(0, next - wv))} to ${tier.nextName}` : 'Highest tier');
+    const rewards = volume.directLiquidityRewards || {};
+    const rewardText = rewards.status === 'NO_ACTIVE_ALLOCATION'
+      ? `No direct liquidity-reward allocation on this BTC market (minimum displayed size ${rewards.minimumDisplayedShares ?? '—'} shares; max spread ${rewards.maximumDisplayedSpreadCents ?? '—'}¢).`
+      : rewards.status === 'ACTIVE_ALLOCATION'
+        ? `A market-specific liquidity allocation exists, but this taker-only bot posts no maker quotes and earns none from it.`
+        : `Direct market reward status: ${(rewards.status || 'unknown').replaceAll('_',' ').toLowerCase()}${rewards.reason ? ` — ${rewards.reason}` : ''}.`;
+    setText('rewardStatus', `${rewardText} Tier rebates start only after the published volume threshold and are not guaranteed.`);
+
+    setText('positionCount', `${open.length} open/pending`);
+    renderTableRows('positions', open.slice(0,100), 'No open positions. The bot waits until the model clears all entry checks.', p => {
+      const pnl = p.unrealizedPnl;
+      return `<tr><td>${shortTime(p.windowStart)}</td><td class="${p.side==='UP'?'green':'red'}">${escapeHtml(p.side)}</td><td>${Number(p.shares||0).toFixed(2)}</td><td>${price(p.avgEntry)}</td><td>${price(p.markBid)}</td><td class="${Number(pnl)>=0?'green':'red'}">${pnl==null?'—':money(pnl)}</td><td>${escapeHtml(p.status)}</td></tr>`;
+    });
+    const orders = (state.orders || []).slice(0,50);
+    renderTableRows('orders', orders, 'No orders in this window.', o => `<tr><td>${shortTime(o.createdAt)}</td><td>${escapeHtml(o.kind)}</td><td class="${o.side==='UP'?'green':'red'}">${escapeHtml(o.side)}</td><td>${Number(o.matchedShares||0).toFixed(2)} / ${Number(o.requestedShares||o.shares||0).toFixed(2)}</td><td>${price(o.price)}</td><td>${money(o.fee)}</td><td>${escapeHtml(o.fillStatus || o.status)}</td></tr>`);
+    const events = (state.events || []).slice(0,20);
+    $('events').innerHTML = events.length ? events.map(e=>`<div class="event"><time>${shortTime(e.ts ?? e.at)}</time><span class="event-type">${escapeHtml(e.event || e.type || 'PAPER')}</span><span>${escapeHtml(e.message || e.reason || e.error || e.side || 'Paper state updated')}</span></div>`).join('') : '<div class="empty">No activity yet.</div>';
+    setText('error', state.error || '');
+  }
+  async function refresh() {
+    try {
+      const response = await fetch('/api/state', {cache:'no-store'});
+      if (!response.ok) throw new Error(`Dashboard API returned ${response.status}`);
+      render(await response.json());
+    } catch (error) {
+      $('statusBadge').textContent = 'DATA UNAVAILABLE';
+      $('statusBadge').className = 'badge warn';
+      setText('error', error.message);
+    }
+  }
+  refresh();
+  setInterval(refresh, 1000);
+</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 'use strict';
 
-const PressureForecastBot = require('./pressure-forecast-bot');
+const VolumeBot = require('./volume-bot');
 const startServer = require('./server');
 const marketData = require('./wick-market-data');
 const BinanceTickFeed = require('./binance-tick-feed');
@@ -37,7 +37,7 @@ function startApplication({
     console.warn('[safety] LIVE_TRADING=true is ignored; this entrypoint is hardwired to paper mode.');
   }
   const feed = priceFeed || new BinanceTickFeed();
-  const bot = suppliedBot || new PressureForecastBot({
+  const bot = suppliedBot || new VolumeBot({
     marketData: dataProvider,
     priceFeed: feed,
   });
