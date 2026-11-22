@@ -3,7 +3,8 @@
 const ClobMarketFeed = require('./clob-feed');
 const { MAX_HORIZON_MS } = require('./gamma-market-scanner');
 
-const STRATEGY_VERSION = 'non-sports-non-crypto-mid-limit-requote-v4';
+const PREVIOUS_STRATEGY_VERSION = 'non-sports-non-crypto-mid-limit-requote-v4';
+const STRATEGY_VERSION = 'non-sports-non-crypto-market-sweep-v5';
 const ENTRY_MIN_MID = 0.80;
 const ENTRY_MAX_MID = 0.90;
 const ENTRY_SHARES = 20;
@@ -183,7 +184,7 @@ class NearResolutionMarketBot {
       throw new Error('Initial paper capital must be greater than zero');
     }
     this.persistenceStrategyVersion = STRATEGY_VERSION;
-    this.strategyName = 'Non-sports midpoint limit strategy';
+    this.strategyName = 'Non-sports market-sweep strategy';
     this.capital = this.initialCapital;
     this.cash = this.initialCapital;
     this.realizedPnl = 0;
@@ -196,6 +197,7 @@ class NearResolutionMarketBot {
     this.trades = [];
     this.orderEvents = [];
     this.events = [];
+    this.feeWarningTokenIds = new Set();
     this.enteredTokenIds = new Set();
     this.stoppedMarketIds = new Set();
     this.markets = new Map();
@@ -263,7 +265,9 @@ class NearResolutionMarketBot {
   }
 
   restorePersistentState(state) {
-    if (!state || state.paperStrategyVersion !== this.persistenceStrategyVersion) {
+    const migratingMidpointLimits = state?.paperStrategyVersion === PREVIOUS_STRATEGY_VERSION;
+    if (!state || (state.paperStrategyVersion !== this.persistenceStrategyVersion
+      && !migratingMidpointLimits)) {
       throw new Error('Saved paper history belongs to a different strategy version');
     }
     if (!Array.isArray(state.positions) || !Number.isFinite(Number(state.cash))) {
@@ -293,6 +297,23 @@ class NearResolutionMarketBot {
     this.events = Array.isArray(state.events) ? state.events.slice(0, MAX_PUBLIC_EVENTS) : [];
     this.enteredTokenIds = new Set((state.enteredTokenIds || []).map(String));
     this.stoppedMarketIds = new Set((state.stoppedMarketIds || []).map(String));
+    const abandonedEntryOrders = [...this.pendingOrders.values()];
+    for (const order of abandonedEntryOrders) {
+      this.cancelPendingOrder(
+        order,
+        migratingMidpointLimits
+          ? 'STRATEGY_SWITCH_TO_MARKET_SWEEP'
+          : 'MARKET_SWEEP_STRATEGY_NO_RESTING_ENTRIES',
+      );
+    }
+    if (migratingMidpointLimits) {
+      this.log(
+        'STRATEGY_MIGRATED',
+        'Preserved paper balance and positions; canceled unfilled midpoint limits for market-sweep entries',
+      );
+    } else if (abandonedEntryOrders.length) {
+      this.log('LEGACY_ENTRY_ORDERS_CANCELLED', 'Canceled saved entry limits; the current strategy uses immediate market sweeps');
+    }
   }
 
   async persistState(force = false) {
@@ -503,7 +524,7 @@ class NearResolutionMarketBot {
     if (!binding) return;
     if (!this.scanHealthy || !this.isFeedConnected()) return;
     const pendingOrder = this.pendingOrders.get(id);
-    if (pendingOrder) this.updatePendingOrder(binding, quote, pendingOrder);
+    if (pendingOrder) this.cancelPendingOrder(pendingOrder, 'MARKET_SWEEP_STRATEGY_NO_RESTING_ENTRIES');
     else this.tryEntry(binding, quote);
   }
 
@@ -525,13 +546,6 @@ class NearResolutionMarketBot {
     ), 0);
   }
 
-  availableCashForOrder(order) {
-    const orderReserve = Math.max(0, safeNumber(order.remainingShares))
-      * Math.max(0, safeNumber(order.limitPrice));
-    const otherReservations = Math.max(0, this.reservedCash() - orderReserve);
-    return Math.max(0, Math.min(orderReserve, this.cash - otherReservations));
-  }
-
   tryEntry({ market, outcome }, quote) {
     const marketId = String(market.id);
     const tokenId = String(outcome.tokenId);
@@ -546,10 +560,48 @@ class NearResolutionMarketBot {
     if (market.endAt <= now || market.endAt > now + this.horizonMs) return;
     const lastAttempt = this.entryAttemptAt.get(tokenId) || 0;
     if (now - lastAttempt < 2_000) return;
-    if (this.cash - this.reservedCash() + 1e-8 < ENTRY_SHARES * mid) return;
+    const availableCash = Math.max(0, this.cash - this.reservedCash());
+    if (availableCash <= 1e-8) return;
+    this.entryAttemptAt.set(tokenId, now);
+
+    const askLevels = normalizedLevels(quote?.askLevels);
+    if (!askLevels.length && Number.isFinite(Number(quote?.bestAsk))
+      && Number(quote?.askSize) > 0) {
+      askLevels.push({ price: Number(quote.bestAsk), size: Number(quote.askSize) });
+    }
+
+    let maxNotional = availableCash;
+    let execution = null;
+    let fees = null;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      execution = sweep(askLevels, ENTRY_SHARES, {
+        side: 'buy',
+        maxPrice: 1,
+        maxNotional,
+      });
+      if (execution.shares <= 0) return;
+      fees = estimatedTakerFee(market, execution.fills);
+      if (!fees.known || execution.notional + fees.amount <= availableCash + 1e-8) break;
+      maxNotional = Math.max(
+        0,
+        maxNotional - (execution.notional + fees.amount - availableCash),
+      );
+    }
+    if (!execution || execution.shares <= 0) return;
+    if (!fees?.known) {
+      if (!this.feeWarningTokenIds.has(tokenId)) {
+        this.feeWarningTokenIds.add(tokenId);
+        this.log('MARKET_ENTRY_FEE_UNKNOWN', `${market.title} · ${outcome.label}: skipped market sweep because the taker fee schedule is unavailable`, {
+          marketId,
+          outcome: outcome.label,
+        });
+      }
+      return;
+    }
+    if (execution.notional + fees.amount > availableCash + 1e-8) return;
 
     const order = {
-      id: `${marketId}:${tokenId}:${now}`,
+      id: `MARKET_SWEEP:${marketId}:${tokenId}:${now}`,
       marketId,
       marketSlug: market.slug,
       marketTitle: market.title,
@@ -559,139 +611,32 @@ class NearResolutionMarketBot {
       tokenId,
       endAt: market.endAt,
       version: market.version,
-      limitPrice: mid,
+      orderType: 'MARKET_SWEEP',
+      limitPrice: null,
       requestedShares: ENTRY_SHARES,
       filledShares: 0,
       remainingShares: ENTRY_SHARES,
-      status: 'OPEN',
+      status: execution.shares >= ENTRY_SHARES - 1e-8 ? 'FILLED' : 'PARTIAL',
       createdAt: now,
-      requoteCount: 0,
-      lastRequotedAt: now,
-      lastLoggedLimitPrice: mid,
-      seenAskSizes: {},
     };
-    this.entryAttemptAt.set(tokenId, now);
-    this.pendingOrders.set(tokenId, order);
-    this.orderEvents.unshift({
-      id: order.id,
-      at: now,
-      kind: 'BUY_LIMIT_PLACED',
-      marketId,
-      marketTitle: market.title,
-      outcome: outcome.label,
-      requestedShares: ENTRY_SHARES,
-      filledShares: 0,
-      price: mid,
-      status: 'OPEN',
-      pnl: null,
+    this.recordEntryFill(order, market, outcome, quote, execution, {
+      entryFees: fees.amount,
+      orderType: 'MARKET_SWEEP',
     });
-    this.trimHistory();
-    this.log('BUY_LIMIT_PLACED', `${market.title} · ${outcome.label}: resting ${ENTRY_SHARES} shares at midpoint $${mid.toFixed(3)}`, {
+    this.log('MARKET_SWEEP_SUBMITTED', `${market.title} · ${outcome.label}: swept ${execution.shares.toFixed(2)} of ${ENTRY_SHARES} shares across visible asks at average $${execution.averagePrice.toFixed(3)}`, {
       marketId,
       outcome: outcome.label,
-      limitPrice: mid,
       requestedShares: ENTRY_SHARES,
+      filledShares: execution.shares,
+      averagePrice: execution.averagePrice,
+      fees: fees.amount,
     });
   }
 
-  updatePendingOrder({ market, outcome }, quote, order) {
-    const tokenId = String(order.tokenId);
-    const bid = Number(quote?.bestBid);
-    const mid = Number(quote?.mid);
-    if (!Number.isFinite(bid) || bid <= STOP_LOSS_BID) {
-      this.cancelPendingOrder(order, 'BEST_BID_AT_OR_BELOW_STOP');
-      return;
-    }
-
-    const currentAskSizes = new Map(
-      normalizedLevels(quote?.askLevels)
-        .filter((level) => level.price <= order.limitPrice)
-        .map((level) => [level.price, level.size]),
-    );
-    const seenAskSizes = order.seenAskSizes || {};
-    const priceKeys = new Set([
-      ...Object.keys(seenAskSizes).map(Number),
-      ...currentAskSizes.keys(),
-    ]);
-    const newlyVisibleAsks = [];
-    for (const price of priceKeys) {
-      const key = String(price);
-      const currentSize = currentAskSizes.get(price) || 0;
-      const previousSize = Math.max(0, safeNumber(seenAskSizes[key]));
-      if (currentSize > previousSize) {
-        newlyVisibleAsks.push({ price, size: currentSize - previousSize });
-      }
-      seenAskSizes[key] = currentSize;
-    }
-    order.seenAskSizes = seenAskSizes;
-
-    if (newlyVisibleAsks.length) {
-      const execution = sweep(newlyVisibleAsks, order.remainingShares, {
-        side: 'buy',
-        maxPrice: order.limitPrice,
-        maxNotional: this.availableCashForOrder(order),
-      });
-      if (execution.shares > 0) this.recordRestingFill(order, market, outcome, quote, execution);
-    }
-
-    const stillPending = this.pendingOrders.get(tokenId);
-    if (stillPending && Number.isFinite(mid)
-      && (mid < ENTRY_MIN_MID || mid > ENTRY_MAX_MID)) {
-      this.cancelPendingOrder(stillPending, 'MIDPOINT_LEFT_ENTRY_BAND');
-      return;
-    }
-    if (stillPending && Number.isFinite(mid)
-      && Math.abs(mid - stillPending.limitPrice) > 1e-8) {
-      this.requotePendingOrder(stillPending, market, outcome, quote, mid);
-    }
-    const afterRequote = this.pendingOrders.get(tokenId);
-    if (afterRequote && this.availableCashForOrder(afterRequote) <= 1e-8) {
-      this.cancelPendingOrder(afterRequote, 'PAPER_CASH_RESERVED_OR_EXHAUSTED');
-      return;
-    }
-    this.markDirty();
-  }
-
-  requotePendingOrder(order, market, outcome, quote, nextPrice) {
-    const previousPrice = order.limitPrice;
-    const remainingShares = Math.max(0, safeNumber(order.remainingShares));
-    const otherReservations = Math.max(
-      0,
-      this.reservedCash() - remainingShares * previousPrice,
-    );
-    if (this.cash - otherReservations + 1e-8 < remainingShares * nextPrice) {
-      this.cancelPendingOrder(order, 'PAPER_CASH_RESERVED_OR_EXHAUSTED');
-      return false;
-    }
-
-    order.limitPrice = nextPrice;
-    order.requoteCount = safeNumber(order.requoteCount) + 1;
-    order.lastRequotedAt = this.now();
-    // A replacement order must not treat asks already present at its new price
-    // as fresh liquidity that appeared after it was placed.
-    order.seenAskSizes = Object.fromEntries(
-      normalizedLevels(quote?.askLevels)
-        .filter((level) => level.price <= nextPrice)
-        .map((level) => [String(level.price), level.size]),
-    );
-
-    if (Math.abs(nextPrice - safeNumber(order.lastLoggedLimitPrice, previousPrice)) >= 0.01 - 1e-9) {
-      order.lastLoggedLimitPrice = nextPrice;
-      this.log('BUY_LIMIT_REQUOTED', `${market.title} · ${outcome.label}: resting limit moved from $${previousPrice.toFixed(3)} to $${nextPrice.toFixed(3)}`, {
-        marketId: String(market.id),
-        outcome: outcome.label,
-        oldLimitPrice: previousPrice,
-        newLimitPrice: nextPrice,
-        remainingShares,
-        requoteCount: order.requoteCount,
-      });
-    } else {
-      this.markDirty();
-    }
-    return true;
-  }
-
-  recordRestingFill(order, market, outcome, quote, execution) {
+  recordEntryFill(order, market, outcome, quote, execution, {
+    entryFees = 0,
+    orderType = order.orderType || 'MARKET_SWEEP',
+  } = {}) {
     const tokenId = String(order.tokenId);
     const now = this.now();
     const existing = this.positions.find((position) => (
@@ -699,7 +644,7 @@ class NearResolutionMarketBot {
       && position.remainingShares > 0
       && position.status === 'OPEN'
     ));
-    const totalCost = execution.notional;
+    const totalCost = execution.notional + entryFees;
     const bid = Number(quote?.bestBid);
     let position = existing;
 
@@ -719,7 +664,7 @@ class NearResolutionMarketBot {
         takerBaseFee: market.takerBaseFee,
         feeSchedule: market.feeSchedule,
         takerFeeRate: market.takerFeeRate,
-        entryOrderType: 'RESTING_LIMIT',
+        entryOrderType: orderType,
         entryLimitPrice: order.limitPrice,
         requestedShares: order.requestedShares,
         initialShares: 0,
@@ -749,6 +694,7 @@ class NearResolutionMarketBot {
     position.remainingShares += execution.shares;
     position.shares = position.remainingShares;
     position.entryNotional += execution.notional;
+    position.entryFees += entryFees;
     position.totalCost += totalCost;
     position.remainingCostBasis += totalCost;
     position.averageEntryPrice = position.entryNotional / position.initialShares;
@@ -757,6 +703,7 @@ class NearResolutionMarketBot {
     position.markValue = (Number.isFinite(bid) ? bid : 0) * position.remainingShares;
     position.unrealizedPnl = position.markValue - position.remainingCostBasis;
     this.cash -= totalCost;
+    this.totalFees += entryFees;
     order.filledShares += execution.shares;
     order.remainingShares = Math.max(0, order.requestedShares - order.filledShares);
     this.enteredTokenIds.add(tokenId);
@@ -784,19 +731,21 @@ class NearResolutionMarketBot {
       price: execution.averagePrice,
       limitPrice: order.limitPrice,
       notional: execution.notional,
-      fees: 0,
+      fees: entryFees,
       status: complete ? 'FILLED' : 'PARTIAL',
       pnl: null,
+      orderType,
     });
     this.trimHistory();
-    this.log('BUY_ENTRY', `${market.title} · ${outcome.label}: limit filled ${execution.shares.toFixed(2)} shares at $${execution.averagePrice.toFixed(3)}`, {
+    this.log('BUY_ENTRY', `${market.title} · ${outcome.label}: ${orderType === 'MARKET_SWEEP' ? 'market-swept' : 'limit-filled'} ${execution.shares.toFixed(2)} shares at $${execution.averagePrice.toFixed(3)}`, {
       marketId: String(market.id),
       outcome: outcome.label,
+      orderType,
       limitPrice: order.limitPrice,
       filledShares: execution.shares,
       remainingOrderShares: order.remainingShares,
       averagePrice: execution.averagePrice,
-      fees: 0,
+      fees: entryFees,
     });
   }
 
@@ -1130,8 +1079,8 @@ class NearResolutionMarketBot {
         liveTradingEnabled: false,
         realOrderModulesLoaded: false,
         markets: 'Active non-sports, non-crypto outcomes expiring within two hours',
-        entryRule: `Rest a ${ENTRY_SHARES}-share limit buy at the current midpoint when it is $${ENTRY_MIN_MID.toFixed(2)}–$${ENTRY_MAX_MID.toFixed(2)} and best bid is above $${STOP_LOSS_BID.toFixed(2)}.`,
-        orderRule: 'Re-quote the resting limit to each new midpoint tick inside the band; cancel any unfilled remainder when midpoint leaves the band. Fill only from newly visible asks at or below the active limit.',
+        entryRule: `Sweep up to ${ENTRY_SHARES} shares at market when midpoint is $${ENTRY_MIN_MID.toFixed(2)}–$${ENTRY_MAX_MID.toFixed(2)} and best bid is above $${STOP_LOSS_BID.toFixed(2)}.`,
+        orderRule: 'Use the current CLOB WebSocket ask book to sweep visible liquidity up to $1.00; fills use actual visible depth and may be partial. Market-entry taker fees are modeled from Gamma. No resting entry orders or REST polling.',
         takeProfitRule: `Rest a limit sell at $${TAKE_PROFIT_BID.toFixed(2)}; confirm it from best bids.`,
         stopLossRule: `At a best bid of $${STOP_LOSS_BID.toFixed(2)} or lower, sweep available bids; remove that market from active scanning.`,
         resolutionRule: 'Any remaining shares stay paper-open until Gamma reports the official market result.',
@@ -1180,6 +1129,7 @@ class NearResolutionMarketBot {
   }
 }
 
+NearResolutionMarketBot.PREVIOUS_STRATEGY_VERSION = PREVIOUS_STRATEGY_VERSION;
 module.exports = NearResolutionMarketBot;
 module.exports._test = {
   STRATEGY_VERSION,

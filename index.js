@@ -31,13 +31,22 @@ function startApplication({
   const server = startServer(bot, port, null, { listen: !store });
   let shutdownRequested = false;
   let ready = Promise.resolve();
-  const resetVersion = `${String(env.PAPER_HISTORY_RESET_VERSION || '').trim()}|${bot.persistenceStrategyVersion}`;
+  const resetInput = String(env.PAPER_HISTORY_RESET_VERSION || '').trim();
+  const resetVersion = `${resetInput}|${bot.persistenceStrategyVersion}`;
 
   if (store) {
     ready = (async () => {
       const restored = await store.load();
       let historySource;
-      if (restored?.paperStrategyVersion !== bot.persistenceStrategyVersion
+      const previousStrategyVersion = NearResolutionMarketBot.PREVIOUS_STRATEGY_VERSION;
+      const canMigrateMidpointLimits = restored?.paperStrategyVersion === previousStrategyVersion
+        && restored?.paperHistoryResetVersion === `${resetInput}|${previousStrategyVersion}`;
+      if (canMigrateMidpointLimits) {
+        bot.restorePersistentState(restored);
+        bot.paperHistoryResetVersion = resetVersion;
+        bot.markDirty();
+        historySource = 'persistent volume (market-sweep migration; pending limits cancelled)';
+      } else if (restored?.paperStrategyVersion !== bot.persistenceStrategyVersion
         || restored?.paperHistoryResetVersion !== resetVersion) {
         const freshState = bot.serializePersistentState();
         freshState.paperHistoryResetVersion = resetVersion;

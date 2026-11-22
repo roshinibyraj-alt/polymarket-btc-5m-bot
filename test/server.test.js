@@ -35,7 +35,7 @@ test('dashboard serves the near-resolution strategy and live market controls', a
   assert.match(html, /0\.90/);
   assert.match(html, /0\.99/);
   assert.match(html, /0\.60/);
-  assert.match(html, /resting limit/);
+  assert.match(html, /market-sweep/i);
   assert.match(html, /Demo only/);
   assert.doesNotMatch(html, /BTCUSDT|Binance model|Volume and rebate tracker/);
 });

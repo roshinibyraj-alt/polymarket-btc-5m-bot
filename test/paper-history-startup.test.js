@@ -49,6 +49,9 @@ function makeBot(steps) {
     attachPersistenceStore() {
       steps.push('attach');
     },
+    markDirty() {
+      steps.push('dirty');
+    },
     async persistState() {
       steps.push('persist');
       await this.store.save(this.restoredState);
@@ -138,6 +141,49 @@ test('an older volume strategy ledger is reset instead of carrying BTC history f
   assert.equal(savedStates.length, 1);
   assert.equal(savedStates[0].paperStrategyVersion, STRATEGY_VERSION);
   assert.ok(steps.includes('serialize'));
+});
+
+test('midpoint-limit strategy upgrade preserves the ledger for market-sweep migration', async (t) => {
+  const steps = [];
+  const previousVersion = 'non-sports-non-crypto-mid-limit-requote-v4';
+  const currentVersion = 'non-sports-non-crypto-market-sweep-v5';
+  const oldState = {
+    schemaVersion: 1,
+    paperStrategyVersion: previousVersion,
+    paperHistoryResetVersion: `near-market-clean-start-v1|${previousVersion}`,
+    capital: 10_000,
+    cash: 9_740,
+    positions: [{ id: 'preserved-position', remainingShares: 10, status: 'OPEN' }],
+    pendingOrders: [{ id: 'old-limit', tokenId: 'old-token' }],
+    trades: [{ id: 'filled-entry', kind: 'BUY_ENTRY' }],
+    orderEvents: [{ id: 'old-limit', kind: 'BUY_LIMIT_PLACED' }],
+    events: [],
+    enteredTokenIds: ['already-entered'],
+    stoppedMarketIds: [],
+    totalEntries: 1,
+    totalSettledTrades: 0,
+  };
+  const { store, savedStates } = makeStore(steps, oldState);
+  const bot = makeBot(steps);
+  bot.persistenceStrategyVersion = currentVersion;
+  bot.store = store;
+  const app = startApplication({
+    env: { PAPER_HISTORY_RESET_VERSION: 'near-market-clean-start-v1' },
+    port: 0,
+    bot,
+    paperStateStore: store,
+  });
+  t.after(() => new Promise((resolve) => app.server.close(resolve)));
+
+  await app.ready;
+  await waitForListening(app.server);
+
+  assert.equal(bot.restoredState.cash, 9_740);
+  assert.equal(bot.restoredState.positions[0].id, 'preserved-position');
+  assert.equal(bot.restoredState.trades[0].id, 'filled-entry');
+  assert.equal(bot.paperHistoryResetVersion, `near-market-clean-start-v1|${currentVersion}`);
+  assert.ok(!steps.includes('serialize'), 'migration does not start a fresh paper ledger');
+  assert.equal(savedStates.length, 1);
 });
 
 test('matching strategy and reset markers preserve the new paper history on restart', async (t) => {

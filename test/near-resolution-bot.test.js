@@ -100,110 +100,114 @@ test('midpoint boundaries $0.80 and $0.90 qualify; adjacent prices and bids at t
     const { bot, feedFactory } = makeBot();
     await bot.scanNow();
     bot.handleQuote('market-1-a', quote({ ask: mid + 0.01, bid }));
-    assert.equal(bot.pendingOrders.size, expected);
+    assert.equal(bot.positions.length, expected);
+    assert.equal(bot.pendingOrders.size, 0);
     assert.equal(feedFactory.getFeed().assetIds.length, 2);
   }
 });
 
-test('rests a 20-share limit at midpoint and only fills from new asks at or below the limit', async () => {
-  const { bot, nowRef } = makeBot();
+test('market entry sweeps visible asks for 20 shares without leaving a resting order', async () => {
+  const { bot } = makeBot();
   await bot.scanNow();
-  bot.handleQuote('market-1-a', quote({ ask: 0.86, bid: 0.84 }));
-  const order = bot.pendingOrders.get('market-1-a');
-  assert.equal(order.limitPrice, 0.85);
-  assert.equal(order.requestedShares, 20);
-  assert.equal(bot.positions.length, 0);
-  assert.equal(bot.snapshot().account.reservedCash, 17);
-
-  nowRef.value += 100;
   bot.handleQuote('market-1-a', {
-    ...quote({ ask: 0.84, bid: 0.83, askSize: 10 }),
-    askLevels: [{ price: 0.84, size: 10 }],
-  });
-  assert.equal(bot.positions[0].remainingShares, 10);
-  assert.equal(bot.pendingOrders.get('market-1-a').remainingShares, 10);
-  assert.equal(bot.pendingOrders.get('market-1-a').limitPrice, 0.835);
-  assert.ok(Math.abs(bot.positions[0].averageEntryPrice - 0.84) < 1e-8);
-
-  nowRef.value += 100;
-  bot.handleQuote('market-1-a', {
-    ...quote({ ask: 0.84, bid: 0.83, askSize: 10 }),
-    askLevels: [{ price: 0.84, size: 10 }],
-  });
-  assert.equal(bot.positions[0].remainingShares, 10, 'unchanged visible size is not counted twice');
-
-  nowRef.value += 100;
-  bot.handleQuote('market-1-a', {
-    ...quote({ ask: 0.83, bid: 0.82, askSize: 15 }),
-    askLevels: [{ price: 0.83, size: 15 }],
+    ...quote({ ask: 0.86, bid: 0.84, askSize: 5 }),
+    askLevels: [
+      { price: 0.86, size: 5 },
+      { price: 0.88, size: 15 },
+      { price: 0.90, size: 50 },
+    ],
   });
   assert.equal(bot.positions[0].remainingShares, 20);
-  assert.equal(bot.pendingOrders.has('market-1-a'), false);
-  assert.ok(Math.abs(bot.positions[0].averageEntryPrice - 0.835) < 1e-8);
+  assert.equal(bot.pendingOrders.size, 0);
+  assert.equal(bot.positions[0].entryOrderType, 'MARKET_SWEEP');
+  assert.ok(Math.abs(bot.positions[0].averageEntryPrice - 0.875) < 1e-8);
+  assert.equal(bot.trades[0].orderType, 'MARKET_SWEEP');
+  assert.equal(bot.trades[0].filledShares, 20);
   assert.equal(bot.positions[0].entryFees, 0);
-});
 
-test('re-quotes a pending limit to each new midpoint tick inside the band', async () => {
-  const { bot, nowRef } = makeBot();
-  await bot.scanNow();
   bot.handleQuote('market-1-a', quote({ ask: 0.86, bid: 0.84 }));
-  const order = bot.pendingOrders.get('market-1-a');
-  assert.equal(order.limitPrice, 0.85);
-  assert.equal(order.requoteCount, 0);
-
-  nowRef.value += 100;
-  bot.handleQuote('market-1-a', quote({ ask: 0.88, bid: 0.84 }));
-  assert.equal(order.limitPrice, 0.86);
-  assert.equal(order.requoteCount, 1);
-  assert.equal(bot.positions.length, 0, 'existing displayed asks are not treated as new fills after replacement');
-  assert.equal(bot.snapshot().account.reservedCash, 17.2);
-
-  nowRef.value += 100;
-  bot.handleQuote('market-1-a', quote({ ask: 0.88, bid: 0.84 }));
-  assert.equal(order.limitPrice, 0.86);
-  assert.equal(order.requoteCount, 1, 'an unchanged midpoint does not create a new quote');
-
-  nowRef.value += 100;
-  bot.handleQuote('market-1-a', quote({ ask: 0.92, bid: 0.90 }));
-  assert.equal(bot.pendingOrders.size, 0, 'leaving the band still cancels the order');
+  assert.equal(bot.totalEntries, 1, 'an outcome token gets only one entry');
 });
 
-test('cancels unfilled limit when midpoint leaves the band and releases reserved cash', async () => {
+test('market sweep only fills visible ask depth and does not invent the remainder', async () => {
   const { bot } = makeBot();
   await bot.scanNow();
-  bot.handleQuote('market-1-a', quote({ ask: 0.86, bid: 0.84 }));
-  assert.equal(bot.pendingOrders.size, 1);
-  bot.handleQuote('market-1-a', quote({ ask: 0.92, bid: 0.90 }));
+  bot.handleQuote('market-1-a', {
+    ...quote({ ask: 0.86, bid: 0.84, askSize: 7 }),
+    askLevels: [{ price: 0.86, size: 7 }],
+  });
+  assert.equal(bot.positions[0].remainingShares, 7);
+  assert.equal(bot.trades[0].status, 'PARTIAL');
   assert.equal(bot.pendingOrders.size, 0);
-  assert.equal(bot.snapshot().account.reservedCash, 0);
+});
+
+test('market entry fees reduce cash, cost basis, and P&L using the taker schedule', async () => {
+  const item = market();
+  item.feesEnabled = true;
+  item.takerFeeRate = 0.02;
+  const { bot } = makeBot({ markets: [item] });
+  await bot.scanNow();
+  bot.handleQuote('market-1-a', {
+    ...quote({ ask: 0.86, bid: 0.84, askSize: 20 }),
+    askLevels: [{ price: 0.86, size: 20 }],
+  });
+  const expectedFee = 20 * 0.02 * 0.86 * (1 - 0.86);
+  assert.ok(Math.abs(bot.positions[0].entryFees - expectedFee) < 1e-8);
+  assert.ok(Math.abs(bot.positions[0].remainingCostBasis - (17.2 + expectedFee)) < 1e-8);
+  assert.ok(Math.abs(bot.cash - (10_000 - 17.2 - expectedFee)) < 1e-8);
+  assert.ok(Math.abs(bot.totalFees - expectedFee) < 1e-8);
+});
+
+test('v4 midpoint-limit migration preserves paper history and cancels remaining limits', async () => {
+  const { bot } = makeBot();
+  const state = bot.serializePersistentState();
+  state.paperStrategyVersion = NearResolutionMarketBot.PREVIOUS_STRATEGY_VERSION;
+  state.paperHistoryResetVersion = `|${NearResolutionMarketBot.PREVIOUS_STRATEGY_VERSION}`;
+  state.cash = 9_990;
+  state.realizedPnl = -10;
+  state.totalEntries = 1;
+  state.positions = [{
+    id: 'preserved-position',
+    marketId: 'market-1',
+    marketTitle: 'Saved position',
+    tokenId: 'saved-token',
+    outcomeLabel: 'Yes',
+    remainingShares: 10,
+    remainingCostBasis: 8,
+    status: 'OPEN',
+  }];
+  state.pendingOrders = [{
+    id: 'legacy-limit',
+    marketId: 'market-1',
+    marketTitle: 'Saved market',
+    outcomeLabel: 'No',
+    tokenId: 'market-1-b',
+    requestedShares: 20,
+    filledShares: 0,
+    remainingShares: 20,
+    limitPrice: 0.85,
+    status: 'OPEN',
+    createdAt: NOW,
+    seenAskSizes: {},
+  }];
+  state.orderEvents = [{
+    id: 'legacy-limit',
+    at: NOW,
+    kind: 'BUY_LIMIT_PLACED',
+    marketTitle: 'Saved market',
+    outcome: 'No',
+    requestedShares: 20,
+    filledShares: 0,
+    status: 'OPEN',
+  }];
+  bot.restorePersistentState(state);
+
+  assert.equal(bot.pendingOrders.size, 0);
   assert.equal(bot.orderEvents[0].kind, 'BUY_LIMIT_CANCELLED');
-  assert.equal(bot.orderEvents[0].status, 'MIDPOINT_LEFT_ENTRY_BAND');
-});
-
-test('pending limits reserve their full cost and are persisted across restarts', async () => {
-  const markets = [market({ id: 'first' }), market({ id: 'second' })];
-  const { bot } = makeBot({ markets, initialCapital: 17 });
-  await bot.scanNow();
-  bot.handleQuote('first-a', quote({ ask: 0.86, bid: 0.84 }));
-  bot.handleQuote('second-a', quote({ ask: 0.86, bid: 0.84 }));
-  assert.equal(bot.pendingOrders.size, 1);
-  assert.equal(bot.snapshot().account.availableCash, 0);
-
-  const saved = bot.serializePersistentState();
-  const restored = makeBot({ markets, initialCapital: 17 }).bot;
-  restored.restorePersistentState(saved);
-  assert.equal(restored.pendingOrders.size, 1);
-  assert.equal(restored.orderEvents.length, 1);
-  assert.equal(restored.snapshot().account.reservedCash, 17);
-});
-
-test('best bid guard cancels a resting order if it falls to the stop level', async () => {
-  const { bot } = makeBot();
-  await bot.scanNow();
-  bot.handleQuote('market-1-a', quote({ ask: 0.86, bid: 0.84 }));
-  bot.handleQuote('market-1-a', quote({ ask: 0.94, bid: 0.60 }));
-  assert.equal(bot.pendingOrders.size, 0);
-  assert.equal(bot.orderEvents[0].status, 'BEST_BID_AT_OR_BELOW_STOP');
+  assert.equal(bot.orderEvents[0].status, 'STRATEGY_SWITCH_TO_MARKET_SWEEP');
+  assert.equal(bot.cash, 9_990);
+  assert.equal(bot.realizedPnl, -10);
+  assert.equal(bot.positions[0].id, 'preserved-position');
 });
 
 test('floating P&L updates from the live best bid and take-profit closes at $0.99', async () => {
@@ -214,9 +218,9 @@ test('floating P&L updates from the live best bid and take-profit closes at $0.9
     ...quote({ ask: 0.85, bid: 0.84, askSize: 20 }),
     askLevels: [{ price: 0.85, size: 20 }],
   });
-  bot.handleQuote('market-1-a', quote({ ask: 0.88, bid: 0.86 }));
-  assert.ok(Math.abs(bot.snapshot().positions[0].unrealizedPnl - 0.2) < 1e-8);
-  assert.ok(Math.abs(bot.snapshot().account.unrealizedPnl - 0.2) < 1e-8);
+  bot.handleQuote('market-1-a', quote({ ask: 0.90, bid: 0.88 }));
+  assert.ok(Math.abs(bot.snapshot().positions[0].unrealizedPnl - 0.4) < 1e-8);
+  assert.ok(Math.abs(bot.snapshot().account.unrealizedPnl - 0.4) < 1e-8);
   bot.handleQuote('market-1-a', quote({ ask: 0.99, bid: 0.99 }));
   assert.equal(bot.positions[0].status, 'TAKE_PROFIT');
   assert.equal(bot.positions[0].remainingShares, 0);
@@ -228,13 +232,8 @@ test('order churn cannot push actual fills out of recent trade history', async (
   const { bot } = makeBot();
   await bot.scanNow();
   bot.handleQuote('market-1-a', quote({ ask: 0.86, bid: 0.84 }));
-  bot.handleQuote('market-1-a', {
-    ...quote({ ask: 0.85, bid: 0.84, askSize: 20 }),
-    askLevels: [{ price: 0.85, size: 20 }],
-  });
 
   assert.equal(bot.trades[0].kind, 'BUY_ENTRY');
-  assert.equal(bot.orderEvents[0].kind, 'BUY_LIMIT_PLACED');
 
   for (let index = 0; index < 120; index += 1) {
     bot.orderEvents.unshift({
@@ -255,17 +254,16 @@ test('order churn cannot push actual fills out of recent trade history', async (
   assert.equal(snapshot.recentOrderEvents[0].kind, 'BUY_LIMIT_CANCELLED');
 });
 
-test('a $0.60 or lower bid stops a position, cancels sibling orders, and removes the market', async () => {
+test('a $0.60 or lower bid stops the position and removes the market from scanning', async () => {
   const { bot, feedFactory } = makeBot();
   await bot.scanNow();
   bot.handleQuote('market-1-a', quote({ ask: 0.86, bid: 0.84 }));
-  bot.handleQuote('market-1-b', quote({ ask: 0.86, bid: 0.84 }));
   bot.handleQuote('market-1-a', {
     ...quote({ ask: 0.85, bid: 0.84, askSize: 20 }),
     askLevels: [{ price: 0.85, size: 20 }],
   });
   bot.handleQuote('market-1-a', quote({ ask: 0.99, bid: 0.6 }));
-  assert.equal(bot.positions[0].status, 'STOP_LOSS');
+  assert.equal(bot.positions.find((position) => position.tokenId === 'market-1-a').status, 'STOP_LOSS');
   assert.equal(bot.markets.has('market-1'), false);
   assert.equal(bot.stoppedMarketIds.has('market-1'), true);
   assert.equal(bot.pendingOrders.size, 0);
@@ -293,10 +291,10 @@ test('a stopped partial remainder stays subscribed and its floating P&L keeps up
   await bot.scanNow();
   bot.handleQuote('market-1-a', quote({ ask: 0.85, bid: 0.70 }));
   assert.equal(bot.snapshot().positions[0].bestBid, 0.70);
-  assert.ok(Math.abs(bot.snapshot().positions[0].unrealizedPnl - (-1.5)) < 1e-8);
+  assert.ok(Math.abs(bot.snapshot().positions[0].unrealizedPnl - (-1.6)) < 1e-8);
 });
 
-test('multiple outcomes can each hold an independent midpoint resting order', async () => {
+test('multiple outcomes can each have an independent market-sweep entry', async () => {
   const multi = market({
     outcomes: [
       { index: 0, label: 'Home', tokenId: 'multi-home', lastPrice: 0.85 },
@@ -308,8 +306,8 @@ test('multiple outcomes can each hold an independent midpoint resting order', as
   await bot.scanNow();
   bot.handleQuote('multi-home', quote({ ask: 0.86, bid: 0.84 }));
   bot.handleQuote('multi-away', quote({ ask: 0.86, bid: 0.84 }));
-  assert.equal(bot.pendingOrders.size, 2);
-  assert.deepEqual([...bot.pendingOrders.values()].map((order) => order.outcomeLabel), ['Home', 'Away']);
+  assert.equal(bot.pendingOrders.size, 0);
+  assert.deepEqual(bot.positions.map((position) => position.outcomeLabel), ['Away', 'Home']);
 });
 
 test('a page-capped Gamma scan can trade its discovered markets while showing incomplete coverage', async () => {
@@ -324,7 +322,8 @@ test('a page-capped Gamma scan can trade its discovered markets while showing in
   assert.equal(bot.snapshot().marketScan.status, 'INCOMPLETE');
   assert.equal(bot.scanHealthy, true);
   bot.handleQuote('market-1-a', quote({ ask: 0.86, bid: 0.84 }));
-  assert.equal(bot.pendingOrders.size, 1);
+  assert.equal(bot.positions.length, 1);
+  assert.equal(bot.pendingOrders.size, 0);
 });
 
 test('unexited shares wait for official resolution and settle by the market outcome index', async () => {

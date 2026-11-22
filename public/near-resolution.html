@@ -181,7 +181,7 @@
         <div class="kpi-value" id="position-count">0</div>
       </article>
       <article class="card kpi">
-        <div class="kpi-label">Resting orders</div>
+        <div class="kpi-label">Pending limits</div>
         <div class="kpi-value" id="pending-count">0</div>
       </article>
     </div>
@@ -196,10 +196,10 @@
 
     <section class="card">
       <div class="section-head">
-        <h2>Resting limit orders</h2>
-        <span class="section-meta" id="pending-meta">No pending orders</span>
+        <h2>Entry orders</h2>
+        <span class="section-meta" id="pending-meta">Market sweep · no resting entry</span>
       </div>
-      <div id="pending-orders" class="position-list"><div class="empty">No resting entry orders.</div></div>
+      <div id="pending-orders" class="position-list"><div class="empty">Eligible entries sweep visible asks immediately; the bot does not leave entry limits resting.</div></div>
     </section>
 
     <section class="card">
@@ -229,9 +229,9 @@
       <summary>Strategy and rules</summary>
       <div class="rules">
         <div class="rule"><b>Market scan:</b> active, tradable non-sports, non-crypto markets whose listed end time is within two hours. Outcomes and token IDs come from Gamma; prices come from the CLOB WebSocket.</div>
-        <div class="rule"><b>Entry:</b> rest a 20-share paper limit buy at the current midpoint when the midpoint is $0.80–$0.90 and the best bid is above $0.60. Re-quote on each new midpoint tick inside the band; cancel any unfilled remainder when midpoint leaves the band.</div>
-        <div class="rule"><b>Fill model:</b> confirm fills only from newly visible ask size at or below the active resting limit. Partial fills are tracked. Resting maker buys have no trading fee.</div>
-        <div class="rule"><b>Fees &amp; rebates:</b> makers are not charged trading fees. Maker rebates are conditional on eligible fee-generating fills and maker tier; standard rebates start at $200,000 in 30-day maker weighted volume. This paper bot has no connected wallet and credits no real rebate. <a href="https://docs.polymarket.com/trading/fees" target="_blank" rel="noopener noreferrer">Official fee rules</a>.</div>
+        <div class="rule"><b>Entry:</b> market-sweep up to 20 shares when the midpoint is $0.80–$0.90 and the best bid is above $0.60. Use the current WebSocket ask book and sweep visible asks up to $1.00; partial fills are possible if visible depth is short. No entry limit rests, and no extra REST polling is added.</div>
+        <div class="rule"><b>Entry fees:</b> market-sweep entries are taker orders. The paper ledger estimates any enabled taker fee from Gamma's market fee schedule; taker entries do not earn maker rebates.</div>
+        <div class="rule"><b>Maker rebates:</b> Polymarket rebates are conditional on eligible filled maker orders and account tier; standard rebates start at $200,000 in 30-day maker weighted volume. This paper bot has no connected wallet and credits no actual rebate. <a href="https://docs.polymarket.com/trading/fees" target="_blank" rel="noopener noreferrer">Official fee rules</a>.</div>
         <div class="rule"><b>Take-profit:</b> rest a simulated limit sell at $0.99 and fill from visible bids at or above $0.99. It is treated as a maker order with no trading fee.</div>
         <div class="rule"><b>Stop-loss:</b> when best bid reaches $0.60 or lower, sweep available bids; a taker fee may apply from the market's fee schedule. That market is then removed from active scanning.</div>
         <div class="rule"><b>Resolution:</b> any shares left after an exit remain paper-open until Gamma reports the official result. Settlement uses the resolved outcome payout.</div>
@@ -296,7 +296,7 @@
       const rows = state.pendingOrders || [];
       $('pending-meta').textContent = `${rows.length} active`;
       if (!rows.length) {
-        $('pending-orders').innerHTML = '<div class="empty">No resting entry orders.</div>';
+        $('pending-orders').innerHTML = '<div class="empty">Eligible entries sweep visible asks immediately; the bot does not leave entry limits resting.</div>';
         return;
       }
       $('pending-orders').innerHTML = rows.map((order) => {
@@ -357,7 +357,7 @@
           const ask = outcome.bestAsk == null ? '—' : money(outcome.bestAsk);
           const pending = outcome.pendingOrder;
           return `<div class="outcome-row">
-            <span class="outcome-name">${esc(outcome.label)} ${ready ? '<span class="tag ready">entry range</span>' : ''}${pending ? '<span class="tag traded">limit pending</span>' : ''}</span>
+            <span class="outcome-name">${esc(outcome.label)} ${ready ? '<span class="tag ready">entry range</span>' : ''}${pending ? '<span class="tag traded">legacy pending</span>' : ''}</span>
             <span class="quote">Mid <strong>${mid}</strong> · Bid <strong>${bid}</strong> · Ask <strong>${ask}</strong></span>
           </div>`;
         }).join('');
@@ -398,7 +398,7 @@
 
     function renderOrderActivity(state) {
       const events = state.recentOrderEvents || [];
-      $('order-activity-meta').textContent = `${events.length} recent limit-order events · placements and cancellations do not hide fills`;
+      $('order-activity-meta').textContent = `${events.length} recent order events · order activity does not hide fills`;
       if (!events.length) {
         $('order-activity').innerHTML = '<div class="empty">No order activity yet.</div>';
         return;
