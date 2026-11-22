@@ -233,8 +233,8 @@
         <div class="rule"><b>Entry fees:</b> market-sweep entries are taker orders. The paper ledger estimates any enabled taker fee from Gamma's market fee schedule; taker entries do not earn maker rebates.</div>
         <div class="rule"><b>Maker rebates:</b> Polymarket rebates are conditional on eligible filled maker orders and account tier; standard rebates start at $200,000 in 30-day maker weighted volume. This paper bot has no connected wallet and credits no actual rebate. <a href="https://docs.polymarket.com/trading/fees" target="_blank" rel="noopener noreferrer">Official fee rules</a>.</div>
         <div class="rule"><b>Take-profit:</b> rest a simulated limit sell at $0.99 and fill from visible bids at or above $0.99. It is treated as a maker order with no trading fee.</div>
-        <div class="rule"><b>Stop-loss:</b> when best bid reaches $0.60 or lower, sweep available bids; a taker fee may apply from the market's fee schedule. That market is then removed from active scanning.</div>
-        <div class="rule"><b>Resolution:</b> any shares left after an exit remain paper-open until Gamma reports the official result. Settlement uses the resolved outcome payout.</div>
+        <div class="rule"><b>Exit:</b> no stop-loss. The bot sells only at the $0.99 take-profit; otherwise it holds shares until Gamma reports the official result.</div>
+        <div class="rule"><b>Resolution:</b> unexited shares remain paper-open until Gamma reports the official result. Settlement uses the resolved outcome payout.</div>
         <div class="rule"><b>Safety:</b> demo-only. No wallet or real-order code is loaded by this app.</div>
       </div>
     </details>
@@ -269,10 +269,8 @@
       }
       $('positions').innerHTML = rows.map((p) => {
         const pnl = Number(p.unrealizedPnl);
-        const waiting = p.status === 'STOPPED_PENDING_RESOLUTION';
-        const quoteLabel = waiting ? 'Stopped · settling'
-          : `${p.quoteStatus === 'LIVE' ? 'LIVE' : 'WAITING'} · ${clock(p.secondsRemaining)}`;
-        const quoteClass = waiting ? 'negative' : p.quoteStatus === 'LIVE' ? 'positive' : 'neutral';
+        const quoteLabel = `${p.quoteStatus === 'LIVE' ? 'LIVE' : 'WAITING'} · ${clock(p.secondsRemaining)}`;
+        const quoteClass = p.quoteStatus === 'LIVE' ? 'positive' : 'neutral';
         return `<article class="position">
           <div class="position-top">
             <div>
@@ -344,11 +342,9 @@
       $('markets').innerHTML = rows.slice(0, 30).map((market) => {
         const tag = market.status === 'TRADED'
           ? '<span class="tag traded">traded</span>'
-          : market.status === 'STOPPED'
-            ? '<span class="tag stopped">stopped</span>'
-            : market.status === 'PENDING'
-              ? '<span class="tag traded">pending</span>'
-              : '<span class="tag">watching</span>';
+          : market.status === 'PENDING'
+            ? '<span class="tag traded">pending</span>'
+            : '<span class="tag">watching</span>';
         const outcomes = (market.outcomes || []).map((outcome) => {
           const price = outcome.mid;
           const ready = outcome.eligible;

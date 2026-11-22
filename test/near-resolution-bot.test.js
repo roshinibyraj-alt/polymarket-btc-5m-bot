@@ -89,7 +89,7 @@ function quote({ ask, bid = ask - 0.01, askSize = 500, bidSize = 500 } = {}) {
   };
 }
 
-test('midpoint boundaries $0.80 and $0.90 qualify; adjacent prices and bids at the stop do not', async () => {
+test('midpoint boundaries $0.80 and $0.90 qualify; the $0.60 entry bid floor remains', async () => {
   for (const [mid, bid, expected] of [
     [0.79, 0.78, 0],
     [0.8, 0.79, 1],
@@ -158,56 +158,11 @@ test('market entry fees reduce cash, cost basis, and P&L using the taker schedul
   assert.ok(Math.abs(bot.totalFees - expectedFee) < 1e-8);
 });
 
-test('v4 midpoint-limit migration preserves paper history and cancels remaining limits', async () => {
+test('paper history from the prior stop-loss strategy is rejected after a reset', async () => {
   const { bot } = makeBot();
   const state = bot.serializePersistentState();
-  state.paperStrategyVersion = NearResolutionMarketBot.PREVIOUS_STRATEGY_VERSION;
-  state.paperHistoryResetVersion = `|${NearResolutionMarketBot.PREVIOUS_STRATEGY_VERSION}`;
-  state.cash = 9_990;
-  state.realizedPnl = -10;
-  state.totalEntries = 1;
-  state.positions = [{
-    id: 'preserved-position',
-    marketId: 'market-1',
-    marketTitle: 'Saved position',
-    tokenId: 'saved-token',
-    outcomeLabel: 'Yes',
-    remainingShares: 10,
-    remainingCostBasis: 8,
-    status: 'OPEN',
-  }];
-  state.pendingOrders = [{
-    id: 'legacy-limit',
-    marketId: 'market-1',
-    marketTitle: 'Saved market',
-    outcomeLabel: 'No',
-    tokenId: 'market-1-b',
-    requestedShares: 20,
-    filledShares: 0,
-    remainingShares: 20,
-    limitPrice: 0.85,
-    status: 'OPEN',
-    createdAt: NOW,
-    seenAskSizes: {},
-  }];
-  state.orderEvents = [{
-    id: 'legacy-limit',
-    at: NOW,
-    kind: 'BUY_LIMIT_PLACED',
-    marketTitle: 'Saved market',
-    outcome: 'No',
-    requestedShares: 20,
-    filledShares: 0,
-    status: 'OPEN',
-  }];
-  bot.restorePersistentState(state);
-
-  assert.equal(bot.pendingOrders.size, 0);
-  assert.equal(bot.orderEvents[0].kind, 'BUY_LIMIT_CANCELLED');
-  assert.equal(bot.orderEvents[0].status, 'STRATEGY_SWITCH_TO_MARKET_SWEEP');
-  assert.equal(bot.cash, 9_990);
-  assert.equal(bot.realizedPnl, -10);
-  assert.equal(bot.positions[0].id, 'preserved-position');
+  state.paperStrategyVersion = 'non-sports-non-crypto-market-sweep-v5';
+  assert.throws(() => bot.restorePersistentState(state), /different strategy version/);
 });
 
 test('floating P&L updates from the live best bid and take-profit closes at $0.99', async () => {
@@ -254,44 +209,39 @@ test('order churn cannot push actual fills out of recent trade history', async (
   assert.equal(snapshot.recentOrderEvents[0].kind, 'BUY_LIMIT_CANCELLED');
 });
 
-test('a $0.60 or lower bid stops the position and removes the market from scanning', async () => {
+test('low bids no longer sell positions or remove their markets from scanning', async () => {
   const { bot, feedFactory } = makeBot();
   await bot.scanNow();
   bot.handleQuote('market-1-a', quote({ ask: 0.86, bid: 0.84 }));
-  bot.handleQuote('market-1-a', {
-    ...quote({ ask: 0.85, bid: 0.84, askSize: 20 }),
-    askLevels: [{ price: 0.85, size: 20 }],
-  });
   bot.handleQuote('market-1-a', quote({ ask: 0.99, bid: 0.6 }));
-  assert.equal(bot.positions.find((position) => position.tokenId === 'market-1-a').status, 'STOP_LOSS');
-  assert.equal(bot.markets.has('market-1'), false);
-  assert.equal(bot.stoppedMarketIds.has('market-1'), true);
+  bot.handleQuote('market-1-a', quote({ ask: 0.99, bid: 0.01 }));
+  assert.equal(bot.positions.find((position) => position.tokenId === 'market-1-a').status, 'OPEN');
+  assert.equal(bot.positions[0].remainingShares, 20);
+  assert.equal(bot.positions[0].markBid, 0.01);
+  assert.equal(bot.markets.has('market-1'), true);
   assert.equal(bot.pendingOrders.size, 0);
-  assert.equal(feedFactory.getFeed().assetIds.length, 0);
+  assert.equal(feedFactory.getFeed().assetIds.length, 2);
+  assert.equal(bot.trades.some((trade) => trade.kind === 'STOP_LOSS'), false);
   await bot.scanNow();
-  assert.equal(bot.markets.has('market-1'), false);
+  assert.equal(bot.markets.has('market-1'), true);
 });
 
-test('a stopped partial remainder stays subscribed and its floating P&L keeps updating', async () => {
+test('a deep bid decline keeps all shares open and updates floating P&L', async () => {
   const { bot } = makeBot();
   await bot.scanNow();
   bot.handleQuote('market-1-a', quote({ ask: 0.86, bid: 0.84 }));
   bot.handleQuote('market-1-a', {
-    ...quote({ ask: 0.85, bid: 0.84, askSize: 20 }),
-    askLevels: [{ price: 0.85, size: 20 }],
-  });
-  bot.handleQuote('market-1-a', {
     ...quote({ ask: 0.95, bid: 0.60, bidSize: 10 }),
     bidLevels: [{ price: 0.60, size: 10 }],
   });
-  assert.equal(bot.positions[0].status, 'STOPPED_PENDING_RESOLUTION');
-  assert.equal(bot.positions[0].remainingShares, 10);
+  assert.equal(bot.positions[0].status, 'OPEN');
+  assert.equal(bot.positions[0].remainingShares, 20);
   assert.ok(bot.feed.assetIds.includes('market-1-a'));
 
   await bot.scanNow();
   bot.handleQuote('market-1-a', quote({ ask: 0.85, bid: 0.70 }));
   assert.equal(bot.snapshot().positions[0].bestBid, 0.70);
-  assert.ok(Math.abs(bot.snapshot().positions[0].unrealizedPnl - (-1.6)) < 1e-8);
+  assert.ok(Math.abs(bot.snapshot().positions[0].unrealizedPnl - (-3.2)) < 1e-8);
 });
 
 test('multiple outcomes can each have an independent market-sweep entry', async () => {

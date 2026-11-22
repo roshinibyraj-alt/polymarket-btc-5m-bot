@@ -38,15 +38,7 @@ function startApplication({
     ready = (async () => {
       const restored = await store.load();
       let historySource;
-      const previousStrategyVersion = NearResolutionMarketBot.PREVIOUS_STRATEGY_VERSION;
-      const canMigrateMidpointLimits = restored?.paperStrategyVersion === previousStrategyVersion
-        && restored?.paperHistoryResetVersion === `${resetInput}|${previousStrategyVersion}`;
-      if (canMigrateMidpointLimits) {
-        bot.restorePersistentState(restored);
-        bot.paperHistoryResetVersion = resetVersion;
-        bot.markDirty();
-        historySource = 'persistent volume (market-sweep migration; pending limits cancelled)';
-      } else if (restored?.paperStrategyVersion !== bot.persistenceStrategyVersion
+      if (restored?.paperStrategyVersion !== bot.persistenceStrategyVersion
         || restored?.paperHistoryResetVersion !== resetVersion) {
         const freshState = bot.serializePersistentState();
         freshState.paperHistoryResetVersion = resetVersion;

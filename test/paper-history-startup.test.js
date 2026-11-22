@@ -28,7 +28,7 @@ function makeBot(steps) {
       steps.push('serialize');
       return {
         schemaVersion: 1,
-        paperStrategyVersion: STRATEGY_VERSION,
+        paperStrategyVersion: this.persistenceStrategyVersion,
         paperHistoryResetVersion: null,
         capital: 10_000,
         cash: 10_000,
@@ -143,10 +143,10 @@ test('an older volume strategy ledger is reset instead of carrying BTC history f
   assert.ok(steps.includes('serialize'));
 });
 
-test('midpoint-limit strategy upgrade preserves the ledger for market-sweep migration', async (t) => {
+test('a previous market-sweep ledger is reset for the no-stop-loss strategy', async (t) => {
   const steps = [];
-  const previousVersion = 'non-sports-non-crypto-mid-limit-requote-v4';
-  const currentVersion = 'non-sports-non-crypto-market-sweep-v5';
+  const previousVersion = 'non-sports-non-crypto-market-sweep-v5';
+  const currentVersion = 'non-sports-non-crypto-market-sweep-v6';
   const oldState = {
     schemaVersion: 1,
     paperStrategyVersion: previousVersion,
@@ -178,11 +178,12 @@ test('midpoint-limit strategy upgrade preserves the ledger for market-sweep migr
   await app.ready;
   await waitForListening(app.server);
 
-  assert.equal(bot.restoredState.cash, 9_740);
-  assert.equal(bot.restoredState.positions[0].id, 'preserved-position');
-  assert.equal(bot.restoredState.trades[0].id, 'filled-entry');
-  assert.equal(bot.paperHistoryResetVersion, `near-market-clean-start-v1|${currentVersion}`);
-  assert.ok(!steps.includes('serialize'), 'migration does not start a fresh paper ledger');
+  assert.equal(bot.restoredState.cash, 10_000);
+  assert.deepEqual(bot.restoredState.positions, []);
+  assert.deepEqual(bot.restoredState.trades, []);
+  assert.equal(savedStates[0].paperStrategyVersion, currentVersion);
+  assert.equal(savedStates[0].paperHistoryResetVersion, `near-market-clean-start-v1|${currentVersion}`);
+  assert.ok(steps.includes('serialize'), 'an incompatible strategy starts a fresh paper ledger');
   assert.equal(savedStates.length, 1);
 });
 
