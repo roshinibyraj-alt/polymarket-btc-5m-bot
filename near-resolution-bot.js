@@ -293,17 +293,10 @@ class NearResolutionMarketBot {
     for (const order of abandonedEntryOrders) {
       this.cancelPendingOrder(
         order,
-        migratingMidpointLimits
-          ? 'STRATEGY_SWITCH_TO_MARKET_SWEEP'
-          : 'MARKET_SWEEP_STRATEGY_NO_RESTING_ENTRIES',
+        'MARKET_SWEEP_STRATEGY_NO_RESTING_ENTRIES',
       );
     }
-    if (migratingMidpointLimits) {
-      this.log(
-        'STRATEGY_MIGRATED',
-        'Preserved paper balance and positions; canceled unfilled midpoint limits for market-sweep entries',
-      );
-    } else if (abandonedEntryOrders.length) {
+    if (abandonedEntryOrders.length) {
       this.log('LEGACY_ENTRY_ORDERS_CANCELLED', 'Canceled saved entry limits; the current strategy uses immediate market sweeps');
     }
   }

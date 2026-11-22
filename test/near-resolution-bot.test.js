@@ -165,6 +165,29 @@ test('paper history from the prior stop-loss strategy is rejected after a reset'
   assert.throws(() => bot.restorePersistentState(state), /different strategy version/);
 });
 
+test('same-version restore succeeds and cancels saved resting entries', async () => {
+  const { bot } = makeBot();
+  const state = bot.serializePersistentState();
+  state.pendingOrders = [{
+    id: 'legacy-limit',
+    marketId: 'market-1',
+    marketTitle: 'Saved market',
+    outcomeLabel: 'Yes',
+    tokenId: 'market-1-a',
+    requestedShares: 20,
+    filledShares: 0,
+    remainingShares: 20,
+    limitPrice: 0.85,
+    status: 'OPEN',
+    createdAt: NOW,
+  }];
+  bot.restorePersistentState(state);
+
+  assert.equal(bot.pendingOrders.size, 0);
+  assert.equal(bot.orderEvents[0].kind, 'BUY_LIMIT_CANCELLED');
+  assert.equal(bot.orderEvents[0].status, 'MARKET_SWEEP_STRATEGY_NO_RESTING_ENTRIES');
+});
+
 test('floating P&L updates from the live best bid and take-profit closes at $0.99', async () => {
   const { bot } = makeBot();
   await bot.scanNow();
