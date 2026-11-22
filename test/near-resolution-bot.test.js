@@ -176,8 +176,8 @@ test('cancels unfilled limit when midpoint leaves the band and releases reserved
   bot.handleQuote('market-1-a', quote({ ask: 0.92, bid: 0.90 }));
   assert.equal(bot.pendingOrders.size, 0);
   assert.equal(bot.snapshot().account.reservedCash, 0);
-  assert.equal(bot.trades[0].kind, 'BUY_LIMIT_CANCELLED');
-  assert.equal(bot.trades[0].status, 'MIDPOINT_LEFT_ENTRY_BAND');
+  assert.equal(bot.orderEvents[0].kind, 'BUY_LIMIT_CANCELLED');
+  assert.equal(bot.orderEvents[0].status, 'MIDPOINT_LEFT_ENTRY_BAND');
 });
 
 test('pending limits reserve their full cost and are persisted across restarts', async () => {
@@ -193,6 +193,7 @@ test('pending limits reserve their full cost and are persisted across restarts',
   const restored = makeBot({ markets, initialCapital: 17 }).bot;
   restored.restorePersistentState(saved);
   assert.equal(restored.pendingOrders.size, 1);
+  assert.equal(restored.orderEvents.length, 1);
   assert.equal(restored.snapshot().account.reservedCash, 17);
 });
 
@@ -202,7 +203,7 @@ test('best bid guard cancels a resting order if it falls to the stop level', asy
   bot.handleQuote('market-1-a', quote({ ask: 0.86, bid: 0.84 }));
   bot.handleQuote('market-1-a', quote({ ask: 0.94, bid: 0.60 }));
   assert.equal(bot.pendingOrders.size, 0);
-  assert.equal(bot.trades[0].status, 'BEST_BID_AT_OR_BELOW_STOP');
+  assert.equal(bot.orderEvents[0].status, 'BEST_BID_AT_OR_BELOW_STOP');
 });
 
 test('floating P&L updates from the live best bid and take-profit closes at $0.99', async () => {
@@ -221,6 +222,37 @@ test('floating P&L updates from the live best bid and take-profit closes at $0.9
   assert.equal(bot.positions[0].remainingShares, 0);
   assert.equal(bot.trades[0].kind, 'TAKE_PROFIT');
   assert.ok(bot.realizedPnl > 0);
+});
+
+test('order churn cannot push actual fills out of recent trade history', async () => {
+  const { bot } = makeBot();
+  await bot.scanNow();
+  bot.handleQuote('market-1-a', quote({ ask: 0.86, bid: 0.84 }));
+  bot.handleQuote('market-1-a', {
+    ...quote({ ask: 0.85, bid: 0.84, askSize: 20 }),
+    askLevels: [{ price: 0.85, size: 20 }],
+  });
+
+  assert.equal(bot.trades[0].kind, 'BUY_ENTRY');
+  assert.equal(bot.orderEvents[0].kind, 'BUY_LIMIT_PLACED');
+
+  for (let index = 0; index < 120; index += 1) {
+    bot.orderEvents.unshift({
+      id: `cancel-${index}`,
+      at: NOW + index,
+      kind: 'BUY_LIMIT_CANCELLED',
+      requestedShares: 20,
+      filledShares: 0,
+      status: 'MIDPOINT_LEFT_ENTRY_BAND',
+    });
+  }
+  bot.trimHistory();
+
+  const snapshot = bot.snapshot();
+  assert.equal(snapshot.recentTrades[0].kind, 'BUY_ENTRY');
+  assert.equal(snapshot.recentTrades.length, 1);
+  assert.equal(snapshot.recentOrderEvents.length, 100);
+  assert.equal(snapshot.recentOrderEvents[0].kind, 'BUY_LIMIT_CANCELLED');
 });
 
 test('a $0.60 or lower bid stops a position, cancels sibling orders, and removes the market', async () => {

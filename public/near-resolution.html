@@ -213,11 +213,17 @@
 
     <section class="card">
       <div class="section-head">
-        <h2>Recent trades</h2>
-        <span class="section-meta">Newest first</span>
+        <h2>Fills and exits</h2>
+        <span class="section-meta">Position changes, newest first</span>
       </div>
       <div id="trades" class="trade-list"><div class="empty">No trades yet.</div></div>
     </section>
+
+    <details class="card">
+      <summary>Recent order activity</summary>
+      <div class="section-meta" id="order-activity-meta" style="text-align:left;margin:10px 0"></div>
+      <div id="order-activity" class="trade-list"><div class="empty">No order activity yet.</div></div>
+    </details>
 
     <details class="card">
       <summary>Strategy and rules</summary>
@@ -371,7 +377,7 @@
     function renderTrades(state) {
       const trades = state.recentTrades || [];
       if (!trades.length) {
-        $('trades').innerHTML = '<div class="empty">No trades yet. Waiting for a midpoint in the entry band.</div>';
+        $('trades').innerHTML = '<div class="empty">No fills or exits yet. Pending limits are shown above.</div>';
         return;
       }
       $('trades').innerHTML = trades.slice(0, 30).map((trade) => {
@@ -390,6 +396,28 @@
       }).join('');
     }
 
+    function renderOrderActivity(state) {
+      const events = state.recentOrderEvents || [];
+      $('order-activity-meta').textContent = `${events.length} recent limit-order events · placements and cancellations do not hide fills`;
+      if (!events.length) {
+        $('order-activity').innerHTML = '<div class="empty">No order activity yet.</div>';
+        return;
+      }
+      $('order-activity').innerHTML = events.slice(0, 20).map((event) => {
+        const time = new Date(Number(event.at)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const requested = Number(event.requestedShares || 0).toFixed(2);
+        const filled = Number(event.filledShares || 0).toFixed(2);
+        const priceText = event.price == null ? '' : ` · limit ${money(event.price)}`;
+        return `<article class="trade">
+          <div>
+            <div class="trade-title">${esc(event.kind.replaceAll('_', ' '))} · ${esc(event.outcome || '')}</div>
+            <div class="trade-detail">${esc(event.marketTitle)}<br>${time} · ${requested} requested · ${filled} filled${priceText}</div>
+          </div>
+          <div class="trade-value">${esc(event.status || '')}</div>
+        </article>`;
+      }).join('');
+    }
+
     function render(state) {
       const account = state.account || {};
       $('equity').textContent = money(account.equity);
@@ -404,6 +432,7 @@
       renderPendingOrders(state);
       renderMarkets(state);
       renderTrades(state);
+      renderOrderActivity(state);
       if (state.error) $('footnote').textContent = state.error;
       else $('footnote').textContent = 'Paper-only simulation. Floating P&L is marked from the latest CLOB best bid; quotes refresh from the WebSocket and dashboard state every second.';
     }

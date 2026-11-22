@@ -3,7 +3,7 @@
 const ClobMarketFeed = require('./clob-feed');
 const { MAX_HORIZON_MS } = require('./gamma-market-scanner');
 
-const STRATEGY_VERSION = 'non-sports-non-crypto-mid-limit-requote-v3';
+const STRATEGY_VERSION = 'non-sports-non-crypto-mid-limit-requote-v4';
 const ENTRY_MIN_MID = 0.80;
 const ENTRY_MAX_MID = 0.90;
 const ENTRY_SHARES = 20;
@@ -194,6 +194,7 @@ class NearResolutionMarketBot {
     this.positions = [];
     this.pendingOrders = new Map();
     this.trades = [];
+    this.orderEvents = [];
     this.events = [];
     this.enteredTokenIds = new Set();
     this.stoppedMarketIds = new Set();
@@ -254,6 +255,7 @@ class NearResolutionMarketBot {
       positions: this.positions,
       pendingOrders: [...this.pendingOrders.values()],
       trades: this.trades.slice(0, MAX_PUBLIC_EVENTS),
+      orderEvents: this.orderEvents.slice(0, MAX_PUBLIC_EVENTS),
       events: this.events.slice(0, MAX_PUBLIC_EVENTS),
       enteredTokenIds: [...this.enteredTokenIds],
       stoppedMarketIds: [...this.stoppedMarketIds],
@@ -286,6 +288,8 @@ class NearResolutionMarketBot {
         }]),
     );
     this.trades = Array.isArray(state.trades) ? state.trades.slice(0, MAX_PUBLIC_EVENTS) : [];
+    this.orderEvents = Array.isArray(state.orderEvents)
+      ? state.orderEvents.slice(0, MAX_PUBLIC_EVENTS) : [];
     this.events = Array.isArray(state.events) ? state.events.slice(0, MAX_PUBLIC_EVENTS) : [];
     this.enteredTokenIds = new Set((state.enteredTokenIds || []).map(String));
     this.stoppedMarketIds = new Set((state.stoppedMarketIds || []).map(String));
@@ -568,7 +572,7 @@ class NearResolutionMarketBot {
     };
     this.entryAttemptAt.set(tokenId, now);
     this.pendingOrders.set(tokenId, order);
-    this.trades.unshift({
+    this.orderEvents.unshift({
       id: order.id,
       at: now,
       kind: 'BUY_LIMIT_PLACED',
@@ -758,7 +762,7 @@ class NearResolutionMarketBot {
     this.enteredTokenIds.add(tokenId);
 
     const complete = order.remainingShares <= 1e-8;
-    const placement = this.trades.find((trade) => trade.id === order.id);
+    const placement = this.orderEvents.find((trade) => trade.id === order.id);
     if (placement) {
       placement.filledShares = order.filledShares;
       placement.status = complete ? 'FILLED' : 'PARTIAL';
@@ -804,13 +808,13 @@ class NearResolutionMarketBot {
     order.status = 'CANCELLED';
     order.cancelledAt = this.now();
     order.cancelReason = reason;
-    const placement = this.trades.find((trade) => trade.id === order.id);
+    const placement = this.orderEvents.find((trade) => trade.id === order.id);
     if (placement) {
       placement.status = order.filledShares > 0 ? 'PARTIAL_CANCELLED' : 'CANCELLED';
       placement.cancelReason = reason;
       placement.cancelledAt = order.cancelledAt;
     }
-    this.trades.unshift({
+    this.orderEvents.unshift({
       id: `${order.id}:CANCEL:${order.cancelledAt}`,
       at: order.cancelledAt,
       kind: 'BUY_LIMIT_CANCELLED',
@@ -1034,6 +1038,7 @@ class NearResolutionMarketBot {
 
   trimHistory() {
     if (this.trades.length > MAX_PUBLIC_EVENTS) this.trades.length = MAX_PUBLIC_EVENTS;
+    if (this.orderEvents.length > MAX_PUBLIC_EVENTS) this.orderEvents.length = MAX_PUBLIC_EVENTS;
     if (this.positions.length > MAX_PUBLIC_EVENTS) {
       const active = this.positions.filter((position) => position.remainingShares > 1e-8);
       const closed = this.positions
@@ -1168,6 +1173,7 @@ class NearResolutionMarketBot {
       positions: openPositions,
       markets: liveMarkets,
       recentTrades: this.trades.slice(0, 100),
+      recentOrderEvents: this.orderEvents.slice(0, 100),
       logs: this.events.slice(0, 100),
       stoppedMarketIds: [...this.stoppedMarketIds],
     };
