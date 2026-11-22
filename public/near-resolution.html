@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#09111f">
+  <title>Near-resolution market bot</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #09111f;
+      --panel: #121f33;
+      --panel-2: #172944;
+      --line: #2c3d58;
+      --text: #f3f7ff;
+      --muted: #a3b3cb;
+      --teal: #32e0bb;
+      --green: #70e29a;
+      --red: #ff7187;
+      --amber: #ffc866;
+      --blue: #72b9ff;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background:
+        radial-gradient(circle at 90% -5%, rgba(58, 124, 203, .22), transparent 32rem),
+        linear-gradient(180deg, #0d1a2c 0, var(--bg) 40rem);
+      color: var(--text);
+    }
+    .wrap { width: min(980px, 100%); margin: 0 auto; padding: 18px 14px 52px; }
+    header {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 14px;
+      margin: 4px 0 16px;
+    }
+    h1 { margin: 0; font-size: clamp(22px, 6vw, 34px); letter-spacing: -.04em; line-height: 1.1; }
+    .subtitle { margin: 8px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .badges { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; border-radius: 999px;
+      border: 1px solid var(--line); background: rgba(18, 31, 51, .9); color: var(--muted);
+      font-size: 10px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; white-space: nowrap;
+    }
+    .badge.live { color: var(--green); border-color: rgba(112, 226, 154, .4); }
+    .badge.demo { color: var(--teal); border-color: rgba(50, 224, 187, .4); }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 12px currentColor; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .kpis { margin-bottom: 12px; }
+    .card {
+      min-width: 0; padding: 15px; border-radius: 18px; border: 1px solid var(--line);
+      background: linear-gradient(145deg, rgba(23, 41, 68, .98), rgba(16, 29, 48, .98));
+      box-shadow: 0 12px 28px rgba(0, 0, 0, .14);
+    }
+    .kpi { padding: 13px 14px; }
+    .kpi-label { color: var(--muted); font-size: 11px; font-weight: 700; }
+    .kpi-value { margin-top: 5px; font-size: clamp(20px, 5vw, 28px); font-weight: 850; letter-spacing: -.04em; }
+    .kpi-value.teal { color: var(--teal); }
+    .kpi-value.green { color: var(--green); }
+    .kpi-value.red { color: var(--red); }
+    section { margin-top: 12px; }
+    .section-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 0 1px 10px; }
+    h2 { margin: 0; font-size: 17px; letter-spacing: -.02em; }
+    .section-meta { color: var(--muted); font-size: 11px; text-align: right; }
+    .empty {
+      padding: 20px 14px; border-radius: 14px; border: 1px dashed #425674;
+      color: var(--muted); text-align: center; font-size: 13px; line-height: 1.5;
+    }
+    .position {
+      padding: 14px; border-radius: 15px; background: rgba(9, 17, 31, .55);
+      border: 1px solid rgba(114, 185, 255, .2);
+    }
+    .position-top { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+    .market-title { font-weight: 800; line-height: 1.35; overflow-wrap: anywhere; }
+    .outcome { display: inline-block; margin-top: 7px; color: var(--blue); font-size: 12px; font-weight: 800; }
+    .pnl { font-size: 20px; font-weight: 850; white-space: nowrap; }
+    .positive { color: var(--green) !important; }
+    .negative { color: var(--red) !important; }
+    .neutral { color: var(--amber) !important; }
+    .position-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 13px; }
+    .stat { padding: 9px 10px; border-radius: 11px; background: rgba(23, 41, 68, .75); }
+    .stat-label { color: var(--muted); font-size: 10px; font-weight: 700; }
+    .stat-value { margin-top: 4px; font-size: 14px; font-weight: 800; overflow-wrap: anywhere; }
+    .market-list, .position-list, .trade-list { display: grid; gap: 9px; }
+    .market {
+      padding: 13px; border-radius: 14px; background: rgba(9, 17, 31, .5); border: 1px solid rgba(44, 61, 88, .9);
+    }
+    .market-head { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+    .time { color: var(--amber); font-size: 11px; font-weight: 800; white-space: nowrap; }
+    .market-event { color: var(--muted); font-size: 11px; margin-top: 4px; }
+    .outcome-row {
+      display: flex; justify-content: space-between; align-items: center; gap: 10px;
+      margin-top: 9px; padding-top: 9px; border-top: 1px solid rgba(44, 61, 88, .7);
+      font-size: 12px;
+    }
+    .outcome-name { font-weight: 750; overflow-wrap: anywhere; }
+    .quote { color: var(--muted); text-align: right; white-space: nowrap; }
+    .quote strong { color: var(--text); }
+    .tag {
+      display: inline-block; padding: 4px 7px; border-radius: 999px; font-size: 9px; font-weight: 850;
+      letter-spacing: .05em; text-transform: uppercase; color: var(--muted); background: #22344e;
+    }
+    .tag.ready { color: #0d1c2c; background: var(--teal); }
+    .tag.traded { color: var(--blue); background: rgba(114, 185, 255, .14); }
+    .tag.stopped { color: var(--red); background: rgba(255, 113, 135, .14); }
+    .trade {
+      display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px;
+      padding: 11px 12px; border-radius: 12px; background: rgba(9, 17, 31, .48);
+      border-left: 3px solid var(--line);
+    }
+    .trade.buy { border-left-color: var(--blue); }
+    .trade.profit { border-left-color: var(--green); }
+    .trade.loss { border-left-color: var(--red); }
+    .trade-title { font-size: 12px; font-weight: 800; }
+    .trade-detail { margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.4; }
+    .trade-value { align-self: center; font-size: 12px; font-weight: 850; white-space: nowrap; }
+    details { margin-top: 12px; }
+    summary { cursor: pointer; list-style: none; font-size: 14px; font-weight: 800; }
+    summary::-webkit-details-marker { display: none; }
+    summary::after { content: "+"; float: right; color: var(--teal); font-size: 18px; line-height: 14px; }
+    details[open] summary::after { content: "−"; }
+    .rules { display: grid; gap: 8px; margin-top: 13px; }
+    .rule { padding: 10px; border-radius: 11px; background: rgba(9, 17, 31, .42); color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .rule b { color: var(--text); }
+    .foot { margin: 14px 2px 0; color: #8294ad; font-size: 10px; line-height: 1.5; }
+    @media (max-width: 600px) {
+      .wrap { padding: 14px 11px 38px; }
+      header { flex-direction: column; }
+      .badges { justify-content: flex-start; }
+      .grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+      .card { padding: 13px; border-radius: 16px; }
+      .kpi { padding: 11px; }
+      .section-head { align-items: flex-end; }
+      .market-title { font-size: 13px; }
+      .position-stats { gap: 7px; }
+    }
+    @media (max-width: 360px) {
+      .grid { grid-template-columns: 1fr; }
+      .position-top { flex-direction: column; }
+      .pnl { font-size: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <div>
+        <h1>Near-resolution markets</h1>
+        <p class="subtitle">Non-crypto markets · paper trading · live Polymarket books</p>
+      </div>
+      <div class="badges">
+        <span class="badge demo"><span class="dot"></span>Demo only</span>
+        <span class="badge" id="feed-badge">CLOB connecting</span>
+      </div>
+    </header>
+
+    <div class="grid kpis">
+      <article class="card kpi">
+        <div class="kpi-label">Paper equity</div>
+        <div class="kpi-value teal" id="equity">$—</div>
+      </article>
+      <article class="card kpi">
+        <div class="kpi-label">Available cash</div>
+        <div class="kpi-value" id="cash">$—</div>
+      </article>
+      <article class="card kpi">
+        <div class="kpi-label">Realized P&amp;L</div>
+        <div class="kpi-value" id="realized">$—</div>
+      </article>
+      <article class="card kpi">
+        <div class="kpi-label">Open positions</div>
+        <div class="kpi-value" id="position-count">0</div>
+      </article>
+    </div>
+
+    <section class="card">
+      <div class="section-head">
+        <h2>Open positions</h2>
+        <span class="section-meta" id="position-meta">Floating P&amp;L marked at best bid</span>
+      </div>
+      <div id="positions" class="position-list"><div class="empty">Waiting for the first qualifying entry.</div></div>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
+        <h2>Markets ending soon</h2>
+        <span class="section-meta" id="scan-meta">Gamma scan starting</span>
+      </div>
+      <div class="section-meta" id="eligible-meta" style="text-align:left;margin:-3px 0 10px"></div>
+      <div id="markets" class="market-list"><div class="empty">Searching active non-crypto markets with up to two hours remaining.</div></div>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
+        <h2>Recent trades</h2>
+        <span class="section-meta">Newest first</span>
+      </div>
+      <div id="trades" class="trade-list"><div class="empty">No trades yet.</div></div>
+    </section>
+
+    <details class="card">
+      <summary>Strategy and rules</summary>
+      <div class="rules">
+        <div class="rule"><b>Market scan:</b> active, tradable non-crypto markets whose listed end time is within the next two hours. Outcomes and token IDs come from Gamma; prices come from the CLOB WebSocket.</div>
+        <div class="rule"><b>Entry:</b> paper taker buy for up to 100 shares when an outcome’s best ask is between $0.80 and $0.90, inclusive. The visible asks are swept only up to $0.90; actual filled size and average price are shown.</div>
+        <div class="rule"><b>Take-profit:</b> rest a simulated limit sell at $0.99 and fill from visible bids at or above $0.99. Maker fees and rebates are not estimated.</div>
+        <div class="rule"><b>Stop-loss:</b> when best bid reaches $0.60 or lower, sweep available bids. That market is then removed from active scanning and will not be traded again.</div>
+        <div class="rule"><b>Resolution:</b> any shares left after an exit remain paper-open until Gamma reports the official result. Settlement uses the resolved outcome payout.</div>
+        <div class="rule"><b>Safety:</b> demo-only. No wallet or real-order code is loaded by this app.</div>
+      </div>
+    </details>
+    <p class="foot" id="footnote">Prices and fills are simulated from public order-book snapshots. A live market may have little or no size at the displayed price.</p>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[character]);
+    const money = (value) => Number.isFinite(Number(value))
+      ? '$' + Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      : '—';
+    const signedMoney = (value) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? (n >= 0 ? '+' : '−') + money(Math.abs(n)) : '—';
+    };
+    const clsPnl = (value) => Number(value) > 0 ? 'positive' : Number(value) < 0 ? 'negative' : 'neutral';
+    const clock = (seconds) => {
+      const s = Math.max(0, Number(seconds) || 0);
+      if (s >= 3600) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+      return `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`;
+    };
+
+    function renderPositions(state) {
+      const rows = state.positions || [];
+      $('position-count').textContent = String(state.account?.openPositionCount ?? rows.length);
+      if (!rows.length) {
+        $('positions').innerHTML = '<div class="empty">No open positions. The bot will enter only when a live best ask reaches $0.80–$0.90.</div>';
+        return;
+      }
+      $('positions').innerHTML = rows.map((p) => {
+        const pnl = Number(p.unrealizedPnl);
+        const waiting = p.status === 'STOPPED_PENDING_RESOLUTION';
+        return `<article class="position">
+          <div class="position-top">
+            <div>
+              <div class="market-title">${esc(p.eventTitle || p.marketTitle)}</div>
+              ${p.eventTitle ? `<div class="market-event">${esc(p.marketTitle)}</div>` : ''}
+              <span class="outcome">${esc(p.outcomeLabel)}</span>
+            </div>
+            <div class="pnl ${clsPnl(pnl)}">${signedMoney(pnl)}</div>
+          </div>
+          <div class="position-stats">
+            <div class="stat"><div class="stat-label">Shares remaining</div><div class="stat-value">${Number(p.remainingShares).toFixed(2)}</div></div>
+            <div class="stat"><div class="stat-label">Average entry</div><div class="stat-value">${money(p.averageEntryPrice)}</div></div>
+            <div class="stat"><div class="stat-label">Best bid / ask</div><div class="stat-value">${money(p.bestBid)} / ${money(p.bestAsk)}</div></div>
+            <div class="stat"><div class="stat-label">Position status</div><div class="stat-value ${waiting ? 'negative' : 'positive'}">${waiting ? 'Stopped · settling' : clock(p.secondsRemaining)}</div></div>
+          </div>
+        </article>`;
+      }).join('');
+    }
+
+    function renderMarkets(state) {
+      const scan = state.marketScan || {};
+      const rows = state.markets || [];
+      const age = scan.ageMs == null ? '—' : `${(scan.ageMs / 1000).toFixed(0)}s ago`;
+      const feed = state.clobFeed || {};
+      const f = $('feed-badge');
+      f.className = `badge ${feed.connected ? 'live' : ''}`;
+      f.innerHTML = `<span class="dot"></span>${feed.connected ? 'CLOB live' : esc(feed.status || 'CLOB offline')}`;
+      $('scan-meta').textContent = `${scan.marketsFound ?? 0} markets · scan ${age} · ${scan.status || 'WAITING'}`;
+      $('eligible-meta').textContent = `${scan.cryptoExcluded ?? 0} crypto markets excluded · ${scan.eligibleOutcomeCount ?? 0} outcome asks currently in range · ${feed.assetCount ?? 0} outcomes subscribed`;
+
+      if (!rows.length) {
+        const message = scan.error
+          ? `Market discovery is paused: ${esc(scan.error)}`
+          : 'No active non-crypto markets are currently inside the two-hour window.';
+        $('markets').innerHTML = `<div class="empty">${message}</div>`;
+        return;
+      }
+      $('markets').innerHTML = rows.slice(0, 30).map((market) => {
+        const tag = market.status === 'TRADED'
+          ? '<span class="tag traded">traded</span>'
+          : market.status === 'STOPPED'
+            ? '<span class="tag stopped">stopped</span>'
+            : '<span class="tag">watching</span>';
+        const outcomes = (market.outcomes || []).map((outcome) => {
+          const price = outcome.bestAsk;
+          const ready = outcome.eligible;
+          const ask = price == null ? '—' : money(price);
+          const bid = outcome.bestBid == null ? '—' : money(outcome.bestBid);
+          return `<div class="outcome-row">
+            <span class="outcome-name">${esc(outcome.label)} ${ready ? '<span class="tag ready">entry range</span>' : ''}</span>
+            <span class="quote">Bid <strong>${bid}</strong> · Ask <strong>${ask}</strong></span>
+          </div>`;
+        }).join('');
+        return `<article class="market">
+          <div class="market-head">
+            <div>
+              <div class="market-title">${esc(market.title)}</div>
+              ${market.eventTitle ? `<div class="market-event">${esc(market.eventTitle)}</div>` : ''}
+            </div>
+            <div style="text-align:right">${tag}<div class="time" style="margin-top:7px">${clock(market.secondsRemaining)}</div></div>
+          </div>
+          ${outcomes}
+        </article>`;
+      }).join('');
+    }
+
+    function renderTrades(state) {
+      const trades = state.recentTrades || [];
+      if (!trades.length) {
+        $('trades').innerHTML = '<div class="empty">No trades yet. Waiting for an outcome ask in the entry range.</div>';
+        return;
+      }
+      $('trades').innerHTML = trades.slice(0, 30).map((trade) => {
+        const pnl = Number(trade.pnl);
+        const hasPnl = Number.isFinite(pnl);
+        const type = trade.kind === 'BUY_ENTRY' ? 'buy' : hasPnl ? (pnl >= 0 ? 'profit' : 'loss') : '';
+        const time = new Date(Number(trade.at)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const priceText = trade.price == null ? '' : ` · ${money(trade.price)}`;
+        return `<article class="trade ${type}">
+          <div>
+            <div class="trade-title">${esc(trade.kind.replaceAll('_', ' '))} · ${esc(trade.outcome || '')}</div>
+            <div class="trade-detail">${esc(trade.marketTitle)}<br>${time} · ${Number(trade.filledShares || 0).toFixed(2)} shares${priceText} · ${esc(trade.status || '')}</div>
+          </div>
+          <div class="trade-value ${hasPnl ? clsPnl(pnl) : ''}">${hasPnl ? signedMoney(pnl) : ''}</div>
+        </article>`;
+      }).join('');
+    }
+
+    function render(state) {
+      const account = state.account || {};
+      $('equity').textContent = money(account.equity);
+      $('cash').textContent = money(account.cash);
+      $('realized').textContent = signedMoney(account.realizedPnl);
+      $('realized').className = `kpi-value ${clsPnl(account.realizedPnl)}`;
+      renderPositions(state);
+      renderMarkets(state);
+      renderTrades(state);
+      if (state.error) $('footnote').textContent = state.error;
+      else $('footnote').textContent = 'Paper-only simulation from public Gamma market data and CLOB books. Limit take-profit fees or rebates are not estimated.';
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch('/api/state', { cache: 'no-store' });
+        if (!response.ok) throw new Error(`State API HTTP ${response.status}`);
+        render(await response.json());
+      } catch (error) {
+        $('scan-meta').textContent = error.message;
+        $('feed-badge').className = 'badge negative';
+        $('feed-badge').textContent = 'Dashboard disconnected';
+      }
+    }
+    refresh();
+    setInterval(refresh, 1500);
+  </script>
+</body>
+</html>

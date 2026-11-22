@@ -15,7 +15,7 @@ test('state endpoint accepts the dashboard cache-buster query string', async (t)
   assert.equal(response.headers.get('cache-control'), 'no-store');
 });
 
-test('dashboard serves the paper volume strategy and fee/rebate controls', async (t) => {
+test('dashboard serves the near-resolution strategy and live market controls', async (t) => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise((resolve) => server.once('listening', resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
@@ -23,15 +23,18 @@ test('dashboard serves the paper volume strategy and fee/rebate controls', async
   const response = await fetch(`http://127.0.0.1:${server.address().port}/`);
   const html = await response.text();
   assert.equal(response.status, 200);
-  assert.match(html, /Edge-Gated Volume Bot/);
-  assert.match(html, /Volume and rebate tracker/);
-  assert.match(html, /id="weightedVolume"/);
-  assert.match(html, /id="fees"/);
-  assert.match(html, /id="rewardStatus"/);
+  assert.match(html, /Near-resolution markets/);
+  assert.match(html, /Non-crypto markets/);
+  assert.match(html, /Markets ending soon/);
   assert.match(html, /id="positions"/);
-  assert.match(html, /id="orders"/);
-  assert.match(html, /DEMO ONLY/);
-  assert.match(html, /No wallet is connected/);
+  assert.match(html, /id="markets"/);
+  assert.match(html, /id="trades"/);
+  assert.match(html, /0\.80/);
+  assert.match(html, /0\.90/);
+  assert.match(html, /0\.99/);
+  assert.match(html, /0\.60/);
+  assert.match(html, /Demo only/);
+  assert.doesNotMatch(html, /BTCUSDT|Binance model|Volume and rebate tracker/);
 });
 
 test('unknown dashboard paths still return 404', async (t) => {

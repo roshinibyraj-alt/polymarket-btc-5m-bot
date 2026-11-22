@@ -58,7 +58,54 @@ class ClobMarketFeed {
   start() {
     if (this.started) return;
     this.started = true;
-    this.connect();
+    if (this.assetIds.length) this.connect();
+  }
+
+  updateAssetIds(assetIds) {
+    const next = [...new Set((assetIds || []).map(String).filter(Boolean))];
+    const previousSet = new Set(this.assetIds);
+    const nextSet = new Set(next);
+    const added = next.filter((assetId) => !previousSet.has(assetId));
+    const removed = this.assetIds.filter((assetId) => !nextSet.has(assetId));
+    if (!added.length && !removed.length) return;
+
+    this.assetIds = next;
+    for (const assetId of removed) {
+      this.books.delete(assetId);
+      try { this.onQuote(assetId, null); } catch (_) {}
+    }
+
+    const socket = this.socket;
+    const open = socket && socket.readyState === (this.WebSocketImpl.OPEN ?? 1);
+    const connecting = socket
+      && socket.readyState === (this.WebSocketImpl.CONNECTING ?? 0);
+    if (open) {
+      this.sendAssetOperation(socket, added, 'subscribe');
+      this.sendAssetOperation(socket, removed, 'unsubscribe');
+    } else if (connecting) {
+      // The open handler uses the latest assetIds list, so keep the pending socket.
+      return;
+    } else if (this.started && this.assetIds.length && !this.reconnectTimer) {
+      this.connect();
+    } else if (!this.assetIds.length && socket) {
+      try { socket.close(); } catch (_) {}
+    }
+  }
+
+  sendAssetOperation(socket, assetIds, operation) {
+    for (let index = 0; index < assetIds.length; index += 100) {
+      const batch = assetIds.slice(index, index + 100);
+      try {
+        socket.send(JSON.stringify({
+          assets_ids: batch,
+          operation,
+        }));
+      } catch (error) {
+        this.error = `Could not ${operation} CLOB assets: ${error.message || String(error)}`;
+        this.notifyStatus();
+        return;
+      }
+    }
   }
 
   stop() {
@@ -99,11 +146,13 @@ class ClobMarketFeed {
       this.error = null;
       this.reconnectDelay = 1_000;
       this.lastMessageAt = this.now();
+      const firstBatch = this.assetIds.slice(0, 100);
       socket.send(JSON.stringify({
-        assets_ids: this.assetIds,
+        assets_ids: firstBatch,
         type: 'market',
         custom_feature_enabled: true,
       }));
+      this.sendAssetOperation(socket, this.assetIds.slice(firstBatch.length), 'subscribe');
       this.startConnectionTimers(socket);
       this.notifyStatus();
     });
@@ -261,7 +310,7 @@ class ClobMarketFeed {
     const bestBid = bidLevels[0] || null;
     const bestAsk = askLevels[0] || null;
     return {
-      status: bestBid && bestAsk ? 'LIVE' : 'MISSING',
+      status: bestBid || bestAsk ? 'LIVE' : 'MISSING',
       stale: false,
       source: 'POLYMARKET_CLOB_WEBSOCKET',
       bestBid: bestBid?.price ?? null,
