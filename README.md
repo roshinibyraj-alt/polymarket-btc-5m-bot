@@ -4,14 +4,14 @@ The active Railway entrypoint is paper-only. It does not load real-order modules
 
 ## Market discovery and strategy
 
-1. The Gamma API is scanned for active, order-book-enabled markets with an end time in the next two hours. Crypto markets are excluded by crypto market metadata and market/event text. The market's actual outcome labels and CLOB token IDs are mapped from Gamma, so sports outcomes such as home team, away team, and draw are supported.
-2. One CLOB market WebSocket subscribes to the discovered outcome IDs. The dashboard shows executable best bids and asks; Gamma's last-traded outcome prices are not used as fills.
-3. Each outcome can be entered once. When its live best ask is from $0.80 through $0.90, inclusive, the paper bot sweeps visible asks up to $0.90 for up to 100 shares. If the book is shallow, it records the actual partial fill rather than inventing 100 shares.
-4. A simulated resting take-profit sell is set at $0.99 and fills only against visible bids at or above that level. Maker fees and rebates are not estimated.
-5. If the best bid reaches $0.60 or lower, the bot sweeps available bids. The market is then removed from active scanning and cannot be traded again. Any remaining shares are held until official resolution.
-6. Shares not exited by the TP or SL remain open until Gamma reports the official result. Resolution checks run every 10 seconds.
+1. The Gamma API is scanned for active, order-book-enabled non-sports, non-crypto markets ending within two hours. Sports metadata, sport tags, and sports categories are excluded. Gamma provides the actual outcomes and CLOB token IDs.
+2. One CLOB market WebSocket subscribes to discovered outcome IDs. The dashboard shows live midpoint, best bid, and best ask; open positions are marked at the latest best bid.
+3. Each outcome can have one active resting buy order for 20 shares. When midpoint is from $0.80 through $0.90 and best bid is above $0.60, the order is placed at the current midpoint. It is cancelled when midpoint leaves the band.
+4. Paper fills are counted only from newly visible ask size at or below the resting limit. Partial fills remain visible, and the model does not charge taker entry fees or assume rebates.
+5. A simulated resting take-profit sell is set at $0.99 and fills only against visible bids at or above that level. Maker fees and rebates are not estimated.
+6. If the best bid reaches $0.60 or lower, the bot sweeps available bids and removes that market from active scanning. Any remaining shares stay open until Gamma reports the official result; resolution checks run every 10 seconds.
 
-Paper cash starts at $10,000. Taker fees are estimated from each market's Gamma fee schedule when enabled. The dashboard marks open positions at the best bid and labels the entry fill quantity and average price.
+Paper cash starts at $10,000. Stop-loss taker fees are estimated from the market's Gamma fee schedule when enabled. The dashboard shows each position's floating unrealized P&L and the account-wide floating P&L in real time.
 
 ## Run and verify
 
@@ -19,7 +19,7 @@ Paper cash starts at $10,000. Taker fees are estimated from each market's Gamma 
 - `npm test` — run local unit tests.
 - `npm run smoke:near-resolution` — read-only check against live Gamma discovery and CLOB books; it never places orders.
 
-The dashboard is mobile-first. `/api/state` exposes the scan state, WebSocket status, positions, and trade ledger.
+The dashboard is mobile-first. `/api/state` exposes scan state, WebSocket status, pending orders, positions, and the trade ledger.
 
 ## Paper history
 

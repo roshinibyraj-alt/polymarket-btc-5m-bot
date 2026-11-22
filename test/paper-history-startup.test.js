@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const startApplication = require('../index');
 
-const STRATEGY_VERSION = 'test-near-resolution-v1';
+const STRATEGY_VERSION = 'test-non-sports-mid-limit-v2';
 
 function makeBot(steps) {
   return {
@@ -35,6 +35,7 @@ function makeBot(steps) {
         positions: [],
         trades: [],
         events: [],
+        pendingOrders: [],
         enteredTokenIds: [],
         stoppedMarketIds: [],
         totalEntries: 0,
@@ -148,10 +149,10 @@ test('matching strategy and reset markers preserve the new paper history on rest
     paperHistoryResetVersion: marker,
     capital: 10_000,
     cash: 9_750,
-    positions: [{ id: 'new-sports-position', remainingShares: 10, status: 'OPEN' }],
+    positions: [{ id: 'new-non-sports-position', remainingShares: 10, status: 'OPEN' }],
     trades: [],
     events: [],
-    enteredTokenIds: ['sports-token'],
+    enteredTokenIds: ['non-sports-token'],
     stoppedMarketIds: [],
     totalEntries: 1,
     totalSettledTrades: 0,
@@ -172,6 +173,6 @@ test('matching strategy and reset markers preserve the new paper history on rest
 
   assert.deepEqual(bot.restoredState.positions, persisted.positions);
   assert.equal(bot.restoredState.cash, 9_750);
-  assert.equal(bot.restoredState.enteredTokenIds[0], 'sports-token');
+  assert.equal(bot.restoredState.enteredTokenIds[0], 'non-sports-token');
   assert.ok(!steps.includes('serialize'));
 });

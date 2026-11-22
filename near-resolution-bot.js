@@ -3,10 +3,10 @@
 const ClobMarketFeed = require('./clob-feed');
 const { MAX_HORIZON_MS } = require('./gamma-market-scanner');
 
-const STRATEGY_VERSION = 'non-crypto-near-resolution-v1';
-const ENTRY_MIN_ASK = 0.80;
-const ENTRY_MAX_ASK = 0.90;
-const ENTRY_SHARES = 100;
+const STRATEGY_VERSION = 'non-sports-non-crypto-mid-limit-v2';
+const ENTRY_MIN_MID = 0.80;
+const ENTRY_MAX_MID = 0.90;
+const ENTRY_SHARES = 20;
 const TAKE_PROFIT_BID = 0.99;
 const STOP_LOSS_BID = 0.60;
 const DEFAULT_CAPITAL = 10_000;
@@ -35,21 +35,27 @@ function sweep(levels, requestedShares, {
   side = 'buy',
   minPrice = 0,
   maxPrice = 1,
+  maxNotional = Number.POSITIVE_INFINITY,
 } = {}) {
   const descending = side === 'sell';
   const ordered = normalizedLevels(levels, descending);
   let remaining = Math.max(0, Number(requestedShares) || 0);
+  let budget = Number.isFinite(maxNotional)
+    ? Math.max(0, Number(maxNotional)) : Number.POSITIVE_INFINITY;
   let shares = 0;
   let notional = 0;
   const fills = [];
 
   for (const level of ordered) {
     if (level.price < minPrice || level.price > maxPrice) continue;
-    const quantity = Math.min(remaining, level.size);
+    const affordableShares = Number.isFinite(budget) ? budget / level.price : Infinity;
+    const quantity = Math.min(remaining, level.size, affordableShares);
     if (quantity <= 0) continue;
     fills.push({ price: level.price, shares: quantity });
     shares += quantity;
-    notional += level.price * quantity;
+    const fillNotional = level.price * quantity;
+    notional += fillNotional;
+    if (Number.isFinite(budget)) budget = Math.max(0, budget - fillNotional);
     remaining -= quantity;
     if (remaining <= 1e-9) break;
   }
@@ -103,24 +109,34 @@ function resultPayout(rawMarket, outcomeIndex) {
   return Number.isFinite(payout) && payout >= 0 && payout <= 1 ? payout : null;
 }
 
-function compactMarket(market, quotes, enteredTokens, stopped, now) {
+function compactMarket(market, quotes, enteredTokens, pendingOrders, stopped, now) {
   const outcomes = market.outcomes.map((outcome) => {
     const quote = quotes.get(outcome.tokenId) || null;
+    const mid = Number(quote?.mid);
     const ask = Number(quote?.bestAsk);
     const bid = Number(quote?.bestBid);
-    const eligible = Number.isFinite(ask) && ask >= ENTRY_MIN_ASK && ask <= ENTRY_MAX_ASK;
+    const eligible = Number.isFinite(mid)
+      && mid >= ENTRY_MIN_MID && mid <= ENTRY_MAX_MID
+      && Number.isFinite(bid) && bid > STOP_LOSS_BID;
+    const order = pendingOrders.get(outcome.tokenId);
     return {
       label: outcome.label,
       tokenId: outcome.tokenId,
       lastPrice: outcome.lastPrice,
+      mid: Number.isFinite(mid) ? mid : null,
       bestBid: Number.isFinite(bid) ? bid : null,
       bestAsk: Number.isFinite(ask) ? ask : null,
       bidSize: safeNumber(quote?.bidSize),
       askSize: safeNumber(quote?.askSize),
       updatedAt: quote?.updatedAt ?? null,
       eligible,
+      pendingOrder: order ? {
+        limitPrice: order.limitPrice,
+        remainingShares: order.remainingShares,
+      } : null,
     };
   });
+  const hasPending = outcomes.some((outcome) => outcome.pendingOrder);
   return {
     id: market.id,
     slug: market.slug,
@@ -131,7 +147,8 @@ function compactMarket(market, quotes, enteredTokens, stopped, now) {
     outcomes,
     status: stopped.has(market.id)
       ? 'STOPPED'
-      : outcomes.some((outcome) => enteredTokens.has(outcome.tokenId)) ? 'TRADED' : 'WATCHING',
+      : outcomes.some((outcome) => enteredTokens.has(outcome.tokenId))
+        ? 'TRADED' : hasPending ? 'PENDING' : 'WATCHING',
     eligibleOutcomes: outcomes.filter((outcome) => outcome.eligible).length,
   };
 }
@@ -166,7 +183,7 @@ class NearResolutionMarketBot {
       throw new Error('Initial paper capital must be greater than zero');
     }
     this.persistenceStrategyVersion = STRATEGY_VERSION;
-    this.strategyName = 'Non-crypto near-resolution odds';
+    this.strategyName = 'Non-sports midpoint limit strategy';
     this.capital = this.initialCapital;
     this.cash = this.initialCapital;
     this.realizedPnl = 0;
@@ -175,6 +192,7 @@ class NearResolutionMarketBot {
     this.totalSettledTrades = 0;
     this.peakEquity = this.initialCapital;
     this.positions = [];
+    this.pendingOrders = new Map();
     this.trades = [];
     this.events = [];
     this.enteredTokenIds = new Set();
@@ -201,6 +219,7 @@ class NearResolutionMarketBot {
       rowsSeen: 0,
       marketsFound: 0,
       cryptoExcluded: 0,
+      sportsExcluded: 0,
       invalidMarkets: 0,
       complete: false,
       error: null,
@@ -233,6 +252,7 @@ class NearResolutionMarketBot {
       totalSettledTrades: this.totalSettledTrades,
       peakEquity: this.peakEquity,
       positions: this.positions,
+      pendingOrders: [...this.pendingOrders.values()],
       trades: this.trades.slice(0, MAX_PUBLIC_EVENTS),
       events: this.events.slice(0, MAX_PUBLIC_EVENTS),
       enteredTokenIds: [...this.enteredTokenIds],
@@ -256,6 +276,15 @@ class NearResolutionMarketBot {
     this.totalSettledTrades = safeNumber(state.totalSettledTrades);
     this.peakEquity = safeNumber(state.peakEquity, this.initialCapital);
     this.positions = state.positions.map((position) => ({ ...position }));
+    this.pendingOrders = new Map(
+      (Array.isArray(state.pendingOrders) ? state.pendingOrders : [])
+        .filter((order) => order && order.tokenId && order.marketId)
+        .map((order) => [String(order.tokenId), {
+          ...order,
+          tokenId: String(order.tokenId),
+          seenAskSizes: { ...(order.seenAskSizes || {}) },
+        }]),
+    );
     this.trades = Array.isArray(state.trades) ? state.trades.slice(0, MAX_PUBLIC_EVENTS) : [];
     this.events = Array.isArray(state.events) ? state.events.slice(0, MAX_PUBLIC_EVENTS) : [];
     this.enteredTokenIds = new Set((state.enteredTokenIds || []).map(String));
@@ -353,6 +382,12 @@ class NearResolutionMarketBot {
           .filter((market) => !this.stoppedMarketIds.has(String(market.id)))
           .filter((market) => market.endAt > now && market.endAt <= now + this.horizonMs);
         this.markets = new Map(active.map((market) => [String(market.id), market]));
+        const activeMarketIds = new Set(this.markets.keys());
+        for (const order of [...this.pendingOrders.values()]) {
+          if (!activeMarketIds.has(String(order.marketId))) {
+            this.cancelPendingOrder(order, 'MARKET_NO_LONGER_ELIGIBLE');
+          }
+        }
         this.tokenBindings = new Map();
         for (const market of active) {
           for (const outcome of market.outcomes) {
@@ -360,9 +395,29 @@ class NearResolutionMarketBot {
           }
         }
 
+        const trackedPositions = this.positions.filter((position) => (
+          position.remainingShares > 0
+          && ['OPEN', 'STOPPED_PENDING_RESOLUTION'].includes(position.status)
+          && position.endAt > now
+        ));
+        for (const position of trackedPositions) {
+          if (this.tokenBindings.has(String(position.tokenId))) continue;
+          this.tokenBindings.set(String(position.tokenId), {
+            market: {
+              id: position.marketId,
+              title: position.marketTitle,
+              endAt: position.endAt,
+            },
+            outcome: {
+              tokenId: String(position.tokenId),
+              label: position.outcomeLabel,
+              index: position.outcomeIndex,
+            },
+          });
+        }
         const openTokens = this.positions
           .filter((position) => position.remainingShares > 0
-            && position.status === 'OPEN'
+            && ['OPEN', 'STOPPED_PENDING_RESOLUTION'].includes(position.status)
             && position.endAt > now)
           .map((position) => position.tokenId);
         const tokenIds = [...new Set([
@@ -380,6 +435,7 @@ class NearResolutionMarketBot {
           rowsSeen: safeNumber(result.rowsSeen),
           marketsFound: active.length,
           cryptoExcluded: safeNumber(result.cryptoExcluded),
+          sportsExcluded: safeNumber(result.sportsExcluded),
           invalidMarkets: safeNumber(result.invalidMarkets),
           complete: result.complete === true,
           error: result.complete === true
@@ -415,29 +471,36 @@ class NearResolutionMarketBot {
       return;
     }
     this.quotes.set(id, quote);
-    const binding = this.tokenBindings.get(id);
-    if (!binding) return;
-
     const position = this.positions.find((entry) => (
       entry.tokenId === id
       && entry.remainingShares > 0
-      && entry.status === 'OPEN'
+      && ['OPEN', 'STOPPED_PENDING_RESOLUTION'].includes(entry.status)
     ));
     if (position) {
       this.markPosition(position, quote);
-      if (!this.isFeedConnected()) return;
-      const bid = Number(quote.bestBid);
-      if (Number.isFinite(bid) && bid >= TAKE_PROFIT_BID) {
-        this.executeExit(position, quote, 'TAKE_PROFIT', TAKE_PROFIT_BID);
-      } else if (Number.isFinite(bid) && bid <= STOP_LOSS_BID) {
-        this.executeExit(position, quote, 'STOP_LOSS', 0);
-        this.excludeStoppedMarket(binding.market);
+      if (position.status !== 'OPEN') return;
+      const binding = this.tokenBindings.get(id);
+      if (binding && this.isFeedConnected()) {
+        const bid = Number(quote.bestBid);
+        if (Number.isFinite(bid) && bid >= TAKE_PROFIT_BID) {
+          this.cancelPendingOrder(this.pendingOrders.get(id), 'POSITION_TAKE_PROFIT');
+          this.executeExit(position, quote, 'TAKE_PROFIT', TAKE_PROFIT_BID);
+          return;
+        }
+        if (Number.isFinite(bid) && bid <= STOP_LOSS_BID) {
+          this.executeExit(position, quote, 'STOP_LOSS', 0);
+          this.excludeStoppedMarket(binding.market);
+          return;
+        }
       }
-      return;
     }
 
+    const binding = this.tokenBindings.get(id);
+    if (!binding) return;
     if (!this.scanHealthy || !this.isFeedConnected()) return;
-    this.tryEntry(binding, quote);
+    const pendingOrder = this.pendingOrders.get(id);
+    if (pendingOrder) this.updatePendingOrder(binding, quote, pendingOrder);
+    else this.tryEntry(binding, quote);
   }
 
   markPosition(position, quote) {
@@ -451,116 +514,277 @@ class NearResolutionMarketBot {
     }
   }
 
+  reservedCash() {
+    return [...this.pendingOrders.values()].reduce((sum, order) => (
+      sum + Math.max(0, safeNumber(order.remainingShares))
+        * Math.max(0, safeNumber(order.limitPrice))
+    ), 0);
+  }
+
+  availableCashForOrder(order) {
+    const orderReserve = Math.max(0, safeNumber(order.remainingShares))
+      * Math.max(0, safeNumber(order.limitPrice));
+    const otherReservations = Math.max(0, this.reservedCash() - orderReserve);
+    return Math.max(0, Math.min(orderReserve, this.cash - otherReservations));
+  }
+
   tryEntry({ market, outcome }, quote) {
     const marketId = String(market.id);
     const tokenId = String(outcome.tokenId);
-    if (this.enteredTokenIds.has(tokenId) || this.stoppedMarketIds.has(marketId)) return;
-    const ask = Number(quote?.bestAsk);
-    if (!Number.isFinite(ask) || ask < ENTRY_MIN_ASK || ask > ENTRY_MAX_ASK) return;
+    if (this.enteredTokenIds.has(tokenId)
+      || this.pendingOrders.has(tokenId)
+      || this.stoppedMarketIds.has(marketId)) return;
+    const mid = Number(quote?.mid);
+    const bid = Number(quote?.bestBid);
+    if (!Number.isFinite(mid) || mid < ENTRY_MIN_MID || mid > ENTRY_MAX_MID
+      || !Number.isFinite(bid) || bid <= STOP_LOSS_BID) return;
     const now = this.now();
     if (market.endAt <= now || market.endAt > now + this.horizonMs) return;
     const lastAttempt = this.entryAttemptAt.get(tokenId) || 0;
     if (now - lastAttempt < 2_000) return;
-    this.entryAttemptAt.set(tokenId, now);
+    if (this.cash - this.reservedCash() + 1e-8 < ENTRY_SHARES * mid) return;
 
-    const execution = sweep(quote.askLevels, ENTRY_SHARES, {
-      side: 'buy',
-      maxPrice: ENTRY_MAX_ASK,
-    });
-    if (execution.shares <= 0) {
-      this.log('ENTRY_NO_LIQUIDITY', `${market.title} · ${outcome.label}: no ask size to fill`, {
-        marketId,
-        outcome: outcome.label,
-        bestAsk: ask,
-      });
-      return;
-    }
-
-    const fees = estimatedTakerFee(market, execution.fills);
-    if (!fees.known) {
-      this.log('ENTRY_FEE_UNKNOWN', `${market.title} · ${outcome.label}: fee schedule unavailable`, {
-        marketId,
-        outcome: outcome.label,
-      });
-      return;
-    }
-    const totalCost = execution.notional + fees.amount;
-    if (totalCost > this.cash) {
-      this.log('ENTRY_INSUFFICIENT_CASH', `${market.title} · ${outcome.label}: paper cash is insufficient`, {
-        marketId,
-        outcome: outcome.label,
-        required: totalCost,
-        cash: this.cash,
-      });
-      return;
-    }
-
-    const position = {
-      id: `${marketId}:${outcome.tokenId}:${now}`,
+    const order = {
+      id: `${marketId}:${tokenId}:${now}`,
       marketId,
       marketSlug: market.slug,
       marketTitle: market.title,
       eventTitle: market.eventTitle,
       outcomeLabel: outcome.label,
       outcomeIndex: outcome.index,
-      tokenId: outcome.tokenId,
+      tokenId,
       endAt: market.endAt,
       version: market.version,
-      feesEnabled: market.feesEnabled,
-      takerBaseFee: market.takerBaseFee,
-      feeSchedule: market.feeSchedule,
-      takerFeeRate: market.takerFeeRate,
+      limitPrice: mid,
       requestedShares: ENTRY_SHARES,
-      initialShares: execution.shares,
-      remainingShares: execution.shares,
-      shares: execution.shares,
-      entryNotional: execution.notional,
-      entryFees: fees.amount,
-      totalCost,
-      remainingCostBasis: totalCost,
-      averageEntryPrice: execution.averagePrice,
-      markBid: Number.isFinite(Number(quote.bestBid)) ? Number(quote.bestBid) : null,
-      markUpdatedAt: quote.updatedAt ?? now,
-      markValue: Number.isFinite(Number(quote.bestBid))
-        ? Number(quote.bestBid) * execution.shares : 0,
-      unrealizedPnl: Number.isFinite(Number(quote.bestBid))
-        ? Number(quote.bestBid) * execution.shares - totalCost : -totalCost,
+      filledShares: 0,
+      remainingShares: ENTRY_SHARES,
       status: 'OPEN',
-      entryAt: now,
-      exitAt: null,
-      exitPrice: null,
-      realizedPnl: 0,
-      stopLossTriggered: false,
+      createdAt: now,
+      seenAskSizes: {},
     };
-    this.cash -= totalCost;
-    this.totalFees += fees.amount;
-    this.positions.unshift(position);
-    this.enteredTokenIds.add(tokenId);
+    this.entryAttemptAt.set(tokenId, now);
+    this.pendingOrders.set(tokenId, order);
     this.trades.unshift({
-      id: position.id,
+      id: order.id,
       at: now,
-      kind: 'BUY_ENTRY',
+      kind: 'BUY_LIMIT_PLACED',
       marketId,
       marketTitle: market.title,
       outcome: outcome.label,
       requestedShares: ENTRY_SHARES,
-      filledShares: execution.shares,
-      price: execution.averagePrice,
-      notional: execution.notional,
-      fees: fees.amount,
-      status: execution.shares + 1e-8 >= ENTRY_SHARES ? 'FILLED' : 'PARTIAL',
+      filledShares: 0,
+      price: mid,
+      status: 'OPEN',
       pnl: null,
     });
-    this.totalEntries += 1;
     this.trimHistory();
-    this.log('BUY_ENTRY', `${market.title} · ${outcome.label}: bought ${execution.shares.toFixed(2)} shares`, {
+    this.log('BUY_LIMIT_PLACED', `${market.title} · ${outcome.label}: resting ${ENTRY_SHARES} shares at midpoint $${mid.toFixed(3)}`, {
       marketId,
       outcome: outcome.label,
+      limitPrice: mid,
       requestedShares: ENTRY_SHARES,
-      filledShares: execution.shares,
-      averagePrice: execution.averagePrice,
-      fees: fees.amount,
     });
+  }
+
+  updatePendingOrder({ market, outcome }, quote, order) {
+    const tokenId = String(order.tokenId);
+    const bid = Number(quote?.bestBid);
+    const mid = Number(quote?.mid);
+    if (!Number.isFinite(bid) || bid <= STOP_LOSS_BID) {
+      this.cancelPendingOrder(order, 'BEST_BID_AT_OR_BELOW_STOP');
+      return;
+    }
+
+    const currentAskSizes = new Map(
+      normalizedLevels(quote?.askLevels)
+        .filter((level) => level.price <= order.limitPrice)
+        .map((level) => [level.price, level.size]),
+    );
+    const seenAskSizes = order.seenAskSizes || {};
+    const priceKeys = new Set([
+      ...Object.keys(seenAskSizes).map(Number),
+      ...currentAskSizes.keys(),
+    ]);
+    const newlyVisibleAsks = [];
+    for (const price of priceKeys) {
+      const key = String(price);
+      const currentSize = currentAskSizes.get(price) || 0;
+      const previousSize = Math.max(0, safeNumber(seenAskSizes[key]));
+      if (currentSize > previousSize) {
+        newlyVisibleAsks.push({ price, size: currentSize - previousSize });
+      }
+      seenAskSizes[key] = currentSize;
+    }
+    order.seenAskSizes = seenAskSizes;
+
+    if (newlyVisibleAsks.length) {
+      const execution = sweep(newlyVisibleAsks, order.remainingShares, {
+        side: 'buy',
+        maxPrice: order.limitPrice,
+        maxNotional: this.availableCashForOrder(order),
+      });
+      if (execution.shares > 0) this.recordRestingFill(order, market, outcome, quote, execution);
+    }
+
+    const stillPending = this.pendingOrders.get(tokenId);
+    if (stillPending && Number.isFinite(mid)
+      && (mid < ENTRY_MIN_MID || mid > ENTRY_MAX_MID)) {
+      this.cancelPendingOrder(stillPending, 'MIDPOINT_LEFT_ENTRY_BAND');
+      return;
+    }
+    if (stillPending && this.availableCashForOrder(stillPending) <= 1e-8) {
+      this.cancelPendingOrder(stillPending, 'PAPER_CASH_RESERVED_OR_EXHAUSTED');
+      return;
+    }
+    this.markDirty();
+  }
+
+  recordRestingFill(order, market, outcome, quote, execution) {
+    const tokenId = String(order.tokenId);
+    const now = this.now();
+    const existing = this.positions.find((position) => (
+      position.tokenId === tokenId
+      && position.remainingShares > 0
+      && position.status === 'OPEN'
+    ));
+    const totalCost = execution.notional;
+    const bid = Number(quote?.bestBid);
+    let position = existing;
+
+    if (!position) {
+      position = {
+        id: order.id,
+        marketId: String(market.id),
+        marketSlug: market.slug,
+        marketTitle: market.title,
+        eventTitle: market.eventTitle,
+        outcomeLabel: outcome.label,
+        outcomeIndex: outcome.index,
+        tokenId,
+        endAt: market.endAt,
+        version: market.version,
+        feesEnabled: market.feesEnabled,
+        takerBaseFee: market.takerBaseFee,
+        feeSchedule: market.feeSchedule,
+        takerFeeRate: market.takerFeeRate,
+        entryOrderType: 'RESTING_LIMIT',
+        entryLimitPrice: order.limitPrice,
+        requestedShares: order.requestedShares,
+        initialShares: 0,
+        remainingShares: 0,
+        shares: 0,
+        entryNotional: 0,
+        entryFees: 0,
+        totalCost: 0,
+        remainingCostBasis: 0,
+        averageEntryPrice: null,
+        markBid: Number.isFinite(bid) ? bid : null,
+        markUpdatedAt: quote.updatedAt ?? now,
+        markValue: 0,
+        unrealizedPnl: 0,
+        status: 'OPEN',
+        entryAt: order.createdAt,
+        exitAt: null,
+        exitPrice: null,
+        realizedPnl: 0,
+        stopLossTriggered: false,
+      };
+      this.positions.unshift(position);
+      this.totalEntries += 1;
+    }
+
+    position.initialShares += execution.shares;
+    position.remainingShares += execution.shares;
+    position.shares = position.remainingShares;
+    position.entryNotional += execution.notional;
+    position.totalCost += totalCost;
+    position.remainingCostBasis += totalCost;
+    position.averageEntryPrice = position.entryNotional / position.initialShares;
+    position.markBid = Number.isFinite(bid) ? bid : position.markBid;
+    position.markUpdatedAt = quote.updatedAt ?? now;
+    position.markValue = (Number.isFinite(bid) ? bid : 0) * position.remainingShares;
+    position.unrealizedPnl = position.markValue - position.remainingCostBasis;
+    this.cash -= totalCost;
+    order.filledShares += execution.shares;
+    order.remainingShares = Math.max(0, order.requestedShares - order.filledShares);
+    this.enteredTokenIds.add(tokenId);
+
+    const complete = order.remainingShares <= 1e-8;
+    const placement = this.trades.find((trade) => trade.id === order.id);
+    if (placement) {
+      placement.filledShares = order.filledShares;
+      placement.status = complete ? 'FILLED' : 'PARTIAL';
+    }
+    if (complete) {
+      order.remainingShares = 0;
+      order.status = 'FILLED';
+      this.pendingOrders.delete(tokenId);
+    }
+    this.trades.unshift({
+      id: `${order.id}:FILL:${now}`,
+      at: now,
+      kind: 'BUY_ENTRY',
+      marketId: String(market.id),
+      marketTitle: market.title,
+      outcome: outcome.label,
+      requestedShares: order.requestedShares,
+      filledShares: execution.shares,
+      price: execution.averagePrice,
+      limitPrice: order.limitPrice,
+      notional: execution.notional,
+      fees: 0,
+      status: complete ? 'FILLED' : 'PARTIAL',
+      pnl: null,
+    });
+    this.trimHistory();
+    this.log('BUY_ENTRY', `${market.title} · ${outcome.label}: limit filled ${execution.shares.toFixed(2)} shares at $${execution.averagePrice.toFixed(3)}`, {
+      marketId: String(market.id),
+      outcome: outcome.label,
+      limitPrice: order.limitPrice,
+      filledShares: execution.shares,
+      remainingOrderShares: order.remainingShares,
+      averagePrice: execution.averagePrice,
+      fees: 0,
+    });
+  }
+
+  cancelPendingOrder(order, reason) {
+    if (!order) return false;
+    const tokenId = String(order.tokenId);
+    if (this.pendingOrders.get(tokenId) !== order) return false;
+    this.pendingOrders.delete(tokenId);
+    order.status = 'CANCELLED';
+    order.cancelledAt = this.now();
+    order.cancelReason = reason;
+    const placement = this.trades.find((trade) => trade.id === order.id);
+    if (placement) {
+      placement.status = order.filledShares > 0 ? 'PARTIAL_CANCELLED' : 'CANCELLED';
+      placement.cancelReason = reason;
+      placement.cancelledAt = order.cancelledAt;
+    }
+    this.trades.unshift({
+      id: `${order.id}:CANCEL:${order.cancelledAt}`,
+      at: order.cancelledAt,
+      kind: 'BUY_LIMIT_CANCELLED',
+      marketId: order.marketId,
+      marketTitle: order.marketTitle,
+      outcome: order.outcomeLabel,
+      requestedShares: order.requestedShares,
+      filledShares: order.filledShares,
+      price: order.limitPrice,
+      status: reason,
+      pnl: null,
+    });
+    this.trimHistory();
+    this.log('BUY_LIMIT_CANCELLED', `${order.marketTitle} · ${order.outcomeLabel}: unfilled limit cancelled (${reason})`, {
+      marketId: order.marketId,
+      outcome: order.outcomeLabel,
+      limitPrice: order.limitPrice,
+      remainingShares: order.remainingShares,
+      reason,
+    });
+    return true;
   }
 
   executeExit(position, quote, reason, minimumBid) {
@@ -669,15 +893,25 @@ class NearResolutionMarketBot {
     if (!id || this.stoppedMarketIds.has(id)) return;
     this.stoppedMarketIds.add(id);
     this.markets.delete(id);
+    for (const order of [...this.pendingOrders.values()]) {
+      if (String(order.marketId) === id) {
+        this.cancelPendingOrder(order, 'MARKET_STOPPED');
+      }
+    }
     for (const [tokenId, binding] of this.tokenBindings.entries()) {
-      if (String(binding.market.id) === id) {
+      const hasOpenPosition = this.positions.some((position) => (
+        position.tokenId === tokenId
+        && position.remainingShares > 0
+        && ['OPEN', 'STOPPED_PENDING_RESOLUTION'].includes(position.status)
+      ));
+      if (String(binding.market.id) === id && !hasOpenPosition) {
         this.tokenBindings.delete(tokenId);
         this.quotes.delete(tokenId);
       }
     }
     const stillOpenTokens = this.positions
       .filter((position) => position.remainingShares > 0
-        && position.status === 'OPEN'
+        && ['OPEN', 'STOPPED_PENDING_RESOLUTION'].includes(position.status)
         && position.endAt > this.now())
       .map((position) => position.tokenId);
     const trackedTokens = [...new Set([
@@ -802,17 +1036,33 @@ class NearResolutionMarketBot {
         market,
         this.quotes,
         this.enteredTokenIds,
+        this.pendingOrders,
         this.stoppedMarketIds,
         now,
       ));
     const eligibleOutcomeCount = [...this.markets.values()].reduce((count, market) => (
       count + market.outcomes.reduce((outcomeCount, outcome) => {
         const quote = this.quotes.get(outcome.tokenId);
-        const ask = Number(quote?.bestAsk);
-        return outcomeCount + (Number.isFinite(ask)
-          && ask >= ENTRY_MIN_ASK && ask <= ENTRY_MAX_ASK ? 1 : 0);
+        const mid = Number(quote?.mid);
+        const bid = Number(quote?.bestBid);
+        return outcomeCount + (Number.isFinite(mid)
+          && mid >= ENTRY_MIN_MID && mid <= ENTRY_MAX_MID
+          && Number.isFinite(bid) && bid > STOP_LOSS_BID ? 1 : 0);
       }, 0)
     ), 0);
+    const pendingOrders = [...this.pendingOrders.values()].map((order) => {
+      const quote = this.quotes.get(order.tokenId);
+      const mid = Number(quote?.mid);
+      const bid = Number(quote?.bestBid);
+      const ask = Number(quote?.bestAsk);
+      return {
+        ...order,
+        currentMid: Number.isFinite(mid) ? mid : null,
+        bestBid: Number.isFinite(bid) ? bid : null,
+        bestAsk: Number.isFinite(ask) ? ask : null,
+        secondsRemaining: Math.max(0, Math.round((order.endAt - now) / 1000)),
+      };
+    });
     const positionsValue = openPositions.reduce((sum, position) => (
       sum + safeNumber(position.currentValue)
     ), 0);
@@ -827,12 +1077,13 @@ class NearResolutionMarketBot {
         mode: 'PAPER ONLY',
         liveTradingEnabled: false,
         realOrderModulesLoaded: false,
-        markets: 'All active non-crypto outcomes expiring within two hours',
-        entryRule: `Buy ${ENTRY_SHARES} shares when an outcome's CLOB best ask is $${ENTRY_MIN_ASK.toFixed(2)}–$${ENTRY_MAX_ASK.toFixed(2)}.`,
+        markets: 'Active non-sports, non-crypto outcomes expiring within two hours',
+        entryRule: `Rest a ${ENTRY_SHARES}-share limit buy at the current midpoint when it is $${ENTRY_MIN_MID.toFixed(2)}–$${ENTRY_MAX_MID.toFixed(2)} and best bid is above $${STOP_LOSS_BID.toFixed(2)}.`,
+        orderRule: 'Cancel any unfilled remainder when midpoint leaves the entry band; fill only from newly visible asks at or below the limit.',
         takeProfitRule: `Rest a limit sell at $${TAKE_PROFIT_BID.toFixed(2)}; confirm it from best bids.`,
         stopLossRule: `At a best bid of $${STOP_LOSS_BID.toFixed(2)} or lower, sweep available bids; remove that market from active scanning.`,
         resolutionRule: 'Any remaining shares stay paper-open until Gamma reports the official market result.',
-        entryPerMarket: 'One entry per qualifying outcome token.',
+        entryPerMarket: 'One active order and one filled position per outcome token.',
       },
       marketScan: {
         ...this.scannerState,
@@ -846,9 +1097,13 @@ class NearResolutionMarketBot {
         connected: false,
         assetCount: 0,
       },
+      pendingOrders,
       account: {
         capital: this.capital,
         cash: this.cash,
+        reservedCash: this.reservedCash(),
+        availableCash: Math.max(0, this.cash - this.reservedCash()),
+        pendingOrderCount: pendingOrders.length,
         equity,
         realizedPnl: this.realizedPnl,
         unrealizedPnl: positionsValue - openPositions.reduce(

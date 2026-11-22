@@ -97,6 +97,7 @@
     .outcome-name { font-weight: 750; overflow-wrap: anywhere; }
     .quote { color: var(--muted); text-align: right; white-space: nowrap; }
     .quote strong { color: var(--text); }
+    #cash-detail { margin-top: 3px; text-align: left; font-size: 10px; }
     .tag {
       display: inline-block; padding: 4px 7px; border-radius: 999px; font-size: 9px; font-weight: 850;
       letter-spacing: .05em; text-transform: uppercase; color: var(--muted); background: #22344e;
@@ -134,6 +135,8 @@
       .section-head { align-items: flex-end; }
       .market-title { font-size: 13px; }
       .position-stats { gap: 7px; }
+      .outcome-row { flex-direction: column; align-items: flex-start; }
+      .quote { text-align: left; white-space: normal; line-height: 1.55; }
     }
     @media (max-width: 360px) {
       .grid { grid-template-columns: 1fr; }
@@ -147,7 +150,7 @@
     <header>
       <div>
         <h1>Near-resolution markets</h1>
-        <p class="subtitle">Non-crypto markets · paper trading · live Polymarket books</p>
+        <p class="subtitle">Non-sports, non-crypto markets · paper trading · live Polymarket books</p>
       </div>
       <div class="badges">
         <span class="badge demo"><span class="dot"></span>Demo only</span>
@@ -163,6 +166,11 @@
       <article class="card kpi">
         <div class="kpi-label">Available cash</div>
         <div class="kpi-value" id="cash">$—</div>
+        <div class="section-meta" id="cash-detail"></div>
+      </article>
+      <article class="card kpi">
+        <div class="kpi-label">Floating P&amp;L</div>
+        <div class="kpi-value" id="unrealized">$—</div>
       </article>
       <article class="card kpi">
         <div class="kpi-label">Realized P&amp;L</div>
@@ -171,6 +179,10 @@
       <article class="card kpi">
         <div class="kpi-label">Open positions</div>
         <div class="kpi-value" id="position-count">0</div>
+      </article>
+      <article class="card kpi">
+        <div class="kpi-label">Resting orders</div>
+        <div class="kpi-value" id="pending-count">0</div>
       </article>
     </div>
 
@@ -184,11 +196,19 @@
 
     <section class="card">
       <div class="section-head">
+        <h2>Resting limit orders</h2>
+        <span class="section-meta" id="pending-meta">No pending orders</span>
+      </div>
+      <div id="pending-orders" class="position-list"><div class="empty">No resting entry orders.</div></div>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
         <h2>Markets ending soon</h2>
         <span class="section-meta" id="scan-meta">Gamma scan starting</span>
       </div>
       <div class="section-meta" id="eligible-meta" style="text-align:left;margin:-3px 0 10px"></div>
-      <div id="markets" class="market-list"><div class="empty">Searching active non-crypto markets with up to two hours remaining.</div></div>
+      <div id="markets" class="market-list"><div class="empty">Searching active non-sports, non-crypto markets with up to two hours remaining.</div></div>
     </section>
 
     <section class="card">
@@ -202,8 +222,9 @@
     <details class="card">
       <summary>Strategy and rules</summary>
       <div class="rules">
-        <div class="rule"><b>Market scan:</b> active, tradable non-crypto markets whose listed end time is within the next two hours. Outcomes and token IDs come from Gamma; prices come from the CLOB WebSocket.</div>
-        <div class="rule"><b>Entry:</b> paper taker buy for up to 100 shares when an outcome’s best ask is between $0.80 and $0.90, inclusive. The visible asks are swept only up to $0.90; actual filled size and average price are shown.</div>
+        <div class="rule"><b>Market scan:</b> active, tradable non-sports, non-crypto markets whose listed end time is within two hours. Outcomes and token IDs come from Gamma; prices come from the CLOB WebSocket.</div>
+        <div class="rule"><b>Entry:</b> rest a 20-share paper limit buy at the current midpoint when the midpoint is $0.80–$0.90 and the best bid is above $0.60. The unfilled order is cancelled when midpoint leaves that band.</div>
+        <div class="rule"><b>Fill model:</b> confirm fills only from newly visible ask size at or below the resting limit. Partial fills are tracked; no taker entry fee or rebate is assumed.</div>
         <div class="rule"><b>Take-profit:</b> rest a simulated limit sell at $0.99 and fill from visible bids at or above $0.99. Maker fees and rebates are not estimated.</div>
         <div class="rule"><b>Stop-loss:</b> when best bid reaches $0.60 or lower, sweep available bids. That market is then removed from active scanning and will not be traded again.</div>
         <div class="rule"><b>Resolution:</b> any shares left after an exit remain paper-open until Gamma reports the official result. Settlement uses the resolved outcome payout.</div>
@@ -236,12 +257,15 @@
       const rows = state.positions || [];
       $('position-count').textContent = String(state.account?.openPositionCount ?? rows.length);
       if (!rows.length) {
-        $('positions').innerHTML = '<div class="empty">No open positions. The bot will enter only when a live best ask reaches $0.80–$0.90.</div>';
+        $('positions').innerHTML = '<div class="empty">No open positions. The bot waits for a midpoint in the $0.80–$0.90 band.</div>';
         return;
       }
       $('positions').innerHTML = rows.map((p) => {
         const pnl = Number(p.unrealizedPnl);
         const waiting = p.status === 'STOPPED_PENDING_RESOLUTION';
+        const quoteLabel = waiting ? 'Stopped · settling'
+          : `${p.quoteStatus === 'LIVE' ? 'LIVE' : 'WAITING'} · ${clock(p.secondsRemaining)}`;
+        const quoteClass = waiting ? 'negative' : p.quoteStatus === 'LIVE' ? 'positive' : 'neutral';
         return `<article class="position">
           <div class="position-top">
             <div>
@@ -255,7 +279,34 @@
             <div class="stat"><div class="stat-label">Shares remaining</div><div class="stat-value">${Number(p.remainingShares).toFixed(2)}</div></div>
             <div class="stat"><div class="stat-label">Average entry</div><div class="stat-value">${money(p.averageEntryPrice)}</div></div>
             <div class="stat"><div class="stat-label">Best bid / ask</div><div class="stat-value">${money(p.bestBid)} / ${money(p.bestAsk)}</div></div>
-            <div class="stat"><div class="stat-label">Position status</div><div class="stat-value ${waiting ? 'negative' : 'positive'}">${waiting ? 'Stopped · settling' : clock(p.secondsRemaining)}</div></div>
+            <div class="stat"><div class="stat-label">Quote / time left</div><div class="stat-value ${quoteClass}">${quoteLabel}</div></div>
+          </div>
+        </article>`;
+      }).join('');
+    }
+
+    function renderPendingOrders(state) {
+      const rows = state.pendingOrders || [];
+      $('pending-meta').textContent = `${rows.length} active`;
+      if (!rows.length) {
+        $('pending-orders').innerHTML = '<div class="empty">No resting entry orders.</div>';
+        return;
+      }
+      $('pending-orders').innerHTML = rows.map((order) => {
+        return `<article class="position">
+          <div class="position-top">
+            <div>
+              <div class="market-title">${esc(order.eventTitle || order.marketTitle)}</div>
+              <div class="market-event">${esc(order.marketTitle)}</div>
+              <span class="outcome">${esc(order.outcomeLabel)}</span>
+            </div>
+            <div class="pnl neutral">PENDING</div>
+          </div>
+          <div class="position-stats">
+            <div class="stat"><div class="stat-label">Limit / current mid</div><div class="stat-value">${money(order.limitPrice)} / ${money(order.currentMid)}</div></div>
+            <div class="stat"><div class="stat-label">Shares remaining</div><div class="stat-value">${Number(order.remainingShares).toFixed(2)}</div></div>
+            <div class="stat"><div class="stat-label">Best bid / ask</div><div class="stat-value">${money(order.bestBid)} / ${money(order.bestAsk)}</div></div>
+            <div class="stat"><div class="stat-label">Expires</div><div class="stat-value">Mid leaves band · ${clock(order.secondsRemaining)}</div></div>
           </div>
         </article>`;
       }).join('');
@@ -268,14 +319,18 @@
       const feed = state.clobFeed || {};
       const f = $('feed-badge');
       f.className = `badge ${feed.connected ? 'live' : ''}`;
-      f.innerHTML = `<span class="dot"></span>${feed.connected ? 'CLOB live' : esc(feed.status || 'CLOB offline')}`;
+      const waitingForEligible = scan.status === 'LIVE' && Number(scan.marketsFound) === 0;
+      const feedLabel = feed.connected
+        ? 'CLOB live'
+        : waitingForEligible ? 'Awaiting eligible markets' : (feed.status || 'CLOB offline');
+      f.innerHTML = `<span class="dot"></span>${esc(feedLabel)}`;
       $('scan-meta').textContent = `${scan.marketsFound ?? 0} markets · scan ${age} · ${scan.status || 'WAITING'}`;
-      $('eligible-meta').textContent = `${scan.cryptoExcluded ?? 0} crypto markets excluded · ${scan.eligibleOutcomeCount ?? 0} outcome asks currently in range · ${feed.assetCount ?? 0} outcomes subscribed`;
+      $('eligible-meta').textContent = `${scan.cryptoExcluded ?? 0} crypto · ${scan.sportsExcluded ?? 0} sports excluded · ${scan.eligibleOutcomeCount ?? 0} midpoint candidates · ${feed.assetCount ?? 0} outcomes subscribed`;
 
       if (!rows.length) {
         const message = scan.error
           ? `Market discovery is paused: ${esc(scan.error)}`
-          : 'No active non-crypto markets are currently inside the two-hour window.';
+          : 'No active non-sports, non-crypto markets are currently inside the two-hour window.';
         $('markets').innerHTML = `<div class="empty">${message}</div>`;
         return;
       }
@@ -284,15 +339,19 @@
           ? '<span class="tag traded">traded</span>'
           : market.status === 'STOPPED'
             ? '<span class="tag stopped">stopped</span>'
-            : '<span class="tag">watching</span>';
+            : market.status === 'PENDING'
+              ? '<span class="tag traded">pending</span>'
+              : '<span class="tag">watching</span>';
         const outcomes = (market.outcomes || []).map((outcome) => {
-          const price = outcome.bestAsk;
+          const price = outcome.mid;
           const ready = outcome.eligible;
-          const ask = price == null ? '—' : money(price);
+          const mid = price == null ? '—' : money(price);
           const bid = outcome.bestBid == null ? '—' : money(outcome.bestBid);
+          const ask = outcome.bestAsk == null ? '—' : money(outcome.bestAsk);
+          const pending = outcome.pendingOrder;
           return `<div class="outcome-row">
-            <span class="outcome-name">${esc(outcome.label)} ${ready ? '<span class="tag ready">entry range</span>' : ''}</span>
-            <span class="quote">Bid <strong>${bid}</strong> · Ask <strong>${ask}</strong></span>
+            <span class="outcome-name">${esc(outcome.label)} ${ready ? '<span class="tag ready">entry range</span>' : ''}${pending ? '<span class="tag traded">limit pending</span>' : ''}</span>
+            <span class="quote">Mid <strong>${mid}</strong> · Bid <strong>${bid}</strong> · Ask <strong>${ask}</strong></span>
           </div>`;
         }).join('');
         return `<article class="market">
@@ -311,7 +370,7 @@
     function renderTrades(state) {
       const trades = state.recentTrades || [];
       if (!trades.length) {
-        $('trades').innerHTML = '<div class="empty">No trades yet. Waiting for an outcome ask in the entry range.</div>';
+        $('trades').innerHTML = '<div class="empty">No trades yet. Waiting for a midpoint in the entry band.</div>';
         return;
       }
       $('trades').innerHTML = trades.slice(0, 30).map((trade) => {
@@ -333,14 +392,19 @@
     function render(state) {
       const account = state.account || {};
       $('equity').textContent = money(account.equity);
-      $('cash').textContent = money(account.cash);
+      $('cash').textContent = money(account.availableCash ?? account.cash);
+      $('cash-detail').textContent = `${money(account.reservedCash)} reserved for limits`;
+      $('unrealized').textContent = signedMoney(account.unrealizedPnl);
+      $('unrealized').className = `kpi-value ${clsPnl(account.unrealizedPnl)}`;
       $('realized').textContent = signedMoney(account.realizedPnl);
       $('realized').className = `kpi-value ${clsPnl(account.realizedPnl)}`;
+      $('pending-count').textContent = String(account.pendingOrderCount ?? state.pendingOrders?.length ?? 0);
       renderPositions(state);
+      renderPendingOrders(state);
       renderMarkets(state);
       renderTrades(state);
       if (state.error) $('footnote').textContent = state.error;
-      else $('footnote').textContent = 'Paper-only simulation from public Gamma market data and CLOB books. Limit take-profit fees or rebates are not estimated.';
+      else $('footnote').textContent = 'Paper-only simulation. Floating P&L is marked from the latest CLOB best bid; quotes refresh from the WebSocket and dashboard state every second.';
     }
 
     async function refresh() {

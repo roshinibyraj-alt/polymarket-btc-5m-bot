@@ -8,6 +8,8 @@ const DEFAULT_MAX_PAGES = 100;
 
 const CRYPTO_NAMES = /\b(bitcoin|ethereum|ether|solana|dogecoin|ripple|binance coin|cardano|avalanche|chainlink|litecoin|shiba inu|polkadot|tron|hyperliquid|crypto|cryptocurrency|blockchain|digital asset|token price|stablecoin)\b/i;
 const CRYPTO_TICKERS = /\b(BTC|XBT|ETH|SOL|DOGE|XRP|BNB|ADA|AVAX|HYPE|LTC|SHIB|DOT|TRX|PEPE|SUI|TON|USDC|USDT|UNI|ATOM|NEAR|APT|ARB|OP|FIL|BCH|ETC|MATIC|POL)\b/i;
+const SPORTS_TERMS = /\b(sports?|basketball|football|soccer|baseball|hockey|tennis|cricket|rugby|volleyball|golf|boxing|mma|ufc|wrestling|nascar|formula one|formula 1|motorsport|racing|league of legends|counter-?strike|esports|premier league|champions league|la liga|serie a|bundesliga|wnba|ncaaf|ncaab|atp|wta)\b/i;
+const SPORTS_TICKERS = /\b(NBA|WNBA|NFL|MLB|NHL|NCAAF|NCAAB|ATP|WTA|UFC|FIFA|EPL|MLS|PGA)\b/i;
 
 function meaningful(value) {
   if (value == null || value === false || value === '') return false;
@@ -81,6 +83,46 @@ function isCryptoMarket(market) {
     || CRYPTO_TICKERS.test(headline);
 }
 
+function isSportsMarket(market) {
+  const events = Array.isArray(market?.events) ? market.events : [];
+  const series = [
+    ...(Array.isArray(market?.series) ? market.series : []),
+    ...events.flatMap((event) => Array.isArray(event?.series) ? event.series : []),
+  ];
+  const sportsTypes = [
+    market?.sportsMarketType,
+    market?.sports_market_type,
+    ...events.map((event) => event?.sportsMarketType || event?.sports_market_type),
+  ];
+  if (sportsTypes.some((value) => meaningful(value)
+    && !['none', 'other', 'unknown'].includes(String(value).toLowerCase()))) return true;
+
+  if (meaningful(market?.gameStartTime) || meaningful(market?.game_start_time)) return true;
+
+  const tags = [
+    ...parseList(market?.tags),
+    ...events.flatMap((event) => parseList(event?.tags)),
+  ];
+  const categoryText = [
+    market?.category,
+    market?.subcategory,
+    ...events.flatMap((event) => [event?.category, event?.subcategory]),
+    ...tags.map((tag) => `${tag?.label || ''} ${tag?.slug || ''} ${tag?.name || ''}`),
+  ].map(asText).join(' ');
+  if (SPORTS_TERMS.test(categoryText) || SPORTS_TICKERS.test(categoryText)) return true;
+
+  const headline = [
+    market?.question,
+    market?.title,
+    market?.slug,
+    market?.eventSlug,
+    market?.seriesSlug,
+    events.map((event) => [event?.title, event?.slug, event?.seriesSlug]),
+    series.map((item) => [item?.title, item?.slug, item?.ticker]),
+  ].map(asText).join(' ');
+  return SPORTS_TERMS.test(headline) || SPORTS_TICKERS.test(headline);
+}
+
 function normalizeOutcomes(market) {
   const labels = parseList(market?.outcomes);
   const ids = parseList(
@@ -126,7 +168,7 @@ function normalizeMarket(market, {
   if (boolIsFalse(market.active) || market.closed === true || market.archived === true) return null;
   if (boolIsFalse(market.enableOrderBook) || boolIsFalse(market.acceptingOrders)
     || boolIsFalse(market.tradingEligible)) return null;
-  if (isCryptoMarket(market)) return null;
+  if (isCryptoMarket(market) || isSportsMarket(market)) return null;
 
   const endAt = Date.parse(market.endDate || market.endDateIso || market.end_date_iso);
   if (!Number.isFinite(endAt) || endAt <= now || endAt > now + horizonMs) return null;
@@ -202,6 +244,7 @@ class GammaMarketScanner {
     const discovered = new Map();
     let rowsSeen = 0;
     let cryptoExcluded = 0;
+    let sportsExcluded = 0;
     let invalidMarkets = 0;
     let pageCount = 0;
     let cursor = null;
@@ -229,6 +272,10 @@ class GammaMarketScanner {
           cryptoExcluded += 1;
           continue;
         }
+        if (isSportsMarket(rawMarket)) {
+          sportsExcluded += 1;
+          continue;
+        }
         const market = normalizeMarket(rawMarket, { now, horizonMs });
         if (!market) {
           invalidMarkets += 1;
@@ -252,6 +299,7 @@ class GammaMarketScanner {
       pageCount,
       rowsSeen,
       cryptoExcluded,
+      sportsExcluded,
       invalidMarkets,
       scannedAt: now,
       horizonEndsAt: now + horizonMs,
@@ -273,6 +321,7 @@ module.exports = {
   MAX_HORIZON_MS,
   GammaMarketScanner,
   isCryptoMarket,
+  isSportsMarket,
   normalizeMarket,
   normalizeOutcomes,
   parseList,

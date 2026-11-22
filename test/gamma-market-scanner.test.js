@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
   GammaMarketScanner,
   isCryptoMarket,
+  isSportsMarket,
   normalizeMarket,
   normalizeOutcomes,
 } = require('../gamma-market-scanner');
@@ -61,9 +62,25 @@ test('crypto market metadata, names, and tickers are excluded without treating o
   })), false);
 });
 
-test('market normalization rejects crypto, ended, distant, and non-tradable markets', () => {
+test('sports metadata and categories exclude sports markets without excluding political markets', () => {
+  assert.equal(isSportsMarket(rawMarket({ sportsMarketType: 'spreads' })), true);
+  assert.equal(isSportsMarket(rawMarket({
+    events: [{ title: 'A vs B', series: [{ title: 'Premier League', ticker: 'epl' }] }],
+  })), true);
+  assert.equal(isSportsMarket(rawMarket({
+    tags: [{ label: 'Sports', slug: 'sports' }],
+  })), true);
+  assert.equal(isSportsMarket(rawMarket({
+    question: 'Will the Senate pass the bill?',
+    category: 'Politics',
+    events: [],
+  })), false);
+});
+
+test('market normalization rejects crypto, sports, ended, distant, and non-tradable markets', () => {
   const now = 1_000_000;
   assert.equal(normalizeMarket(rawMarket({ question: 'Bitcoin above $100k?' }), { now }), null);
+  assert.equal(normalizeMarket(rawMarket({ sportsMarketType: 'totals' }), { now }), null);
   assert.equal(normalizeMarket(rawMarket({ endDate: new Date(now - 1).toISOString() }), { now }), null);
   assert.equal(normalizeMarket(rawMarket({ endDate: new Date(now + 7_300_000).toISOString() }), { now }), null);
   assert.equal(normalizeMarket(rawMarket({ acceptingOrders: false }), { now }), null);
@@ -81,6 +98,7 @@ test('Gamma scanner paginates, filters the exact horizon, and reports discovered
       markets: [
       rawMarket(),
       rawMarket({ id: 'crypto', slug: 'btc-updown', question: 'BTC Up or Down?' }),
+      rawMarket({ id: 'sports', sportsMarketType: 'spreads' }),
       ],
       next_cursor: 'page-2',
     },
@@ -107,6 +125,7 @@ test('Gamma scanner paginates, filters the exact horizon, and reports discovered
   const result = await scanner.scanMarkets({ now, horizonMs: 7_200_000 });
   assert.equal(result.markets.length, 1);
   assert.equal(result.cryptoExcluded, 1);
+  assert.equal(result.sportsExcluded, 1);
   assert.equal(result.complete, true);
   assert.equal(result.pageCount, 2);
   assert.equal(requests[0].pathname, '/markets/keyset');
