@@ -3,7 +3,7 @@
 const ClobMarketFeed = require('./clob-feed');
 const { MAX_HORIZON_MS } = require('./gamma-market-scanner');
 
-const STRATEGY_VERSION = 'non-sports-non-crypto-mid-limit-v2';
+const STRATEGY_VERSION = 'non-sports-non-crypto-mid-limit-requote-v3';
 const ENTRY_MIN_MID = 0.80;
 const ENTRY_MAX_MID = 0.90;
 const ENTRY_SHARES = 20;
@@ -561,6 +561,9 @@ class NearResolutionMarketBot {
       remainingShares: ENTRY_SHARES,
       status: 'OPEN',
       createdAt: now,
+      requoteCount: 0,
+      lastRequotedAt: now,
+      lastLoggedLimitPrice: mid,
       seenAskSizes: {},
     };
     this.entryAttemptAt.set(tokenId, now);
@@ -633,11 +636,55 @@ class NearResolutionMarketBot {
       this.cancelPendingOrder(stillPending, 'MIDPOINT_LEFT_ENTRY_BAND');
       return;
     }
-    if (stillPending && this.availableCashForOrder(stillPending) <= 1e-8) {
-      this.cancelPendingOrder(stillPending, 'PAPER_CASH_RESERVED_OR_EXHAUSTED');
+    if (stillPending && Number.isFinite(mid)
+      && Math.abs(mid - stillPending.limitPrice) > 1e-8) {
+      this.requotePendingOrder(stillPending, market, outcome, quote, mid);
+    }
+    const afterRequote = this.pendingOrders.get(tokenId);
+    if (afterRequote && this.availableCashForOrder(afterRequote) <= 1e-8) {
+      this.cancelPendingOrder(afterRequote, 'PAPER_CASH_RESERVED_OR_EXHAUSTED');
       return;
     }
     this.markDirty();
+  }
+
+  requotePendingOrder(order, market, outcome, quote, nextPrice) {
+    const previousPrice = order.limitPrice;
+    const remainingShares = Math.max(0, safeNumber(order.remainingShares));
+    const otherReservations = Math.max(
+      0,
+      this.reservedCash() - remainingShares * previousPrice,
+    );
+    if (this.cash - otherReservations + 1e-8 < remainingShares * nextPrice) {
+      this.cancelPendingOrder(order, 'PAPER_CASH_RESERVED_OR_EXHAUSTED');
+      return false;
+    }
+
+    order.limitPrice = nextPrice;
+    order.requoteCount = safeNumber(order.requoteCount) + 1;
+    order.lastRequotedAt = this.now();
+    // A replacement order must not treat asks already present at its new price
+    // as fresh liquidity that appeared after it was placed.
+    order.seenAskSizes = Object.fromEntries(
+      normalizedLevels(quote?.askLevels)
+        .filter((level) => level.price <= nextPrice)
+        .map((level) => [String(level.price), level.size]),
+    );
+
+    if (Math.abs(nextPrice - safeNumber(order.lastLoggedLimitPrice, previousPrice)) >= 0.01 - 1e-9) {
+      order.lastLoggedLimitPrice = nextPrice;
+      this.log('BUY_LIMIT_REQUOTED', `${market.title} · ${outcome.label}: resting limit moved from $${previousPrice.toFixed(3)} to $${nextPrice.toFixed(3)}`, {
+        marketId: String(market.id),
+        outcome: outcome.label,
+        oldLimitPrice: previousPrice,
+        newLimitPrice: nextPrice,
+        remainingShares,
+        requoteCount: order.requoteCount,
+      });
+    } else {
+      this.markDirty();
+    }
+    return true;
   }
 
   recordRestingFill(order, market, outcome, quote, execution) {
@@ -1079,7 +1126,7 @@ class NearResolutionMarketBot {
         realOrderModulesLoaded: false,
         markets: 'Active non-sports, non-crypto outcomes expiring within two hours',
         entryRule: `Rest a ${ENTRY_SHARES}-share limit buy at the current midpoint when it is $${ENTRY_MIN_MID.toFixed(2)}–$${ENTRY_MAX_MID.toFixed(2)} and best bid is above $${STOP_LOSS_BID.toFixed(2)}.`,
-        orderRule: 'Cancel any unfilled remainder when midpoint leaves the entry band; fill only from newly visible asks at or below the limit.',
+        orderRule: 'Re-quote the resting limit to each new midpoint tick inside the band; cancel any unfilled remainder when midpoint leaves the band. Fill only from newly visible asks at or below the active limit.',
         takeProfitRule: `Rest a limit sell at $${TAKE_PROFIT_BID.toFixed(2)}; confirm it from best bids.`,
         stopLossRule: `At a best bid of $${STOP_LOSS_BID.toFixed(2)} or lower, sweep available bids; remove that market from active scanning.`,
         resolutionRule: 'Any remaining shares stay paper-open until Gamma reports the official market result.',

@@ -122,6 +122,7 @@ test('rests a 20-share limit at midpoint and only fills from new asks at or belo
   });
   assert.equal(bot.positions[0].remainingShares, 10);
   assert.equal(bot.pendingOrders.get('market-1-a').remainingShares, 10);
+  assert.equal(bot.pendingOrders.get('market-1-a').limitPrice, 0.835);
   assert.ok(Math.abs(bot.positions[0].averageEntryPrice - 0.84) < 1e-8);
 
   nowRef.value += 100;
@@ -133,20 +134,38 @@ test('rests a 20-share limit at midpoint and only fills from new asks at or belo
 
   nowRef.value += 100;
   bot.handleQuote('market-1-a', {
-    ...quote({ ask: 0.84, bid: 0.83, askSize: 15 }),
-    askLevels: [{ price: 0.84, size: 15 }],
-  });
-  assert.equal(bot.positions[0].remainingShares, 15);
-  assert.equal(bot.pendingOrders.get('market-1-a').remainingShares, 5);
-
-  nowRef.value += 100;
-  bot.handleQuote('market-1-a', {
-    ...quote({ ask: 0.84, bid: 0.83, askSize: 20 }),
-    askLevels: [{ price: 0.84, size: 20 }],
+    ...quote({ ask: 0.83, bid: 0.82, askSize: 15 }),
+    askLevels: [{ price: 0.83, size: 15 }],
   });
   assert.equal(bot.positions[0].remainingShares, 20);
   assert.equal(bot.pendingOrders.has('market-1-a'), false);
+  assert.ok(Math.abs(bot.positions[0].averageEntryPrice - 0.835) < 1e-8);
   assert.equal(bot.positions[0].entryFees, 0);
+});
+
+test('re-quotes a pending limit to each new midpoint tick inside the band', async () => {
+  const { bot, nowRef } = makeBot();
+  await bot.scanNow();
+  bot.handleQuote('market-1-a', quote({ ask: 0.86, bid: 0.84 }));
+  const order = bot.pendingOrders.get('market-1-a');
+  assert.equal(order.limitPrice, 0.85);
+  assert.equal(order.requoteCount, 0);
+
+  nowRef.value += 100;
+  bot.handleQuote('market-1-a', quote({ ask: 0.88, bid: 0.84 }));
+  assert.equal(order.limitPrice, 0.86);
+  assert.equal(order.requoteCount, 1);
+  assert.equal(bot.positions.length, 0, 'existing displayed asks are not treated as new fills after replacement');
+  assert.equal(bot.snapshot().account.reservedCash, 17.2);
+
+  nowRef.value += 100;
+  bot.handleQuote('market-1-a', quote({ ask: 0.88, bid: 0.84 }));
+  assert.equal(order.limitPrice, 0.86);
+  assert.equal(order.requoteCount, 1, 'an unchanged midpoint does not create a new quote');
+
+  nowRef.value += 100;
+  bot.handleQuote('market-1-a', quote({ ask: 0.92, bid: 0.90 }));
+  assert.equal(bot.pendingOrders.size, 0, 'leaving the band still cancels the order');
 });
 
 test('cancels unfilled limit when midpoint leaves the band and releases reserved cash', async () => {

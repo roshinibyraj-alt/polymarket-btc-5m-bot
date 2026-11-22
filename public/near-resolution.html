@@ -223,10 +223,11 @@
       <summary>Strategy and rules</summary>
       <div class="rules">
         <div class="rule"><b>Market scan:</b> active, tradable non-sports, non-crypto markets whose listed end time is within two hours. Outcomes and token IDs come from Gamma; prices come from the CLOB WebSocket.</div>
-        <div class="rule"><b>Entry:</b> rest a 20-share paper limit buy at the current midpoint when the midpoint is $0.80–$0.90 and the best bid is above $0.60. The unfilled order is cancelled when midpoint leaves that band.</div>
-        <div class="rule"><b>Fill model:</b> confirm fills only from newly visible ask size at or below the resting limit. Partial fills are tracked; no taker entry fee or rebate is assumed.</div>
-        <div class="rule"><b>Take-profit:</b> rest a simulated limit sell at $0.99 and fill from visible bids at or above $0.99. Maker fees and rebates are not estimated.</div>
-        <div class="rule"><b>Stop-loss:</b> when best bid reaches $0.60 or lower, sweep available bids. That market is then removed from active scanning and will not be traded again.</div>
+        <div class="rule"><b>Entry:</b> rest a 20-share paper limit buy at the current midpoint when the midpoint is $0.80–$0.90 and the best bid is above $0.60. Re-quote on each new midpoint tick inside the band; cancel any unfilled remainder when midpoint leaves the band.</div>
+        <div class="rule"><b>Fill model:</b> confirm fills only from newly visible ask size at or below the active resting limit. Partial fills are tracked. Resting maker buys have no trading fee.</div>
+        <div class="rule"><b>Fees &amp; rebates:</b> makers are not charged trading fees. Maker rebates are conditional on eligible fee-generating fills and maker tier; standard rebates start at $200,000 in 30-day maker weighted volume. This paper bot has no connected wallet and credits no real rebate. <a href="https://docs.polymarket.com/trading/fees" target="_blank" rel="noopener noreferrer">Official fee rules</a>.</div>
+        <div class="rule"><b>Take-profit:</b> rest a simulated limit sell at $0.99 and fill from visible bids at or above $0.99. It is treated as a maker order with no trading fee.</div>
+        <div class="rule"><b>Stop-loss:</b> when best bid reaches $0.60 or lower, sweep available bids; a taker fee may apply from the market's fee schedule. That market is then removed from active scanning.</div>
         <div class="rule"><b>Resolution:</b> any shares left after an exit remain paper-open until Gamma reports the official result. Settlement uses the resolved outcome payout.</div>
         <div class="rule"><b>Safety:</b> demo-only. No wallet or real-order code is loaded by this app.</div>
       </div>
@@ -306,7 +307,7 @@
             <div class="stat"><div class="stat-label">Limit / current mid</div><div class="stat-value">${money(order.limitPrice)} / ${money(order.currentMid)}</div></div>
             <div class="stat"><div class="stat-label">Shares remaining</div><div class="stat-value">${Number(order.remainingShares).toFixed(2)}</div></div>
             <div class="stat"><div class="stat-label">Best bid / ask</div><div class="stat-value">${money(order.bestBid)} / ${money(order.bestAsk)}</div></div>
-            <div class="stat"><div class="stat-label">Expires</div><div class="stat-value">Mid leaves band · ${clock(order.secondsRemaining)}</div></div>
+            <div class="stat"><div class="stat-label">Requotes / expiry</div><div class="stat-value">${Number(order.requoteCount || 0)} · Mid leaves band · ${clock(order.secondsRemaining)}</div></div>
           </div>
         </article>`;
       }).join('');
