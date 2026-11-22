@@ -1084,7 +1084,7 @@ class NearResolutionMarketBot {
         takeProfitRule: `Rest a limit sell at $${TAKE_PROFIT_BID.toFixed(2)}; confirm it from best bids.`,
         stopLossRule: `At a best bid of $${STOP_LOSS_BID.toFixed(2)} or lower, sweep available bids; remove that market from active scanning.`,
         resolutionRule: 'Any remaining shares stay paper-open until Gamma reports the official market result.',
-        entryPerMarket: 'One active order and one filled position per outcome token.',
+        entryPerMarket: 'One market-sweep entry per outcome token; no resting entry orders.',
       },
       marketScan: {
         ...this.scannerState,
