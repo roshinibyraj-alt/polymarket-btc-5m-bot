@@ -1,26 +1,37 @@
-# Polymarket near-resolution paper bot
+# Polymarket BTC 5-minute edge-gated volume paper bot
 
-The active Railway entrypoint is paper-only. It does not load real-order modules or submit Polymarket orders, even if live-trading variables are present.
+This Railway app is a paper-only simulator. It does not load or submit real orders, even if `LIVE_TRADING=true` is present.
 
-## Market discovery and strategy
+## Strategy
 
-1. The Gamma API is scanned for active, order-book-enabled non-sports, non-crypto markets ending within two hours. Sports metadata, sport tags, and sports categories are excluded. Gamma provides the actual outcomes and CLOB token IDs.
-2. One CLOB market WebSocket subscribes to discovered outcome IDs. The dashboard shows live midpoint, best bid, and best ask; open positions are marked at the latest best bid.
-3. Each outcome can have one 20-share market-sweep entry when midpoint is from $0.80 through $0.90 and best bid is above $0.60. This is an entry filter only, not a stop-loss. The current CLOB WebSocket ask book is swept up to $1.00; actual visible depth determines full or partial fills. No entry order rests or uses additional REST polling.
-4. Entry taker fees are modeled from Gamma's market fee schedule when fees are enabled. A simulated resting take-profit sell is set at $0.99 and fills only against visible bids at or above that level; it has no maker trading fee.
-5. Real maker rebates apply only to eligible filled maker orders on fee-generating markets and depend on maker tier. Market-sweep entries are takers, and the paper bot has no connected wallet or real rebate payout.
-6. There is no stop-loss. Open shares remain held unless the $0.99 take-profit fills; otherwise they stay open until Gamma reports the official result. Resolution checks run every 10 seconds.
+The bot tracks eligible taker volume, fees, and tier-based rebate estimates, but it does not trade just to inflate volume:
 
-Paper cash starts at $10,000. Standard maker rebates start at $200,000 in 30-day maker weighted volume and require eligible filled orders; see [Polymarket's official fee and rebate rules](https://docs.polymarket.com/trading/fees). Entry taker fees are estimated from the market's Gamma fee schedule when enabled. The dashboard shows each position's floating unrealized P&L and the account-wide floating P&L in real time.
+1. It estimates the chance of UP at resolution from the live Binance BTCUSDT price relative to the current 5-minute candle open, scaled by the recent 60-second realized price range. DOWN probability is `1 − UP probability`.
+2. It compares those estimates with Polymarket's live UP/DOWN books. It simulates a taker sweep of up to 10 shares across visible asks, allowing a realistic partial FAK fill only when at least 5 shares and $1 notional execute; the unfilled remainder is cancelled. It skips prices above $0.90.
+3. An entry is allowed only when estimated payout minus the full sweep cost, modeled taker fee, and a 2¢ Binance/Chainlink basis buffer leaves at least 5¢ expected edge per share.
+4. UP and DOWN are evaluated independently. The higher qualifying edge is bought first; each side has a 10-second cooldown and a 10-entry-per-window limit. The bot also enforces a $250 per-window entry-spend cap, $500 total open-cost cap, and $100 daily realized-loss stop.
+5. A position is sold only when a full visible-bid sweep would realize at least 3¢ per share after both entry and exit fees. Otherwise it stays open for official Polymarket resolution, checked every 10 seconds.
 
-## Run and verify
+This is an uncalibrated probability model, not a forecast guarantee. Binance is only a proxy for the Chainlink-based resolution price. The dashboard shows the underlying inputs and uses conservative basis-risk padding.
 
-- `npm start` — start the dashboard and paper bot.
-- `npm test` — run local unit tests.
-- `npm run smoke:near-resolution` — read-only check against live Gamma discovery and CLOB books; it never places orders.
+## Volume and rebate tracking
 
-The dashboard is mobile-first. `/api/state` exposes scan state, WebSocket status, pending orders, positions, and the trade ledger.
+- Taker fees use the market fee schedule when provided, otherwise the BTC 5-minute default of 5%. The fee calculation is `shares × fee rate × price × (1 − price)`.
+- Eligible weighted volume is tracked as `dollar trade size × (1 − entry price)` only for fee-paying taker fills.
+- The paper tier starts at 0 because no wallet or existing Polymarket tier is connected. The published tiers are None below $200k 30-day weighted volume, then Gold (10%), Platinum (25%), Diamond (40%), Obsidian (50%), and Onyx (60%). Tier changes apply on the daily update; prior trades are not repriced. Rebates are estimates and the $1 minimum payout is shown separately.
+- Direct market liquidity rewards are checked for the current market. The BTC 5-minute market observed during implementation returned an empty `rewards_config`; the strategy is taker-only and does not place maker quotes, so even an allocation on another market would not be treated as earnings.
+- No self-matching or artificial touch-fill accounting is used.
+
+Official references:
+
+- [Polymarket trading fees](https://docs.polymarket.com/trading/fees)
+- [Polymarket taker rebates](https://docs.polymarket.com/programs/taker-rebates)
+- [Polymarket liquidity rewards](https://docs.polymarket.com/programs/liquidity-rewards)
+
+## Running and testing
+
+Run `npm test` and `npm start`. The dashboard and `/api/state` expose the active model, live books, paper positions, orders, fees, weighted-volume progress, and rebate estimates.
 
 ## Paper history
 
-The Railway paper ledger is stored on its persistent volume. The new strategy has a distinct persistence version, so the prior BTC volume ledger is reset once on replacement and the new paper balance starts at $10,000. The strategy version and `PAPER_HISTORY_RESET_VERSION` marker are saved so later restarts retain new history.
+The existing paper ledger is persisted on the Railway volume. Strategy migration preserves cash, positions, and history; only unfilled orders from the replaced strategy are marked cancelled. Changing `PAPER_HISTORY_RESET_VERSION` intentionally starts a fresh paper ledger.

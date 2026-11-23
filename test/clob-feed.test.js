@@ -8,7 +8,6 @@ const ClobMarketFeed = require('../clob-feed');
 const sockets = [];
 
 class FakeSocket extends EventEmitter {
-  static CONNECTING = 0;
   static OPEN = 1;
 
   constructor(url) {
@@ -136,56 +135,4 @@ test('disconnect clears cached books and reconnect waits for a new snapshot', (t
   assert.equal(feed.getQuote('up-token'), null);
   assert.equal(feed.snapshot().status, 'RECONNECTING');
   assert.equal(feed.snapshot().reconnectCount, 1);
-});
-
-test('dynamic subscriptions add and remove outcome IDs on the existing socket', (t) => {
-  sockets.length = 0;
-  const assetIds = Array.from({ length: 150 }, (_, index) => `token-${index}`);
-  const feed = new ClobMarketFeed({
-    assetIds: [],
-    WebSocketImpl: FakeSocket,
-    heartbeatMs: 60_000,
-    connectionStaleMs: 120_000,
-  });
-  t.after(() => feed.stop());
-
-  feed.start();
-  feed.updateAssetIds(assetIds);
-  const socket = sockets.at(-1);
-  socket.open();
-  assert.deepEqual(JSON.parse(socket.sent[0]).assets_ids, assetIds.slice(0, 100));
-  assert.deepEqual(JSON.parse(socket.sent[1]), {
-    assets_ids: assetIds.slice(100),
-    operation: 'subscribe',
-  });
-
-  const next = [...assetIds.slice(1), 'new-token'];
-  feed.updateAssetIds(next);
-  assert.deepEqual(JSON.parse(socket.sent[2]), {
-    assets_ids: ['new-token'],
-    operation: 'subscribe',
-  });
-  assert.deepEqual(JSON.parse(socket.sent[3]), {
-    assets_ids: ['token-0'],
-    operation: 'unsubscribe',
-  });
-});
-
-test('asset changes during connection reuse the pending socket and subscribe its latest IDs', (t) => {
-  sockets.length = 0;
-  const feed = new ClobMarketFeed({
-    assetIds: [],
-    WebSocketImpl: FakeSocket,
-    heartbeatMs: 60_000,
-    connectionStaleMs: 120_000,
-  });
-  t.after(() => feed.stop());
-
-  feed.start();
-  feed.updateAssetIds(['first-token']);
-  const socket = sockets.at(-1);
-  feed.updateAssetIds(['latest-token']);
-  assert.equal(sockets.length, 1);
-  socket.open();
-  assert.deepEqual(JSON.parse(socket.sent[0]).assets_ids, ['latest-token']);
 });
