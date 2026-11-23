@@ -99,7 +99,7 @@ test('four pairs are independent and each requires a strict ask-sum below $0.80'
   btcUp.sequence = getNow() + 2;
   bot.evaluateCrossPairs(getNow());
   assert.equal(bot.positions.length, 6, 'each qualifying pair should enter independently');
-  assert.deepEqual(bot.positions.map(position => position.shares), [100, 100, 100, 100, 100, 100]);
+  assert.deepEqual(bot.positions.map(position => position.shares), Array(6).fill(config.CROSS_PAIR_BASE_SHARES));
   assert.equal(bot.crossPairCycles.length, 3);
   assert.ok(bot.crossPairCycles.every(cycle => cycle.legPositionIds.length === 2));
   assert.equal(bot.snapshot().crossPairs.length, 4);
@@ -124,10 +124,10 @@ test('entry audits save matched market, token, book levels, timestamps, fills, a
   assert.equal(btcOrder.executionAudit.sourceUpdatedAt, getNow());
   assert.deepEqual(btcOrder.executionAudit.asks, [{ price: 0.35, size: 2000 }]);
   assert.deepEqual(btcOrder.executionAudit.simulatedFills, [
-    { shares: 100, price: 0.35, value: 35, fee: 1.1375 },
+    { shares: 10, price: 0.35, value: 3.5, fee: 0.11375 },
   ]);
-  assert.equal(btcOrder.fee, 1.1375);
-  assert.equal(ethOrder.fee, 0.2464);
+  assert.equal(btcOrder.fee, 0.11375);
+  assert.equal(ethOrder.fee, 0.02464);
   assert.equal(btcOrder.executionAudit.feeScheduleSource, 'Gamma market fee schedule');
   assert.equal(bot.snapshot().executionAudit.auditedOrderCount, 6);
 });
@@ -163,12 +163,12 @@ test('the same displayed ask depth is not counted twice across overlapping pairs
     ethUp: 0.40,
     ethDown: 0.40,
   }, now);
-  bot.records.get('BTC:5m').quotes.UP.asks = [{ price: 0.35, size: 100 }];
-  bot.records.get('BTC:5m').quotes.UP.askSize = 100;
+  bot.records.get('BTC:5m').quotes.UP.asks = [{ price: 0.35, size: 10 }];
+  bot.records.get('BTC:5m').quotes.UP.askSize = 10;
   bot.evaluateCrossPairs(now);
 
   const btcUpOrders = bot.orders.filter(order => order.asset === 'BTC' && order.side === 'UP');
-  assert.equal(btcUpOrders.reduce((sum, order) => sum + order.filledShares, 0), 100);
+  assert.equal(btcUpOrders.reduce((sum, order) => sum + order.filledShares, 0), 10);
   assert.equal(btcUpOrders.filter(order => order.filledShares === 0).length, 1);
 });
 
@@ -188,35 +188,35 @@ test('floating P&L sweeps visible bids and subtracts estimated sell fees', () =>
   const record = bot.records.get('BTC:5m');
   const quote = record.quotes.UP;
   quote.bestBid = 0.50;
-  quote.bidSize = 50;
-  quote.bids = [{ price: 0.50, size: 50 }, { price: 0.40, size: 50 }];
+  quote.bidSize = 5;
+  quote.bids = [{ price: 0.50, size: 5 }, { price: 0.40, size: 5 }];
   quote.updatedAt = now + 10;
   quote.receivedAt = now + 10;
   quote.sequence = now + 10;
   bot.markPositions(now + 10, record.key, 'UP');
 
   assert.equal(position.markBid, 0.45);
-  assert.equal(position.estimatedLiquidationProceeds, 45);
-  assert.equal(position.estimatedExitFee, 1.225);
-  assert.equal(position.unrealizedPnl, 7.6375);
+  assert.equal(position.estimatedLiquidationProceeds, 4.5);
+  assert.equal(position.estimatedExitFee, 0.1225);
+  assert.equal(position.unrealizedPnl, 0.76375);
   assert.equal(position.markStatus, 'LIVE_DEPTH_SWEEP');
   const account = bot.accountSnapshot();
-  assert.equal(account.unrealizedPnl, bot.positions
+  assert.ok(Math.abs(account.unrealizedPnl - bot.positions
     .filter(item => item.status === 'OPEN')
-    .reduce((sum, item) => sum + item.unrealizedPnl, 0));
+    .reduce((sum, item) => sum + item.unrealizedPnl, 0)) < 1e-9);
   assert.equal(account.equity, Number((bot.initialCapital + account.realizedPnl + account.unrealizedPnl).toFixed(6)));
 });
 
-test('all pair sizes stay at 100 after wins or losses', () => {
+test('all pair sizes stay at 10 after wins or losses', () => {
   const { bot, getNow } = createBot();
   bot.evaluateCrossPairs(getNow());
   const btcUpEthDown = bot.crossPairCycles.find(cycle => cycle.pairId === 'btc-up-eth-down');
   assert.ok(btcUpEthDown);
 
   settlePair(bot, btcUpEthDown, 'DOWN', 'UP', getNow() + 1000);
-  assert.equal(bot.crossPairSizing['btc-up-eth-down'].nextShares, 100);
+  assert.equal(bot.crossPairSizing['btc-up-eth-down'].nextShares, 10);
   assert.equal(btcUpEthDown.sizingOutcome, 'PAIR_LOSS');
-  assert.ok(Object.values(bot.crossPairSizing).every(item => item.nextShares === 100));
+  assert.ok(Object.values(bot.crossPairSizing).every(item => item.nextShares === 10));
 
   const nextStart = START + WINDOW_MS;
   const nextNow = nextStart + 1000;
@@ -230,7 +230,7 @@ test('all pair sizes stay at 100 after wins or losses', () => {
   const nextCycle = bot.crossPairCycles.find(cycle =>
     cycle.pairId === 'btc-up-eth-down' && cycle.windowStart === nextStart);
   assert.ok(nextCycle);
-  assert.equal(nextCycle.sharesPerLeg, 100);
+  assert.equal(nextCycle.sharesPerLeg, 10);
 });
 
 test('a $0.99 best bid closes at the modeled $1-per-share payout', () => {
@@ -252,7 +252,7 @@ test('a $0.99 best bid closes at the modeled $1-per-share payout', () => {
   assert.equal(position.exitPayout, 1);
   assert.ok(position.realizedPnl > 0);
   assert.equal(cycle.status, 'OPEN');
-  assert.equal(bot.crossPairSizing[cycle.pairId].nextShares, 100);
+  assert.equal(bot.crossPairSizing[cycle.pairId].nextShares, 10);
 });
 
 test('a fresh empty bid book triggers the $0 stop-loss', () => {
@@ -278,8 +278,8 @@ test('a fresh empty bid book triggers the $0 stop-loss', () => {
 
   assert.equal(cycle.status, 'CLOSED');
   assert.equal(cycle.sizingOutcome, 'PAIR_LOSS');
-  assert.equal(bot.crossPairSizing[cycle.pairId].nextShares, 100);
-  assert.ok(Object.values(bot.crossPairSizing).every(item => item.nextShares === 100));
+  assert.equal(bot.crossPairSizing[cycle.pairId].nextShares, 10);
+  assert.ok(Object.values(bot.crossPairSizing).every(item => item.nextShares === 10));
 });
 
 test('positions keep their final live mark while awaiting resolution', () => {
@@ -487,12 +487,12 @@ test('the new ledger stores pair sizing and restores open pair positions', () =>
 
   const restored = new CrossPairBot({ now: getNow });
   restored.restoreLedger(saved);
-  assert.equal(restored.crossPairSizing['btc-up-eth-down'].nextShares, 100);
+  assert.equal(restored.crossPairSizing['btc-up-eth-down'].nextShares, 10);
   assert.equal(restored.positions.length, 6);
   assert.equal(restored.crossPairCycles.length, 3);
   assert.equal(restored.snapshot().strategy.id, CrossPairBot.STRATEGY.id);
   const pair = restored.snapshot().crossPairs.find(item => item.id === 'btc-up-eth-down');
-  assert.equal(pair.trades[0].legs[0].position.shares, 100);
+  assert.equal(pair.trades[0].legs[0].position.shares, 10);
   assert.equal(pair.trades.length, 1);
   assert.equal(restored.snapshot().crossPairs.length, 4);
 });

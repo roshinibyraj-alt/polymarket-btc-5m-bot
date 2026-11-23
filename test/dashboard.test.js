@@ -54,24 +54,24 @@ test('dashboard shows four independent pairs, open legs, and the no-inverse-sell
     entryAt: 1_800_000_001_000,
     windowStart: 1_800_000_000_000,
     entryAskSum: 0.75,
-    sharesPerLeg: 100,
+    sharesPerLeg: 10,
     legs: ['BTC', 'ETH'].map((asset, index) => ({
       asset,
       side: index === 0 ? 'UP' : 'DOWN',
-      filledShares: 100,
-      requestedShares: 100,
+      filledShares: 10,
+      requestedShares: 10,
       position: {
         status: 'OPEN',
-        shares: 100,
-        initialShares: 100,
-        requestedShares: 100,
+        shares: 10,
+        initialShares: 10,
+        requestedShares: 10,
         entryPrice: 0.35,
-        initialCost: 35,
+        initialCost: 3.5,
         markBid: 0.36,
         unrealizedPnl: 1,
         partialRealizedPnl: 0,
       },
-      order: { status: 'FILLED', filledShares: 100, requestedShares: 100, averagePrice: 0.35 },
+      order: { status: 'FILLED', filledShares: 10, requestedShares: 10, averagePrice: 0.35 },
     })),
   };
   const pairs = ['BTC UP + ETH DOWN', 'ETH UP + BTC DOWN', 'BTC UP + ETH UP', 'BTC DOWN + ETH DOWN'].map((label, index) => ({
@@ -82,7 +82,7 @@ test('dashboard shows four independent pairs, open legs, and the no-inverse-sell
     combinedAsk: 0.75,
     entryThreshold: 0.8,
     status: index === 0 ? 'ENTERED' : 'ARMED',
-    nextSharesPerLeg: 100,
+    nextSharesPerLeg: 10,
     entered: index === 0,
     windowStart: cycle.windowStart,
     currentCycle: index === 0 ? cycle : null,
@@ -114,7 +114,7 @@ test('dashboard shows four independent pairs, open legs, and the no-inverse-sell
   });
 
   assert.match(elements.get('sizingGrid').innerHTML, /BTC UP \+ ETH DOWN/);
-  assert.match(elements.get('sizingGrid').innerHTML, /100 \/ leg/);
+  assert.match(elements.get('sizingGrid').innerHTML, /10 \/ leg/);
   assert.match(elements.get('sizingGrid').innerHTML, /Floating P&L/);
   assert.match(elements.get('sizingGrid').innerHTML, /Position exits/);
   assert.match(elements.get('sizingGrid').innerHTML, /Awaiting|Open/);

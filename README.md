@@ -13,7 +13,7 @@ Four cross-pairs are evaluated independently:
 
 For each pair, the bot watches the two fresh best asks from the Polymarket CLOB WebSocket. When their sum is strictly below $0.80, it makes one paper taker entry for that pair in the current 5-minute window. All four pairs can enter independently during the same window.
 
-Each leg always requests 100 shares, regardless of previous results. The paper simulator sweeps visible asks up to $0.99, records simulated filled quantities, volume-weighted entry prices, and market-specific modeled taker fees, and cancels any unfilled remainder. A book must match the current market and token, have a post-open timestamp, and be no older than 2 seconds. Displayed ask depth is shared across all pair entries that use the same token and book update, so the same shares are not simulated as filled twice. Entry is skipped while the same cross-pair has an earlier position awaiting official resolution.
+Each leg always requests 10 shares, regardless of previous results. The paper simulator sweeps visible asks up to $0.99, records simulated filled quantities, volume-weighted entry prices, and market-specific modeled taker fees, and cancels any unfilled remainder. A book must match the current market and token, have a post-open timestamp, and be no older than 2 seconds. Displayed ask depth is shared across all pair entries that use the same token and book update, so the same shares are not simulated as filled twice. Entry is skipped while the same cross-pair has an earlier position awaiting official resolution.
 
 The four pairs are inverse-linked: BTC UP + ETH UP ↔ BTC DOWN + ETH DOWN, and BTC UP + ETH DOWN ↔ BTC DOWN + ETH UP. That relationship does not trigger a sale: an opposite pair may enter only when its own fresh ask sum is below $0.80, while existing positions remain open.
 
@@ -27,7 +27,7 @@ Market metadata and official outcomes come from Polymarket Gamma. The live order
 
 ## Persistent paper history
 
-On Railway, `PAPER_LEDGER_PATH` should point into the mounted persistent volume. This update keeps the existing strategy ID and preserves the current ledger. Earlier orders remain in the history and are labeled unaudited because no entry-time book snapshots were stored; new entries use the audited depth model. Later restarts continue to restore history and open positions.
+On Railway, `PAPER_LEDGER_PATH` should point into the mounted persistent volume. The 10-share reset deployment uses a new strategy ID to start a fresh $3,000 paper ledger; later restarts preserve that new history and any open positions.
 
 ## Run
 

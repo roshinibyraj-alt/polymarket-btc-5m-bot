@@ -313,7 +313,7 @@
       <div class="hero-copy">
         <div class="eyebrow">Four independent cross-pair entries</div>
         <h1 id="pageTitle">The market pulse, at a glance.</h1>
-        <p>BTC UP + ETH DOWN, ETH UP + BTC DOWN, BTC UP + ETH UP, and BTC DOWN + ETH DOWN · each pair uses a fixed 100 shares per leg.</p>
+        <p>BTC UP + ETH DOWN, ETH UP + BTC DOWN, BTC UP + ETH UP, and BTC DOWN + ETH DOWN · each pair uses a fixed 10 shares per leg.</p>
       </div>
       <div class="hero-side">
         <div class="hero-stat"><span>Markets live</span><strong id="marketLiveCount">— / 2</strong></div>
@@ -403,7 +403,7 @@
         <div class="strategy-steps">
           <div class="strategy-step"><span class="step-num">1</span><div><strong>Evaluate all four combinations independently</strong><span>BTC UP + ETH DOWN, ETH UP + BTC DOWN, BTC UP + ETH UP, and BTC DOWN + ETH DOWN can each trigger in the same 5-minute window.</span></div></div>
           <div class="strategy-step"><span class="step-num">2</span><div><strong>Enter when combined best asks are below $0.80</strong><span>Each pair has one entry per window. Books must match the current market token, have a post-open timestamp, and be no more than 2 seconds old.</span></div></div>
-          <div class="strategy-step"><span class="step-num">3</span><div><strong>Sweep only visible ask depth</strong><span>Each leg requests 100 shares, capped at $0.99. Partial fills are allowed, and the same displayed token liquidity cannot be reused by overlapping pairs until a newer book snapshot arrives.</span></div></div>
+          <div class="strategy-step"><span class="step-num">3</span><div><strong>Sweep only visible ask depth</strong><span>Each leg requests 10 shares, capped at $0.99. Partial fills are allowed, and the same displayed token liquidity cannot be reused by overlapping pairs until a newer book snapshot arrives.</span></div></div>
           <div class="strategy-step"><span class="step-num">4</span><div><strong>Pairs do not force-sell one another</strong><span>An opposite pair may enter only when its own fresh asks qualify. Existing shares stay open for their own take-profit, stop, or official resolution.</span></div></div>
           <div class="strategy-step"><span class="step-num">5</span><div><strong>Keep the $0.99 TP, empty-book stop, and resolution rules</strong><span>At a $0.99 best bid, count $1 per remaining share, as requested. An empty fresh bid book counts as a $0 stop. Any shares still open at window end go to official resolution.</span></div></div>
           <div class="strategy-step"><span class="step-num">6</span><div><strong>Show conservative floating P&amp;L</strong><span>Open shares are valued by sweeping the visible bid book and subtracting the estimated taker exit fee. Any shares beyond displayed bid depth are valued at $0; this is a paper estimate, not a guaranteed fill.</span></div></div>
@@ -668,7 +668,7 @@
         const list = Array.isArray(pairs) ? pairs : [];
         $('sizingGrid').innerHTML = list.length ? list.map(pair => {
           const id = pair.id;
-          const nextShares = hasNumber(pair.nextSharesPerLeg) ? Number(pair.nextSharesPerLeg) : 100;
+          const nextShares = hasNumber(pair.nextSharesPerLeg) ? Number(pair.nextSharesPerLeg) : 10;
           const status = String(pair.status || 'WAITING_FOR_QUOTES').replaceAll('_', ' ');
           const outcome = String(pair.lastOutcome || '').replaceAll('_', ' ');
           const outcomeClass = pair.lastOutcome === 'PAIR_LOSS' ? 'loss' :

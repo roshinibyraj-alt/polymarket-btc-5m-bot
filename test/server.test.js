@@ -56,7 +56,7 @@ test('dashboard serves the BTC/ETH 5-minute cross-pair strategy', async t => {
   assert.match(html, /BTC UP \+ ETH DOWN, ETH UP \+ BTC DOWN, BTC UP \+ ETH UP, and BTC DOWN \+ ETH DOWN/);
   assert.match(html, /Ask-sum entries \+ independent exits/);
   assert.match(html, /below \$0\.80/);
-  assert.match(html, /Each leg requests 100 shares/);
+  assert.match(html, /Each leg requests 10 shares/);
   assert.match(html, /same displayed token liquidity cannot be reused/);
   assert.match(html, /History is saved in persistent Railway storage/);
   assert.match(html, /capped at \$0\.99/);

@@ -59,9 +59,9 @@ const PAIRS = Object.freeze([
 ]);
 
 const STRATEGY = Object.freeze({
-  id: 'btc-eth-four-pair-tpsl-paper-no-inverse-exit-reset-20261123',
+  id: 'btc-eth-four-pair-tpsl-paper-no-inverse-exit-10-shares-reset-20261123',
   name: 'BTC/ETH four-pair fixed-size paper strategy',
-  version: 'four-pairs-080-tp-099-empty-book-sl-000-no-inverse-exit-audited-v7',
+  version: 'four-pairs-080-tp-099-empty-book-sl-000-no-inverse-exit-audited-v7-10-shares',
   assets: ['BTC', 'ETH'],
   timeframes: ['5m'],
   sharesPerLeg: BASE_SHARES,
@@ -76,7 +76,7 @@ const STRATEGY = Object.freeze({
   takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
   stopLoss: 'Fresh empty best-bid book; settle remaining shares at $0.',
   exit: 'Pairs do not force-sell when the opposite pair enters or reaches a price threshold. Apply the $0.99 bid take-profit ($1/share) and empty-bid $0 stop; any remaining open shares go to official resolution at window end.',
-  sizing: 'Always 100 shares per leg on every entry in all four cross-pairs. No size progression after wins or losses.',
+  sizing: 'Always 10 shares per leg on every entry in all four cross-pairs. No size progression after wins or losses.',
   execution: 'PAPER ONLY',
 });
 
