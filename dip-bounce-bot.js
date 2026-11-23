@@ -589,7 +589,18 @@ class DipBounceBot {
 
   applyBook(record, side, book, updatedAt) {
     const sequence = ++this.marketUpdateSequence;
-    const quote = quoteFromBook(book, updatedAt, sequence);
+    const receivedAt = this.now();
+    const quote = {
+      ...quoteFromBook(book, updatedAt, sequence),
+      receivedAt,
+      tokenId: String(record.market?.tokens?.[side] || ''),
+      marketId: String(record.market?.id || record.market?.slug || ''),
+      marketSlug: record.market?.slug || null,
+      windowStart: Number.isFinite(Number(record.market?.start))
+        ? Number(record.market.start) : null,
+      windowEnd: Number.isFinite(Number(record.market?.end))
+        ? Number(record.market.end) : null,
+    };
     record.quotes[side] = quote;
     const state = record.sideStates[side];
     state.lastObservedMid = quote.mid;

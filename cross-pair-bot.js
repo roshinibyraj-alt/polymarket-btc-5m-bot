@@ -10,6 +10,9 @@ const SWEEP_CAP = config.CROSS_PAIR_TAKER_SWEEP_CAP;
 const TAKE_PROFIT_BID = config.DIP_BOUNCE_TAKE_PROFIT_BID;
 const TAKE_PROFIT_PAYOUT = config.DIP_BOUNCE_TAKE_PROFIT_PAYOUT;
 const QUOTE_MAX_AGE_MS = config.DIP_BOUNCE_MAX_QUOTE_AGE_MS;
+const ENTRY_QUOTE_MAX_AGE_MS = config.CROSS_PAIR_MAX_QUOTE_AGE_MS;
+const AUDIT_LEVEL_LIMIT = config.CROSS_PAIR_AUDIT_LEVEL_LIMIT;
+const EXECUTION_MODEL = 'CLOB_VISIBLE_DEPTH_SHARED_PAPER_V2';
 const CLOSED_POSITION_STATUSES = new Set([
   'TAKE_PROFIT',
   'STOP_LOSS',
@@ -58,13 +61,16 @@ const PAIRS = Object.freeze([
 const STRATEGY = Object.freeze({
   id: 'btc-eth-four-pair-tpsl-paper-no-inverse-exit',
   name: 'BTC/ETH four-pair fixed-size paper strategy',
-  version: 'four-pairs-080-tp-099-empty-book-sl-000-no-inverse-exit-v6',
+  version: 'four-pairs-080-tp-099-empty-book-sl-000-no-inverse-exit-audited-v7',
   assets: ['BTC', 'ETH'],
   timeframes: ['5m'],
   sharesPerLeg: BASE_SHARES,
   entryAskSumBelow: ASK_SUM_THRESHOLD,
   orderType: 'TAKER',
   sweepCap: SWEEP_CAP,
+  executionModel: EXECUTION_MODEL,
+  maximumQuoteAgeMs: ENTRY_QUOTE_MAX_AGE_MS,
+  auditBookLevels: AUDIT_LEVEL_LIMIT,
   resolutionPollMs: config.DIP_BOUNCE_RESOLUTION_POLL_MS,
   takeProfitBid: TAKE_PROFIT_BID,
   takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
@@ -108,6 +114,18 @@ function sortLevels(levels) {
     .sort((a, b) => a.price - b.price);
 }
 
+function sortBidLevels(levels) {
+  return (Array.isArray(levels) ? levels : [])
+    .map(level => ({ price: Number(level.price), size: Number(level.size) }))
+    .filter(level => Number.isFinite(level.price) && level.price > 0 && level.price < 1
+      && Number.isFinite(level.size) && level.size > 0)
+    .sort((a, b) => b.price - a.price);
+}
+
+function roundFee(value) {
+  return Number(Number(value).toFixed(5));
+}
+
 function sweepAsks(levels, requestedShares, market) {
   let remaining = requestedShares;
   let notional = 0;
@@ -125,7 +143,7 @@ function sweepAsks(levels, requestedShares, market) {
   for (const level of sortLevels(levels)) {
     if (remaining <= 1e-9 || level.price > SWEEP_CAP) break;
     const shares = Math.min(remaining, level.size);
-    const fee = shares * feeRate * level.price * (1 - level.price);
+    const fee = roundFee(shares * feeRate * level.price * (1 - level.price));
     const value = shares * level.price;
     fills.push({ shares: round(shares), price: round(level.price), value: round(value), fee: round(fee) });
     notional += value;
@@ -137,9 +155,119 @@ function sweepAsks(levels, requestedShares, market) {
     filledShares: round(filledShares),
     remainingShares: round(remaining),
     notional: round(notional),
-    fees: round(fees),
+    fees: roundFee(fees),
     averagePrice: filledShares > 0 ? round(notional / filledShares) : null,
     fills,
+  };
+}
+
+function sweepBids(levels, requestedShares, market) {
+  let remaining = requestedShares;
+  let notional = 0;
+  let fees = 0;
+  const fills = [];
+  const configuredRate = Number(
+    market?.feeSchedule?.rate ?? market?.takerFeeRate ??
+    (market?.asset === 'BTC' ? 0.05 : 0.01),
+  );
+  const feeRate = market?.feesEnabled === false ? 0 : configuredRate;
+  if (!Number.isFinite(feeRate) || feeRate < 0) {
+    return { filledShares: 0, remainingShares: requestedShares, notional: 0, fees: 0, averagePrice: null, fills: [] };
+  }
+
+  for (const level of sortBidLevels(levels)) {
+    if (remaining <= 1e-9) break;
+    const shares = Math.min(remaining, level.size);
+    const fee = roundFee(shares * feeRate * level.price * (1 - level.price));
+    const value = shares * level.price;
+    fills.push({ shares: round(shares), price: round(level.price), value: round(value), fee });
+    notional += value;
+    fees += fee;
+    remaining -= shares;
+  }
+  const filledShares = requestedShares - remaining;
+  return {
+    filledShares: round(filledShares),
+    remainingShares: round(remaining),
+    notional: round(notional),
+    fees: roundFee(fees),
+    averagePrice: filledShares > 0 ? round(notional / filledShares) : null,
+    fills,
+  };
+}
+
+function quoteMetadataIsCurrentForLeg(leg, now) {
+  const quote = leg?.quote;
+  const market = leg?.market;
+  if (!quote || !market) return false;
+  const marketId = String(market.id || market.slug || '');
+  const tokenId = String(market.tokens?.[leg.side] || '');
+  const start = Number(market.start);
+  const updatedAt = Number(quote.updatedAt);
+  const receivedAt = Number(quote.receivedAt);
+  if (!marketId || !tokenId || !Number.isFinite(start)) return false;
+  return quote.marketId === marketId &&
+    quote.marketSlug === market.slug &&
+    quote.tokenId === tokenId &&
+    Number(quote.windowStart) === start &&
+    Number(quote.windowEnd) === Number(market.end) &&
+    updatedAt >= start && receivedAt >= start &&
+    updatedAt <= now + 250 && receivedAt <= now + 250 &&
+    now - updatedAt >= 0 && now - updatedAt <= ENTRY_QUOTE_MAX_AGE_MS &&
+    now - receivedAt >= 0 && now - receivedAt <= ENTRY_QUOTE_MAX_AGE_MS;
+}
+
+function quoteIsCurrentForLeg(leg, now) {
+  const quote = leg?.quote;
+  return quoteMetadataIsCurrentForLeg(leg, now) &&
+    quote.status === 'LIVE' &&
+    Number.isFinite(Number(quote.bestAsk)) &&
+    Number(quote.bestAsk) > 0 && Number(quote.bestAsk) < 1 &&
+    Array.isArray(quote.asks) && quote.asks.length > 0;
+}
+
+function entryAuditSnapshot(leg, now, askLevelsAvailable, fill) {
+  const quote = leg.quote;
+  const bids = sortBidLevels(quote.bids);
+  const asks = sortLevels(quote.asks);
+  const availableAsks = sortLevels(askLevelsAvailable);
+  return {
+    model: EXECUTION_MODEL,
+    capturedAt: now,
+    modeledLatencyMs: 0,
+    marketId: String(leg.market.id || leg.market.slug),
+    marketSlug: leg.market.slug,
+    marketTitle: leg.market.title,
+    tokenId: String(leg.market.tokens?.[leg.side] || ''),
+    asset: leg.asset,
+    side: leg.side,
+    windowStart: Number(leg.market.start),
+    windowEnd: Number(leg.market.end),
+    sourceUpdatedAt: Number(quote.updatedAt),
+    receivedAt: Number(quote.receivedAt),
+    sourceAgeMs: Math.max(0, now - Number(quote.updatedAt)),
+    receiveAgeMs: Math.max(0, now - Number(quote.receivedAt)),
+    bestBid: quote.bestBid == null ? null : Number(quote.bestBid),
+    bestBidSize: Number(quote.bidSize) || 0,
+    bestAsk: Number(quote.bestAsk),
+    bestAskSize: Number(quote.askSize) || 0,
+    feeRate: Number(leg.market?.feeSchedule?.rate ?? leg.market?.takerFeeRate ??
+      (leg.market?.asset === 'BTC' ? 0.05 : 0.01)),
+    feeScheduleSource: leg.market?.feeSchedule?.rate != null
+      ? 'Gamma market fee schedule'
+      : leg.market?.takerFeeRate != null ? 'Gamma taker fee rate' : 'documented category fallback',
+    bids: bids.slice(0, AUDIT_LEVEL_LIMIT),
+    asks: asks.slice(0, AUDIT_LEVEL_LIMIT),
+    availableAsksAtSimulation: availableAsks.slice(0, AUDIT_LEVEL_LIMIT),
+    totalBidLevels: bids.length,
+    totalAskLevels: asks.length,
+    askLevelsTruncated: asks.length > AUDIT_LEVEL_LIMIT,
+    bidLevelsTruncated: bids.length > AUDIT_LEVEL_LIMIT,
+    simulatedFills: fill.fills.map(item => ({ ...item })),
+    filledShares: fill.filledShares,
+    unfilledShares: fill.remainingShares,
+    averageFillPrice: fill.averagePrice,
+    totalEntryFees: fill.fees,
   };
 }
 
@@ -153,6 +281,7 @@ class CrossPairBot extends DipBounceBot {
     this.pairWindowStates = {};
     this.crossPairCycles = [];
     this.lastCrossPairScanAt = null;
+    this.paperAskDepthByToken = new Map();
   }
 
   log(message, {
@@ -193,14 +322,7 @@ class CrossPairBot extends DipBounceBot {
       leg.record.marketStatus === 'OPEN' &&
       Number(leg.market.start) === Number(legs[0].market?.start) &&
       Number(leg.market.end) === Number(legs[0].market?.end));
-    const asksFresh = marketsAligned && legs.every(leg => {
-      const quote = leg.quote;
-      return quote?.status === 'LIVE' &&
-        Number.isFinite(Number(quote.bestAsk)) &&
-        Number(quote.bestAsk) > 0 && Number(quote.bestAsk) < 1 &&
-        Number.isFinite(Number(quote.updatedAt)) &&
-        now - Number(quote.updatedAt) <= QUOTE_MAX_AGE_MS;
-    });
+    const asksFresh = marketsAligned && legs.every(leg => quoteIsCurrentForLeg(leg, now));
     return {
       legs,
       marketsAligned,
@@ -217,6 +339,36 @@ class CrossPairBot extends DipBounceBot {
         const position = this.positions.find(item => item.id === id);
         return position && ['OPEN', 'PENDING_RESOLUTION'].includes(position.status);
       }));
+  }
+
+  availableAskLevelsForQuote(quote) {
+    const tokenId = String(quote?.tokenId || '');
+    const sequence = Number(quote?.sequence);
+    if (!tokenId || !Number.isFinite(sequence)) return sortLevels(quote?.asks);
+    let budget = this.paperAskDepthByToken.get(tokenId);
+    if (!budget || budget.sequence !== sequence) {
+      budget = {
+        sequence,
+        remainingByPrice: new Map(sortLevels(quote.asks)
+          .map(level => [level.price.toFixed(8), level.size])),
+      };
+      this.paperAskDepthByToken.set(tokenId, budget);
+    }
+    return sortLevels(quote.asks).map(level => ({
+      price: level.price,
+      size: Math.max(0, Number(budget.remainingByPrice.get(level.price.toFixed(8)) || 0)),
+    })).filter(level => level.size > 0);
+  }
+
+  consumeAskDepth(quote, fills) {
+    const tokenId = String(quote?.tokenId || '');
+    const budget = tokenId ? this.paperAskDepthByToken.get(tokenId) : null;
+    if (!budget || budget.sequence !== Number(quote?.sequence)) return;
+    for (const fill of fills || []) {
+      const key = Number(fill.price).toFixed(8);
+      const remaining = Number(budget.remainingByPrice.get(key) || 0);
+      budget.remainingByPrice.set(key, Math.max(0, remaining - Number(fill.shares || 0)));
+    }
   }
 
   processSide(record, side, quote) {
@@ -252,27 +404,75 @@ class CrossPairBot extends DipBounceBot {
   }
 
   markPositions(now, onlyRecordKey = null, onlySide = null) {
-    super.markPositions(now, onlyRecordKey, onlySide);
+    const groups = new Map();
     for (const position of this.positions) {
-      if (position.status !== 'OPEN') continue;
+      if (position.status !== 'OPEN' || !(Number(position.shares) > 0)) continue;
       if (onlySide && position.side !== onlySide) continue;
       const record = this.records.get(`${position.asset}:${position.timeframe}`);
       if (!record || (onlyRecordKey && record.key !== onlyRecordKey)) continue;
       if (String(record.market?.id || record.market?.slug) !== position.marketId) continue;
-      if (position.markStatus !== 'LIVE' || !Number.isFinite(Number(position.markBid))) continue;
-      const remainingEntryFees = Number.isFinite(Number(position.remainingEntryFees))
-        ? Number(position.remainingEntryFees)
-        : Number(position.fees) || 0;
-      position.unrealizedPnl = round(
-        Number(position.markBid) * Number(position.shares)
-        - Number(position.totalCost || 0)
-        - remainingEntryFees,
-      );
+      const key = `${record.key}:${position.marketId}:${position.side}`;
+      if (!groups.has(key)) groups.set(key, { record, side: position.side, positions: [] });
+      groups.get(key).positions.push(position);
+    }
+
+    for (const { record, side, positions } of groups.values()) {
+      const quote = record.quotes[side];
+      if (!quoteMetadataIsCurrentForLeg({ market: record.market, quote, side }, now)) {
+        for (const position of positions) {
+          position.markStatus = 'STALE';
+          position.unrealizedPnl = null;
+        }
+        continue;
+      }
+      const totalShares = positions.reduce((sum, position) => sum + Number(position.shares || 0), 0);
+      const liquidation = sweepBids(quote.bids, totalShares, record.market);
+      const averageExitPrice = totalShares > 0 ? round(liquidation.notional / totalShares) : 0;
+      for (const position of positions) {
+        const fraction = Number(position.shares) / totalShares;
+        const estimatedProceeds = round(liquidation.notional * fraction);
+        const estimatedExitFee = roundFee(liquidation.fees * fraction);
+        const remainingEntryFees = Number.isFinite(Number(position.remainingEntryFees))
+          ? Number(position.remainingEntryFees)
+          : Number(position.fees) || 0;
+        position.markBid = averageExitPrice;
+        position.markUpdatedAt = quote.updatedAt;
+        position.markStatus = liquidation.remainingShares > 1e-9
+          ? 'LIVE_DEPTH_PARTIAL' : 'LIVE_DEPTH_SWEEP';
+        position.estimatedLiquidationProceeds = estimatedProceeds;
+        position.estimatedExitFee = estimatedExitFee;
+        position.unrealizedPnl = round(
+          estimatedProceeds - Number(position.totalCost || 0)
+          - remainingEntryFees
+          - estimatedExitFee
+          + (Number(position.estimatedMakerRebate) || 0),
+        );
+      }
+    }
+  }
+
+  updateAccountMetrics(now, forceSample = false) {
+    const active = this.positions.filter(position =>
+      ['OPEN', 'PENDING_RESOLUTION'].includes(position.status));
+    const markedValue = active.reduce((sum, position) =>
+      sum + (Number.isFinite(Number(position.markBid))
+        ? Number(position.markBid) * Number(position.shares || 0) : 0), 0);
+    const estimatedExitFees = active.reduce((sum, position) =>
+      sum + (Number(position.estimatedExitFee) || 0), 0);
+    const equity = this.cash + markedValue - estimatedExitFees;
+    this.peakEquity = Math.max(this.peakEquity, equity);
+    this.maxDrawdown = Math.max(this.maxDrawdown, this.peakEquity - equity);
+    if (forceSample || now - this.lastEquitySampleAt >= 15_000) {
+      this.equityCurve.push({ at: now, equity });
+      if (this.equityCurve.length > 1000) this.equityCurve.splice(0, this.equityCurve.length - 1000);
+      this.lastEquitySampleAt = now;
     }
   }
 
   accountSnapshot() {
     const account = super.accountSnapshot();
+    const active = this.positions.filter(position =>
+      ['OPEN', 'PENDING_RESOLUTION'].includes(position.status));
     const closedPnl = this.positions.reduce((sum, position) =>
       sum + (Number.isFinite(Number(position.realizedPnl)) ? Number(position.realizedPnl) : 0), 0);
     const openPartialPnl = this.positions
@@ -280,10 +480,23 @@ class CrossPairBot extends DipBounceBot {
       .reduce((sum, position) => sum + (Number(position.partialRealizedPnl) || 0), 0);
     const totalFees = this.positions.reduce((sum, position) =>
       sum + (Number(position.fees) || 0) + (Number(position.exitFees) || 0), 0);
+    const estimatedExitFees = active.reduce((sum, position) =>
+      sum + (Number(position.estimatedExitFee) || 0), 0);
+    const unrealizedPnl = this.positions
+      .filter(position => ['OPEN', 'PENDING_RESOLUTION'].includes(position.status)
+        && Number.isFinite(Number(position.unrealizedPnl)))
+      .reduce((sum, position) => sum + Number(position.unrealizedPnl), 0);
+    const markedValue = active.reduce((sum, position) =>
+      sum + (Number.isFinite(Number(position.markBid))
+        ? Number(position.markBid) * Number(position.shares || 0) : 0), 0);
     return {
       ...account,
       realizedPnl: round(closedPnl + openPartialPnl),
       totalFees: round(totalFees),
+      estimatedExitFees: roundFee(estimatedExitFees),
+      netMarkedValue: round(markedValue - estimatedExitFees),
+      equity: round(this.cash + markedValue - estimatedExitFees),
+      unrealizedPnl: round(unrealizedPnl),
     };
   }
 
@@ -299,7 +512,8 @@ class CrossPairBot extends DipBounceBot {
       if (pairState.entered) continue;
       if (!marketPair.asksFresh) {
         pairState.status = 'WAITING_FOR_QUOTES';
-        pairState.lastReason = 'Waiting for fresh best asks on both legs.';
+        pairState.lastReason =
+          `Waiting for matching post-open CLOB books no older than ${ENTRY_QUOTE_MAX_AGE_MS}ms.`;
         continue;
       }
       if (marketPair.askSum >= ASK_SUM_THRESHOLD) {
@@ -315,7 +529,6 @@ class CrossPairBot extends DipBounceBot {
         continue;
       }
 
-      const sizing = this.crossPairSizing[pair.id];
       const sharesPerLeg = BASE_SHARES;
       pairState.status = 'ENTRY_READY';
       pairState.lastReason =
@@ -330,8 +543,7 @@ class CrossPairBot extends DipBounceBot {
   checkTakeProfits(record, side, quote, now) {
     if (!record?.market || record.marketStatus !== 'OPEN' ||
         Number(quote?.bestBid) < TAKE_PROFIT_BID) return;
-    if (!Number.isFinite(Number(quote?.updatedAt)) ||
-        now - Number(quote.updatedAt) > config.DIP_BOUNCE_MAX_QUOTE_AGE_MS) return;
+    if (!quoteMetadataIsCurrentForLeg({ market: record.market, quote, side }, now)) return;
     const marketId = String(record.market.id || record.market.slug);
     for (const position of this.positions) {
       if (position.marketId !== marketId || position.side !== side || position.status !== 'OPEN') continue;
@@ -360,6 +572,8 @@ class CrossPairBot extends DipBounceBot {
       position.markUpdatedAt = quote.updatedAt;
       position.markStatus = 'CLOSED';
       position.unrealizedPnl = null;
+      position.estimatedExitFee = 0;
+      position.estimatedLiquidationProceeds = null;
       this.updateSizingAfterClose(position, position.realizedPnl > 0, now);
       this.log(`${position.asset} ${side} take-profit hit at $0.99; credited $1.00 per remaining share.`, {
         asset: position.asset,
@@ -375,8 +589,7 @@ class CrossPairBot extends DipBounceBot {
 
   checkStopLosses(record, side, quote, now) {
     if (!record?.market || record.marketStatus !== 'OPEN') return;
-    const fresh = Number.isFinite(Number(quote?.updatedAt))
-      && now - Number(quote.updatedAt) <= config.DIP_BOUNCE_MAX_QUOTE_AGE_MS;
+    const fresh = quoteMetadataIsCurrentForLeg({ market: record.market, quote, side }, now);
     if (!fresh || (quote.bestBid != null && Number(quote.bestBid) > 0)) return;
     const marketId = String(record.market.id || record.market.slug);
     for (const position of this.positions) {
@@ -402,6 +615,8 @@ class CrossPairBot extends DipBounceBot {
       position.markUpdatedAt = quote.updatedAt;
       position.markStatus = 'CLOSED';
       position.unrealizedPnl = null;
+      position.estimatedExitFee = 0;
+      position.estimatedLiquidationProceeds = null;
       this.updateSizingAfterClose(position, false, now);
       this.log(`${position.asset} ${side} stop-loss hit: the fresh bid book is empty; remaining shares count as a $0 payout.`, {
         asset: position.asset,
@@ -416,10 +631,14 @@ class CrossPairBot extends DipBounceBot {
   }
 
   buyCrossPair(pair, pairState, marketPair, sharesPerLeg, now) {
-    const fills = marketPair.legs.map(leg => ({
-      ...leg,
-      fill: sweepAsks(leg.quote.asks, sharesPerLeg, leg.market),
-    }));
+    const fills = marketPair.legs.map(leg => {
+      const availableAsks = this.availableAskLevelsForQuote(leg.quote);
+      return {
+        ...leg,
+        availableAsks,
+        fill: sweepAsks(availableAsks, sharesPerLeg, leg.market),
+      };
+    });
     const totalDebit = fills.reduce(
       (sum, leg) => sum + leg.fill.notional + leg.fill.fees, 0,
     );
@@ -429,6 +648,7 @@ class CrossPairBot extends DipBounceBot {
         `The two-leg taker sweep needs $${round(totalDebit).toFixed(2)}, more than available paper cash.`;
       return false;
     }
+    for (const leg of fills) this.consumeAskDepth(leg.quote, leg.fill.fills);
 
     const cycleNumber = this.crossPairCycles.filter(item =>
       item.pairId === pair.id && Number(item.windowStart) === Number(pairState.windowStart)).length + 1;
@@ -442,6 +662,7 @@ class CrossPairBot extends DipBounceBot {
       status: 'OPEN',
       entryAt: now,
       entryAskSum: marketPair.askSum,
+      executionModel: EXECUTION_MODEL,
       inversePairId: pair.inversePairId,
       sharesPerLeg,
       legPositionIds: [],
@@ -482,7 +703,9 @@ class CrossPairBot extends DipBounceBot {
         averagePrice: leg.fill.averagePrice,
         limitPrice: SWEEP_CAP,
         fills: leg.fill.fills,
-        fillRule: `Immediate visible-ask sweep up to $${SWEEP_CAP.toFixed(2)}; any remainder is cancelled.`,
+        executionModel: EXECUTION_MODEL,
+        executionAudit: entryAuditSnapshot(leg, now, leg.availableAsks, leg.fill),
+        fillRule: `Sweep the current matching token's visible asks up to $${SWEEP_CAP.toFixed(2)}; charge the Gamma taker fee, consume shared simulated depth, and cancel any remainder.`,
         positionId,
         positionIds: positionId ? [positionId] : [],
         createdAt: now,
@@ -532,13 +755,12 @@ class CrossPairBot extends DipBounceBot {
         entryAt: now,
         windowStart: pairState.windowStart,
         windowEnd: marketPair.windowEnd,
-        markBid: leg.quote.bestBid ?? null,
-        markUpdatedAt: leg.quote.updatedAt || now,
-        markStatus: leg.quote.bestBid == null ? 'MISSING' : 'LIVE',
-        unrealizedPnl: leg.quote.bestBid == null
-          ? null
-          : Number(leg.quote.bestBid) * leg.fill.filledShares
-            - leg.fill.notional - leg.fill.fees,
+        markBid: null,
+        markUpdatedAt: null,
+        markStatus: 'WAITING_FOR_MARK',
+        estimatedLiquidationProceeds: null,
+        estimatedExitFee: 0,
+        unrealizedPnl: null,
         realizedPnl: null,
         exitPrice: null,
         exitPayout: null,
@@ -549,7 +771,8 @@ class CrossPairBot extends DipBounceBot {
         pairLabel: pair.label,
         pairCycleId: cycleId,
         pairCycleSharesPerLeg: sharesPerLeg,
-        fillModel: 'VISIBLE_ASK_TAKER_SWEEP',
+        fillModel: EXECUTION_MODEL,
+        executionModel: EXECUTION_MODEL,
       };
       order.position = position;
       this.positions.unshift(position);
@@ -568,6 +791,7 @@ class CrossPairBot extends DipBounceBot {
       if (this.crossPairCycles.length > 1000) this.crossPairCycles.length = 1000;
     }
     this.cash = round(this.cash - totalDebit);
+    this.markPositions(now);
     const sizing = this.crossPairSizing[pair.id];
     sizing.entries += 1;
     this.entryOrderPlaced = cycle.legPositionIds.length > 0;
@@ -615,6 +839,8 @@ class CrossPairBot extends DipBounceBot {
       position.remainingEntryFees = 0;
       position.markStatus = 'CLOSED';
       position.unrealizedPnl = null;
+      position.estimatedExitFee = 0;
+      position.estimatedLiquidationProceeds = null;
       this.updateSizingAfterClose(position, won, now);
       this.log(`${position.asset} ${position.side} resolved ${won ? 'WIN' : 'LOSS'}; official market winner was ${winner}.`, {
         asset: position.asset,
@@ -744,7 +970,16 @@ class CrossPairBot extends DipBounceBot {
       }
       : { ...originalSnapshot, strategy: { ...originalSnapshot.strategy, id: BASE_STRATEGY_ID } };
     super.restoreLedger(compatibilityLedger);
+    for (const order of this.orders) {
+      if (!order.executionModel) order.executionModel = 'LEGACY_UNAUDITED';
+      if (!order.executionAudit) order.executionAudit = null;
+      if (order.position && !order.position.executionModel) {
+        order.position.executionModel = 'LEGACY_UNAUDITED';
+      }
+    }
     for (const position of this.positions) {
+      if (!position.executionModel) position.executionModel = 'LEGACY_UNAUDITED';
+      if (!Number.isFinite(Number(position.estimatedExitFee))) position.estimatedExitFee = 0;
       if (position.status !== 'PENDING_RESOLUTION' ||
           !Number.isFinite(Number(position.resolutionMarkPnl))) continue;
       position.unrealizedPnl = Number(position.resolutionMarkPnl);
@@ -787,6 +1022,8 @@ class CrossPairBot extends DipBounceBot {
       ...market,
       sideStates: Object.fromEntries(['UP', 'DOWN'].map(side => {
         const original = market.sideStates?.[side] || {};
+        const record = this.records.get(`${market.asset}:5m`);
+        const quote = record?.quotes?.[side];
         const other = market.asset === 'BTC' ? 'ETH' : 'BTC';
         const paired = PAIRS.filter(item => item.legs.some(leg =>
           leg.asset === market.asset && leg.side === side));
@@ -802,7 +1039,7 @@ class CrossPairBot extends DipBounceBot {
           mid: original.mid,
           updatedAt: original.updatedAt,
           ageMs: original.ageMs,
-          fresh: original.fresh,
+          fresh: quoteMetadataIsCurrentForLeg({ market: record?.market, quote, side }, now),
           orderStatus: enteredPairs.length
             ? enteredPairs.map(item => item.state.status).join(' · ')
             : 'MONITORING',
@@ -821,12 +1058,28 @@ class CrossPairBot extends DipBounceBot {
     state.strategy = {
       ...STRATEGY,
       entry: 'Monitor all four BTC/ETH UP/DOWN combinations independently. Enter a pair when its fresh best asks sum to strictly less than $0.80; one entry per pair per 5-minute window.',
-      fill: 'Paper taker sweep of visible asks up to $0.99. Actual filled quantity, average entry, and market taker fees are recorded; unfilled remainder is cancelled.',
+      fill: `Paper taker sweep of current-window, matching-token asks no older than ${ENTRY_QUOTE_MAX_AGE_MS}ms. Shared displayed ask depth is consumed across overlapping pairs; partial fills and unfilled quantity are recorded. Each order saves the token, market, both book sides, timestamps, fee schedule, and exact simulated fills.`,
       sizing: STRATEGY.sizing,
       takeProfit: `When a side's best bid reaches $${TAKE_PROFIT_BID.toFixed(2)}, model a $${TAKE_PROFIT_PAYOUT.toFixed(2)} payout per remaining share.`,
       stopLoss: 'A fresh empty best-bid book triggers the $0.00 stop-loss for that side.',
       settlement: `Any shares still open at window end move to official Polymarket resolution; the bot checks for an official result every ${config.DIP_BOUNCE_RESOLUTION_POLL_MS / 1000} seconds.`,
+      markToMarket: 'Floating P&L estimates full-position liquidation by sweeping visible bids, sharing depth across same-token positions, and subtracting estimated exit taker fees. Unfilled bid depth is conservatively valued at $0.',
+      feeModel: 'Uses the Gamma market taker fee schedule and Polymarket fee formula. Account-specific taker rebates are not assumed.',
       execution: 'PAPER ONLY',
+    };
+    const auditedOrders = this.orders.filter(order => order.executionModel === EXECUTION_MODEL);
+    const auditedPositions = this.positions.filter(position => position.executionModel === EXECUTION_MODEL);
+    state.executionAudit = {
+      model: EXECUTION_MODEL,
+      auditedOrderCount: auditedOrders.length,
+      legacyUnauditedOrderCount: this.orders.filter(order => order.executionModel === 'LEGACY_UNAUDITED').length,
+      auditedRealizedPnl: round(auditedPositions.reduce((sum, position) =>
+        sum + (Number.isFinite(Number(position.realizedPnl)) ? Number(position.realizedPnl) : 0), 0)),
+      auditedFloatingPnl: round(auditedPositions
+        .filter(position => ['OPEN', 'PENDING_RESOLUTION'].includes(position.status))
+        .reduce((sum, position) => sum + (Number(position.unrealizedPnl) || 0), 0)),
+      auditedSince: auditedOrders.length
+        ? Math.min(...auditedOrders.map(order => Number(order.createdAt) || now)) : null,
     };
     state.sizingByAsset = undefined;
     state.crossPairSizing = Object.fromEntries(PAIRS.map(pair => [
@@ -904,6 +1157,8 @@ class CrossPairBot extends DipBounceBot {
               cost: order.cost,
               fee: order.fee,
               createdAt: order.createdAt,
+              executionModel: order.executionModel,
+              executionAudit: order.executionAudit,
             } : null,
             position: position ? { ...position } : null,
           };
@@ -923,8 +1178,7 @@ class CrossPairBot extends DipBounceBot {
           ...leg,
           bestAsk: quote.bestAsk ?? null,
           bestBid: quote.bestBid ?? null,
-          fresh: quote.status === 'LIVE' && Number.isFinite(Number(quote.updatedAt)) &&
-            now - Number(quote.updatedAt) <= QUOTE_MAX_AGE_MS,
+          fresh: quoteMetadataIsCurrentForLeg({ market: record?.market, quote, side: leg.side }, now),
         };
       });
       return {

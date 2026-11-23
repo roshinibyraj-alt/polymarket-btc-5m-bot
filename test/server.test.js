@@ -56,10 +56,10 @@ test('dashboard serves the BTC/ETH 5-minute cross-pair strategy', async t => {
   assert.match(html, /BTC UP \+ ETH DOWN, ETH UP \+ BTC DOWN, BTC UP \+ ETH UP, and BTC DOWN \+ ETH DOWN/);
   assert.match(html, /Ask-sum entries \+ independent exits/);
   assert.match(html, /below \$0\.80/);
-  assert.match(html, /Always buy 100 shares on each leg/);
-  assert.match(html, /regardless of previous wins or losses/);
+  assert.match(html, /Each leg requests 100 shares/);
+  assert.match(html, /same displayed token liquidity cannot be reused/);
   assert.match(html, /History is saved in persistent Railway storage/);
-  assert.match(html, /Paper taker sweeps are capped at \$0\.99/);
+  assert.match(html, /capped at \$0\.99/);
   assert.match(html, /Pairs do not force-sell one another/);
   assert.match(html, /\$1 per remaining share/);
   assert.match(html, /empty fresh bid book counts as a \$0 stop/i);
@@ -74,6 +74,9 @@ test('dashboard serves the BTC/ETH 5-minute cross-pair strategy', async t => {
   assert.match(html, /positionList/);
   assert.match(html, /orderList/);
   assert.match(html, /eventList/);
+  assert.match(html, /Entry audit/);
+  assert.match(html, /Visible-bid sweep less estimated exit fees/);
+  assert.match(html, /Older fills have no saved book snapshot/);
   assert.ok(html.indexOf('aria-label="Paper account summary"') < html.indexOf('id="positionsHeading"'));
   assert.ok(html.indexOf('aria-label="Performance"') < html.indexOf('id="positionsHeading"'));
   assert.ok(html.indexOf('aria-label="Market activity"') > html.indexOf('aria-labelledby="strategyHeading"'));

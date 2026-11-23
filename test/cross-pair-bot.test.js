@@ -29,6 +29,10 @@ function setWindow(bot, start, asks, updatedAt = start + 1000) {
       asset,
       start,
       end: start + WINDOW_MS,
+      tokens: {
+        UP: `${asset.toLowerCase()}-${start}-up-token`,
+        DOWN: `${asset.toLowerCase()}-${start}-down-token`,
+      },
       feesEnabled: true,
       feeSchedule: { rate: 0 },
     };
@@ -39,9 +43,17 @@ function setWindow(bot, start, asks, updatedAt = start + 1000) {
         status: 'LIVE',
         bestBid: Math.max(0.01, ask - 0.01),
         bestAsk: ask,
+        bidSize: 2000,
+        askSize: 2000,
         mid: (Math.max(0.01, ask - 0.01) + ask) / 2,
         updatedAt,
+        receivedAt: updatedAt,
         sequence: updatedAt,
+        tokenId: record.market.tokens[side],
+        marketId: record.market.id,
+        marketSlug: record.market.slug,
+        windowStart: start,
+        windowEnd: start + WINDOW_MS,
         asks: [{ price: ask, size: 2000 }],
         bids: [{ price: Math.max(0.01, ask - 0.01), size: 2000 }],
       };
@@ -66,8 +78,12 @@ test('four pairs are independent and each requires a strict ask-sum below $0.80'
 
   btcUp.bestAsk = 0.36;
   btcUp.asks = [{ price: 0.36, size: 2000 }];
+  btcUp.sequence = getNow() + 1;
+  btcUp.askSize = 2000;
   ethDown.bestAsk = 0.44;
   ethDown.asks = [{ price: 0.44, size: 2000 }];
+  ethDown.sequence = getNow() + 1;
+  ethDown.askSize = 2000;
   bot.evaluateCrossPairs(getNow());
   assert.equal(
     bot.positions.filter(position => position.pairId === 'btc-up-eth-down').length,
@@ -80,6 +96,7 @@ test('four pairs are independent and each requires a strict ask-sum below $0.80'
 
   btcUp.bestAsk = 0.35;
   btcUp.asks = [{ price: 0.35, size: 2000 }];
+  btcUp.sequence = getNow() + 2;
   bot.evaluateCrossPairs(getNow());
   assert.equal(bot.positions.length, 6, 'each qualifying pair should enter independently');
   assert.deepEqual(bot.positions.map(position => position.shares), [100, 100, 100, 100, 100, 100]);
@@ -88,6 +105,105 @@ test('four pairs are independent and each requires a strict ask-sum below $0.80'
   assert.equal(bot.snapshot().crossPairs.length, 4);
   assert.equal(bot.snapshot().strategy.id, CrossPairBot.STRATEGY.id);
   assert.equal(bot.snapshot().strategy.resolutionPollMs, 5000);
+});
+
+test('entry audits save matched market, token, book levels, timestamps, fills, and market fee', () => {
+  const { bot, getNow } = createBot();
+  bot.records.get('BTC:5m').market.feeSchedule = { rate: 0.05 };
+  bot.records.get('ETH:5m').market.feeSchedule = { rate: 0.01 };
+  bot.evaluateCrossPairs(getNow());
+
+  const btcOrder = bot.orders.find(order =>
+    order.pairId === 'btc-up-eth-down' && order.asset === 'BTC');
+  const ethOrder = bot.orders.find(order =>
+    order.pairId === 'btc-up-eth-down' && order.asset === 'ETH');
+  assert.equal(btcOrder.executionModel, 'CLOB_VISIBLE_DEPTH_SHARED_PAPER_V2');
+  assert.equal(btcOrder.executionAudit.marketId, `btc-${START}`);
+  assert.equal(btcOrder.executionAudit.tokenId, `btc-${START}-up-token`);
+  assert.equal(btcOrder.executionAudit.sourceUpdatedAt, getNow());
+  assert.deepEqual(btcOrder.executionAudit.asks, [{ price: 0.35, size: 2000 }]);
+  assert.deepEqual(btcOrder.executionAudit.simulatedFills, [
+    { shares: 100, price: 0.35, value: 35, fee: 1.1375 },
+  ]);
+  assert.equal(btcOrder.fee, 1.1375);
+  assert.equal(ethOrder.fee, 0.2464);
+  assert.equal(btcOrder.executionAudit.feeScheduleSource, 'Gamma market fee schedule');
+  assert.equal(bot.snapshot().executionAudit.auditedOrderCount, 6);
+});
+
+test('stale or previous-window token quotes cannot trigger new entries', () => {
+  const now = START + 1000;
+  const bot = new CrossPairBot({ now: () => now });
+  setWindow(bot, START, {
+    btcUp: 0.35,
+    btcDown: 0.65,
+    ethUp: 0.55,
+    ethDown: 0.40,
+  }, now);
+  const quote = bot.records.get('BTC:5m').quotes.UP;
+  quote.tokenId = 'previous-window-token';
+  bot.evaluateCrossPairs(now);
+  assert.equal(bot.crossPairCycles.length, 0);
+
+  quote.tokenId = `btc-${START}-up-token`;
+  quote.updatedAt = now - config.CROSS_PAIR_MAX_QUOTE_AGE_MS - 1;
+  quote.receivedAt = quote.updatedAt;
+  bot.evaluateCrossPairs(now);
+  assert.equal(bot.crossPairCycles.length, 0);
+  assert.equal(bot.snapshot().crossPairs.find(pair => pair.id === 'btc-up-eth-down').status, 'WAITING_FOR_QUOTES');
+});
+
+test('the same displayed ask depth is not counted twice across overlapping pairs', () => {
+  const now = START + 1000;
+  const bot = new CrossPairBot({ now: () => now });
+  setWindow(bot, START, {
+    btcUp: 0.35,
+    btcDown: 0.65,
+    ethUp: 0.40,
+    ethDown: 0.40,
+  }, now);
+  bot.records.get('BTC:5m').quotes.UP.asks = [{ price: 0.35, size: 100 }];
+  bot.records.get('BTC:5m').quotes.UP.askSize = 100;
+  bot.evaluateCrossPairs(now);
+
+  const btcUpOrders = bot.orders.filter(order => order.asset === 'BTC' && order.side === 'UP');
+  assert.equal(btcUpOrders.reduce((sum, order) => sum + order.filledShares, 0), 100);
+  assert.equal(btcUpOrders.filter(order => order.filledShares === 0).length, 1);
+});
+
+test('floating P&L sweeps visible bids and subtracts estimated sell fees', () => {
+  const now = START + 1000;
+  const bot = new CrossPairBot({ now: () => now });
+  setWindow(bot, START, {
+    btcUp: 0.35,
+    btcDown: 0.60,
+    ethUp: 0.55,
+    ethDown: 0.40,
+  }, now);
+  bot.records.get('BTC:5m').market.feeSchedule = { rate: 0.05 };
+  bot.evaluateCrossPairs(now);
+
+  const position = bot.positions.find(item => item.pairId === 'btc-up-eth-down' && item.asset === 'BTC');
+  const record = bot.records.get('BTC:5m');
+  const quote = record.quotes.UP;
+  quote.bestBid = 0.50;
+  quote.bidSize = 50;
+  quote.bids = [{ price: 0.50, size: 50 }, { price: 0.40, size: 50 }];
+  quote.updatedAt = now + 10;
+  quote.receivedAt = now + 10;
+  quote.sequence = now + 10;
+  bot.markPositions(now + 10, record.key, 'UP');
+
+  assert.equal(position.markBid, 0.45);
+  assert.equal(position.estimatedLiquidationProceeds, 45);
+  assert.equal(position.estimatedExitFee, 1.225);
+  assert.equal(position.unrealizedPnl, 7.6375);
+  assert.equal(position.markStatus, 'LIVE_DEPTH_SWEEP');
+  const account = bot.accountSnapshot();
+  assert.equal(account.unrealizedPnl, bot.positions
+    .filter(item => item.status === 'OPEN')
+    .reduce((sum, item) => sum + item.unrealizedPnl, 0));
+  assert.equal(account.equity, Number((bot.initialCapital + account.realizedPnl + account.unrealizedPnl).toFixed(6)));
 });
 
 test('all pair sizes stay at 100 after wins or losses', () => {
@@ -125,6 +241,8 @@ test('a $0.99 best bid closes at the modeled $1-per-share payout', () => {
   const quote = record.quotes[position.side];
   quote.bestBid = 0.99;
   quote.updatedAt = getNow() + 100;
+  quote.receivedAt = getNow() + 100;
+  quote.sequence = getNow() + 100;
 
   bot.checkTakeProfits(record, position.side, quote, getNow() + 100);
 
@@ -147,6 +265,9 @@ test('a fresh empty bid book triggers the $0 stop-loss', () => {
     const quote = record.quotes[position.side];
     quote.bestBid = null;
     quote.updatedAt = getNow() + 100;
+    quote.receivedAt = getNow() + 100;
+    quote.sequence = getNow() + 100;
+    quote.bids = [];
     bot.checkStopLosses(record, position.side, quote, getNow() + 100);
     assert.equal(position.status, 'STOP_LOSS');
     assert.equal(position.exitPrice, 0);
@@ -169,6 +290,9 @@ test('positions keep their final live mark while awaiting resolution', () => {
   const quote = record.quotes[position.side];
   quote.bestBid = 0.31;
   quote.updatedAt = getNow() + 20;
+  quote.receivedAt = getNow() + 20;
+  quote.sequence = getNow() + 20;
+  quote.bids = [{ price: 0.31, size: 2000 }];
   bot.markPositions(getNow() + 20, record.key, position.side);
   const lastMarkPnl = position.unrealizedPnl;
 
@@ -223,7 +347,10 @@ test('a pair stays open when its asks rise and the opposite pair enters independ
     quote.bestAsk = ask;
     quote.bestBid = bid;
     quote.updatedAt = tick;
+    quote.receivedAt = tick;
     quote.sequence = tick;
+    quote.askSize = 2000;
+    quote.bidSize = 2000;
     quote.asks = [{ price: ask, size: 2000 }];
     quote.bids = [{ price: bid, size: 2000 }];
   };
@@ -367,4 +494,32 @@ test('the new ledger stores pair sizing and restores open pair positions', () =>
   assert.equal(pair.trades[0].legs[0].position.shares, 100);
   assert.equal(pair.trades.length, 1);
   assert.equal(restored.snapshot().crossPairs.length, 4);
+});
+
+test('history migration labels old fills unaudited without changing their money or positions', () => {
+  const { bot, getNow } = createBot();
+  bot.evaluateCrossPairs(getNow());
+  const ledger = bot.exportLedger();
+  const snapshot = ledger.snapshot;
+  const cashBefore = snapshot.account.cash;
+  const positionCountBefore = snapshot.positions.length;
+  const firstOrder = snapshot.orders[0];
+  const legacyOrderId = firstOrder.id;
+  delete firstOrder.executionModel;
+  delete firstOrder.executionAudit;
+  const legacyPositionId = snapshot.positions[0].id;
+  delete snapshot.positions[0].executionModel;
+  const costBefore = snapshot.positions[0].totalCost;
+  const feesBefore = snapshot.positions[0].fees;
+
+  const restored = new CrossPairBot({ now: getNow });
+  restored.restoreLedger(ledger);
+
+  assert.equal(restored.cash, cashBefore);
+  assert.equal(restored.positions.length, positionCountBefore);
+  assert.equal(restored.positions[0].totalCost, costBefore);
+  assert.equal(restored.positions[0].fees, feesBefore);
+  assert.equal(restored.positions.find(item => item.id === legacyPositionId).executionModel, 'LEGACY_UNAUDITED');
+  assert.equal(restored.orders.find(item => item.id === legacyOrderId).executionModel, 'LEGACY_UNAUDITED');
+  assert.equal(restored.snapshot().executionAudit.legacyUnauditedOrderCount, 1);
 });

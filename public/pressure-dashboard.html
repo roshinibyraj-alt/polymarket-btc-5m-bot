@@ -200,6 +200,22 @@
     .trade-history summary { color:var(--muted); font-size:9px; font-weight:850; cursor:pointer; }
     .trade-history-list { display:grid; gap:7px; margin-top:8px; }
     .trade-history { display:grid; gap:7px; }
+    .execution-audit { margin-top:8px; padding:8px; border:1px solid #dce4da; border-radius:9px; background:#f6f8f3; }
+    .execution-audit summary { color:#43543c; font-size:9px; font-weight:900; cursor:pointer; }
+    .audit-meta { display:grid; grid-template-columns:1fr 1fr; gap:5px; margin-top:7px; }
+    .audit-meta div { min-width:0; padding:6px; border-radius:7px; background:#fff; }
+    .audit-meta span { display:block; color:var(--muted); font-size:7px; font-weight:850; text-transform:uppercase; }
+    .audit-meta strong { display:block; margin-top:2px; overflow-wrap:anywhere; font-size:8px; font-variant-numeric:tabular-nums; }
+    .audit-books { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:7px; }
+    .audit-book { min-width:0; padding:6px; border-radius:7px; background:#fff; }
+    .audit-book strong { display:block; margin-bottom:4px; color:#43543c; font-size:8px; }
+    .audit-level { display:flex; justify-content:space-between; gap:5px; padding:2px 0; border-top:1px solid #eef0e9; color:#526047; font-size:8px; font-variant-numeric:tabular-nums; }
+    .audit-fill { margin-top:6px; padding:6px; border-radius:7px; background:#e8f2e7; color:#176e4c; font-size:8px; line-height:1.4; font-weight:800; overflow-wrap:anywhere; }
+    .legacy-audit { margin-top:7px; padding:7px; border-radius:8px; color:#755c21; background:#fff4d4; font-size:8px; line-height:1.4; }
+    .execution-summary { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-top:11px; padding:10px; border:1px solid #dce7d8; border-radius:12px; background:#f6f9f0; }
+    .execution-summary > div { min-width:0; }
+    .execution-summary strong { display:block; font-size:9px; }
+    .execution-summary span { display:block; margin-top:2px; color:var(--muted); font-size:8px; line-height:1.35; }
     .sizing-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:11px; }
     .sizing-card { min-width:0; padding:11px 12px; border:1px solid #dce7d8; border-radius:14px; background:#f8fbf2; }
     .sizing-card[data-asset="BTC"] { border-top:4px solid #e2b632; }
@@ -317,10 +333,10 @@
         <div class="section-note" id="updatedAt">Waiting for update</div>
       </div>
       <div class="metrics">
-        <article class="metric"><div class="metric-label">Equity</div><div class="metric-value" id="equity">—</div><small class="metric-detail">Cash + marked positions</small></article>
+        <article class="metric"><div class="metric-label">Equity</div><div class="metric-value" id="equity">—</div><small class="metric-detail">Cash + visible-bid sweep − estimated exit fees</small></article>
         <article class="metric"><div class="metric-label">Available cash</div><div class="metric-value" id="cash">—</div><small class="metric-detail" id="capitalDetail">Paper balance</small></article>
         <article class="metric"><div class="metric-label">Realized P&amp;L</div><div class="metric-value" id="realized">—</div><small class="metric-detail">Resolved paper trades</small></article>
-        <article class="metric"><div class="metric-label">Unrealized P&amp;L</div><div class="metric-value" id="unrealized">—</div><small class="metric-detail">Current live marks</small></article>
+         <article class="metric"><div class="metric-label">Unrealized P&amp;L</div><div class="metric-value" id="unrealized">—</div><small class="metric-detail">Visible-bid sweep less estimated exit fees</small></article>
       </div>
     </section>
 
@@ -335,6 +351,10 @@
         <div class="strategy-meta" style="margin-top:10px">
           <span class="meta-pill" id="winRate">Win rate —</span>
           <span class="meta-pill" id="winsLosses">0 wins · 0 losses</span>
+        </div>
+        <div class="execution-summary" id="executionSummary" aria-live="polite">
+          <div><strong>Realistic paper execution</strong><span>Waiting for audited fills</span></div>
+          <div><strong>Legacy history</strong><span>Older fills have no saved book snapshot</span></div>
         </div>
       </article>
     </section>
@@ -382,13 +402,15 @@
       <div>
         <div class="strategy-steps">
           <div class="strategy-step"><span class="step-num">1</span><div><strong>Evaluate all four combinations independently</strong><span>BTC UP + ETH DOWN, ETH UP + BTC DOWN, BTC UP + ETH UP, and BTC DOWN + ETH DOWN can each trigger in the same 5-minute window.</span></div></div>
-          <div class="strategy-step"><span class="step-num">2</span><div><strong>Enter when combined best asks are below $0.80</strong><span>Each pair has one entry per window. Both current best asks must be fresh, and their sum must be strictly below $0.80.</span></div></div>
-          <div class="strategy-step"><span class="step-num">3</span><div><strong>Always buy 100 shares on each leg</strong><span>Every qualifying entry stays flat at 100 requested shares per leg, regardless of previous wins or losses. Paper taker sweeps are capped at $0.99.</span></div></div>
+          <div class="strategy-step"><span class="step-num">2</span><div><strong>Enter when combined best asks are below $0.80</strong><span>Each pair has one entry per window. Books must match the current market token, have a post-open timestamp, and be no more than 2 seconds old.</span></div></div>
+          <div class="strategy-step"><span class="step-num">3</span><div><strong>Sweep only visible ask depth</strong><span>Each leg requests 100 shares, capped at $0.99. Partial fills are allowed, and the same displayed token liquidity cannot be reused by overlapping pairs until a newer book snapshot arrives.</span></div></div>
           <div class="strategy-step"><span class="step-num">4</span><div><strong>Pairs do not force-sell one another</strong><span>An opposite pair may enter only when its own fresh asks qualify. Existing shares stay open for their own take-profit, stop, or official resolution.</span></div></div>
-          <div class="strategy-step"><span class="step-num">5</span><div><strong>Keep the previous take-profit, stop, and resolution rules</strong><span>At a $0.99 best bid, count $1 per remaining share. An empty fresh bid book counts as a $0 stop. Any shares still open at window end go to official resolution.</span></div></div>
+          <div class="strategy-step"><span class="step-num">5</span><div><strong>Keep the $0.99 TP, empty-book stop, and resolution rules</strong><span>At a $0.99 best bid, count $1 per remaining share, as requested. An empty fresh bid book counts as a $0 stop. Any shares still open at window end go to official resolution.</span></div></div>
+          <div class="strategy-step"><span class="step-num">6</span><div><strong>Show conservative floating P&amp;L</strong><span>Open shares are valued by sweeping the visible bid book and subtracting the estimated taker exit fee. Any shares beyond displayed bid depth are valued at $0; this is a paper estimate, not a guaranteed fill.</span></div></div>
         </div>
         <div class="strategy-meta">
           <span class="meta-pill">Taker entry fees included</span>
+          <span class="meta-pill">No rebate assumed</span>
           <span class="meta-pill">No live trading</span>
           <span class="meta-pill" id="resolutionPolling">Checking official results —</span>
           <span class="meta-pill" id="strategyVersion">Strategy —</span>
@@ -513,6 +535,44 @@
         return String(cycle?.status || 'OPEN').replaceAll('_', ' ');
       }
 
+      function executionAuditHtml(order) {
+        const audit = order?.executionAudit;
+        if (!audit) {
+          return `<div class="legacy-audit">${safe(label(order?.executionModel, 'Legacy unaudited fill'))}: no entry-time order-book snapshot was saved, so this fill cannot be independently replayed.</div>`;
+        }
+        const levelsHtml = (title, levels) => {
+          const entries = Array.isArray(levels) ? levels.slice(0, 10) : [];
+          return `<div class="audit-book"><strong>${safe(title)}${entries.length ? ` · ${entries.length} levels` : ''}</strong>
+            ${entries.length ? entries.map(level => `<div class="audit-level"><span>${money(level.price, 4)}</span><span>${shares(level.size ?? level.shares)} sh</span></div>`).join('') : '<div class="audit-level"><span>No visible levels</span><span>—</span></div>'}
+          </div>`;
+        };
+        const fills = Array.isArray(audit.simulatedFills) ? audit.simulatedFills : [];
+        const fillText = fills.length
+          ? fills.map(fill => `${shares(fill.shares)} @ ${money(fill.price, 4)}${hasNumber(fill.fee) ? ` · fee ${money(fill.fee, 5)}` : ''}`).join(' | ')
+          : 'No visible ask depth was filled.';
+        return `<details class="execution-audit">
+          <summary>Entry audit · ${safe(label(audit.model, 'paper fill'))}</summary>
+          <div class="audit-meta">
+            <div><span>Market / token</span><strong>${safe(audit.marketSlug)} · ${safe(audit.tokenId)}</strong></div>
+            <div><span>Window start</span><strong>${safe(dateTime(audit.windowStart))}</strong></div>
+            <div><span>Book update · received</span><strong>${safe(clockTime(audit.sourceUpdatedAt))} · ${safe(clockTime(audit.receivedAt))}</strong></div>
+            <div><span>Quote age at entry</span><strong>Source ${safe(shares(audit.sourceAgeMs))} ms · received ${safe(shares(audit.receiveAgeMs))} ms</strong></div>
+            <div><span>Modeled send latency</span><strong>${safe(shares(audit.modeledLatencyMs))} ms · instant paper fill</strong></div>
+            <div><span>Best bid / size</span><strong>${money(audit.bestBid, 4)} · ${shares(audit.bestBidSize)}</strong></div>
+            <div><span>Best ask / size</span><strong>${money(audit.bestAsk, 4)} · ${shares(audit.bestAskSize)}</strong></div>
+            <div><span>Fee schedule</span><strong>${safe((Number(audit.feeRate) * 100).toFixed(2))}% · ${safe(audit.feeScheduleSource)}</strong></div>
+            <div><span>Simulated result</span><strong>${shares(audit.filledShares)} filled · ${shares(audit.unfilledShares)} unfilled · avg ${money(audit.averageFillPrice, 4)}</strong></div>
+          </div>
+          <div class="audit-books">
+            ${levelsHtml('Original asks', audit.asks)}
+            ${levelsHtml('Original bids', audit.bids)}
+            ${levelsHtml('Available asks after shared depth', audit.availableAsksAtSimulation)}
+            ${levelsHtml('Simulated fill levels', fills)}
+          </div>
+          <div class="audit-fill">Entry fees ${money(audit.totalEntryFees, 5)} · Source book levels saved ${safe(shares(audit.totalAskLevels))} asks / ${safe(shares(audit.totalBidLevels))} bids${audit.askLevelsTruncated || audit.bidLevelsTruncated ? ' · snapshot limited to top 20 levels per side' : ''}.<br>${safe(fillText)}</div>
+        </details>`;
+      }
+
       function tradeLegHtml(leg) {
         const position = leg.position || null;
         const order = leg.order || null;
@@ -532,7 +592,7 @@
           statusClass = hasNumber(pnl) ? (Number(pnl) >= 0 ? 'win' : 'loss') : '';
           markText = Number(position?.soldShares) > 0
             ? `${shares(position.soldShares)} sold; retrying/holding ${shares(position.shares)} remaining`
-            : 'Watching $0.99 take-profit, empty-book stop, and official resolution';
+            : 'Floating value uses a full visible-bid sweep, estimated taker exit fee, then the $0.99 TP / $0 resolution rules';
         } else if (status === 'PENDING_RESOLUTION') {
           statusLabel = 'Awaiting official result';
           const wait = elapsedTime(position?.pendingResolutionAt, latestState?.now);
@@ -547,10 +607,12 @@
         const avg = position?.entryPrice ?? order?.averagePrice ?? leg.averageEntry;
         const total = Number(position?.initialCost ?? position?.totalCost ?? 0)
           + Number(position?.initialFees ?? position?.fees ?? 0);
-        const priceLabel = status === 'PENDING_RESOLUTION' ? 'Last bid before resolution'
+        const priceLabel = status === 'PENDING_RESOLUTION' ? 'Last exit avg before resolution'
           : ['RESOLVED_WIN', 'RESOLVED_LOSS'].includes(status) ? 'Resolution payout'
             : ['TAKE_PROFIT', 'STOP_LOSS'].includes(status) ? 'Exit price'
-              : 'Live best bid';
+              : 'Estimated exit avg';
+        const exitFeeLabel = isActive ? 'Estimated exit fee' : 'Actual exit fees';
+        const exitFee = isActive ? position?.estimatedExitFee : position?.exitFees;
         const pnlLabel = status === 'PENDING_RESOLUTION'
           ? 'Last floating P&L'
           : isActive ? 'Floating P&L' : 'Realized P&L';
@@ -562,10 +624,11 @@
             <div><span>Cost + entry fees</span><strong>${position ? money(total, 3) : '—'}</strong></div>
             <div><span>${isActive ? 'Sold / remaining' : 'Sold / closed'}</span><strong>${position ? `${shares(sold)} / ${shares(isActive ? position.shares : position.closedSharesAtExit)}` : '—'}</strong></div>
             <div><span>${priceLabel}</span><strong>${money(position?.exitPrice ?? position?.markBid, 3)}</strong></div>
-            <div><span>Exit fees</span><strong>${money(position?.exitFees, 3)}</strong></div>
+            <div><span>${exitFeeLabel}</span><strong>${money(exitFee, 5)}</strong></div>
           </div>
           <div class="trade-pnl"><span>${pnlLabel}</span><strong class="${signClass(pnl)}">${money(pnl)}</strong></div>
           <div class="sizing-note">${safe(markText)}${position?.resolutionMarkAt ? ` · ${safe(clockTime(position.resolutionMarkAt))}` : ''}</div>
+          ${executionAuditHtml(order)}
         </article>`;
       }
 
@@ -678,10 +741,11 @@
             <div class="position-values">
               <div><span>Shares remaining</span><strong>${shares(position.shares)}</strong></div>
               <div><span>Entry</span><strong>${money(position.entryPrice, 3)}</strong></div>
-              <div><span>Mark bid</span><strong>${money(position.markBid, 3)}</strong></div>
+              <div><span>Exit avg</span><strong>${money(position.markBid, 3)}</strong></div>
             </div>
             <div class="position-values"><div><span>Total cost</span><strong>${money(position.totalCost)}</strong></div><div><span>Mark status</span><strong>${safe(label(position.markStatus))}</strong></div></div>
-            <div class="position-pnl"><span>Total open P&amp;L</span><strong class="${signClass(Number(pnl || 0) + Number(position.partialRealizedPnl || 0))}">${money(Number(pnl || 0) + Number(position.partialRealizedPnl || 0))}</strong></div>
+            <div class="position-values"><div><span>Estimated taker exit fee</span><strong>${money(position.estimatedExitFee, 5)}</strong></div><div><span>Mark method</span><strong>Visible bid sweep</strong></div></div>
+            <div class="position-pnl"><span>Open P&amp;L after estimated exit fee</span><strong class="${signClass(Number(pnl || 0) + Number(position.partialRealizedPnl || 0))}">${money(Number(pnl || 0) + Number(position.partialRealizedPnl || 0))}</strong></div>
           </article>`;
         }).join('');
       }
@@ -773,6 +837,9 @@
         $('drawdown').textContent = `Max DD ${money(account.maxDrawdown)}${hasNumber(account.maxDrawdownPercent) ? ` · ${Number(account.maxDrawdownPercent).toFixed(1)}%` : ''}`;
         $('winRate').textContent = `Win rate ${hasNumber(account.winRate) ? `${Number(account.winRate).toFixed(1)}%` : '—'}`;
         $('winsLosses').textContent = `${Number(account.wins) || 0} wins · ${Number(account.losses) || 0} losses`;
+        const audit = latestState.executionAudit || {};
+        $('executionSummary').innerHTML = `<div><strong>Audited paper entries · ${shares(audit.auditedOrderCount ?? 0)}</strong><span>New entries save current-window bid/ask levels, token IDs, timestamps, fee schedule, and exact modeled fills. Submission latency is not simulated.</span></div>
+          <div><strong>Audited P&amp;L · ${money(Number(audit.auditedRealizedPnl || 0) + Number(audit.auditedFloatingPnl || 0))}</strong><span>${money(audit.auditedRealizedPnl)} realized · ${money(audit.auditedFloatingPnl)} floating. ${shares(audit.legacyUnauditedOrderCount ?? 0)} older orders retained without entry snapshots.</span></div>`;
         const socket = latestState.websocket || {};
         const socketTime = socket.lastMessageAt ? ` · last book ${clockTime(socket.lastMessageAt)}` : '';
         $('marketCount').setAttribute('title', `Feed ${label(socket.status, 'waiting')}${socketTime}`);
