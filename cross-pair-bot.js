@@ -59,7 +59,7 @@ const PAIRS = Object.freeze([
 ]);
 
 const STRATEGY = Object.freeze({
-  id: 'btc-eth-four-pair-tpsl-paper-no-inverse-exit',
+  id: 'btc-eth-four-pair-tpsl-paper-no-inverse-exit-reset-20261123',
   name: 'BTC/ETH four-pair fixed-size paper strategy',
   version: 'four-pairs-080-tp-099-empty-book-sl-000-no-inverse-exit-audited-v7',
   assets: ['BTC', 'ETH'],
