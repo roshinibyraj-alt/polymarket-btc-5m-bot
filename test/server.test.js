@@ -4,88 +4,86 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const startServer = require('../server');
 
-test('state endpoint accepts the dashboard cache-buster query string', async (t) => {
-  const expected = { mode: 'DEMO', account: { capital: 1000 } };
+test('state endpoint returns the current strategy with no cache', async t => {
+  const expected = { mode: 'DEMO ONLY', strategy: { id: 'btc-5m-combined-orderflow-accumulation' } };
   const server = startServer({ snapshot: () => expected }, 0);
-  await new Promise((resolve) => server.once('listening', resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
-  const response = await fetch('http://127.0.0.1:' + server.address().port + '/api/state?ts=123');
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/state?ts=123`);
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), expected);
   assert.equal(response.headers.get('cache-control'), 'no-store');
 });
 
-test('dashboard serves the paper volume strategy and fee/rebate controls', async (t) => {
-  const server = startServer({ snapshot: () => ({}) }, 0);
-  await new Promise((resolve) => server.once('listening', resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
+test('dashboard state route serves the same live strategy snapshot', async t => {
+  const expected = { mode: 'DEMO ONLY', strategy: { id: 'btc-5m-combined-orderflow-accumulation' } };
+  const server = startServer({ snapshot: () => expected }, 0);
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/strategy/state`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), expected);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+});
 
+test('health endpoint reports the demo service without secrets', async t => {
+  const server = startServer({ snapshot: () => ({ mode: 'DEMO ONLY', status: 'scanning', now: 123 }) }, 0);
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/healthz`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, mode: 'DEMO', status: 'scanning', now: 123 });
+});
+
+test('health endpoint reports strategy errors as unhealthy', async t => {
+  const server = startServer({ snapshot: () => ({ status: 'ERROR', now: 123 }) }, 0);
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/healthz`);
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
+});
+
+test('dashboard serves the BTC/ETH 5-minute cross-pair strategy', async t => {
+  const server = startServer({ snapshot: () => ({}) }, 0);
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
   const response = await fetch(`http://127.0.0.1:${server.address().port}/`);
   const html = await response.text();
   assert.equal(response.status, 200);
-  assert.match(html, /Edge-Gated Volume Bot/);
-  assert.match(html, /Volume and rebate tracker/);
-  assert.match(html, /id="weightedVolume"/);
-  assert.match(html, /id="fees"/);
-  assert.match(html, /id="rewardStatus"/);
-  assert.match(html, /id="positions"/);
-  assert.match(html, /id="orders"/);
-  assert.match(html, /DEMO ONLY/);
-  assert.match(html, /No wallet is connected/);
+  assert.match(html, /Invented/);
+  assert.match(html, /Four independent cross-pair entries/);
+  assert.match(html, /BTC UP \+ ETH DOWN, ETH UP \+ BTC DOWN, BTC UP \+ ETH UP, and BTC DOWN \+ ETH DOWN/);
+  assert.match(html, /Ask-sum entries \+ independent exits/);
+  assert.match(html, /below \$0\.80/);
+  assert.match(html, /Always buy 100 shares on each leg/);
+  assert.match(html, /regardless of previous wins or losses/);
+  assert.match(html, /History is saved in persistent Railway storage/);
+  assert.match(html, /Paper taker sweeps are capped at \$0\.99/);
+  assert.match(html, /Pairs do not force-sell one another/);
+  assert.match(html, /\$1 per remaining share/);
+  assert.match(html, /empty fresh bid book counts as a \$0 stop/i);
+  assert.doesNotMatch(html, /\$1\.22|1\.20\+|inverse-pair exit/i);
+  assert.match(html, /Existing shares stay open for their own take-profit, stop, or official resolution/);
+  assert.match(html, /Official result checked every/);
+  assert.match(html, /Last pre-resolution mark/);
+  assert.match(html, /pair-grid/);
+  assert.match(html, /Recent trades/);
+  assert.match(html, /official resolution/);
+  assert.match(html, /SIMULATION ONLY/);
+  assert.match(html, /positionList/);
+  assert.match(html, /orderList/);
+  assert.match(html, /eventList/);
+  assert.ok(html.indexOf('aria-label="Paper account summary"') < html.indexOf('id="positionsHeading"'));
+  assert.ok(html.indexOf('aria-label="Performance"') < html.indexOf('id="positionsHeading"'));
+  assert.ok(html.indexOf('aria-label="Market activity"') > html.indexOf('aria-labelledby="strategyHeading"'));
+  assert.ok(html.indexOf('aria-label="Market activity"') < html.indexOf('<footer>'));
 });
 
-test('unknown dashboard paths still return 404', async (t) => {
+test('unknown dashboard paths still return 404', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
-  await new Promise((resolve) => server.once('listening', resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
-  const response = await fetch('http://127.0.0.1:' + server.address().port + '/not-a-route');
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/not-a-route`);
   assert.equal(response.status, 404);
-});
-
-test('health endpoint returns demo service status without exposing secrets', async (t) => {
-  const server = startServer({ snapshot: () => ({ mode: 'DEMO ONLY', status: 'scanning', now: 123 }) }, 0);
-  await new Promise((resolve) => server.once('listening', resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
-  const response = await fetch('http://127.0.0.1:' + server.address().port + '/api/healthz');
-  assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), {
-    ok:true,mode:'DEMO',status:'scanning',liveStatus:'disabled',now:123
-  });
-});
-
-test('health endpoint reports an unhealthy state when paper history cannot be restored', async (t) => {
-  const server = startServer({
-    snapshot: () => ({ mode: 'DEMO ONLY', status: 'history_restore_failed', now: 123 }),
-  }, 0);
-  await new Promise((resolve) => server.once('listening', resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
-  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/healthz`);
-
-  assert.equal(response.status, 503);
-  assert.equal((await response.json()).ok, false);
-});
-
-test('health endpoint reports live mode only when the live order adapter is ready',async t=>{
-  const server=startServer(
-    {snapshot:()=>({status:'scanning',now:123})},
-    0,
-    {snapshot:()=>({status:'ready',tradingEnabled:true,halted:false})}
-  );
-  await new Promise(resolve=>server.once('listening',resolve));
-  t.after(()=>new Promise(resolve=>server.close(resolve)));
-  const response=await fetch(`http://127.0.0.1:${server.address().port}/api/healthz`);
-  assert.equal(response.status,200);
-  assert.deepEqual(await response.json(),{
-    ok:true,mode:'LIVE',status:'scanning',liveStatus:'ready',now:123
-  });
-});
-
-test('live balance endpoint returns only the read-only balance snapshot',async(t)=>{
-  const snapshot={status:'ready',collateral:125,positionValue:40,equity:165,positionCount:2,asOf:'2026-10-29T00:00:00Z'};
-  const server=startServer({snapshot:()=>({})},0,{snapshot:()=>snapshot});
-  await new Promise(resolve=>server.once('listening',resolve));
-  t.after(()=>new Promise(resolve=>server.close(resolve)));
-  const response=await fetch(`http://127.0.0.1:${server.address().port}/api/live-balance`);
-  assert.equal(response.status,200);
-  assert.deepEqual(await response.json(),snapshot);
 });

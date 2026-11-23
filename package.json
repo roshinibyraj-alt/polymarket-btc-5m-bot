@@ -1,19 +1,15 @@
 {
-  "name": "polymarket-btc-edge-volume-paper-bot",
+  "name": "invented-btc-eth-5m-four-pair-paper-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Polymarket BTC 5-minute edge-gated volume paper bot.",
+  "description": "Paper-only BTC/ETH 5-minute four-pair strategy with fixed 100-share legs.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node --test"
+    "test": "node --test test/*.test.js"
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=22"
   },
-  "dependencies": {
-    "@polymarket/client": "0.14.0",
-    "ws": "8.22.0",
-    "viem": "^2.46.3"
-  }
+  "dependencies": {}
 }

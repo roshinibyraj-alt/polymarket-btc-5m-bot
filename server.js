@@ -4,39 +4,21 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'volume.html'));
-
-function startServer(bot, port, liveBalanceProvider=null, { listen = true } = {}) {
+const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'pressure-dashboard.html'));
+function startServer(bot, port) {
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
     if (pathname === '/api/healthz') {
       const state = bot.snapshot();
-      const live=liveBalanceProvider?.snapshot?.()||null;
-      const liveEnabled=live?.tradingEnabled===true;
-      const unhealthyStates = new Set([
-        'blocked_or_error',
-        'history_restore_failed',
-        'history_persistence_error',
-      ]);
-      const healthy = !unhealthyStates.has(state.status)
-        &&(!liveEnabled||(live.status==='ready'&&!live.halted));
+      const healthy = state.status !== 'blocked_or_error' && state.status !== 'ERROR';
       res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify({
-        ok:healthy,mode:liveEnabled?'LIVE':'DEMO',status:state.status,
-        liveStatus:live?.status||'disabled',now:state.now
-      }));
+      res.end(JSON.stringify({ ok: healthy, mode: 'DEMO', status: state.status, now: state.now }));
       return;
     }
-    if (pathname === '/api/state') {
+    if (pathname === '/api/state' || pathname === '/api/strategy/state') {
       const body = JSON.stringify(bot.snapshot());
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(body);
-      return;
-    }
-    if(pathname==='/api/live-balance'){
-      Promise.resolve(liveBalanceProvider?.snapshot?.()||{status:'disabled',collateral:null,positionValue:null,equity:null,asOf:null})
-        .then(body=>{res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(body))})
-        .catch(()=>{res.writeHead(503,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify({status:'unavailable',collateral:null,positionValue:null,equity:null,asOf:null}))});
       return;
     }
     if (pathname === '/' || pathname === '/index.html') {
@@ -47,11 +29,9 @@ function startServer(bot, port, liveBalanceProvider=null, { listen = true } = {}
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('not found');
   });
-  if (listen) {
-    server.listen(port, () => {
-      console.log(`[dashboard] listening on :${port}`);
-    });
-  }
+  server.listen(port, () => {
+    console.log(`[dashboard] listening on :${port}`);
+  });
   return server;
 }
 

@@ -1,37 +1,37 @@
-# Polymarket BTC 5-minute edge-gated volume paper bot
+# Invented BTC/ETH 5-minute cross-pair paper bot
 
-This Railway app is a paper-only simulator. It does not load or submit real orders, even if `LIVE_TRADING=true` is present.
+Invented tracks the Polymarket BTC and ETH UP/DOWN markets on 5-minute windows. It is a paper simulator only: it does not submit real orders or use wallet credentials.
 
 ## Strategy
 
-The bot tracks eligible taker volume, fees, and tier-based rebate estimates, but it does not trade just to inflate volume:
+Four cross-pairs are evaluated independently:
 
-1. It estimates the chance of UP at resolution from the live Binance BTCUSDT price relative to the current 5-minute candle open, scaled by the recent 60-second realized price range. DOWN probability is `1 − UP probability`.
-2. It compares those estimates with Polymarket's live UP/DOWN books. It simulates a taker sweep of up to 10 shares across visible asks, allowing a realistic partial FAK fill only when at least 5 shares and $1 notional execute; the unfilled remainder is cancelled. It skips prices above $0.90.
-3. An entry is allowed only when estimated payout minus the full sweep cost, modeled taker fee, and a 2¢ Binance/Chainlink basis buffer leaves at least 5¢ expected edge per share.
-4. UP and DOWN are evaluated independently. The higher qualifying edge is bought first; each side has a 10-second cooldown and a 10-entry-per-window limit. The bot also enforces a $250 per-window entry-spend cap, $500 total open-cost cap, and $100 daily realized-loss stop.
-5. A position is sold only when a full visible-bid sweep would realize at least 3¢ per share after both entry and exit fees. Otherwise it stays open for official Polymarket resolution, checked every 10 seconds.
+- BTC UP + ETH DOWN
+- ETH UP + BTC DOWN
+- BTC UP + ETH UP
+- BTC DOWN + ETH DOWN
 
-This is an uncalibrated probability model, not a forecast guarantee. Binance is only a proxy for the Chainlink-based resolution price. The dashboard shows the underlying inputs and uses conservative basis-risk padding.
+For each pair, the bot watches the two fresh best asks from the Polymarket CLOB WebSocket. When their sum is strictly below $0.80, it makes one paper taker entry for that pair in the current 5-minute window. All four pairs can enter independently during the same window.
 
-## Volume and rebate tracking
+Each leg always requests 100 shares, regardless of previous results. The paper simulator sweeps visible asks up to $0.99, records actual filled quantities, volume-weighted entry prices, and modeled taker fees, and cancels any unfilled remainder. Entry is skipped while the same cross-pair has an earlier position awaiting official resolution.
 
-- Taker fees use the market fee schedule when provided, otherwise the BTC 5-minute default of 5%. The fee calculation is `shares × fee rate × price × (1 − price)`.
-- Eligible weighted volume is tracked as `dollar trade size × (1 − entry price)` only for fee-paying taker fills.
-- The paper tier starts at 0 because no wallet or existing Polymarket tier is connected. The published tiers are None below $200k 30-day weighted volume, then Gold (10%), Platinum (25%), Diamond (40%), Obsidian (50%), and Onyx (60%). Tier changes apply on the daily update; prior trades are not repriced. Rebates are estimates and the $1 minimum payout is shown separately.
-- Direct market liquidity rewards are checked for the current market. The BTC 5-minute market observed during implementation returned an empty `rewards_config`; the strategy is taker-only and does not place maker quotes, so even an allocation on another market would not be treated as earnings.
-- No self-matching or artificial touch-fill accounting is used.
+The four pairs are inverse-linked: BTC UP + ETH UP ↔ BTC DOWN + ETH DOWN, and BTC UP + ETH DOWN ↔ BTC DOWN + ETH UP. That relationship does not trigger a sale: an opposite pair may enter only when its own fresh ask sum is below $0.80, while existing positions remain open.
 
-Official references:
+The previous per-side exits are restored: a best bid at or above $0.99 closes the remaining quantity with a modeled $1 payout per share; a fresh empty bid book triggers the $0 stop-loss. Any remaining shares at window end wait for the official result of their exact BTC or ETH market. The bot checks pending markets every 5 seconds and settles only after Polymarket publishes a closed market and a definitive winning outcome. Before the window ends, dashboard cards show the live bid and floating P&L; resolution-waiting cards retain the last pre-expiry mark.
 
-- [Polymarket trading fees](https://docs.polymarket.com/trading/fees)
-- [Polymarket taker rebates](https://docs.polymarket.com/programs/taker-rebates)
-- [Polymarket liquidity rewards](https://docs.polymarket.com/programs/liquidity-rewards)
+Wins and losses do not change sizing. Each pair can have one entry per window. A delayed official result delays the next entry for that same pair, but does not block the other pairs.
 
-## Running and testing
+## Data and dashboard
 
-Run `npm test` and `npm start`. The dashboard and `/api/state` expose the active model, live books, paper positions, orders, fees, weighted-volume progress, and rebate estimates.
+Market metadata and official outcomes come from Polymarket Gamma. The live order books use a Polymarket CLOB WebSocket subscription for the active BTC and ETH token IDs. The mobile-first dashboard puts balance and performance at the top, followed by four cross-pair cards. Each card shows its opposite pair, entry and exit rules, both legs' shares, average entry, cost and fees, live bid, floating P&L, and final exit or resolution result.
 
-## Paper history
+## Persistent paper history
 
-The existing paper ledger is persisted on the Railway volume. Strategy migration preserves cash, positions, and history; only unfilled orders from the replaced strategy are marked cancelled. Changing `PAPER_HISTORY_RESET_VERSION` intentionally starts a fresh paper ledger.
+On Railway, `PAPER_LEDGER_PATH` should point into the mounted persistent volume. This release uses a new strategy ID, so deployment starts with a clean paper ledger and saves the fresh state to the configured ledger path. Later restarts restore the four-pair history and open positions.
+
+## Run
+
+```sh
+npm test
+npm start
+```

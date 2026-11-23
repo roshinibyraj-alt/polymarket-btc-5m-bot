@@ -1,64 +1,41 @@
 'use strict';
 
-const cfg=require('./config');
-const Bot=require('./wick-bot');
-const {feed:chainlinkFeed}=require('./chainlink-feed');
+const CrossPairBot = require('./cross-pair-bot');
 
 class MultiBot {
-  constructor({onLiveMarketState=null,liveTradingEnabled=false}={}){
-    this.liveTradingEnabled=liveTradingEnabled;
-    this.bots={};
-    for(const timeframe of ['5m','15m']){
-      const windowMs=timeframe==='5m'?cfg.WINDOW_MS_5M:cfg.WINDOW_MS_15M;
-      const capital=(timeframe==='5m'?cfg.DEMO_CAPITAL_5M:cfg.DEMO_CAPITAL_15M)/2;
-      this.bots[`BTC-${timeframe}`]=new Bot({
-        asset:'BTC',timeframe,windowMs,capital,strategyMode:'market-confusion',
-        priceFeed:chainlinkFeed,onLiveMarketState
-      });
-    }
+  constructor(options = {}) {
+    this.bot = options.bot || new CrossPairBot(options);
   }
-  start(){for(const bot of Object.values(this.bots))bot.start()}
-  stop(){for(const bot of Object.values(this.bots))bot.stop();chainlinkFeed.stop()}
-  snapshot(){
-    const timeframes=Object.fromEntries(Object.entries(this.bots).map(([k,b])=>[k,b.snapshot()]));
-    const states=Object.values(timeframes),positions=states.flatMap(s=>s.positions)
-      .sort((a,b)=>b.openedAt-a.openedAt),events=states.flatMap(s=>s.events).sort((a,b)=>b.ts-a.ts).slice(0,100);
-    const openPositions=states.reduce((n,s)=>n+s.account.openPositions,0);
-    const totalTrades=states.reduce((n,s)=>n+s.account.totalTrades,0),settledTrades=states.reduce((n,s)=>n+s.account.settledTrades,0);
-    const wins=states.reduce((n,s)=>n+s.account.wins,0),losses=states.reduce((n,s)=>n+s.account.losses,0);
-    const status=states.some(s=>s.status==='blocked_or_error')?'blocked_or_error':
-      states.some(s=>['scanning','position_open'].includes(s.status))?
-        (openPositions?'position_open':'scanning'):'waiting_for_market';
-      const primary=timeframes['BTC-5m'],capital=states.reduce((n,s)=>n+s.account.capital,0);
-    const series=states.map(s=>s.account.equityCurve||[]);
-    const current=series.map(x=>Number(x[0]?.equity||0));
-    const startTs=Math.min(...series.map(x=>Number(x[0]?.ts||Date.now())));
-    const equityCurve=[{ts:startTs,equity:capital}];
-    const settled=series.flatMap((curve,index)=>curve.slice(1).map(point=>({ts:point.ts,index,equity:point.equity})))
-      .sort((a,b)=>a.ts-b.ts);
-    for(const point of settled){current[point.index]=Number(point.equity);equityCurve.push({ts:point.ts,equity:current.reduce((n,x)=>n+x,0)});}
-    let peak=equityCurve[0]?.equity||capital,maxDrawdown=0;
-    for(const point of equityCurve){peak=Math.max(peak,point.equity);maxDrawdown=Math.max(maxDrawdown,peak-point.equity);}
-    return {...primary,now:Date.now(),status,timeframes,positions,events,
-      error:states.find(s=>s.error)?.error||null,
-       strategy:{
-         execution:this.liveTradingEnabled?'PAPER + LIVE LIMIT ORDERS':'PAPER ONLY',
-         markets:['BTC 5m','BTC 15m'],
-         style:'Market confusion on BTC 5m and 15m'
-       },
-      account:{capital,
-        cash:states.reduce((n,s)=>n+s.account.cash,0),
-        realizedPnl:states.reduce((n,s)=>n+s.account.realizedPnl,0),
-        unrealizedPnl:states.reduce((n,s)=>n+s.account.unrealizedPnl,0),
-        equity:states.reduce((n,s)=>n+s.account.equity,0),
-         takerFees:states.reduce((n,s)=>n+s.account.takerFees,0),
-         estimatedMakerRebate:states.reduce((n,s)=>n+s.account.estimatedMakerRebate,0),
-        markedValue:states.reduce((n,s)=>n+s.account.markedValue,0),
-         unpricedOpenPositions:states.reduce((n,s)=>n+s.account.unpricedOpenPositions,0),totalTrades,settledTrades,wins,losses,winRate:settledTrades?wins/settledTrades*100:0,openPositions,
-         maxConsecutiveLosses:Math.max(...states.map(s=>s.account.maxConsecutiveLosses)),
-         maxDrawdown,maxDrawdownPercent:peak?maxDrawdown/peak*100:0,
-         equityCurve}};
+
+  start() {
+    this.bot.start();
+  }
+
+  stop() {
+    this.bot.stop();
+  }
+
+  snapshot() {
+    return this.bot.snapshot();
+  }
+
+  diagnostics() {
+    const state = this.snapshot();
+    const trades = [...(state.trades || [])].reverse();
+    const orders = [...(state.orders || [])].reverse();
+    return {
+      generatedAt: Date.now(),
+      mode: 'DEMO ONLY',
+      execution: 'PAPER ONLY',
+      strategy: state.strategy,
+      account: state.account,
+      tradeCount: trades.length,
+      orderAttempts: this.bot.totalOrderAttempts,
+      retainedOrderCount: orders.length,
+      trades,
+      orders,
+    };
   }
 }
 
-module.exports=MultiBot;
+module.exports = MultiBot;
