@@ -234,7 +234,7 @@ function entryAuditSnapshot(leg, now, askLevelsAvailable, fill) {
   return {
     model: EXECUTION_MODEL,
     capturedAt: now,
-    modeledLatencyMs: 0,
+    modeledLatencyMs: null,
     marketId: String(leg.market.id || leg.market.slug),
     marketSlug: leg.market.slug,
     marketTitle: leg.market.title,

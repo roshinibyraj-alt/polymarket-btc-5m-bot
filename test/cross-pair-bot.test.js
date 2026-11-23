@@ -118,6 +118,7 @@ test('entry audits save matched market, token, book levels, timestamps, fills, a
   const ethOrder = bot.orders.find(order =>
     order.pairId === 'btc-up-eth-down' && order.asset === 'ETH');
   assert.equal(btcOrder.executionModel, 'CLOB_VISIBLE_DEPTH_SHARED_PAPER_V2');
+  assert.equal(btcOrder.executionAudit.modeledLatencyMs, null);
   assert.equal(btcOrder.executionAudit.marketId, `btc-${START}`);
   assert.equal(btcOrder.executionAudit.tokenId, `btc-${START}-up-token`);
   assert.equal(btcOrder.executionAudit.sourceUpdatedAt, getNow());

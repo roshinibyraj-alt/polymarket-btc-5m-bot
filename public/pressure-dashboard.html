@@ -557,7 +557,7 @@
             <div><span>Window start</span><strong>${safe(dateTime(audit.windowStart))}</strong></div>
             <div><span>Book update · received</span><strong>${safe(clockTime(audit.sourceUpdatedAt))} · ${safe(clockTime(audit.receivedAt))}</strong></div>
             <div><span>Quote age at entry</span><strong>Source ${safe(shares(audit.sourceAgeMs))} ms · received ${safe(shares(audit.receiveAgeMs))} ms</strong></div>
-            <div><span>Modeled send latency</span><strong>${safe(shares(audit.modeledLatencyMs))} ms · instant paper fill</strong></div>
+            <div><span>Modeled send latency</span><strong>${audit.modeledLatencyMs == null ? 'Not simulated' : `${safe(shares(audit.modeledLatencyMs))} ms`}</strong></div>
             <div><span>Best bid / size</span><strong>${money(audit.bestBid, 4)} · ${shares(audit.bestBidSize)}</strong></div>
             <div><span>Best ask / size</span><strong>${money(audit.bestAsk, 4)} · ${shares(audit.bestAskSize)}</strong></div>
             <div><span>Fee schedule</span><strong>${safe((Number(audit.feeRate) * 100).toFixed(2))}% · ${safe(audit.feeScheduleSource)}</strong></div>
