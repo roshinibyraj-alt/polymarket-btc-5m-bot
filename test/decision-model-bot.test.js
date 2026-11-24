@@ -178,11 +178,32 @@ test('a reversal review can sell UP while independently opening DOWN', () => {
   assert.ok(bot.orders.some((order) => order.action === 'SELL_TAKER' && order.side === 'UP'));
   assert.ok(bot.orders.some((order) => order.action === 'BUY_TAKER' && order.side === 'DOWN'));
   assert.equal(bot.positions.find((position) => position.side === 'UP').status, 'MODEL_SOLD');
+  assert.ok(bot.positions.find((position) => position.side === 'UP').realizedPnl > 0);
+  assert.equal(bot.positions.find((position) => position.side === 'UP').exitPrice, 0.79);
   assert.equal(bot.positions.find((position) => position.side === 'DOWN').status, 'OPEN');
   assert.deepEqual(
     bot.latestReview.actions.map((action) => `${action.type}_${action.side}`).sort(),
     ['BUY_DOWN', 'SELL_UP'],
   );
+  bot.stop();
+});
+
+test('a losing UP position stays open while a qualifying DOWN buy enters independently', () => {
+  const { bot, record, setNow, setPressure, setFeed } = makeBot();
+  bot.evaluateOnSchedule(START + 1_000);
+  setNow(START + 16_000);
+  setPressure(false);
+  setFeed(makeFeed(START + 16_000, false));
+  record.quotes.UP = { ...levels(0.45, 0.46), updatedAt: START + 16_000, receivedAt: START + 16_000 };
+  record.quotes.DOWN = { ...levels(0.34, 0.35), updatedAt: START + 16_000, receivedAt: START + 16_000 };
+  bot.evaluateOnSchedule(START + 16_000);
+
+  assert.equal(bot.orders.some((order) => order.action === 'SELL_TAKER' && order.side === 'UP'), false);
+  assert.ok(bot.orders.some((order) => order.action === 'BUY_TAKER' && order.side === 'DOWN'));
+  assert.equal(bot.positions.find((position) => position.side === 'UP').status, 'OPEN');
+  assert.equal(bot.positions.find((position) => position.side === 'DOWN').status, 'OPEN');
+  assert.equal(bot.latestReview.questions.sellUP.answer, 'NO');
+  assert.match(bot.latestReview.questions.sellUP.reason, /realize an estimated net loss/i);
   bot.stop();
 });
 
@@ -211,6 +232,11 @@ test('partial model exits retain remaining shares and account for all fees throu
   bot.settleMarket(position.marketId, 'UP', START + 301_000);
   assert.equal(position.status, 'RESOLVED_WIN');
   assert.ok(position.realizedPnl > 15);
+  const completed = bot.snapshot().modelEngine.tradeHistory[0];
+  assert.equal(completed.shares, 50);
+  assert.equal(completed.entryPrice, 0.56);
+  assert.ok(Math.abs(completed.exitPrice - 0.916) < 1e-8);
+  assert.equal(completed.result, 'WIN');
   assert.ok(
     Math.abs(bot.accountSnapshot().totalFees - (entryFees + position.exitFees)) < 1e-4,
     `total ${bot.accountSnapshot().totalFees}; expected ${entryFees + position.exitFees}; exit ${position.exitFees}`,

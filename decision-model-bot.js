@@ -89,6 +89,22 @@ function positionSideAverage(positions) {
   };
 }
 
+function estimateProfitableFifoExit(positions, sellSweep) {
+  if (!(sellSweep?.filledShares > 0)) return null;
+  let sharesToAllocate = sellSweep.filledShares;
+  let allocatedBasis = 0;
+  for (const position of [...positions].sort((a, b) => Number(a.entryAt) - Number(b.entryAt))) {
+    if (sharesToAllocate <= EPSILON) break;
+    const shares = Number(position.shares || 0);
+    if (!(shares > 0)) continue;
+    const allocatedShares = Math.min(shares, sharesToAllocate);
+    const ratio = allocatedShares / shares;
+    allocatedBasis += (Number(position.totalCost || 0) + Number(position.fees || 0)) * ratio;
+    sharesToAllocate -= allocatedShares;
+  }
+  return sellSweep.totalCost - allocatedBasis;
+}
+
 class DecisionModelBot extends DipBounceBot {
   constructor({
     marketData,
@@ -311,11 +327,15 @@ class DecisionModelBot extends DipBounceBot {
       const sellEdge = liquidationValue == null
         ? null
         : probabilities[side] - liquidationValue;
-      const modelWantsSell = aggregate.shares > 0
+      const sellProfit = sellSweep?.filledShares > 0
+        ? estimateProfitableFifoExit(currentPositions, sellSweep)
+        : null;
+      const modelPrefersExit = aggregate.shares > 0
         && sellEdge != null
         && sellEdge <= -STRATEGY.exitAdvantagePerShare;
       const canExecuteSell = Boolean(sellSweep?.filledShares > 0);
-      const sellNow = modelWantsSell && canExecuteSell;
+      const profitableExit = sellProfit != null && sellProfit > EPSILON;
+      const sellNow = modelPrefersExit && profitableExit && canExecuteSell;
       const buyQualifies = sideReady
         && candidate.fullSizeVisible
         && candidate.estimatedProbability >= STRATEGY.minimumProbability
@@ -351,6 +371,8 @@ class DecisionModelBot extends DipBounceBot {
             : `There is no open ${side} position to hold.`
           : sellNow
             ? `Do not hold: modeled ${side} probability is ${(probabilities[side] * 100).toFixed(1)}%, below the estimated net bid liquidation value by $${Math.abs(sellEdge).toFixed(3)} per share.`
+            : modelPrefersExit && !profitableExit
+              ? `Hold the ${side} position: selling now would realize an estimated net loss of $${Math.abs(sellProfit || 0).toFixed(2)}. The opposite side can still enter independently.`
             : `Keep ${aggregate.shares.toFixed(2)} ${side} shares open; the model has not found a sufficiently better net value in selling now. Any unsold shares go to official resolution at window end.`,
         {
           openShares: aggregate.shares,
@@ -364,16 +386,20 @@ class DecisionModelBot extends DipBounceBot {
         sellNow ? 'YES' : 'NO',
         currentPositions.length === 0
           ? `No open ${side} shares exist.`
-          : modelWantsSell && !canExecuteSell
+          : modelPrefersExit && !profitableExit
+            ? `The directional model favors exiting, but a bid sweep would realize an estimated net loss of $${Math.abs(sellProfit || 0).toFixed(2)}. Hold this side; an opposite-side buy is still allowed.`
+          : modelPrefersExit && !canExecuteSell
             ? 'The model prefers exiting, but the current bid book has no executable shares; the position remains open and is reviewed again.'
             : sellNow
-              ? `A visible-bid sweep can exit now; the model values the remaining ${side} shares below their estimated net liquidation value by $${Math.abs(sellEdge).toFixed(3)} per share.`
-              : `Hold to the next 15-second review or window resolution; the model does not see a $${STRATEGY.exitAdvantagePerShare.toFixed(2)}-per-share advantage in selling.`,
+              ? `A visible-bid sweep can exit now at an estimated net profit of $${sellProfit.toFixed(2)}; the model also values the ${side} shares below their net liquidation value by $${Math.abs(sellEdge).toFixed(3)} per share.`
+              : `Hold to the next 15-second review or window resolution; the model does not see a profitable exit with a $${STRATEGY.exitAdvantagePerShare.toFixed(2)}-per-share advantage.`,
         {
           openShares: aggregate.shares,
           estimatedNetBidValue: liquidationValue,
           probability: probabilities[side],
           modelVsBid: sellEdge,
+          estimatedNetExitProfit: sellProfit,
+          profitableExit,
         },
       );
 
@@ -508,6 +534,10 @@ class DecisionModelBot extends DipBounceBot {
       fees: result.fees,
       totalEntryFees: result.fees,
       exitFees: 0,
+      soldShares: 0,
+      resolvedShares: 0,
+      closedShares: 0,
+      exitProceeds: 0,
       estimatedMakerRebate: 0,
       entryAt: now,
       windowStart: order.windowStart,
@@ -582,6 +612,7 @@ class DecisionModelBot extends DipBounceBot {
     this.cash += grossProceeds - exitFees;
 
     let leftToAllocate = filledShares;
+    let realizedTotal = 0;
     for (const position of positions) {
       if (leftToAllocate <= EPSILON) break;
       const beforeShares = Number(position.shares);
@@ -593,6 +624,7 @@ class DecisionModelBot extends DipBounceBot {
       const allocatedExitFees = exitFees * (soldShares / filledShares);
       const realized = proceeds - allocatedExitFees - releasedCost - releasedEntryFees;
 
+      realizedTotal += realized;
       position.partialRealizedPnl = Number(position.partialRealizedPnl || 0) + realized;
       position.soldShares = Number(position.soldShares || 0) + soldShares;
       position.exitProceeds = Number(position.exitProceeds || 0) + proceeds;
@@ -616,12 +648,12 @@ class DecisionModelBot extends DipBounceBot {
       leftToAllocate -= soldShares;
     }
     this.log(
-      `${side} model exit: sold ${filledShares.toFixed(2)} shares at $${order.fillPrice.toFixed(4)} average; remaining shares stay open if bids lacked depth.`,
+      `${side} model exit: sold ${filledShares.toFixed(2)} shares at $${order.fillPrice.toFixed(4)} average; net realized ${realizedTotal >= 0 ? 'profit' : 'loss'} $${Math.abs(realizedTotal).toFixed(2)} after fees.`,
       {
         asset: 'BTC',
         timeframe: '5m',
         side,
-        outcome: grossProceeds - exitFees >= 0 ? 'good' : 'bad',
+        outcome: realizedTotal >= 0 ? 'good' : 'bad',
         type: 'MODEL_SELL',
         now,
       },
@@ -640,13 +672,22 @@ class DecisionModelBot extends DipBounceBot {
       if (position.marketId !== marketId || position.status !== 'PENDING_RESOLUTION') continue;
       const won = position.side === winner;
       const payout = won ? position.shares : 0;
+      const remainingShares = Number(position.shares || 0);
       this.cash += payout;
       position.status = won ? 'RESOLVED_WIN' : 'RESOLVED_LOSS';
       position.resolvedAt = now;
       position.resolutionWinner = winner;
-      position.exitPrice = won ? 1 : 0;
+      position.resolvedShares = remainingShares;
       position.exitPayout = won ? 1 : 0;
-      position.exitReason = 'OFFICIAL_RESOLUTION';
+      position.exitProceeds = Number(position.exitProceeds || 0) + payout;
+      position.closedShares = Number(position.soldShares || 0) + remainingShares;
+      position.exitPrice = position.closedShares > EPSILON
+        ? position.exitProceeds / position.closedShares
+        : won ? 1 : 0;
+      position.exitReason = Number(position.soldShares || 0) > EPSILON
+        ? 'MODEL_EXIT_AND_OFFICIAL_RESOLUTION'
+        : 'OFFICIAL_RESOLUTION';
+      position.closedAt = now;
       position.realizedPnl = Number(position.partialRealizedPnl || 0)
         + payout - position.totalCost - position.fees + Number(position.estimatedMakerRebate || 0);
       position.markStatus = 'CLOSED';
@@ -772,7 +813,7 @@ class DecisionModelBot extends DipBounceBot {
       summary: 'At each 15-second review, estimate BTC 5-minute resolution odds from spot-vs-open movement, one-second buyer/seller pressure, recent candles, and Polymarket midpoints. Buy or sell UP and DOWN independently when explicit probability and net-value tests pass.',
       execution: 'PAPER ONLY — no real orders or wallet signing.',
       entry: 'A qualifying side receives a 50-share visible-ask sweep (up to $0.99) at each review; only displayed depth is simulated and taker fees are included.',
-      exit: 'Sell a side when the model values its future payout at least $0.03/share below current visible net bid liquidation value. No fixed TP/SL. Unsold shares go to official resolution at window end.',
+      exit: 'Never sell a side at an estimated net loss. Sell only when the directional model favors exiting and the visible-bid sweep is profitable after fees. A losing side remains open while the opposite side may enter independently; unsold shares go to official resolution at window end.',
       decisions: 'The model records eight explicit answers per review: buy / avoid / hold / sell for UP and DOWN.',
       probability: 'Experimental, uncalibrated directional estimate; not a guarantee or proven predictive edge.',
     };
@@ -807,6 +848,25 @@ class DecisionModelBot extends DipBounceBot {
       latestReview: currentReview,
       recentReviews: this.reviews.slice(0, 30),
       sides: sidePositions,
+      tradeHistory: this.positions
+        .filter((position) => ['MODEL_SOLD', 'RESOLVED_WIN', 'RESOLVED_LOSS'].includes(position.status))
+        .sort((a, b) => Number(b.closedAt || b.resolvedAt || b.exitAt || 0) - Number(a.closedAt || a.resolvedAt || a.exitAt || 0))
+        .slice(0, 30)
+        .map((position) => ({
+          id: position.id,
+          side: position.side,
+          status: position.status,
+          result: Number(position.realizedPnl) >= 0 ? 'WIN' : 'LOSS',
+          shares: Number(position.closedShares || position.soldShares || position.requestedShares || 0),
+          entryPrice: position.entryPrice,
+          exitPrice: position.exitPrice,
+          realizedPnl: position.realizedPnl,
+          entryFees: position.totalEntryFees ?? position.fees,
+          exitFees: position.exitFees || 0,
+          entryAt: position.entryAt,
+          exitAt: position.closedAt || position.resolvedAt || position.exitAt,
+          exitReason: position.exitReason,
+        })),
       rules: {
         sharesPerBuyDecision: STRATEGY.sharesPerBuyDecision,
         minimumProbability: STRATEGY.minimumProbability,

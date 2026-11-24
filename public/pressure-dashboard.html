@@ -140,6 +140,21 @@
     .history-head strong { font-size: 11px; }
     .history-head time { color: var(--muted); font-size: 10px; }
     .history-item p { color: #b4c4d6; margin-top: 6px; font-size: 11px; line-height: 1.45; }
+    .trade-list { display: grid; gap: 9px; }
+    .trade-card { padding: 13px; border: 1px solid var(--line); border-left: 4px solid #68798d; border-radius: 13px; background: #0a1725; }
+    .trade-card.win { border-left-color: var(--green); background: linear-gradient(100deg, #12372e, #0a1725 70%); }
+    .trade-card.loss { border-left-color: var(--red); background: linear-gradient(100deg, #3c202b, #0a1725 70%); }
+    .trade-title { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .trade-title strong { font-size: 13px; }
+    .trade-title time { color: var(--muted); font-size: 10px; }
+    .trade-badge { border-radius: 999px; padding: 5px 8px; font-size: 9px; font-weight: 950; letter-spacing: .06em; }
+    .trade-badge.win { color: #9bf3d0; background: #1b5745; }
+    .trade-badge.loss { color: #ffb4bf; background: #602d3c; }
+    .trade-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin-top: 11px; }
+    .trade-cell { min-width: 0; padding: 8px; border-radius: 9px; background: #06132188; }
+    .trade-cell span { display: block; color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
+    .trade-cell strong { display: block; margin-top: 4px; font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .trade-note { margin-top: 9px; color: var(--muted); font-size: 10px; line-height: 1.4; }
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; min-width: 560px; font-size: 11px; }
     th { color: var(--muted); font-size: 9px; text-align: left; text-transform: uppercase; letter-spacing: .07em; }
@@ -165,6 +180,7 @@
       .question-grid { grid-template-columns: 1fr; }
       .prob-grid, .position-grid { gap: 8px; }
       .prob-card, .side-card { padding: 12px; }
+      .trade-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .big-number { font-size: 27px; }
       .book-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
       .book-cell { padding: 7px 6px; }
@@ -287,6 +303,13 @@
       </div>
     </section>
 
+    <section class="panel" aria-label="Closed trade history">
+      <div class="section-head">
+        <div><h2>Closed trade history</h2><p>Entry, exit, fees, and final net result for each completed position.</p></div>
+      </div>
+      <div id="tradeHistory" class="trade-list"><div class="empty">Completed trades will show entry and exit prices here.</div></div>
+    </section>
+
     <section class="panel" aria-label="Model questions and answers">
       <div class="section-head">
         <div><h2>Why the model acted</h2><p id="reviewTime">The model records eight explicit answers per review.</p></div>
@@ -311,7 +334,7 @@
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Time</th><th>Action</th><th>Side</th><th>Shares</th><th>Avg price</th><th>Fees</th><th>Status</th></tr></thead>
+          <thead><tr><th>Time</th><th>Action</th><th>Side</th><th>Shares</th><th>Fill price</th><th>Fees</th><th>Status</th></tr></thead>
           <tbody id="orderRows"><tr><td colspan="7" class="muted">No paper orders yet.</td></tr></tbody>
         </table>
       </div>
@@ -333,7 +356,7 @@
           <li>Estimate resolution direction from BTC’s move from the window open, recent pressure, closed candles, and Polymarket midpoints.</li>
           <li>Use a 50-share visible-ask sweep only when the estimate is at least 58%, full-size depth is available, and estimated net edge after taker fees is at least $0.05/share.</li>
           <li>UP and DOWN positions are independent. The model may add 50 shares on each qualifying review.</li>
-          <li>Sell only when estimated future value is at least $0.03/share below the visible net bid exit value. No fixed TP or SL.</li>
+          <li>Never sell at an estimated net loss. A losing side stays open while an opposite side can enter; sell only when the model favors an exit and the visible-bid sweep is profitable after fees. No fixed TP or SL.</li>
           <li>Any unsold position goes to official resolution of the market. Live order execution is disabled.</li>
         </ul>
       </div>
@@ -348,8 +371,15 @@
     const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
     })[character]);
-    const usd = (value, digits = 2) => Number.isFinite(Number(value))
-      ? `$${Number(value).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}` : '—';
+    const usd = (value, digits = 2) => {
+      const amount = Number(value);
+      if (!Number.isFinite(amount)) return '—';
+      const formatted = Math.abs(amount).toLocaleString(undefined, {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      });
+      return `${amount < 0 ? '-' : ''}$${formatted}`;
+    };
     const shares = (value) => Number.isFinite(Number(value))
       ? `${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })} shares` : '—';
     const pct = (value) => Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(1)}%` : '—';
@@ -448,6 +478,34 @@
         </tr>`).join('') : '<tr><td colspan="7" class="muted">No paper orders yet.</td></tr>';
     }
 
+    function renderTradeHistory(trades) {
+      const target = $('tradeHistory');
+      const rows = (trades || []).slice(0, 30);
+      if (!rows.length) {
+        target.innerHTML = '<div class="empty">Completed trades will show entry and exit prices here.</div>';
+        return;
+      }
+      target.innerHTML = rows.map((trade) => {
+        const winning = Number(trade.realizedPnl) >= 0;
+        const outcome = winning ? 'WIN' : 'LOSS';
+        const totalFees = Number(trade.entryFees || 0) + Number(trade.exitFees || 0);
+        const stateLabel = trade.status === 'MODEL_SOLD' ? 'MODEL EXIT' : 'RESOLVED';
+        return `<article class="trade-card ${winning ? 'win' : 'loss'}">
+          <div class="trade-title">
+            <strong>${esc(trade.side)} · ${shares(trade.shares)}</strong>
+            <span class="trade-badge ${winning ? 'win' : 'loss'}">${outcome}</span>
+          </div>
+          <div class="trade-grid">
+            <div class="trade-cell"><span>Entry price</span><strong>${usd(trade.entryPrice, 4)}</strong></div>
+            <div class="trade-cell"><span>Exit price</span><strong>${usd(trade.exitPrice, 4)}</strong></div>
+            <div class="trade-cell"><span>Net P&amp;L</span><strong class="${clsPnl(trade.realizedPnl)}">${usd(trade.realizedPnl)}</strong></div>
+            <div class="trade-cell"><span>Total fees</span><strong>${usd(totalFees)}</strong></div>
+          </div>
+          <p class="trade-note">${stateLabel} · Opened ${fmtTime(trade.entryAt)} · Closed ${fmtTime(trade.exitAt)} · ${esc(label(trade.exitReason))}</p>
+        </article>`;
+      }).join('');
+    }
+
     function renderEvents(events) {
       const rows = (events || []).slice(0, 8);
       $('eventRows').innerHTML = rows.length ? rows.map((event) =>
@@ -519,6 +577,7 @@
       $('positionCount').textContent = `${state.account.openPositions || 0} open · ${state.account.pendingResolution || 0} resolving`;
       renderQuestions(review);
       renderReviews(engine.recentReviews);
+      renderTradeHistory(engine.tradeHistory);
       renderOrders(state.orders);
       renderEvents(state.events);
     }

@@ -127,6 +127,38 @@ function sampleState(eventMessage = 'Model review completed.') {
         questions,
       },
       recentReviews: [],
+      tradeHistory: [
+        {
+          id: 'winning-trade',
+          side: 'UP',
+          status: 'RESOLVED_WIN',
+          result: 'WIN',
+          shares: 50,
+          entryPrice: 0.56,
+          exitPrice: 1,
+          realizedPnl: 21.14,
+          entryFees: 0.86,
+          exitFees: 0,
+          entryAt: at - 300_000,
+          exitAt: at,
+          exitReason: 'OFFICIAL_RESOLUTION',
+        },
+        {
+          id: 'losing-trade',
+          side: 'DOWN',
+          status: 'RESOLVED_LOSS',
+          result: 'LOSS',
+          shares: 50,
+          entryPrice: 0.65,
+          exitPrice: 0,
+          realizedPnl: -33.25,
+          entryFees: 0.75,
+          exitFees: 0,
+          entryAt: at - 600_000,
+          exitAt: at - 300_000,
+          exitReason: 'OFFICIAL_RESOLUTION',
+        },
+      ],
       sides: {
         UP: {
           shares: 50,
@@ -150,6 +182,12 @@ test('dashboard shows the BTC model, eight answers, independent positions, and p
   assert.equal(elements.get('downProbability').textContent, '32.0%');
   assert.match(elements.get('questionGrid').innerHTML, /Why should I buy UP/);
   assert.match(elements.get('questionGrid').innerHTML, /Why should I sell DOWN now/);
+  assert.match(elements.get('tradeHistory').innerHTML, /Entry price/);
+  assert.match(elements.get('tradeHistory').innerHTML, /Exit price/);
+  assert.match(elements.get('tradeHistory').innerHTML, /\$1\.0000/);
+  assert.match(elements.get('tradeHistory').innerHTML, /trade-card win/);
+  assert.match(elements.get('tradeHistory').innerHTML, /trade-card loss/);
+  assert.match(elements.get('tradeHistory').innerHTML, /-\$33\.25/);
   assert.match(elements.get('upShares').textContent, /50 shares/);
   assert.match(elements.get('orderRows').innerHTML, /Buy Taker/);
   assert.match(html, /@media \(max-width: 680px\)/);
