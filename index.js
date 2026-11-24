@@ -25,7 +25,7 @@ async function main() {
     return;
   }
 
-  const Bot = require('./decision-model-bot');
+  const Bot = require('./minute-color-bot');
   const startServer = require('./server');
   const fs = require('node:fs');
   const path = require('node:path');
@@ -41,7 +41,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: PAPER ONLY -- BTC 5-minute explainable decision model; no live orders are sent.');
+  console.log('MODE: PAPER ONLY -- BTC 5-minute one-minute candle color-flip strategy; no live orders are sent.');
 
   let stopping = false;
   const shutdown = async () => {

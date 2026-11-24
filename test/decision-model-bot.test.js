@@ -2,50 +2,23 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const DecisionModelBot = require('../decision-model-bot');
-const { sweep } = DecisionModelBot._test;
+const MinuteColorBot = require('../minute-color-bot');
 
 const START = 1_800_000_000_000;
 
-function candles(count, direction) {
-  return Array.from({ length: count }, (_, index) => {
-    const open = 100_000 + index * 100;
-    return {
-      start: START - (count - index) * 300_000,
-      open,
-      high: direction === 'UP' ? open * 1.012 : open * 1.002,
-      low: direction === 'DOWN' ? open * 0.988 : open * 0.998,
-      close: direction === 'UP' ? open * 1.01 : open * 0.99,
-      closeAt: START - (count - index) * 300_000 + 299_999,
-    };
-  });
-}
-
-function makeFeed(now, up = true) {
-  const direction = up ? 'UP' : 'DOWN';
+function candle(minute, color) {
+  const open = 100;
+  const close = color === 'GREEN' ? 101 : color === 'RED' ? 99 : 100;
+  const start = START + (minute - 1) * 60_000;
   return {
-    status: 'CONNECTED',
-    historyStatus: 'READY',
-    error: null,
-    price: up ? 101_000 : 99_000,
-    tickAt: now,
-    tickAgeMs: 100,
-    currentCandle: {
-      start: START,
-      open: 100_000,
-      high: 101_000,
-      low: 99_000,
-      close: up ? 101_000 : 99_000,
-      openSource: 'BINANCE_KLINE',
-    },
-    candles: candles(6, direction),
-    candleSets: {
-      '5m': candles(6, direction),
-      '15m': candles(4, direction),
-      '1h': candles(2, direction),
-    },
-    candleCounts: { '5m': 6, '15m': 4, '1h': 2 },
-    reconnectCount: 0,
+    start,
+    closeAt: start + 59_999,
+    open,
+    high: Math.max(open, close),
+    low: Math.min(open, close),
+    close,
+    closed: true,
+    source: 'BINANCE_1M_WEBSOCKET',
   };
 }
 
@@ -54,26 +27,38 @@ function levels(bid, ask, size = 500) {
     bestBid: bid,
     bestAsk: ask,
     mid: (bid + ask) / 2,
-    updatedAt: 1_800_000_000_000,
-    receivedAt: 1_800_000_000_000,
+    updatedAt: START,
+    receivedAt: START,
     bids: [{ price: bid, size }],
     asks: [{ price: ask, size }],
   };
 }
 
-function makeBot({ now = START + 1_000, up = true } = {}) {
+function setup({ now = START + 120_100, upAskSize = 500, downAskSize = 500 } = {}) {
   let clock = now;
-  let feedState = makeFeed(now, up);
+  let feedState = {
+    status: 'CONNECTED',
+    historyStatus: 'READY',
+    error: null,
+    price: 101_000,
+    tickAt: clock,
+    lastMessageAt: clock,
+    messageAgeMs: 0,
+    currentCandle: null,
+    closedCandles: [],
+    candleCounts: { '1m': 0 },
+    reconnectCount: 0,
+  };
   const marketData = {
     getAssetMarket: async (asset, start, windowMs) => ({
-      id: 'btc-5m-market',
+      id: 'btc-five-minute-market',
       slug: 'btc-updown-5m-test',
       title: 'Bitcoin Up or Down · test',
       asset: asset.toUpperCase(),
       timeframe: '5m',
       start,
       end: start + windowMs,
-      tokens: { UP: 'btc-up-token', DOWN: 'btc-down-token' },
+      tokens: { UP: 'up-token', DOWN: 'down-token' },
       feesEnabled: true,
       feeSchedule: { rate: 0.07 },
     }),
@@ -85,112 +70,96 @@ function makeBot({ now = START + 1_000, up = true } = {}) {
     status: 'CONNECTED',
     start: async () => {},
     stop() {},
-    snapshot: () => ({ ...feedState, tickAt: clock, tickAgeMs: 100 }),
+    snapshot: () => ({ ...feedState, messageAgeMs: Math.max(0, clock - feedState.lastMessageAt) }),
   };
-  const bot = new DecisionModelBot({
+  const bot = new MinuteColorBot({
     marketData,
     binanceFeed,
     now: () => clock,
-    initialCapital: 3000,
+    initialCapital: 3_000,
   });
   bot.running = true;
   const record = bot.records.get('BTC:5m');
   record.targetStart = START;
   record.market = {
-    id: 'btc-5m-market',
+    id: 'btc-five-minute-market',
     slug: 'btc-updown-5m-test',
     title: 'Bitcoin Up or Down · test',
     asset: 'BTC',
     timeframe: '5m',
     start: START,
     end: START + 300_000,
-    tokens: { UP: 'btc-up-token', DOWN: 'btc-down-token' },
+    tokens: { UP: 'up-token', DOWN: 'down-token' },
     feesEnabled: true,
     feeSchedule: { rate: 0.07 },
   };
   record.marketStatus = 'OPEN';
-  const updateQuotes = () => {
-    record.quotes.UP = { ...levels(0.55, 0.56), updatedAt: clock, receivedAt: clock };
-    record.quotes.DOWN = { ...levels(0.44, 0.45), updatedAt: clock, receivedAt: clock };
-  };
-  updateQuotes();
+  record.quotes.UP = { ...levels(0.54, 0.56, upAskSize), updatedAt: clock, receivedAt: clock };
+  record.quotes.DOWN = { ...levels(0.43, 0.45, downAskSize), updatedAt: clock, receivedAt: clock };
+  bot.websocket.status = 'CONNECTED';
 
   return {
     bot,
     record,
     setNow(value) {
       clock = value;
-      feedState = makeFeed(value, value === START + 1_000 || up);
-      updateQuotes();
+      feedState = { ...feedState, tickAt: value, lastMessageAt: value };
+      record.quotes.UP.updatedAt = value;
+      record.quotes.UP.receivedAt = value;
+      record.quotes.DOWN.updatedAt = value;
+      record.quotes.DOWN.receivedAt = value;
     },
-    setFeed(value) {
-      feedState = { ...value };
+    setCandles(candles) {
+      feedState = { ...feedState, closedCandles: candles, candleCounts: { '1m': candles.length } };
     },
+    feedState: () => feedState,
   };
 }
 
-test('only scans BTC 5-minute markets and keeps UP/DOWN independently', () => {
-  const { bot } = makeBot();
-  assert.deepEqual([...bot.records.keys()], ['BTC:5m']);
-  const state = bot.snapshot();
-  assert.deepEqual(state.scanner.assets, ['BTC']);
-  assert.deepEqual(state.scanner.timeframes, ['5m']);
-  assert.equal(state.strategy.execution, 'PAPER ONLY — no real orders or wallet signing.');
-  assert.deepEqual(Object.keys(state.markets[0].sideStates.UP).sort(), [
-    'ageMs', 'bestAsk', 'bestBid', 'fresh', 'mid', 'updatedAt',
-  ]);
-  assert.equal(Object.hasOwn(state.modelEngine, 'tradeFlow'), false);
+test('one closed minute-1 reference candle alone never buys', () => {
+  const { bot, setCandles } = setup();
+  setCandles([candle(1, 'RED')]);
+  bot.processClosedCandles(START + 60_100);
+  assert.equal(bot.orders.length, 0);
   bot.stop();
 });
 
-test('a qualifying 15-second review buys 50 shares and records all eight answers', () => {
-  const { bot, record } = makeBot();
-  bot.evaluateOnSchedule(START + 1_000);
-
+test('same-color minute 2 does not trade; a color change buys 200 shares on the new color side', () => {
+  const { bot, setCandles } = setup();
+  setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
+  bot.processClosedCandles(START + 120_100);
   assert.equal(bot.orders.length, 1);
   assert.equal(bot.orders[0].action, 'BUY_TAKER');
-  assert.equal(bot.orders[0].requestedShares, 50);
-  assert.equal(bot.orders[0].filledShares, 50);
-  assert.equal(bot.positions[0].shares, 50);
-  assert.equal(bot.positions[0].status, 'OPEN');
-  assert.equal(bot.latestReview.actions[0].type, 'BUY');
-  assert.equal(bot.latestReview.questions.buyUP.answer, 'YES');
-  assert.equal(bot.latestReview.questions.avoidUP.answer, 'NO');
-  assert.equal(bot.latestReview.questions.holdUP.answer, 'YES');
-  assert.equal(bot.latestReview.questions.sellUP.answer, 'NO');
-  assert.equal(Object.keys(bot.latestReview.questions).length, 8);
-  assert.equal(record.triggeredSide, null, 'legacy one-side-only strategy stays disabled');
+  assert.equal(bot.orders[0].side, 'UP');
+  assert.equal(bot.orders[0].requestedShares, 200);
+  assert.equal(bot.orders[0].filledShares, 200);
+  assert.equal(bot.positions[0].shares, 200);
+  assert.equal(bot.latestReview.signalSide, 'UP');
+
+  const duplicate = bot.orders.length;
+  bot.processClosedCandles(START + 121_100);
+  assert.equal(bot.orders.length, duplicate);
   bot.stop();
 });
 
-test('model review cadence prevents a second buy before 15 seconds', () => {
-  const { bot, setNow } = makeBot();
-  bot.evaluateOnSchedule(START + 1_000);
-  bot.evaluateOnSchedule(START + 10_000);
-  assert.equal(bot.reviews.length, 1);
-  setNow(START + 16_000);
-  bot.evaluateOnSchedule(START + 16_000);
-  assert.equal(bot.reviews.length, 2);
-  assert.equal(bot.orders.filter((order) => order.action === 'BUY_TAKER').length, 2);
-  assert.equal(bot.positions.reduce((sum, position) => sum + position.shares, 0), 100);
-  bot.stop();
-});
+test('a color flip sells the existing side even at a loss and buys 200 on the new side', () => {
+  const { bot, record, setNow, setCandles } = setup();
+  setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
+  bot.processClosedCandles(START + 120_100);
+  const upPosition = bot.positions.find((position) => position.side === 'UP');
+  assert.equal(upPosition.status, 'OPEN');
 
-test('a candle reversal review can sell UP while independently opening DOWN', () => {
-  const { bot, record, setNow, setFeed } = makeBot();
-  bot.evaluateOnSchedule(START + 1_000);
-  setNow(START + 16_000);
-  setFeed(makeFeed(START + 16_000, false));
-  record.quotes.UP = { ...levels(0.79, 0.80), updatedAt: START + 16_000, receivedAt: START + 16_000 };
-  record.quotes.DOWN = { ...levels(0.34, 0.35), updatedAt: START + 16_000, receivedAt: START + 16_000 };
-  bot.evaluateOnSchedule(START + 16_000);
+  setNow(START + 180_100);
+  record.quotes.UP = { ...levels(0.40, 0.41), updatedAt: START + 180_100, receivedAt: START + 180_100 };
+  record.quotes.DOWN = { ...levels(0.43, 0.45), updatedAt: START + 180_100, receivedAt: START + 180_100 };
+  setCandles([candle(1, 'RED'), candle(2, 'GREEN'), candle(3, 'RED')]);
+  bot.processClosedCandles(START + 180_100);
 
+  assert.equal(upPosition.status, 'SIGNAL_SOLD');
+  assert.ok(upPosition.realizedPnl < 0);
   assert.ok(bot.orders.some((order) => order.action === 'SELL_TAKER' && order.side === 'UP'));
   assert.ok(bot.orders.some((order) => order.action === 'BUY_TAKER' && order.side === 'DOWN'));
-  assert.equal(bot.positions.find((position) => position.side === 'UP').status, 'MODEL_SOLD');
-  assert.ok(bot.positions.find((position) => position.side === 'UP').realizedPnl > 0);
-  assert.equal(bot.positions.find((position) => position.side === 'UP').exitPrice, 0.79);
-  assert.equal(bot.positions.find((position) => position.side === 'DOWN').status, 'OPEN');
+  assert.equal(bot.positions.find((position) => position.side === 'DOWN').shares, 200);
   assert.deepEqual(
     bot.latestReview.actions.map((action) => `${action.type}_${action.side}`).sort(),
     ['BUY_DOWN', 'SELL_UP'],
@@ -198,75 +167,91 @@ test('a candle reversal review can sell UP while independently opening DOWN', ()
   bot.stop();
 });
 
-test('a losing UP position stays open while a qualifying DOWN buy enters independently', () => {
-  const { bot, record, setNow, setFeed } = makeBot();
-  bot.evaluateOnSchedule(START + 1_000);
-  setNow(START + 16_000);
-  setFeed(makeFeed(START + 16_000, false));
-  record.quotes.UP = { ...levels(0.45, 0.46), updatedAt: START + 16_000, receivedAt: START + 16_000 };
-  record.quotes.DOWN = { ...levels(0.34, 0.35), updatedAt: START + 16_000, receivedAt: START + 16_000 };
-  bot.evaluateOnSchedule(START + 16_000);
+test('buy sweep records only visible depth when fewer than 200 shares are available', () => {
+  const { bot, setCandles } = setup({ upAskSize: 75 });
+  setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
+  bot.processClosedCandles(START + 120_100);
+  assert.equal(bot.orders[0].requestedShares, 200);
+  assert.equal(bot.orders[0].filledShares, 75);
+  assert.equal(bot.orders[0].status, 'PARTIALLY_FILLED');
+  assert.equal(bot.positions[0].shares, 75);
+  bot.stop();
+});
 
-  assert.equal(bot.orders.some((order) => order.action === 'SELL_TAKER' && order.side === 'UP'), false);
+test('a valid color-change signal waits briefly for a fresh CLOB quote instead of being lost immediately', () => {
+  const { bot, record, setNow, setCandles } = setup();
+  record.quotes.UP.updatedAt -= 3_000;
+  record.quotes.UP.receivedAt -= 3_000;
+  setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
+  bot.processClosedCandles(START + 120_100);
+  assert.equal(bot.orders.length, 0);
+  assert.equal(bot.pendingSignals.length, 1);
+  assert.match(bot.latestReview.signalReason, /Waiting briefly/);
+
+  setNow(START + 120_600);
+  bot.processClosedCandles(START + 120_600);
+  assert.equal(bot.pendingSignals.length, 0);
+  assert.equal(bot.orders.length, 1);
+  assert.equal(bot.orders[0].side, 'UP');
+  bot.stop();
+});
+
+test('a failed flip sale does not block the opposite-side buy', () => {
+  const { bot, record, setNow, setCandles } = setup();
+  setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
+  bot.processClosedCandles(START + 120_100);
+  bot.sellPositions = () => { throw new Error('simulated sell error'); };
+
+  setNow(START + 180_100);
+  setCandles([candle(1, 'RED'), candle(2, 'GREEN'), candle(3, 'RED')]);
+  bot.processClosedCandles(START + 180_100);
   assert.ok(bot.orders.some((order) => order.action === 'BUY_TAKER' && order.side === 'DOWN'));
-  assert.equal(bot.positions.find((position) => position.side === 'UP').status, 'OPEN');
-  assert.equal(bot.positions.find((position) => position.side === 'DOWN').status, 'OPEN');
-  assert.equal(bot.latestReview.questions.sellUP.answer, 'NO');
-  assert.match(bot.latestReview.questions.sellUP.reason, /realize an estimated net loss/i);
+  assert.ok(bot.events.some((event) => event.type === 'FLIP_SELL_FAILED'));
   bot.stop();
 });
 
-test('partial model exits retain remaining shares and account for all fees through resolution', () => {
-  const { bot, record } = makeBot();
-  bot.evaluateOnSchedule(START + 1_000);
-  const position = bot.positions.find((item) => item.side === 'UP');
-  const entryCost = position.totalCost;
-  const entryFees = position.fees;
-  const sellResult = sweep([{ price: 0.79, size: 20 }], 50, 0.07, 'SELL');
+test('same-color and minute-5 closes do not add orders', () => {
+  const { bot, setNow, setCandles } = setup();
+  setCandles([candle(1, 'GREEN'), candle(2, 'GREEN')]);
+  bot.processClosedCandles(START + 120_100);
+  assert.equal(bot.orders.length, 0);
 
-  bot.sellPositions(record, 'UP', sellResult, START + 2_000, {
-    feeRate: 0.07,
-    feeSource: 'test',
-    estimatedProbability: 0.1,
-  }, -0.5);
-
-  assert.equal(position.status, 'OPEN');
-  assert.equal(position.shares, 30);
-  assert.ok(position.partialRealizedPnl > 3);
-  assert.ok(position.exitFees > 0);
-  assert.ok(Math.abs(position.totalCost - entryCost * 0.6) < 1e-8);
-  assert.ok(Math.abs(position.fees - entryFees * 0.6) < 1e-8);
-
-  bot.expireMarket(record, START + 300_000);
-  bot.settleMarket(position.marketId, 'UP', START + 301_000);
-  assert.equal(position.status, 'RESOLVED_WIN');
-  assert.ok(position.realizedPnl > 15);
-  const completed = bot.snapshot().modelEngine.tradeHistory[0];
-  assert.equal(completed.shares, 50);
-  assert.equal(completed.entryPrice, 0.56);
-  assert.ok(Math.abs(completed.exitPrice - 0.916) < 1e-8);
-  assert.equal(completed.result, 'WIN');
-  assert.ok(
-    Math.abs(bot.accountSnapshot().totalFees - (entryFees + position.exitFees)) < 1e-4,
-    `total ${bot.accountSnapshot().totalFees}; expected ${entryFees + position.exitFees}; exit ${position.exitFees}`,
-  );
+  setNow(START + 300_000);
+  setCandles([
+    candle(1, 'GREEN'), candle(2, 'GREEN'), candle(3, 'RED'),
+    candle(4, 'RED'), candle(5, 'GREEN'),
+  ]);
+  bot.processClosedCandles(START + 299_999);
+  assert.equal(bot.orders.length, 0);
   bot.stop();
 });
 
-test('model strategy ledger round-trips without restoring old cross-pair strategy state', () => {
-  const { bot } = makeBot();
-  bot.evaluateOnSchedule(START + 1_000);
+test('ledger stores the new strategy and processed candles to prevent duplicate entries after restart', () => {
+  const { bot, setCandles } = setup();
+  setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
+  bot.processClosedCandles(START + 120_100);
   const ledger = bot.exportLedger();
-  assert.equal(ledger.strategyId, DecisionModelBot.STRATEGY.id);
-  assert.equal(ledger.snapshot.strategy.id, DecisionModelBot.STRATEGY.id);
-  assert.equal(ledger.snapshot.positions[0].shares, 50);
+  assert.equal(ledger.strategyId, MinuteColorBot.STRATEGY.id);
+  assert.equal(ledger.snapshot.strategy.id, MinuteColorBot.STRATEGY.id);
+  assert.equal(ledger.snapshot.positions[0].shares, 200);
 
-  const restored = makeBot().bot;
+  const restored = setup().bot;
   restored.restoreLedger(ledger);
-  assert.equal(restored.positions.length, 1);
-  assert.equal(restored.positions[0].shares, 50);
-  assert.equal(restored.reviews.length, 1);
-  assert.equal(restored.lastDecisionAt, START + 1_000);
+  restored.running = true;
+  const restoredRecord = restored.records.get('BTC:5m');
+  restoredRecord.targetStart = START;
+  restoredRecord.market = { ...bot.records.get('BTC:5m').market };
+  restoredRecord.marketStatus = 'OPEN';
+  restored.binanceFeed.snapshot = () => ({
+    status: 'CONNECTED',
+    historyStatus: 'READY',
+    messageAgeMs: 0,
+    closedCandles: [candle(1, 'RED'), candle(2, 'GREEN')],
+    candleCounts: { '1m': 2 },
+  });
+  restored.websocket.status = 'CONNECTED';
+  restored.processClosedCandles(START + 120_200);
+  assert.equal(restored.orders.filter((order) => order.action === 'BUY_TAKER').length, 1);
   bot.stop();
   restored.stop();
 });

@@ -44,22 +44,21 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard serves the BTC 5-minute explainable model', async t => {
+test('dashboard serves the BTC 5-minute color-change strategy', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const response = await fetch(`http://127.0.0.1:${server.address().port}/`);
   const html = await response.text();
   assert.equal(response.status, 200);
-  assert.match(html, /BTC Decision Model/);
-  assert.match(html, /Current BTC 5-minute window/);
-  assert.match(html, /Why the model acted/);
-  assert.match(html, /Recent 15-second reviews/);
-  assert.match(html, /50-share visible-ask sweep/);
-  assert.match(html, /No fixed TP or SL/);
+  assert.match(html, /BTC Candle Bot/);
+  assert.match(html, /Current BTC market/);
+  assert.match(html, /Five one-minute candles/);
+  assert.match(html, /200 shares on the current candle/);
+  assert.match(html, /Minute 5 has no new signal/);
   assert.match(html, /official resolution/);
   assert.match(html, /PAPER ONLY/);
-  assert.match(html, /@media \(max-width: 680px\)/);
+  assert.match(html, /@media \(max-width: 360px\)/);
 });
 
 test('unknown dashboard paths still return 404', async t => {

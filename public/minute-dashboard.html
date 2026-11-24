@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#091522">
+  <title>BTC 5m Candle Bot · Paper</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #08131f;
+      --panel: #122236;
+      --panel-2: #172b42;
+      --line: #29445d;
+      --text: #f2f7ff;
+      --muted: #a5b8cc;
+      --green: #43e0aa;
+      --green-bg: #103a35;
+      --red: #ff778f;
+      --red-bg: #422432;
+      --blue: #8bc7ff;
+      --gold: #ffd777;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; color: var(--text);
+      background: radial-gradient(800px 400px at 0 -10%, #1a4665 0, transparent 66%), var(--bg);
+    }
+    .shell { width: min(760px, 100%); margin: 0 auto; padding: 12px 12px 34px; }
+    .top, .hero-line, .section-head, .position-head, .price-head, .order-head, .trade-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    }
+    .top { margin: 3px 1px 12px; }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .brand-icon {
+      display: grid; place-items: center; width: 38px; height: 38px; border-radius: 13px;
+      color: #07131d; font-size: 18px; font-weight: 1000;
+      background: linear-gradient(140deg, #5ce2b1, #84caff);
+    }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 16px; letter-spacing: -.03em; }
+    .sub { margin-top: 2px; color: var(--muted); font-size: 11px; }
+    .status {
+      display: inline-flex; align-items: center; gap: 7px; padding: 7px 9px;
+      border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
+      font-size: 9px; font-weight: 900; letter-spacing: .04em; white-space: nowrap;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gold); }
+    .status.good .dot { background: var(--green); box-shadow: 0 0 11px #43e0aa88; }
+    .status.bad .dot { background: var(--red); }
+    .hero, .panel, .metric, .price-card, .position-card {
+      border: 1px solid var(--line); border-radius: 17px; background: var(--panel);
+    }
+    .hero {
+      padding: 16px; border-color: #37647b;
+      background: linear-gradient(135deg, #143849, #152a40 75%);
+    }
+    .hero-line { align-items: flex-start; }
+    .eyebrow { color: #a4f1d5; font-size: 9px; font-weight: 900; letter-spacing: .11em; text-transform: uppercase; }
+    .hero h2 { margin-top: 5px; font-size: 19px; line-height: 1.2; }
+    .clock { min-width: 74px; padding: 8px; border: 1px solid #ffffff22; border-radius: 13px; text-align: center; background: #07152266; }
+    .clock strong { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+    .clock small { color: var(--muted); font-size: 8px; text-transform: uppercase; letter-spacing: .1em; }
+    .meta { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+    .pill { padding: 6px 8px; border-radius: 9px; background: #06152188; color: #d2e0ef; font-size: 10px; }
+    .metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 9px 0; }
+    .metric { min-width: 0; padding: 11px 12px; }
+    .metric span, .label { color: var(--muted); font-size: 9px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+    .metric strong { display: block; margin-top: 4px; font-size: 18px; font-variant-numeric: tabular-nums; }
+    .panel { padding: 13px; margin-top: 10px; }
+    .section-head { align-items: flex-start; margin-bottom: 10px; }
+    .section-head h2 { font-size: 14px; }
+    .section-head p { margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.4; }
+    .price-grid, .position-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+    .price-card { padding: 13px; }
+    .price-card.up, .position-card.up { border-color: #267960; background: linear-gradient(150deg, #123b37, #112436); }
+    .price-card.down, .position-card.down { border-color: #774055; background: linear-gradient(150deg, #3b2235, #172235); }
+    .side-tag { font-size: 12px; font-weight: 1000; letter-spacing: .08em; }
+    .price-card.up .side-tag, .price-card.up .main-price, .position-card.up .side-tag { color: var(--green); }
+    .price-card.down .side-tag, .price-card.down .main-price, .position-card.down .side-tag { color: var(--red); }
+    .main-price { margin-top: 7px; font-size: clamp(30px, 9vw, 42px); font-weight: 1000; line-height: 1; letter-spacing: -.055em; font-variant-numeric: tabular-nums; }
+    .quote-label { margin-top: 3px; color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
+    .bid-line { margin-top: 8px; color: #e5eef8; font-size: 15px; font-weight: 850; }
+    .price-note { margin-top: 7px; color: var(--muted); font-size: 9px; }
+    .position-card { min-width: 0; padding: 12px; }
+    .position-head .state { color: var(--muted); font-size: 9px; font-weight: 850; }
+    .position-shares { margin-top: 8px; font-size: 22px; font-weight: 1000; font-variant-numeric: tabular-nums; }
+    .position-details { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 9px; }
+    .detail { padding: 7px; border-radius: 9px; background: #06152288; min-width: 0; }
+    .detail span { display: block; color: var(--muted); font-size: 8px; text-transform: uppercase; letter-spacing: .06em; }
+    .detail strong { display: block; margin-top: 3px; font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .green { color: var(--green) !important; }
+    .red { color: var(--red) !important; }
+    .yellow { color: var(--gold) !important; }
+    .candle-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+    .candle {
+      min-width: 0; padding: 8px 5px; border: 1px solid var(--line); border-radius: 11px;
+      text-align: center; background: #091725;
+    }
+    .candle.green { border-color: #28765e; background: var(--green-bg); }
+    .candle.red { border-color: #754052; background: var(--red-bg); }
+    .candle .minute { display: block; color: var(--muted); font-size: 8px; font-weight: 850; }
+    .candle b { display: block; margin-top: 5px; font-size: 14px; }
+    .candle .range { display: block; margin-top: 4px; color: #c5d4e3; font-size: 8px; line-height: 1.3; overflow-wrap: anywhere; }
+    .candle .state { display: block; margin-top: 4px; color: var(--muted); font-size: 7px; text-transform: uppercase; }
+    .list { display: grid; gap: 7px; }
+    .item { padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: #0a1827; }
+    .order-head strong, .trade-head strong { font-size: 11px; }
+    .order-head time, .trade-head time { color: var(--muted); font-size: 9px; }
+    .item p { margin-top: 5px; color: #c3d2e1; font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
+    .pnl { font-weight: 950; }
+    .empty { padding: 14px 10px; border: 1px dashed var(--line); border-radius: 11px; color: var(--muted); font-size: 11px; text-align: center; }
+    details { border: 1px solid var(--line); border-radius: 12px; background: #0a1827; }
+    summary { padding: 11px; cursor: pointer; font-size: 11px; font-weight: 900; }
+    .strategy-copy { padding: 0 12px 12px; color: #c6d5e4; font-size: 10px; line-height: 1.55; }
+    .strategy-copy ul { margin: 0; padding-left: 18px; }
+    .strategy-copy li { margin: 4px 0; }
+    .footer { padding: 13px 4px 0; color: #8294a8; text-align: center; font-size: 9px; line-height: 1.4; }
+    @media (max-width: 360px) {
+      .shell { padding: 9px 8px 28px; }
+      .panel { padding: 10px; }
+      .price-grid, .position-grid { gap: 6px; }
+      .price-card, .position-card { padding: 10px; }
+      .main-price { font-size: 29px; }
+      .candle-strip { gap: 3px; }
+      .candle { padding-inline: 2px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="top">
+      <div class="brand">
+        <div class="brand-icon">₿</div>
+        <div><h1>BTC Candle Bot</h1><p class="sub">5-minute paper trading · 1-minute color changes</p></div>
+      </div>
+      <div id="status" class="status"><i class="dot"></i><span>CONNECTING</span></div>
+    </header>
+
+    <section class="hero">
+      <div class="hero-line">
+        <div><div class="eyebrow">Current BTC market</div><h2 id="marketTitle">Loading the active window…</h2></div>
+        <div class="clock"><strong id="countdown">--:--</strong><small>left</small></div>
+      </div>
+      <div class="meta"><span id="windowState" class="pill">Discovering</span><span id="marketSlug" class="pill">BTC 5m</span></div>
+    </section>
+
+    <section class="metrics" aria-label="Paper account">
+      <div class="metric"><span>Paper equity</span><strong id="equity">—</strong></div>
+      <div class="metric"><span>Cash available</span><strong id="cash">—</strong></div>
+      <div class="metric"><span>Realized P&amp;L</span><strong id="realized">—</strong></div>
+      <div class="metric"><span>Floating P&amp;L</span><strong id="floating">—</strong></div>
+    </section>
+
+    <section class="panel" aria-label="Current Polymarket prices">
+      <div class="section-head"><div><h2>Polymarket prices</h2><p>Large live asks, with bid beneath each price.</p></div><span id="clobStatus" class="pill">CLOB —</span></div>
+      <div class="price-grid">
+        <article class="price-card up">
+          <div class="price-head"><span class="side-tag">UP</span><span class="quote-label">Best ask</span></div>
+          <div id="upAsk" class="main-price">—</div>
+          <div class="bid-line">Bid <span id="upBid">—</span></div>
+          <div id="upQuoteAge" class="price-note">Waiting for quote</div>
+        </article>
+        <article class="price-card down">
+          <div class="price-head"><span class="side-tag">DOWN</span><span class="quote-label">Best ask</span></div>
+          <div id="downAsk" class="main-price">—</div>
+          <div class="bid-line">Bid <span id="downBid">—</span></div>
+          <div id="downQuoteAge" class="price-note">Waiting for quote</div>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel" aria-label="Current positions">
+      <div class="section-head"><div><h2>Positions</h2><p>Flip exits happen when a new candle closes in the opposite colour.</p></div><span id="positionCount" class="pill">0 open</span></div>
+      <div class="position-grid">
+        <article class="position-card up">
+          <div class="position-head"><span class="side-tag">UP</span><span id="upPositionStatus" class="state">EMPTY</span></div>
+          <div id="upShares" class="position-shares">0 shares</div>
+          <div class="position-details">
+            <div class="detail"><span>Average entry</span><strong id="upAvg">—</strong></div>
+            <div class="detail"><span>Position cost</span><strong id="upCost">—</strong></div>
+            <div class="detail"><span>Floating P&amp;L</span><strong id="upPnl">—</strong></div>
+            <div class="detail"><span>Entries</span><strong id="upEntries">0</strong></div>
+          </div>
+        </article>
+        <article class="position-card down">
+          <div class="position-head"><span class="side-tag">DOWN</span><span id="downPositionStatus" class="state">EMPTY</span></div>
+          <div id="downShares" class="position-shares">0 shares</div>
+          <div class="position-details">
+            <div class="detail"><span>Average entry</span><strong id="downAvg">—</strong></div>
+            <div class="detail"><span>Position cost</span><strong id="downCost">—</strong></div>
+            <div class="detail"><span>Floating P&amp;L</span><strong id="downPnl">—</strong></div>
+            <div class="detail"><span>Entries</span><strong id="downEntries">0</strong></div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel" aria-label="Five one-minute candles">
+      <div class="section-head"><div><h2>One-minute candles</h2><p>Minute 1 is the reference. Minute 2–4 color changes trigger trades; minute 5 is skipped.</p></div><span id="binanceStatus" class="pill">Binance —</span></div>
+      <div id="candleStrip" class="candle-strip"></div>
+      <div id="lastSignal" class="price-note">Waiting for a closed one-minute candle.</div>
+    </section>
+
+    <section class="panel" aria-label="Recent trades">
+      <div class="section-head"><div><h2>Recent orders</h2><p>Paper taker sweeps and flip sales, with visible-book fills.</p></div></div>
+      <div id="orderList" class="list"><div class="empty">No orders in this run yet.</div></div>
+    </section>
+
+    <section class="panel" aria-label="Closed trade results">
+      <div class="section-head"><div><h2>Closed results</h2><p>Realized result after modeled fees or official resolution.</p></div></div>
+      <div id="tradeList" class="list"><div class="empty">No completed positions yet.</div></div>
+    </section>
+
+    <section class="panel" aria-label="Recent activity">
+      <div class="section-head"><div><h2>Recent activity</h2><p>Candle checks, buys, sells, and resolution events.</p></div></div>
+      <div id="eventList" class="list"><div class="empty">Waiting for activity.</div></div>
+    </section>
+
+    <section class="panel" aria-label="Strategy details">
+      <details>
+        <summary>Strategy rules</summary>
+        <div id="strategyCopy" class="strategy-copy">
+          <ul>
+            <li>Use Binance BTCUSDT one-minute kline WebSocket candles. No direction or signal comes from Polymarket prices or trade pressure.</li>
+            <li>Minute 1 is reference-only. At the close of minute 2 compare it with minute 1; repeat for minute 3 versus minute 2 and minute 4 versus minute 3.</li>
+            <li>If the two colors match, do nothing. If they differ, request 200 shares on the current candle’s side: green buys UP, red buys DOWN.</li>
+            <li>On an opposite-color trigger, sell the previous side against visible bids, then buy the new side. A sell failure does not block the new-side buy.</li>
+            <li>Minute 5 has no new signal. Any shares still open at the window end are settled by the official market result.</li>
+            <li>Paper-only execution. Simulated taker orders use visible CLOB depth and modeled fees; buy sweeps stop at $0.99 and may be partial.</li>
+          </ul>
+        </div>
+      </details>
+    </section>
+    <footer class="footer">PAPER ONLY · Binance one-minute WebSocket + Polymarket CLOB WebSocket · Simulated results are not a promise of live fills or profit.</footer>
+  </main>
+
+  <script>
+    'use strict';
+    const $ = (id) => document.getElementById(id);
+    const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[c]);
+    const num = (value) => Number.isFinite(Number(value)) ? Number(value) : null;
+    const money = (value, digits = 2) => {
+      const n = num(value);
+      if (n == null) return '—';
+      return `${n < 0 ? '-' : ''}$${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+    };
+    const pnlClass = (value) => Number(value) > 0 ? 'green' : Number(value) < 0 ? 'red' : 'yellow';
+    const time = (value) => num(value) == null ? '—' : new Date(Number(value)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const titleCase = (value) => String(value || '').replaceAll('_', ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+
+    function updateCountdown(market, now) {
+      if (!market || num(market.end) == null) { $('countdown').textContent = '--:--'; return; }
+      const seconds = Math.max(0, Math.ceil((Number(market.end) - Number(now)) / 1000));
+      $('countdown').textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+    }
+    function renderStatus(state) {
+      const ok = state.status === 'RUNNING'
+        && state.modelEngine?.status === 'CONNECTED'
+        && state.websocket?.status === 'CONNECTED';
+      const bad = ['ERROR', 'STOPPED'].includes(state.status);
+      $('status').className = `status ${ok ? 'good' : bad ? 'bad' : ''}`;
+      $('status').querySelector('span').textContent = ok ? 'FEEDS LIVE · PAPER' : bad ? state.status : 'WAITING FOR FEEDS';
+    }
+    function renderQuote(side, quote) {
+      const key = side.toLowerCase();
+      $(`${key}Ask`).textContent = money(quote?.bestAsk, 3);
+      $(`${key}Bid`).textContent = money(quote?.bestBid, 3);
+      $(`${key}QuoteAge`).textContent = quote?.fresh
+        ? `Live · updated ${time(quote.updatedAt)}`
+        : quote?.ageMs != null ? `Quote age ${Math.ceil(Number(quote.ageMs) / 1000)}s` : 'Waiting for quote';
+    }
+    function renderPosition(side, stats) {
+      const key = side.toLowerCase();
+      const shares = Number(stats?.shares || 0);
+      $(`${key}Shares`).textContent = `${shares.toLocaleString(undefined, { maximumFractionDigits: 2 })} shares`;
+      $(`${key}Avg`).textContent = money(stats?.allInAverageCost, 4);
+      $(`${key}Cost`).textContent = money(Number(stats?.totalCost || 0) + Number(stats?.entryFees || 0));
+      $(`${key}Pnl`).textContent = money(stats?.unrealizedPnl);
+      $(`${key}Pnl`).className = pnlClass(stats?.unrealizedPnl);
+      $(`${key}Entries`).textContent = String(stats?.openPositionCount || 0);
+      $(`${key}PositionStatus`).textContent = shares > 0 ? `${stats.openPositionCount} OPEN` : 'EMPTY';
+    }
+    function renderCandles(engine) {
+      const candles = engine?.windowCandles || [];
+      const byMinute = new Map(candles.map((candle) => [Number(candle.minute), candle]));
+      const active = engine?.currentCandle;
+      const html = Array.from({ length: 5 }, (_, index) => {
+        const minute = index + 1;
+        const candle = byMinute.get(minute);
+        if (!candle) {
+          return `<div class="candle"><span class="minute">MIN ${minute}</span><b>—</b><span class="range">Not closed</span><span class="state">${minute === 1 ? 'Reference' : minute === 5 ? 'Skipped' : 'Waiting'}</span></div>`;
+        }
+        const color = String(candle.color || 'UNKNOWN');
+        const tone = color === 'GREEN' ? 'green' : color === 'RED' ? 'red' : '';
+        const forming = candle.closed === false ? 'Forming' : 'Closed';
+        return `<div class="candle ${tone}"><span class="minute">MIN ${minute}</span><b>${esc(color)}</b><span class="range">O ${money(candle.open, 1)}<br>C ${money(candle.close, 1)}</span><span class="state">${forming}</span></div>`;
+      }).join('');
+      $('candleStrip').innerHTML = html;
+      const review = engine?.latestReview;
+      $('lastSignal').textContent = review
+        ? `Latest: minute ${review.candleNumber} ${review.currentColor} after ${review.previousColor} · ${review.signalReason}`
+        : 'Waiting for minute 2 to close.';
+      $('binanceStatus').textContent = `Binance 1m WebSocket · ${engine?.status || '—'} · ${engine?.historyStatus || 'history —'}`;
+    }
+    function renderOrders(orders) {
+      const list = (orders || []).slice(0, 10);
+      $('orderList').innerHTML = list.length ? list.map((order) => {
+        const bought = String(order.action).startsWith('BUY');
+        const outcome = order.status === 'FILLED' ? 'green' : 'yellow';
+        return `<article class="item">
+          <div class="order-head"><strong class="${bought ? 'green' : 'red'}">${esc(titleCase(order.action))} · ${esc(order.side)}</strong><time>${time(order.placedAt)}</time></div>
+          <p>${Number(order.filledShares || 0).toFixed(2)} / ${Number(order.requestedShares || 0).toFixed(0)} shares · average ${money(order.fillPrice, 4)} · fees ${money(order.fees)} · <b class="${outcome}">${esc(titleCase(order.status))}</b></p>
+          <p>Minute ${order.signalCandleNumber || '—'}: ${esc(order.previousColor || '—')} → ${esc(order.signalColor || '—')}</p>
+        </article>`;
+      }).join('') : '<div class="empty">No orders in this run yet.</div>';
+    }
+    function renderTrades(trades) {
+      const list = (trades || []).slice(0, 10);
+      $('tradeList').innerHTML = list.length ? list.map((trade) => {
+        const outcome = Number(trade.realizedPnl) >= 0 ? 'green' : 'red';
+        return `<article class="item">
+          <div class="trade-head"><strong>${esc(trade.side)} · ${esc(titleCase(trade.status))}</strong><time>${time(trade.exitAt)}</time></div>
+          <p>${Number(trade.shares || 0).toFixed(2)} shares · entry ${money(trade.entryPrice, 4)} · exit ${money(trade.exitPrice, 4)} · <b class="pnl ${outcome}">${money(trade.realizedPnl)}</b></p>
+          <p>${esc(titleCase(trade.exitReason))}</p>
+        </article>`;
+      }).join('') : '<div class="empty">No completed positions yet.</div>';
+    }
+    function renderEvents(events) {
+      const list = (events || []).slice(0, 8);
+      $('eventList').innerHTML = list.length ? list.map((event) =>
+        `<article class="item"><div class="order-head"><strong>${esc(titleCase(event.type))}</strong><time>${time(event.time)}</time></div><p>${esc(event.message)}</p></article>`
+      ).join('') : '<div class="empty">Waiting for activity.</div>';
+    }
+    function render(state) {
+      if (!state?.account) return;
+      renderStatus(state);
+      const market = state.markets?.find((item) => item.asset === 'BTC' && item.timeframe === '5m');
+      $('marketTitle').textContent = market?.title || 'BTC 5-minute market loading';
+      $('marketSlug').textContent = market?.slug || 'BTC 5m';
+      $('windowState').textContent = titleCase(market?.marketStatus || state.statusReason || 'Discovering');
+      updateCountdown(market, state.now);
+      $('equity').textContent = money(state.account.equity);
+      $('cash').textContent = money(state.account.availableCash);
+      $('realized').textContent = money(state.account.realizedPnl);
+      $('realized').className = pnlClass(state.account.realizedPnl);
+      $('floating').textContent = money(state.account.unrealizedPnl);
+      $('floating').className = pnlClass(state.account.unrealizedPnl);
+      $('clobStatus').textContent = `CLOB ${state.websocket?.status || '—'}`;
+      for (const side of ['UP', 'DOWN']) renderQuote(side, market?.sideStates?.[side]);
+      const engine = state.modelEngine || {};
+      renderCandles(engine);
+      renderPosition('UP', engine.sides?.UP);
+      renderPosition('DOWN', engine.sides?.DOWN);
+      $('positionCount').textContent = `${state.account.openPositions || 0} open · ${state.account.pendingResolution || 0} resolving`;
+      renderOrders(state.orders);
+      renderTrades(engine.tradeHistory);
+      renderEvents(state.events);
+    }
+    async function refresh() {
+      try {
+        const response = await fetch(`/api/state?ts=${Date.now()}`, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`State request returned ${response.status}`);
+        render(await response.json());
+      } catch {
+        $('status').className = 'status bad';
+        $('status').querySelector('span').textContent = 'RECONNECTING';
+      }
+    }
+    refresh();
+    setInterval(refresh, 1000);
+  </script>
+</body>
+</html>

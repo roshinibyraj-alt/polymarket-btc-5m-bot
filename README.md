@@ -1,36 +1,21 @@
-# BTC 5-minute closed-candle decision-model paper bot
+# BTC 5-minute one-minute color-change paper bot
 
-This service watches the BTC UP/DOWN market on 5-minute windows. It is paper-only: it does not submit real orders or sign with a wallet.
+This service watches BTC UP/DOWN five-minute markets. It uses Binance BTCUSDT one-minute kline WebSocket candles for direction and the Polymarket CLOB WebSocket for paper execution quotes. It is paper-only: it does not submit real orders or sign with a wallet.
 
-## Decision flow
+## Signal flow
 
-Once a window is available, the bot records a review immediately and then every 15 seconds. Each review stores answers and reasons for eight prompts:
+Each active Polymarket five-minute window contains five one-minute BTC candles. Minute 1 is reference-only. At the close of minute 2, the bot compares its color with minute 1; it repeats this for minute 3 versus minute 2 and minute 4 versus minute 3. Matching colors produce no trade. A color change triggers a 200-share buy in the current candle's direction: green buys UP and red buys DOWN. Minute 5 has no signal. Doji candles are neutral and do not trigger a trade.
 
-- Why buy UP? Why not buy UP? Why hold UP? Why sell UP now?
-- Why buy DOWN? Why not buy DOWN? Why hold DOWN? Why sell DOWN now?
+## Paper execution
 
-The directional estimate uses only fully closed Binance candle OHLC:
+- On a reversal, the bot attempts to sell all open shares on the previous side against visible bids, then independently attempts the 200-share buy on the new side. A sell that cannot fully fill does not block the new-side buy; any remainder stays open for resolution.
+- Taker-style paper buys sweep visible asks up to $0.99. The simulator records only visible depth, so an order can be partially filled. Fees use market metadata when available and the configured crypto-fee fallback otherwise.
+- No fixed take-profit or stop-loss applies. Shares still open at expiry are settled using the official Polymarket result, polled every five seconds.
+- Trading pauses if the Binance WebSocket is disconnected/stale or if the required CLOB quote is not fresh. REST candle history only seeds/reconciles closed candles; it does not replace the live WebSocket check for signal execution.
 
-- last 6 closed 5-minute candles: 65% of the score;
-- last 4 closed 15-minute candles: 25%;
-- last 2 closed 1-hour candles: 10%.
+## Dashboard and history
 
-Within each timeframe, more recent candles receive more weight. The score combines the weighted candle return with directional persistence. It does not use Binance buy/sell volume, aggressor flow, live BTC ticks, Polymarket order-flow pressure, or Polymarket midpoint prices to choose UP or DOWN. The BTC tick stream is retained only for display. Polymarket CLOB UP/DOWN quotes and visible book levels are used for entry-price checks, simulated fills, fees, and position valuation.
-
-The transparent weighted score maps to an estimated probability. It has not been statistically calibrated and is not a proven predictive edge.
-
-## Paper orders
-
-- UP and DOWN are independent positions. Either side may be held while the other is bought or sold.
-- A buy decision requests 50 shares. It can add another 50 on any later 15-second review that independently passes the filters.
-- A buy requires complete closed-candle history for all three timeframes, fresh Polymarket CLOB quotes, a full 50-share visible ask sweep at or below $0.99, an estimated side probability of at least 58%, net estimated edge of at least $0.05/share after modeled taker fees, and sufficient paper cash.
-- The simulator records fills only against visible book depth. It does not invent a full fill when the book is shallow. Fees use market metadata when available and the configured crypto-fee fallback otherwise.
-- A position is sold only when the model estimates future payout is at least $0.03/share below its current visible net bid liquidation value. The sale sweeps visible bids; any unfilled shares remain open.
-- There is no fixed take-profit or stop-loss. Shares still open at expiry are sent to official Polymarket resolution; the result is polled every five seconds.
-
-## Dashboard and storage
-
-The mobile-first dashboard shows closed-candle bias for each timeframe, estimated UP/DOWN probabilities, live position shares and floating P&L, all eight model questions and answers, recent 15-second reviews, orders, and activity. Paper ledger storage is controlled by `PAPER_LEDGER_PATH`. A new strategy ID resets any ledger from the replaced strategy; subsequent restarts preserve the new model's history and open positions.
+The mobile dashboard puts large UP/DOWN CLOB prices near the top, followed by paper account totals, current positions, the five one-minute candle colors, and recent orders/results. The strategy explanation is last. `PAPER_LEDGER_PATH` controls paper-history storage. The new strategy ID resets the replaced strategy's ledger on deploy; restarts after this deploy keep this strategy's positions and history.
 
 ## Run
 

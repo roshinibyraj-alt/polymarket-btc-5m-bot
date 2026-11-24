@@ -2,89 +2,83 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const {
-  STRATEGY,
-  candleSummary,
-  directionalEstimate,
-} = require('../model-decision-engine');
-const { sweep } = require('../decision-model-bot')._test;
+const { STRATEGY, candleColor, classifyCandleTransition } = require('../minute-candle-strategy');
 
-function candles(count, direction) {
-  return Array.from({ length: count }, (_, index) => {
-    const open = 100 + index;
-    return {
-      open,
-      close: direction === 'UP' ? open * 1.01 : direction === 'DOWN' ? open * 0.99 : open,
-    };
-  });
+const START = 1_800_000_000_000;
+function candle(minute, color, windowStart = START) {
+  const open = 100;
+  const close = color === 'GREEN' ? 101 : color === 'RED' ? 99 : 100;
+  const start = windowStart + (minute - 1) * 60_000;
+  return { start, closeAt: start + 59_999, open, high: Math.max(open, close), low: Math.min(open, close), close };
 }
 
-test('strategy uses the agreed 6/4/2 closed-candle lookbacks and 65/25/10 weights', () => {
+test('fixed paper strategy is BTC 5m with 200 shares per eligible color-change trigger', () => {
   assert.deepEqual(STRATEGY.assets, ['BTC']);
   assert.deepEqual(STRATEGY.timeframes, ['5m']);
-  assert.deepEqual(STRATEGY.candleLookbacks, { '5m': 6, '15m': 4, '1h': 2 });
-  assert.deepEqual(STRATEGY.candleWeights, { '5m': 0.65, '15m': 0.25, '1h': 0.1 });
-  assert.equal(STRATEGY.reviewIntervalMs, 15_000);
-  assert.equal(STRATEGY.sharesPerBuyDecision, 50);
+  assert.equal(STRATEGY.sharesPerTrigger, 200);
+  assert.equal(STRATEGY.firstSignalCandle, 2);
+  assert.equal(STRATEGY.lastSignalCandle, 4);
+  assert.equal(STRATEGY.execution, 'PAPER ONLY');
 });
 
-test('candle score uses only the requested most recent closed candles', () => {
-  const recent = candleSummary(candles(8, 'UP'), 6, '5m');
-  assert.equal(recent.count, 6);
-  assert.equal(recent.required, 6);
-  assert.equal(recent.bias, 'UP');
-  assert.ok(recent.score > 0);
-});
-
-test('closed candles across all three timeframes determine UP or DOWN probability', () => {
-  const up = directionalEstimate({
-    candleSets: { '5m': candles(6, 'UP'), '15m': candles(4, 'UP'), '1h': candles(2, 'UP') },
+test('minute 2 same color means no signal; a different candle chooses the new candle side', () => {
+  const same = classifyCandleTransition({
+    candle: candle(2, 'GREEN'),
+    previousCandle: candle(1, 'GREEN'),
+    windowStart: START,
   });
-  const down = directionalEstimate({
-    candleSets: { '5m': candles(6, 'DOWN'), '15m': candles(4, 'DOWN'), '1h': candles(2, 'DOWN') },
+  const changedUp = classifyCandleTransition({
+    candle: candle(2, 'GREEN'),
+    previousCandle: candle(1, 'RED'),
+    windowStart: START,
   });
-  assert.equal(up.ready, true);
-  assert.ok(up.probabilityUp > 0.75);
-  assert.ok(up.probabilityDown < 0.25);
-  assert.ok(down.probabilityDown > 0.75);
-  assert.ok(down.probabilityUp < 0.25);
-  assert.equal(up.components.length, 3);
+  const changedDown = classifyCandleTransition({
+    candle: candle(2, 'RED'),
+    previousCandle: candle(1, 'GREEN'),
+    windowStart: START,
+  });
+  assert.equal(same.side, null);
+  assert.equal(changedUp.side, 'UP');
+  assert.equal(changedDown.side, 'DOWN');
 });
 
-test('missing timeframe history prevents a directional estimate', () => {
-  const estimate = directionalEstimate({
-    candleSets: { '5m': candles(6, 'UP'), '15m': candles(3, 'UP'), '1h': candles(2, 'UP') },
-  });
-  assert.equal(estimate.ready, false);
-  assert.equal(estimate.probabilityUp, null);
-  assert.equal(estimate.probabilityDown, null);
+test('minute 1 and minute 5 are excluded; minute 2 through 4 are eligible', () => {
+  for (const minute of [1, 5]) {
+    const result = classifyCandleTransition({
+      candle: candle(minute, 'GREEN'),
+      previousCandle: candle(minute - 1, 'RED'),
+      windowStart: START,
+    });
+    assert.equal(result.eligible, false);
+    assert.equal(result.side, null);
+  }
+  for (const minute of [2, 3, 4]) {
+    const result = classifyCandleTransition({
+      candle: candle(minute, 'GREEN'),
+      previousCandle: candle(minute - 1, 'RED'),
+      windowStart: START,
+    });
+    assert.equal(result.eligible, true);
+    assert.equal(result.side, 'UP');
+  }
 });
 
-test('live ticks, order-flow samples, and Polymarket midpoints cannot change the candle estimate', () => {
-  const candleSets = { '5m': candles(6, 'UP'), '15m': candles(4, 'DOWN'), '1h': candles(2, 'UP') };
-  const first = directionalEstimate({ candleSets, price: 1, upMid: 0.99, downMid: 0.01 });
-  const second = directionalEstimate({
-    candleSets,
-    price: 999_999,
-    upMid: 0.01,
-    downMid: 0.99,
-    pressureSamples: Array(10).fill({ score: -1 }),
+test('doji candles do not create a directional signal', () => {
+  const result = classifyCandleTransition({
+    candle: candle(3, 'DOJI'),
+    previousCandle: candle(2, 'RED'),
+    windowStart: START,
   });
-  assert.equal(first.probabilityUp, second.probabilityUp);
-  assert.deepEqual(first.components.map((component) => component.timeframe), ['5m', '15m', '1h']);
+  assert.equal(candleColor(candle(3, 'DOJI')), 'DOJI');
+  assert.equal(result.side, null);
 });
 
-test('taker sweep accounts for per-level fees and does not invent missing depth', () => {
-  const buy = sweep([
-    { price: 0.4, size: 3 },
-    { price: 0.5, size: 2 },
-  ], 5, 0.07, 'BUY', 0.99);
-  assert.equal(buy.complete, true);
-  assert.equal(buy.filledShares, 5);
-  assert.equal(buy.notional, 2.2);
-  assert.ok(Math.abs(buy.fees - (3 * 0.07 * 0.4 * 0.6 + 2 * 0.07 * 0.5 * 0.5)) < 1e-9);
-  const shallow = sweep([{ price: 0.4, size: 3 }], 5, 0.07, 'BUY', 0.99);
-  assert.equal(shallow.complete, false);
-  assert.equal(shallow.filledShares, 3);
-  assert.equal(shallow.remainingShares, 2);
+test('comparison requires the immediately preceding candle from the same window', () => {
+  const missing = classifyCandleTransition({
+    candle: candle(2, 'GREEN'),
+    previousCandle: candle(1, 'RED', START - 300_000),
+    windowStart: START,
+  });
+  assert.equal(missing.side, null);
+  assert.match(missing.reason, /immediately previous/);
 });
