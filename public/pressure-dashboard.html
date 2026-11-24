@@ -93,11 +93,14 @@
     .section-head { align-items: flex-start; margin-bottom: 14px; }
     .section-head h2 { font-size: 15px; letter-spacing: -.02em; }
     .section-head p { color: var(--muted); font-size: 11px; line-height: 1.5; margin-top: 4px; }
-    .feed-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .feed-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
     .feed-card { padding: 13px; border: 1px solid var(--line); border-radius: 14px; background: #091725; }
     .feed-card strong { display: block; margin-top: 7px; font-size: 19px; font-variant-numeric: tabular-nums; }
     .feed-card small { color: var(--muted); display: block; margin-top: 5px; line-height: 1.45; }
     .feed-card .feed-tag { color: var(--blue); font-weight: 850; font-size: 10px; }
+    .feed-card .feed-bias { font-size: 19px; font-weight: 950; }
+    .feed-card .feed-bias.up { color: var(--green); }
+    .feed-card .feed-bias.down { color: var(--red); }
     .prob-grid, .position-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .prob-card, .side-card { padding: 16px; }
     .prob-card { border: 1px solid var(--line); border-radius: 16px; background: linear-gradient(150deg, #14263b, #0b1725); }
@@ -229,26 +232,35 @@
 
     <section class="panel" aria-label="Live data feeds">
       <div class="section-head">
-        <div><h2>Live inputs</h2><p>Orders pause when required Binance or Polymarket data is stale.</p></div>
+        <div><h2>Closed-candle context</h2><p>Previous completed BTC candles choose direction. CLOB prices are used for order pricing and position value only.</p></div>
         <span id="nextReview" class="chip">Next review —</span>
       </div>
       <div class="feed-grid">
         <div class="feed-card">
-          <span class="feed-tag">BINANCE BTCUSDT</span>
+          <span class="feed-tag">LIVE BTC SPOT · DISPLAY ONLY</span>
           <strong id="btcPrice">$—</strong>
-          <small id="btcContext">Waiting for a live trade tick</small>
+          <small id="btcContext">Not used in the directional score</small>
         </div>
         <div class="feed-card">
-          <span class="feed-tag">BUY / SELL PRESSURE</span>
-          <strong id="pressureValue">—</strong>
-          <small id="pressureContext">Collecting one-second samples</small>
+          <span class="feed-tag">5-MINUTE LOOKBACK · 6 CLOSED</span>
+          <strong class="feed-bias" id="candle5mBias">WAITING</strong>
+          <small id="candle5mDetail">Loading candle history</small>
+        </div>
+        <div class="feed-card">
+          <span class="feed-tag">15-MINUTE LOOKBACK · 4 CLOSED</span>
+          <strong class="feed-bias" id="candle15mBias">WAITING</strong>
+          <small id="candle15mDetail">Loading candle history</small>
+        </div>
+        <div class="feed-card">
+          <span class="feed-tag">1-HOUR LOOKBACK · 2 CLOSED</span>
+          <strong class="feed-bias" id="candle1hBias">WAITING</strong>
+          <small id="candle1hDetail">Loading candle history</small>
         </div>
       </div>
       <div class="data-strip">
-        <span class="data-pill" id="binanceStatus">Binance: —</span>
+        <span class="data-pill" id="binanceStatus">Binance candles: —</span>
         <span class="data-pill" id="clobStatus">Polymarket CLOB: —</span>
-        <span class="data-pill" id="candlesStatus">Closed candles: —</span>
-        <span class="data-pill" id="tickAge">Tick age: —</span>
+        <span class="data-pill" id="candlesStatus">Candle history: —</span>
       </div>
     </section>
 
@@ -351,9 +363,10 @@
       <div class="section-head"><div><h2 id="strategyHeading">How this paper strategy works</h2><p>These rules are visible so each decision can be audited.</p></div></div>
       <div id="strategyDetails" class="details">
         <ul>
-          <li>BTC 5-minute windows only. Binance spot and the Polymarket CLOB provide live inputs.</li>
-          <li>Sample aggressive buy/sell pressure once per second; evaluate every 15 seconds.</li>
-          <li>Estimate resolution direction from BTC’s move from the window open, recent pressure, closed candles, and Polymarket midpoints.</li>
+          <li>BTC 5-minute windows only. Review the model every 15 seconds.</li>
+          <li>Estimate direction from the last 6 closed 5m candles (65% weight), 4 closed 15m candles (25%), and 2 closed 1h candles (10%).</li>
+          <li>Only candle OHLC is used for direction. No Polymarket order-flow pressure, buy/sell volume, or live BTC tick is part of the directional score.</li>
+          <li>Polymarket CLOB UP/DOWN prices and visible book levels are used for order pricing, simulated execution, fees, and position valuation—not to decide direction.</li>
           <li>Use a 50-share visible-ask sweep only when the estimate is at least 58%, full-size depth is available, and estimated net edge after taker fees is at least $0.05/share.</li>
           <li>UP and DOWN positions are independent. The model may add 50 shares on each qualifying review.</li>
           <li>Never sell at an estimated net loss. A losing side stays open while an opposite side can enter; sell only when the model favors an exit and the visible-bid sweep is profitable after fees. No fixed TP or SL.</li>
@@ -372,6 +385,7 @@
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
     })[character]);
     const usd = (value, digits = 2) => {
+      if (value == null || value === '') return '—';
       const amount = Number(value);
       if (!Number.isFinite(amount)) return '—';
       const formatted = Math.abs(amount).toLocaleString(undefined, {
@@ -382,7 +396,8 @@
     };
     const shares = (value) => Number.isFinite(Number(value))
       ? `${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })} shares` : '—';
-    const pct = (value) => Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(1)}%` : '—';
+    const pct = (value) => value != null && value !== '' && Number.isFinite(Number(value))
+      ? `${(Number(value) * 100).toFixed(1)}%` : '—';
     const clsPnl = (value) => Number(value) > 0 ? 'positive' : Number(value) < 0 ? 'negative' : 'neutral';
     const fmtTime = (value) => Number.isFinite(Number(value))
       ? new Date(Number(value)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
@@ -397,7 +412,7 @@
     function setStatus(state) {
       const status = $('status');
       const ready = state.status === 'RUNNING'
-        && state.modelEngine?.status === 'CONNECTED'
+        && state.modelEngine?.historyStatus === 'READY'
         && state.websocket?.status === 'CONNECTED';
       const bad = state.status === 'ERROR' || state.status === 'STOPPED';
       status.className = `status ${ready ? 'good' : bad ? 'bad' : 'wait'}`;
@@ -515,6 +530,18 @@
         </article>`).join('') : '<div class="empty">No activity yet.</div>';
     }
 
+    function renderCandleContext(timeframe, summary) {
+      const prefix = timeframe === '1h' ? '1h' : timeframe;
+      const bias = summary?.bias || 'WAITING';
+      const score = summary?.score;
+      const weightedReturn = summary?.weightedReturn;
+      $(`candle${prefix}Bias`).textContent = bias;
+      $(`candle${prefix}Bias`).className = `feed-bias ${bias.toLowerCase()}`;
+      $(`candle${prefix}Detail`).textContent = score == null
+        ? `Waiting for ${summary?.required ?? 'required'} closed candles`
+        : `${summary.count}/${summary.required} candles · weighted move ${weightedReturn >= 0 ? '+' : ''}${(weightedReturn * 100).toFixed(3)}% · score ${(score * 100).toFixed(0)}`;
+    }
+
     function render(state) {
       if (!state || !state.account) return;
       setStatus(state);
@@ -532,19 +559,14 @@
       $('floating').className = clsPnl(state.account.unrealizedPnl);
 
       const engine = state.modelEngine || {};
-      const feed = engine.tradeFlow || {};
       $('btcPrice').textContent = usd(engine.price, 2);
-      const candle = engine.currentCandle;
-      const move = candle?.open && engine.price
-        ? (Number(engine.price) / Number(candle.open) - 1) * 100 : null;
-      $('btcContext').textContent = `Window open ${usd(candle?.open, 2)} · ${move == null ? 'move —' : `${move >= 0 ? '+' : ''}${move.toFixed(3)}%`}`;
-      $('pressureValue').textContent = feed.imbalance == null ? 'Collecting…' : `${(Number(feed.imbalance) * 100).toFixed(1)}%`;
-      $('pressureValue').className = feed.imbalance > 0 ? 'positive' : feed.imbalance < 0 ? 'negative' : '';
-      $('pressureContext').textContent = `${feed.buyCount || 0} aggressive buys · ${feed.sellCount || 0} aggressive sells in last 5s`;
-      $('binanceStatus').textContent = `Binance: ${engine.status || '—'}`;
+      $('btcContext').textContent = 'Display only · live spot is not part of the model score';
+      renderCandleContext('5m', engine.candleContexts?.['5m']);
+      renderCandleContext('15m', engine.candleContexts?.['15m']);
+      renderCandleContext('1h', engine.candleContexts?.['1h']);
+      $('binanceStatus').textContent = `Binance candle history: ${engine.historyStatus || '—'}`;
       $('clobStatus').textContent = `Polymarket CLOB: ${state.websocket?.status || '—'}`;
-      $('candlesStatus').textContent = `Closed candles: ${engine.historyStatus || '—'} · ${(engine.closedCandles || []).length}`;
-      $('tickAge').textContent = `Tick age: ${engine.tickAgeMs == null ? '—' : `${engine.tickAgeMs}ms`}`;
+      $('candlesStatus').textContent = `Lookback ready: 5m ${engine.candleCounts?.['5m'] || 0}/6 · 15m ${engine.candleCounts?.['15m'] || 0}/4 · 1h ${engine.candleCounts?.['1h'] || 0}/2`;
       const next = Number(engine.nextReviewAt);
       $('nextReview').textContent = Number.isFinite(next)
         ? next > state.now ? `Next review in ${Math.ceil((next - state.now) / 1000)}s` : 'Review due'
@@ -554,8 +576,8 @@
       if (review) {
         $('upProbability').textContent = pct(review.probabilityUp);
         $('downProbability').textContent = pct(review.probabilityDown);
-        $('upBar').style.width = `${Math.max(2, Math.min(98, review.probabilityUp * 100))}%`;
-        $('downBar').style.width = `${Math.max(2, Math.min(98, review.probabilityDown * 100))}%`;
+        $('upBar').style.width = `${Math.max(2, Math.min(98, Number(review.probabilityUp ?? 0.5) * 100))}%`;
+        $('downBar').style.width = `${Math.max(2, Math.min(98, Number(review.probabilityDown ?? 0.5) * 100))}%`;
         for (const side of ['UP', 'DOWN']) {
           const candidate = review.sides?.[side];
           const prefix = side.toLowerCase();
@@ -564,7 +586,7 @@
           $(`${prefix}Edge`).textContent = `Net edge ${candidate?.netEdgePerShare == null ? '—' : usd(candidate.netEdgePerShare, 3)} / share · ${candidate?.fullSizeVisible ? '50-share depth ready' : 'depth incomplete'}`;
         }
         $('scoreComponents').innerHTML = (review.estimate?.components || []).map((item) =>
-          `<span class="data-pill">${esc(label(item.key))}: ${(Number(item.score) * 100).toFixed(0)}%</span>`).join('');
+          `<span class="data-pill">${esc(item.timeframe)} · ${(Number(item.weight) * 100).toFixed(0)}% weight · ${item.score == null ? 'waiting' : `${(Number(item.score) * 100).toFixed(0)} score`}</span>`).join('');
       } else {
         $('upProbability').textContent = '—%';
         $('downProbability').textContent = '—%';

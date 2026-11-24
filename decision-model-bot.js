@@ -5,7 +5,6 @@ const DipBounceBot = require('./dip-bounce-bot');
 const BinanceTickFeed = require('./binance-tick-feed');
 const {
   STRATEGY,
-  clamp,
   round,
   directionalEstimate,
   buildQuestion,
@@ -13,7 +12,6 @@ const {
 
 const SIDES = ['UP', 'DOWN'];
 const MAX_QUOTE_AGE_MS = 2500;
-const PRESSURE_SAMPLE_HISTORY_MS = 60_000;
 const EPSILON = 1e-8;
 const BASE_STRATEGY_ID = DipBounceBot._test.STRATEGY.id;
 
@@ -125,9 +123,11 @@ class DecisionModelBot extends DipBounceBot {
     });
     this.strategyId = STRATEGY.id;
     this.strategyName = STRATEGY.name;
-    this.binanceFeed = binanceFeed || new BinanceTickFeed({ now, WebSocketImpl });
-    this.pressureSamples = [];
-    this.lastSampleAt = null;
+    this.binanceFeed = binanceFeed || new BinanceTickFeed({
+      now,
+      WebSocketImpl,
+      includeTradeFlow: false,
+    });
     this.lastDecisionAt = null;
     this.lastDecisionWindowStart = null;
     this.latestReview = null;
@@ -154,7 +154,6 @@ class DecisionModelBot extends DipBounceBot {
     if (!this.running || this.status === 'ERROR') return;
     try {
       this.resetForWindowChange();
-      this.samplePressure(now);
       this.evaluateOnSchedule(now);
       this.updateAccountMetrics(now);
     } catch (error) {
@@ -163,12 +162,15 @@ class DecisionModelBot extends DipBounceBot {
       this.log(this.statusReason, { asset: 'BTC', timeframe: '5m', outcome: 'bad', type: 'MODEL_ERROR', now });
       return;
     }
-    if (this.binanceFeed.status !== 'CONNECTED') {
-      this.status = 'WAITING_FOR_FEED';
-      this.statusReason = 'Waiting for both the Binance trade stream and fresh Polymarket books before a model order.';
+    if (this.binanceFeed.historyStatus !== 'READY') {
+      this.status = 'WAITING_FOR_CANDLE_HISTORY';
+      this.statusReason = 'Waiting for 6 closed 5m, 4 closed 15m, and 2 closed 1h BTC candles.';
     } else if (this.websocket.status === 'CONNECTED') {
       this.status = 'RUNNING';
-      this.statusReason = 'BTC 5-minute model active; reviewing both sides every 15 seconds.';
+      this.statusReason = 'BTC closed-candle model active; reviewing both sides every 15 seconds.';
+    } else {
+      this.status = 'WAITING_FOR_CLOB';
+      this.statusReason = 'Candle context is ready; waiting for the Polymarket CLOB connection.';
     }
   }
 
@@ -178,35 +180,6 @@ class DecisionModelBot extends DipBounceBot {
     if (currentStart == null || currentStart === this.lastDecisionWindowStart) return;
     this.lastDecisionWindowStart = currentStart;
     this.lastDecisionAt = null;
-    this.pressureSamples = [];
-    this.lastSampleAt = null;
-  }
-
-  samplePressure(now) {
-    if (this.lastSampleAt != null && now - this.lastSampleAt < STRATEGY.pressureSampleIntervalMs) return;
-    this.lastSampleAt = now;
-    const feed = this.binanceFeed.snapshot();
-    const flow = feed.tradeFlow || {};
-    const enoughTrades = Number(flow.tradeCount) >= config.FLOW_MIN_BINANCE_TRADES;
-    const hasFlow = enoughTrades && Number.isFinite(Number(flow.imbalance));
-    const priceMomentum = Number.isFinite(Number(flow.priceChangePct))
-      ? Math.tanh(Number(flow.priceChangePct) / config.FLOW_PRICE_MOMENTUM_SCALE)
-      : 0;
-    const score = hasFlow
-      ? clamp(Number(flow.imbalance) * 0.70 + priceMomentum * 0.30, -1, 1)
-      : null;
-    this.pressureSamples.push({
-      at: now,
-      price: Number.isFinite(Number(feed.price)) ? Number(feed.price) : null,
-      score: score == null ? null : round(score),
-      tradeCount: Number(flow.tradeCount) || 0,
-      imbalance: Number.isFinite(Number(flow.imbalance)) ? round(flow.imbalance) : null,
-      priceChangePct: Number.isFinite(Number(flow.priceChangePct))
-        ? round(flow.priceChangePct) : null,
-    });
-    this.pressureSamples = this.pressureSamples
-      .filter((sample) => now - sample.at <= PRESSURE_SAMPLE_HISTORY_MS)
-      .slice(-60);
   }
 
   evaluateOnSchedule(now) {
@@ -245,30 +218,15 @@ class DecisionModelBot extends DipBounceBot {
     const remainingSeconds = Math.max(0, (Number(market.end) - now) / 1000);
     const quotes = Object.fromEntries(SIDES.map((side) => [side, record.quotes[side]]));
     const quoteFresh = Object.fromEntries(SIDES.map((side) => [side, quoteIsFresh(quotes[side], now)]));
-    const flowSamples = this.pressureSamples.filter((sample) => now - sample.at <= 10_000);
-    const validPressureCount = flowSamples.filter((sample) => Number.isFinite(Number(sample.score))).length;
-    const currentCandle = feed.currentCandle;
-    const windowOpen = currentCandle
-      && Number(currentCandle.start) === Number(market.start)
-      ? Number(currentCandle.open)
-      : null;
-    const binanceFresh = feed.status === 'CONNECTED'
-      && Number.isFinite(Number(feed.price))
-      && Number.isFinite(Number(feed.tickAgeMs))
-      && Number(feed.tickAgeMs) <= 2000
-      && Number.isFinite(windowOpen)
-      && windowOpen > 0;
     const bothQuotesFresh = quoteFresh.UP && quoteFresh.DOWN;
-    const dataReady = binanceFresh && bothQuotesFresh && validPressureCount >= 3;
+    const candleSets = feed.candleSets || { '5m': feed.candles || [], '15m': [], '1h': [] };
+    const currentCandle = feed.currentCandle;
+    const candleCounts = Object.fromEntries(Object.keys(STRATEGY.candleLookbacks)
+      .map((timeframe) => [timeframe, (candleSets[timeframe] || []).length]));
     const estimate = directionalEstimate({
-      price: feed.price,
-      windowOpen,
-      secondsRemaining: remainingSeconds,
-      candles: feed.candles || [],
-      pressureSamples: flowSamples,
-      upMid: quoteFresh.UP ? quotes.UP.mid : null,
-      downMid: quoteFresh.DOWN ? quotes.DOWN.mid : null,
+      candleSets,
     });
+    const dataReady = estimate.ready && bothQuotesFresh;
     const fee = normalizeFeeRate(market);
     const probabilities = {
       UP: estimate.probabilityUp,
@@ -284,9 +242,12 @@ class DecisionModelBot extends DipBounceBot {
     const questions = {};
     const actions = [];
     const sharedReadyReasons = [];
-    if (!binanceFresh) sharedReadyReasons.push('The Binance BTC trade feed is not current or the window-open price is missing.');
+    for (const [timeframe, required] of Object.entries(STRATEGY.candleLookbacks)) {
+      if (candleCounts[timeframe] < required) {
+        sharedReadyReasons.push(`Waiting for ${required} fully closed BTC ${timeframe} candles; ${candleCounts[timeframe]} are ready.`);
+      }
+    }
     if (!bothQuotesFresh) sharedReadyReasons.push('Both Polymarket CLOB books are not fresh enough for a decision.');
-    if (validPressureCount < 3) sharedReadyReasons.push('Fewer than three valid one-second buyer/seller pressure samples are available.');
     if (remainingSeconds <= STRATEGY.minimumTimeRemainingSeconds) {
       sharedReadyReasons.push('The window has 15 seconds or less remaining; no new entry is started this late.');
     }
@@ -422,12 +383,10 @@ class DecisionModelBot extends DipBounceBot {
       probabilityDown: estimate.probabilityDown,
       combinedScore: estimate.combinedScore,
       estimate: {
-        method: 'Uncalibrated directional score using BTC move vs window open, 10 one-second pressure samples, recent closed candles, and fresh Polymarket midpoints.',
+        method: 'Uncalibrated directional score from fully closed Binance candle OHLC only: six 5m candles, four 15m candles, and two 1h candles, weighted 65% / 25% / 10%. CLOB prices are used for execution and position value, not directional pressure.',
         components: estimate.components,
-        pressure: estimate.pressure,
-        candle: estimate.candle,
-        shortTrend: estimate.shortTrend,
-        impliedUp: estimate.impliedUp,
+        timeframes: estimate.timeframes,
+        candleCounts,
         feeRate: fee.rate,
         feeSource: fee.source,
       },
@@ -439,10 +398,9 @@ class DecisionModelBot extends DipBounceBot {
           price: feed.price,
           tickAt: feed.tickAt,
           tickAgeMs: feed.tickAgeMs,
-          windowOpen,
           currentCandleStart: currentCandle?.start ?? null,
           historyStatus: feed.historyStatus,
-          pressureSamples: validPressureCount,
+          candleCounts,
         },
         clob: {
           status: this.websocket.status,
@@ -739,14 +697,6 @@ class DecisionModelBot extends DipBounceBot {
       };
     super.restoreLedger(compatible);
     const savedModel = originalSnapshot.modelEngine || {};
-    const now = this.now();
-    this.pressureSamples = Array.isArray(savedModel.pressureSamples)
-      ? savedModel.pressureSamples
-        .map((sample) => ({ ...sample, at: Number(sample.at) }))
-        .filter((sample) => Number.isFinite(sample.at) && now - sample.at <= PRESSURE_SAMPLE_HISTORY_MS)
-        .slice(-60)
-      : [];
-    this.lastSampleAt = this.pressureSamples.at(-1)?.at ?? null;
     this.lastDecisionAt = Number.isFinite(Number(savedModel.lastDecisionAt))
       ? Number(savedModel.lastDecisionAt) : null;
     this.lastDecisionWindowStart = Number.isFinite(Number(savedModel.lastDecisionWindowStart))
@@ -765,7 +715,6 @@ class DecisionModelBot extends DipBounceBot {
     snapshot.modelEngine = {
       lastDecisionAt: this.lastDecisionAt,
       lastDecisionWindowStart: this.lastDecisionWindowStart,
-      pressureSamples: this.pressureSamples.slice(-60),
       reviews: this.reviews.slice(0, 100),
     };
     return {
@@ -784,6 +733,7 @@ class DecisionModelBot extends DipBounceBot {
     const currentReview = this.reviews.find((review) =>
       Number(review.windowStart) === Number(market?.start)) || null;
     const feed = this.binanceFeed.snapshot();
+    const candleEstimate = directionalEstimate({ candleSets: feed.candleSets || {} });
     const positions = this.positions
       .filter((position) => position.marketId === String(market?.id || market?.slug)
         && ['OPEN', 'PENDING_RESOLUTION'].includes(position.status));
@@ -810,7 +760,7 @@ class DecisionModelBot extends DipBounceBot {
     state.statusReason = this.statusReason;
     state.strategy = {
       ...STRATEGY,
-      summary: 'At each 15-second review, estimate BTC 5-minute resolution odds from spot-vs-open movement, one-second buyer/seller pressure, recent candles, and Polymarket midpoints. Buy or sell UP and DOWN independently when explicit probability and net-value tests pass.',
+      summary: 'At each 15-second review, estimate the next BTC 5-minute outcome from fully closed 5m, 15m, and 1h candle OHLC. CLOB prices are for execution and position valuation only; no trade pressure or volume signal is used.',
       execution: 'PAPER ONLY — no real orders or wallet signing.',
       entry: 'A qualifying side receives a 50-share visible-ask sweep (up to $0.99) at each review; only displayed depth is simulated and taker fees are included.',
       exit: 'Never sell a side at an estimated net loss. Sell only when the directional model favors exiting and the visible-bid sweep is profitable after fees. A losing side remains open while the opposite side may enter independently; unsold shares go to official resolution at window end.',
@@ -822,12 +772,13 @@ class DecisionModelBot extends DipBounceBot {
       assets: ['BTC'],
       timeframes: ['5m'],
       totalMarkets: 1,
-      marketData: 'BTC spot from Binance aggregate-trade WebSocket; BTC 5-minute market and UP/DOWN books from Polymarket CLOB WebSocket.',
+      marketData: 'BTC fully closed 5m, 15m, and 1h Binance candles drive direction. Polymarket CLOB UP/DOWN prices are used for execution and position valuation only.',
     };
     state.markets = state.markets.filter((item) => item.asset === 'BTC' && item.timeframe === '5m');
     state.account = this.accountSnapshot();
     state.modelEngine = {
-      status: feed.status,
+      status: feed.historyStatus === 'READY' ? 'READY' : feed.status,
+      tickStreamStatus: feed.status,
       error: feed.error,
       historyStatus: feed.historyStatus,
       reconnectCount: feed.reconnectCount,
@@ -836,15 +787,15 @@ class DecisionModelBot extends DipBounceBot {
       tickAgeMs: feed.tickAgeMs,
       currentCandle: feed.currentCandle,
       closedCandles: feed.candles,
-      tradeFlow: feed.tradeFlow,
-      sampleIntervalMs: STRATEGY.pressureSampleIntervalMs,
+      candleSets: feed.candleSets,
+      candleCounts: feed.candleCounts,
+      candleLookbacks: STRATEGY.candleLookbacks,
+      candleWeights: STRATEGY.candleWeights,
+      candleContexts: candleEstimate.timeframes,
       reviewIntervalMs: STRATEGY.reviewIntervalMs,
       nextReviewAt: lastReviewAt == null
         ? (market?.start ?? null)
         : lastReviewAt + STRATEGY.reviewIntervalMs,
-      validPressureSamples: this.pressureSamples
-        .filter((sample) => now - sample.at <= 10_000 && Number.isFinite(Number(sample.score))).length,
-      pressureSamples: this.pressureSamples.slice(-STRATEGY.pressureLookbackSamples),
       latestReview: currentReview,
       recentReviews: this.reviews.slice(0, 30),
       sides: sidePositions,

@@ -7,7 +7,22 @@ const { sweep } = DecisionModelBot._test;
 
 const START = 1_800_000_000_000;
 
+function candles(count, direction) {
+  return Array.from({ length: count }, (_, index) => {
+    const open = 100_000 + index * 100;
+    return {
+      start: START - (count - index) * 300_000,
+      open,
+      high: direction === 'UP' ? open * 1.012 : open * 1.002,
+      low: direction === 'DOWN' ? open * 0.988 : open * 0.998,
+      close: direction === 'UP' ? open * 1.01 : open * 0.99,
+      closeAt: START - (count - index) * 300_000 + 299_999,
+    };
+  });
+}
+
 function makeFeed(now, up = true) {
+  const direction = up ? 'UP' : 'DOWN';
   return {
     status: 'CONNECTED',
     historyStatus: 'READY',
@@ -23,10 +38,13 @@ function makeFeed(now, up = true) {
       close: up ? 101_000 : 99_000,
       openSource: 'BINANCE_KLINE',
     },
-    candles: up
-      ? [{ open: 99_000, close: 99_500 }, { open: 99_500, close: 100_000 }, { open: 100_000, close: 100_500 }]
-      : [{ open: 101_000, close: 100_500 }, { open: 100_500, close: 100_000 }, { open: 100_000, close: 99_500 }],
-    tradeFlow: { tradeCount: 25, buyCount: 17, sellCount: 8, imbalance: up ? 0.6 : -0.6 },
+    candles: candles(6, direction),
+    candleSets: {
+      '5m': candles(6, direction),
+      '15m': candles(4, direction),
+      '1h': candles(2, direction),
+    },
+    candleCounts: { '5m': 6, '15m': 4, '1h': 2 },
     reconnectCount: 0,
   };
 }
@@ -95,16 +113,7 @@ function makeBot({ now = START + 1_000, up = true } = {}) {
     record.quotes.UP = { ...levels(0.55, 0.56), updatedAt: clock, receivedAt: clock };
     record.quotes.DOWN = { ...levels(0.44, 0.45), updatedAt: clock, receivedAt: clock };
   };
-  const updateSamples = (positive) => {
-    bot.pressureSamples = Array.from({ length: 10 }, (_, index) => ({
-      at: clock - (9 - index) * 1000,
-      price: positive ? 100_000 + index * 100 : 100_000 - index * 100,
-      score: positive ? 0.75 : -0.75,
-      tradeCount: 15,
-    }));
-  };
   updateQuotes();
-  updateSamples(up);
 
   return {
     bot,
@@ -117,7 +126,6 @@ function makeBot({ now = START + 1_000, up = true } = {}) {
     setFeed(value) {
       feedState = { ...value };
     },
-    setPressure(positive) { updateSamples(positive); },
   };
 }
 
@@ -152,12 +160,11 @@ test('a qualifying 15-second review buys 50 shares and records all eight answers
 });
 
 test('model review cadence prevents a second buy before 15 seconds', () => {
-  const { bot, setNow, setPressure } = makeBot();
+  const { bot, setNow } = makeBot();
   bot.evaluateOnSchedule(START + 1_000);
   bot.evaluateOnSchedule(START + 10_000);
   assert.equal(bot.reviews.length, 1);
   setNow(START + 16_000);
-  setPressure(true);
   bot.evaluateOnSchedule(START + 16_000);
   assert.equal(bot.reviews.length, 2);
   assert.equal(bot.orders.filter((order) => order.action === 'BUY_TAKER').length, 2);
@@ -165,11 +172,10 @@ test('model review cadence prevents a second buy before 15 seconds', () => {
   bot.stop();
 });
 
-test('a reversal review can sell UP while independently opening DOWN', () => {
-  const { bot, record, setNow, setPressure, setFeed } = makeBot();
+test('a candle reversal review can sell UP while independently opening DOWN', () => {
+  const { bot, record, setNow, setFeed } = makeBot();
   bot.evaluateOnSchedule(START + 1_000);
   setNow(START + 16_000);
-  setPressure(false);
   setFeed(makeFeed(START + 16_000, false));
   record.quotes.UP = { ...levels(0.79, 0.80), updatedAt: START + 16_000, receivedAt: START + 16_000 };
   record.quotes.DOWN = { ...levels(0.34, 0.35), updatedAt: START + 16_000, receivedAt: START + 16_000 };
@@ -189,10 +195,9 @@ test('a reversal review can sell UP while independently opening DOWN', () => {
 });
 
 test('a losing UP position stays open while a qualifying DOWN buy enters independently', () => {
-  const { bot, record, setNow, setPressure, setFeed } = makeBot();
+  const { bot, record, setNow, setFeed } = makeBot();
   bot.evaluateOnSchedule(START + 1_000);
   setNow(START + 16_000);
-  setPressure(false);
   setFeed(makeFeed(START + 16_000, false));
   record.quotes.UP = { ...levels(0.45, 0.46), updatedAt: START + 16_000, receivedAt: START + 16_000 };
   record.quotes.DOWN = { ...levels(0.34, 0.35), updatedAt: START + 16_000, receivedAt: START + 16_000 };

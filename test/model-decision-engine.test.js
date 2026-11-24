@@ -4,50 +4,74 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   STRATEGY,
-  pressureSummary,
+  candleSummary,
   directionalEstimate,
 } = require('../model-decision-engine');
 const { sweep } = require('../decision-model-bot')._test;
 
-test('strategy uses BTC five-minute reviews and adds 50 shares per qualifying buy decision', () => {
+function candles(count, direction) {
+  return Array.from({ length: count }, (_, index) => {
+    const open = 100 + index;
+    return {
+      open,
+      close: direction === 'UP' ? open * 1.01 : direction === 'DOWN' ? open * 0.99 : open,
+    };
+  });
+}
+
+test('strategy uses the agreed 6/4/2 closed-candle lookbacks and 65/25/10 weights', () => {
   assert.deepEqual(STRATEGY.assets, ['BTC']);
   assert.deepEqual(STRATEGY.timeframes, ['5m']);
+  assert.deepEqual(STRATEGY.candleLookbacks, { '5m': 6, '15m': 4, '1h': 2 });
+  assert.deepEqual(STRATEGY.candleWeights, { '5m': 0.65, '15m': 0.25, '1h': 0.1 });
   assert.equal(STRATEGY.reviewIntervalMs, 15_000);
   assert.equal(STRATEGY.sharesPerBuyDecision, 50);
 });
 
-test('pressure summary scores recent direction, persistence, and acceleration', () => {
-  const positive = pressureSummary([0.1, 0.2, 0.3, 0.4, 0.8].map((score, index) => ({ score, at: index })));
-  const negative = pressureSummary([-0.1, -0.2, -0.3, -0.4, -0.8].map((score, index) => ({ score, at: index })));
-  assert.ok(positive.score > 0);
-  assert.ok(negative.score < 0);
-  assert.equal(positive.count, 5);
+test('candle score uses only the requested most recent closed candles', () => {
+  const recent = candleSummary(candles(8, 'UP'), 6, '5m');
+  assert.equal(recent.count, 6);
+  assert.equal(recent.required, 6);
+  assert.equal(recent.bias, 'UP');
+  assert.ok(recent.score > 0);
 });
 
-test('direction estimate combines BTC move, pressure, candles, and market midpoints', () => {
-  const start = 1_800_000_000_000;
-  const candles = [
-    { open: 100, close: 101 },
-    { open: 101, close: 102 },
-    { open: 102, close: 103 },
-  ];
-  const samples = Array.from({ length: 10 }, (_, index) => ({
-    at: start + index * 1000,
-    score: 0.8,
-    price: 103 + index * 0.05,
-  }));
-  const estimate = directionalEstimate({
-    price: 104,
-    windowOpen: 100,
-    secondsRemaining: 120,
-    candles,
-    pressureSamples: samples,
-    upMid: 0.65,
-    downMid: 0.34,
+test('closed candles across all three timeframes determine UP or DOWN probability', () => {
+  const up = directionalEstimate({
+    candleSets: { '5m': candles(6, 'UP'), '15m': candles(4, 'UP'), '1h': candles(2, 'UP') },
   });
-  assert.ok(estimate.probabilityUp > 0.75);
-  assert.ok(estimate.probabilityDown < 0.25);
-  assert.equal(estimate.components.length, 5);
+  const down = directionalEstimate({
+    candleSets: { '5m': candles(6, 'DOWN'), '15m': candles(4, 'DOWN'), '1h': candles(2, 'DOWN') },
+  });
+  assert.equal(up.ready, true);
+  assert.ok(up.probabilityUp > 0.75);
+  assert.ok(up.probabilityDown < 0.25);
+  assert.ok(down.probabilityDown > 0.75);
+  assert.ok(down.probabilityUp < 0.25);
+  assert.equal(up.components.length, 3);
+});
+
+test('missing timeframe history prevents a directional estimate', () => {
+  const estimate = directionalEstimate({
+    candleSets: { '5m': candles(6, 'UP'), '15m': candles(3, 'UP'), '1h': candles(2, 'UP') },
+  });
+  assert.equal(estimate.ready, false);
+  assert.equal(estimate.probabilityUp, null);
+  assert.equal(estimate.probabilityDown, null);
+});
+
+test('live ticks, order-flow samples, and Polymarket midpoints cannot change the candle estimate', () => {
+  const candleSets = { '5m': candles(6, 'UP'), '15m': candles(4, 'DOWN'), '1h': candles(2, 'UP') };
+  const first = directionalEstimate({ candleSets, price: 1, upMid: 0.99, downMid: 0.01 });
+  const second = directionalEstimate({
+    candleSets,
+    price: 999_999,
+    upMid: 0.01,
+    downMid: 0.99,
+    pressureSamples: Array(10).fill({ score: -1 }),
+  });
+  assert.equal(first.probabilityUp, second.probabilityUp);
+  assert.deepEqual(first.components.map((component) => component.timeframe), ['5m', '15m', '1h']);
 });
 
 test('taker sweep accounts for per-level fees and does not invent missing depth', () => {

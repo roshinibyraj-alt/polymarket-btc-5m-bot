@@ -109,7 +109,12 @@ function sampleState(eventMessage = 'Model review completed.') {
       tickAgeMs: 120,
       currentCandle: { open: 68_000 },
       closedCandles: [{ open: 67_900, close: 68_000 }],
-      tradeFlow: { buyCount: 25, sellCount: 15, imbalance: 0.25 },
+      candleCounts: { '5m': 6, '15m': 4, '1h': 2 },
+      candleContexts: {
+        '5m': { bias: 'UP', score: 0.7, weightedReturn: 0.002, count: 6, required: 6 },
+        '15m': { bias: 'MIXED', score: 0.01, weightedReturn: 0.0001, count: 4, required: 4 },
+        '1h': { bias: 'DOWN', score: -0.3, weightedReturn: -0.001, count: 2, required: 2 },
+      },
       reviewIntervalMs: 15_000,
       nextReviewAt: at + 10_000,
       latestReview: {
@@ -123,7 +128,13 @@ function sampleState(eventMessage = 'Model review completed.') {
           UP: { netEdgePerShare: 0.1, fullSizeVisible: true },
           DOWN: { netEdgePerShare: -0.1, fullSizeVisible: true },
         },
-        estimate: { components: [{ key: 'tradePressure', score: 0.6 }] },
+        estimate: {
+          components: [
+            { key: 'closedCandles5m', timeframe: '5m', weight: 0.65, score: 0.7 },
+            { key: 'closedCandles15m', timeframe: '15m', weight: 0.25, score: 0.01 },
+            { key: 'closedCandles1h', timeframe: '1h', weight: 0.1, score: -0.3 },
+          ],
+        },
         questions,
       },
       recentReviews: [],
@@ -189,9 +200,14 @@ test('dashboard shows the BTC model, eight answers, independent positions, and p
   assert.match(elements.get('tradeHistory').innerHTML, /trade-card loss/);
   assert.match(elements.get('tradeHistory').innerHTML, /-\$33\.25/);
   assert.match(elements.get('upShares').textContent, /50 shares/);
+  assert.equal(elements.get('candle5mBias').textContent, 'UP');
+  assert.equal(elements.get('candle15mBias').textContent, 'MIXED');
+  assert.equal(elements.get('candle1hBias').textContent, 'DOWN');
   assert.match(elements.get('orderRows').innerHTML, /Buy Taker/);
+  assert.doesNotMatch(html, /BUY \/ SELL PRESSURE|pressureValue|aggressive buys|aggressive sells/);
   assert.match(html, /@media \(max-width: 680px\)/);
-  assert.match(html, /eight explicit answers per review/);
+  assert.match(html, /6 closed 5m candles/);
+  assert.match(html, /live BTC tick is part of the directional score/);
   assert.match(html, /PAPER ONLY/);
   assert.doesNotMatch(html, /cross-pair|dip-and-bounce|1\.22/);
 });

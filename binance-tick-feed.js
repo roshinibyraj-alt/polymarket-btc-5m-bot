@@ -1,11 +1,22 @@
 'use strict';
 
 const BINANCE_STREAM_URL = 'wss://data-stream.binance.vision/ws/btcusdt@aggTrade';
-const BINANCE_KLINES_URL = 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=8';
+const BINANCE_KLINE_ENDPOINT = 'https://data-api.binance.vision/api/v3/klines';
+const CANDLE_LOOKBACKS = Object.freeze({ '5m': 6, '15m': 4, '1h': 2 });
+const CANDLE_REQUESTS = Object.freeze({
+  '5m': { interval: '5m', limit: 7 },
+  '15m': { interval: '15m', limit: 5 },
+  '1h': { interval: '1h', limit: 3 },
+});
 const WINDOW_MS = 5 * 60 * 1000;
 
 class BinanceTickFeed {
-  constructor({ fetchImpl = globalThis.fetch, WebSocketImpl = globalThis.WebSocket, now = Date.now } = {}) {
+  constructor({
+    fetchImpl = globalThis.fetch,
+    WebSocketImpl = globalThis.WebSocket,
+    now = Date.now,
+    includeTradeFlow = true,
+  } = {}) {
     this.fetchImpl = fetchImpl;
     this.WebSocketImpl = WebSocketImpl;
     this.now = now;
@@ -16,7 +27,9 @@ class BinanceTickFeed {
     this.tickAt = null;
     this.currentCandle = null;
     this.candles = [];
-    this.recentTrades = [];
+    this.candleSets = { '5m': [], '15m': [], '1h': [] };
+    this.includeTradeFlow = includeTradeFlow;
+    this.recentTrades = includeTradeFlow ? [] : null;
     this.socket = null;
     this.retryTimer = null;
     this.historyTimer = null;
@@ -53,25 +66,51 @@ class BinanceTickFeed {
       this.error = 'Fetch is unavailable for Binance candle history.';
       return;
     }
+    const now = this.now();
+    const results = await Promise.all(Object.entries(CANDLE_REQUESTS).map(async ([timeframe, request]) => {
+      const url = new URL(BINANCE_KLINE_ENDPOINT);
+      url.search = new URLSearchParams({
+        symbol: 'BTCUSDT',
+        interval: request.interval,
+        limit: String(request.limit),
+      }).toString();
+      try {
+        const response = await this.fetchImpl(url.toString(), {
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (!response.ok) throw new Error(`Binance ${timeframe} candle request failed (${response.status}).`);
+        const rows = await response.json();
+        const closed = rows.map((row) => ({
+          start: Number(row[0]),
+          open: Number(row[1]),
+          high: Number(row[2]),
+          low: Number(row[3]),
+          close: Number(row[4]),
+          closeAt: Number(row[6]),
+        })).filter((candle) => Number.isFinite(candle.start)
+          && Number.isFinite(candle.closeAt)
+          && candle.closeAt < now
+          && candle.open > 0
+          && candle.close > 0)
+          .slice(-CANDLE_LOOKBACKS[timeframe]);
+        return { timeframe, candles: closed, error: null };
+      } catch (error) {
+        return { timeframe, candles: null, error };
+      }
+    }));
+
+    const errors = [];
+    for (const result of results) {
+      if (result.candles) this.candleSets[result.timeframe] = result.candles;
+      else errors.push(result.error);
+    }
+    this.candles = this.candleSets['5m'];
+    const ready = Object.entries(CANDLE_LOOKBACKS).every(([timeframe, count]) =>
+      this.candleSets[timeframe].length >= count);
     try {
-      const response = await this.fetchImpl(BINANCE_KLINES_URL, {
-        headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!response.ok) throw new Error(`Binance candle request failed (${response.status}).`);
-      const rows = await response.json();
-      const now = this.now();
-      const parsed = rows.map((row) => ({
-        start: Number(row[0]),
-        open: Number(row[1]),
-        high: Number(row[2]),
-        low: Number(row[3]),
-        close: Number(row[4]),
-        closeAt: Number(row[6]),
-      })).filter((candle) => Number.isFinite(candle.start) && candle.open > 0 && candle.close > 0);
       const currentStart = Math.floor(now / WINDOW_MS) * WINDOW_MS;
-      this.candles = parsed.filter((candle) => candle.closeAt < now).slice(-3);
-      const live = parsed.find((candle) => candle.start === currentStart);
+      const live = this.candleSets['5m'].find((candle) => candle.start === currentStart);
       if (live && (!this.currentCandle
         || this.currentCandle.start !== currentStart
         || this.currentCandle.openSource !== 'BINANCE_KLINE')) {
@@ -85,10 +124,11 @@ class BinanceTickFeed {
         };
         if (this.price == null) this.price = live.close;
       }
-      this.historyStatus = this.candles.length === 3 ? 'READY' : 'WAITING';
-      if (this.historyStatus === 'READY') this.error = null;
+      this.historyStatus = ready ? 'READY' : errors.length ? 'ERROR' : 'WAITING';
+      this.error = errors.length
+        ? errors.map((error) => error?.message || String(error)).join(' · ')
+        : ready ? null : 'Waiting for enough fully closed BTC candles across 5m, 15m, and 1h.';
     } catch (error) {
-      this.historyStatus = this.candles.length === 3 ? 'READY' : 'ERROR';
       this.setError(error);
     }
   }
@@ -137,7 +177,7 @@ class BinanceTickFeed {
       this.price = price;
       this.tickAt = tickAt;
       const quantity = Number(message.q);
-      if (quantity > 0 && typeof message.m === 'boolean') {
+      if (this.includeTradeFlow && quantity > 0 && typeof message.m === 'boolean') {
         this.recentTrades.push({
           price,
           quantity,
@@ -182,8 +222,7 @@ class BinanceTickFeed {
 
   tradeFlow(now = this.now()) {
     this.pruneRecentTrades(now);
-    const start = now - 5000;
-    const trades = this.recentTrades.filter((trade) => trade.timestamp >= start);
+    const trades = this.recentTrades.filter((trade) => trade.timestamp >= now - 5000);
     const buyNotional = trades
       .filter((trade) => trade.aggressor === 'BUY')
       .reduce((sum, trade) => sum + trade.notional, 0);
@@ -222,7 +261,11 @@ class BinanceTickFeed {
       tickAgeMs,
       currentCandle: this.currentCandle ? { ...this.currentCandle } : null,
       candles: this.candles.map((candle) => ({ ...candle })),
-      tradeFlow: this.tradeFlow(),
+      candleSets: Object.fromEntries(Object.entries(this.candleSets)
+        .map(([timeframe, candles]) => [timeframe, candles.map((candle) => ({ ...candle }))])),
+      candleCounts: Object.fromEntries(Object.entries(this.candleSets)
+        .map(([timeframe, candles]) => [timeframe, candles.length])),
+      ...(this.includeTradeFlow ? { tradeFlow: this.tradeFlow() } : {}),
       reconnectCount: this.reconnectCount,
     };
   }
@@ -230,4 +273,5 @@ class BinanceTickFeed {
 
 module.exports = BinanceTickFeed;
 module.exports.BINANCE_STREAM_URL = BINANCE_STREAM_URL;
-module.exports.BINANCE_KLINES_URL = BINANCE_KLINES_URL;
+module.exports.BINANCE_KLINES_URL = `${BINANCE_KLINE_ENDPOINT}?symbol=BTCUSDT&interval=5m&limit=7`;
+module.exports.CANDLE_LOOKBACKS = CANDLE_LOOKBACKS;
