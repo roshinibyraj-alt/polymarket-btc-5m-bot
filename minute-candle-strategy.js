@@ -1,8 +1,8 @@
 'use strict';
 
 const STRATEGY = Object.freeze({
-  id: 'btc-5m-one-minute-color-flip-200-20261126',
-  name: 'BTC 5-minute one-minute color-flip',
+  id: 'btc-5m-one-minute-color-one-buy-200-entry050-veto065-20261126',
+  name: 'BTC 5-minute one-minute color signal · one buy',
   version: 1,
   assets: ['BTC'],
   timeframes: ['5m'],
@@ -10,9 +10,15 @@ const STRATEGY = Object.freeze({
   firstSignalCandle: 2,
   lastSignalCandle: 4,
   sharesPerTrigger: 200,
-  maximumBuyPrice: 0.99,
+  maximumEntriesPerWindow: 1,
+  maximumEntryAsk: 0.50,
+  oppositeSignalVetoBestBid: 0.65,
+  takeProfitMid: 0.99,
+  stopLossMid: 0.00,
+  maximumBuyPrice: 0.50,
   maximumQuoteAgeMs: 2_500,
   maximumSignalDelayMs: 5_000,
+  signalValidityMs: 60_000,
   execution: 'PAPER ONLY',
 });
 

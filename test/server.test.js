@@ -56,6 +56,10 @@ test('dashboard serves the BTC 5-minute color-change strategy', async t => {
   assert.match(html, /Five one-minute candles/);
   assert.match(html, /200 shares on the current candle/);
   assert.match(html, /Minute 5 has no new signal/);
+  assert.match(html, /best ask must be below \$0\.50/);
+  assert.match(html, /best bid is above \$0\.65/);
+  assert.match(html, /\$0\.99 \(credit \$1\/share\)/);
+  assert.match(html, /\$0\.00 \(credit \$0\/share\)/);
   assert.match(html, /official resolution/);
   assert.match(html, /PAPER ONLY/);
   assert.match(html, /@media \(max-width: 360px\)/);

@@ -16,6 +16,12 @@ test('fixed paper strategy is BTC 5m with 200 shares per eligible color-change t
   assert.deepEqual(STRATEGY.assets, ['BTC']);
   assert.deepEqual(STRATEGY.timeframes, ['5m']);
   assert.equal(STRATEGY.sharesPerTrigger, 200);
+  assert.equal(STRATEGY.maximumEntriesPerWindow, 1);
+  assert.equal(STRATEGY.maximumEntryAsk, 0.50);
+  assert.equal(STRATEGY.oppositeSignalVetoBestBid, 0.65);
+  assert.equal(STRATEGY.signalValidityMs, 60_000);
+  assert.equal(STRATEGY.takeProfitMid, 0.99);
+  assert.equal(STRATEGY.stopLossMid, 0.00);
   assert.equal(STRATEGY.firstSignalCandle, 2);
   assert.equal(STRATEGY.lastSignalCandle, 4);
   assert.equal(STRATEGY.execution, 'PAPER ONLY');

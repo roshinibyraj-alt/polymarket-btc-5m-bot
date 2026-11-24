@@ -159,20 +159,20 @@
         <article class="price-card up">
           <div class="price-head"><span class="side-tag">UP</span><span class="quote-label">Best ask</span></div>
           <div id="upAsk" class="main-price">—</div>
-          <div class="bid-line">Bid <span id="upBid">—</span></div>
+          <div class="bid-line">Bid <span id="upBid">—</span> · Mid <span id="upMid">—</span></div>
           <div id="upQuoteAge" class="price-note">Waiting for quote</div>
         </article>
         <article class="price-card down">
           <div class="price-head"><span class="side-tag">DOWN</span><span class="quote-label">Best ask</span></div>
           <div id="downAsk" class="main-price">—</div>
-          <div class="bid-line">Bid <span id="downBid">—</span></div>
+          <div class="bid-line">Bid <span id="downBid">—</span> · Mid <span id="downMid">—</span></div>
           <div id="downQuoteAge" class="price-note">Waiting for quote</div>
         </article>
       </div>
     </section>
 
     <section class="panel" aria-label="Current positions">
-      <div class="section-head"><div><h2>Positions</h2><p>Flip exits happen when a new candle closes in the opposite colour.</p></div><span id="positionCount" class="pill">0 open</span></div>
+      <div class="section-head"><div><h2>Positions</h2><p>One buy per window; midpoint TP/SL or hold to resolution.</p></div><span id="positionCount" class="pill">0 open</span></div>
       <div class="position-grid">
         <article class="position-card up">
           <div class="position-head"><span class="side-tag">UP</span><span id="upPositionStatus" class="state">EMPTY</span></div>
@@ -204,7 +204,7 @@
     </section>
 
     <section class="panel" aria-label="Recent trades">
-      <div class="section-head"><div><h2>Recent orders</h2><p>Paper taker sweeps and flip sales, with visible-book fills.</p></div></div>
+      <div class="section-head"><div><h2>Recent orders</h2><p>Paper entry sweeps use visible asks strictly below $0.50.</p></div></div>
       <div id="orderList" class="list"><div class="empty">No orders in this run yet.</div></div>
     </section>
 
@@ -226,9 +226,10 @@
             <li>Use Binance BTCUSDT one-minute kline WebSocket candles. No direction or signal comes from Polymarket prices or trade pressure.</li>
             <li>Minute 1 is reference-only. At the close of minute 2 compare it with minute 1; repeat for minute 3 versus minute 2 and minute 4 versus minute 3.</li>
             <li>If the two colors match, do nothing. If they differ, request 200 shares on the current candle’s side: green buys UP, red buys DOWN.</li>
-            <li>On an opposite-color trigger, sell the previous side against visible bids, then buy the new side. A sell failure does not block the new-side buy.</li>
-            <li>Minute 5 has no new signal. Any shares still open at the window end are settled by the official market result.</li>
-            <li>Paper-only execution. Simulated taker orders use visible CLOB depth and modeled fees; buy sweeps stop at $0.99 and may be partial.</li>
+            <li>At most one buy may fill per five-minute window. Only the first valid signal can enter.</li>
+            <li>The signalled side’s best ask must be below $0.50. If it is not yet below $0.50, keep that signal active until the next one-minute candle closes, and buy if the ask falls below $0.50 in that time.</li>
+            <li>After the one buy, ignore later signals. Close when the held-side midpoint reaches $0.99 (credit $1/share) or $0.00 (credit $0/share); otherwise hold to official resolution. If the held side’s best bid is above $0.65, an opposite signal is invalid as well.</li>
+            <li>Minute 5 has no new signal. Paper taker fills use visible CLOB asks strictly below $0.50 and modeled fees; shallow books can partially fill.</li>
           </ul>
         </div>
       </details>
@@ -269,6 +270,7 @@
       const key = side.toLowerCase();
       $(`${key}Ask`).textContent = money(quote?.bestAsk, 3);
       $(`${key}Bid`).textContent = money(quote?.bestBid, 3);
+      $(`${key}Mid`).textContent = money(quote?.mid, 3);
       $(`${key}QuoteAge`).textContent = quote?.fresh
         ? `Live · updated ${time(quote.updatedAt)}`
         : quote?.ageMs != null ? `Quote age ${Math.ceil(Number(quote.ageMs) / 1000)}s` : 'Waiting for quote';

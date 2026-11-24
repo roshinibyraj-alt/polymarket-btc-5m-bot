@@ -27,9 +27,20 @@ test('strategy details are at the bottom after the monitoring sections', () => {
   assert.match(html, /details>/);
 });
 
-test('dashboard keeps the intended fixed-size candle color and flip explanation', () => {
+test('dashboard keeps the fixed-size candle color and single-entry explanation', () => {
   assert.match(html, /200 shares on the current candle’s side/);
-  assert.match(html, /sell the previous side against visible bids/);
+  assert.match(html, /At most one buy may fill per five-minute window/);
   assert.match(html, /Minute 5 has no new signal/);
   assert.match(html, /PAPER ONLY/);
+});
+
+test('dashboard clearly explains the entry gate and opposite-signal veto', () => {
+  assert.match(html, /best ask must be below \$0\.50/);
+  assert.match(html, /best bid is above \$0\.65/);
+  assert.match(html, /ignore later signals/);
+  assert.match(html, /keep that signal active until the next one-minute candle closes/);
+  assert.match(html, /\$0\.99 \(credit \$1\/share\)/);
+  assert.match(html, /\$0\.00 \(credit \$0\/share\)/);
+  assert.match(html, /id="upMid"/);
+  assert.match(html, /id="downMid"/);
 });

@@ -94,7 +94,7 @@ function setup({ now = START + 120_100, upAskSize = 500, downAskSize = 500 } = {
     feeSchedule: { rate: 0.07 },
   };
   record.marketStatus = 'OPEN';
-  record.quotes.UP = { ...levels(0.54, 0.56, upAskSize), updatedAt: clock, receivedAt: clock };
+  record.quotes.UP = { ...levels(0.43, 0.45, upAskSize), updatedAt: clock, receivedAt: clock };
   record.quotes.DOWN = { ...levels(0.43, 0.45, downAskSize), updatedAt: clock, receivedAt: clock };
   bot.websocket.status = 'CONNECTED';
 
@@ -142,7 +142,7 @@ test('same-color minute 2 does not trade; a color change buys 200 shares on the 
   bot.stop();
 });
 
-test('a color flip sells the existing side even at a loss and buys 200 on the new side', () => {
+test('only one buy is allowed and later opposite signals leave the position open', () => {
   const { bot, record, setNow, setCandles } = setup();
   setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
   bot.processClosedCandles(START + 120_100);
@@ -150,20 +150,14 @@ test('a color flip sells the existing side even at a loss and buys 200 on the ne
   assert.equal(upPosition.status, 'OPEN');
 
   setNow(START + 180_100);
-  record.quotes.UP = { ...levels(0.40, 0.41), updatedAt: START + 180_100, receivedAt: START + 180_100 };
+  record.quotes.UP = { ...levels(0.60, 0.61), updatedAt: START + 180_100, receivedAt: START + 180_100 };
   record.quotes.DOWN = { ...levels(0.43, 0.45), updatedAt: START + 180_100, receivedAt: START + 180_100 };
   setCandles([candle(1, 'RED'), candle(2, 'GREEN'), candle(3, 'RED')]);
   bot.processClosedCandles(START + 180_100);
 
-  assert.equal(upPosition.status, 'SIGNAL_SOLD');
-  assert.ok(upPosition.realizedPnl < 0);
-  assert.ok(bot.orders.some((order) => order.action === 'SELL_TAKER' && order.side === 'UP'));
-  assert.ok(bot.orders.some((order) => order.action === 'BUY_TAKER' && order.side === 'DOWN'));
-  assert.equal(bot.positions.find((position) => position.side === 'DOWN').shares, 200);
-  assert.deepEqual(
-    bot.latestReview.actions.map((action) => `${action.type}_${action.side}`).sort(),
-    ['BUY_DOWN', 'SELL_UP'],
-  );
+  assert.equal(upPosition.status, 'OPEN');
+  assert.equal(bot.orders.length, 1);
+  assert.match(bot.latestReview.signalReason, /one buy and the position is held to resolution/);
   bot.stop();
 });
 
@@ -178,7 +172,7 @@ test('buy sweep records only visible depth when fewer than 200 shares are availa
   bot.stop();
 });
 
-test('a valid color-change signal waits briefly for a fresh CLOB quote instead of being lost immediately', () => {
+test('a valid color-change signal waits for a fresh CLOB quote instead of being lost immediately', () => {
   const { bot, record, setNow, setCandles } = setup();
   record.quotes.UP.updatedAt -= 3_000;
   record.quotes.UP.receivedAt -= 3_000;
@@ -186,7 +180,7 @@ test('a valid color-change signal waits briefly for a fresh CLOB quote instead o
   bot.processClosedCandles(START + 120_100);
   assert.equal(bot.orders.length, 0);
   assert.equal(bot.pendingSignals.length, 1);
-  assert.match(bot.latestReview.signalReason, /Waiting briefly/);
+  assert.match(bot.latestReview.signalReason, /remains active until the next one-minute close/);
 
   setNow(START + 120_600);
   bot.processClosedCandles(START + 120_600);
@@ -196,17 +190,20 @@ test('a valid color-change signal waits briefly for a fresh CLOB quote instead o
   bot.stop();
 });
 
-test('a failed flip sale does not block the opposite-side buy', () => {
+test('a pending signal can enter if the ask drops below $0.50 before the next candle close', () => {
   const { bot, record, setNow, setCandles } = setup();
+  record.quotes.UP = { ...levels(0.51, 0.52), updatedAt: START + 120_100, receivedAt: START + 120_100 };
   setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
   bot.processClosedCandles(START + 120_100);
-  bot.sellPositions = () => { throw new Error('simulated sell error'); };
+  assert.equal(bot.orders.length, 0);
+  assert.equal(bot.pendingSignals.length, 1);
 
-  setNow(START + 180_100);
-  setCandles([candle(1, 'RED'), candle(2, 'GREEN'), candle(3, 'RED')]);
-  bot.processClosedCandles(START + 180_100);
-  assert.ok(bot.orders.some((order) => order.action === 'BUY_TAKER' && order.side === 'DOWN'));
-  assert.ok(bot.events.some((event) => event.type === 'FLIP_SELL_FAILED'));
+  setNow(START + 150_000);
+  record.quotes.UP = { ...levels(0.48, 0.49), updatedAt: START + 150_000, receivedAt: START + 150_000 };
+  bot.processClosedCandles(START + 150_000);
+  assert.equal(bot.orders.length, 1);
+  assert.equal(bot.orders[0].side, 'UP');
+  assert.equal(bot.pendingSignals.length, 0);
   bot.stop();
 });
 
@@ -226,6 +223,136 @@ test('same-color and minute-5 closes do not add orders', () => {
   bot.stop();
 });
 
+test('entry requires the signalled side best ask to be strictly below $0.50', () => {
+  const atCap = setup();
+  atCap.record.quotes.UP = {
+    ...levels(0.49, 0.50),
+    updatedAt: START + 120_100,
+    receivedAt: START + 120_100,
+  };
+  atCap.setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
+  atCap.bot.processClosedCandles(START + 120_100);
+  assert.equal(atCap.bot.orders.length, 0);
+  assert.equal(atCap.bot.pendingSignals.length, 1);
+  atCap.bot.stop();
+
+  const belowCap = setup();
+  belowCap.record.quotes.UP = {
+    ...levels(0.47, 0.49),
+    updatedAt: START + 120_100,
+    receivedAt: START + 120_100,
+  };
+  belowCap.setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
+  belowCap.bot.processClosedCandles(START + 120_100);
+  assert.equal(belowCap.bot.orders.length, 1);
+  assert.equal(belowCap.bot.orders[0].side, 'UP');
+  belowCap.bot.stop();
+});
+
+test('opposite signal is vetoed when held-side best bid is above $0.65', () => {
+  const { bot, record, setNow, setCandles } = setup();
+  setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
+  bot.processClosedCandles(START + 120_100);
+  const upPosition = bot.positions.find((position) => position.side === 'UP');
+  assert.equal(upPosition.status, 'OPEN');
+
+  setNow(START + 180_100);
+  record.quotes.UP = { ...levels(0.66, 0.67), updatedAt: START + 180_100, receivedAt: START + 180_100 };
+  record.quotes.DOWN = { ...levels(0.43, 0.45), updatedAt: START + 180_100, receivedAt: START + 180_100 };
+  setCandles([candle(1, 'RED'), candle(2, 'GREEN'), candle(3, 'RED')]);
+  bot.processClosedCandles(START + 180_100);
+
+  assert.equal(upPosition.status, 'OPEN');
+  assert.equal(bot.orders.length, 1);
+  assert.ok(bot.events.some((event) => event.type === 'MINUTE_CANDLE_REVIEW' && /Opposite signal invalid/.test(event.message)));
+  assert.match(bot.latestReview.signalReason, /held UP best bid is \$0\.660, above the \$0\.65 veto/);
+  bot.stop();
+});
+
+test('a held-side best bid exactly at $0.65 does not trigger the veto, but one-entry hold remains', () => {
+  const { bot, record, setNow, setCandles } = setup();
+  setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
+  bot.processClosedCandles(START + 120_100);
+
+  setNow(START + 180_100);
+  record.quotes.UP = { ...levels(0.65, 0.66), updatedAt: START + 180_100, receivedAt: START + 180_100 };
+  record.quotes.DOWN = { ...levels(0.43, 0.45), updatedAt: START + 180_100, receivedAt: START + 180_100 };
+  setCandles([candle(1, 'RED'), candle(2, 'GREEN'), candle(3, 'RED')]);
+  bot.processClosedCandles(START + 180_100);
+  assert.equal(bot.orders.length, 1);
+  assert.match(bot.latestReview.signalReason, /one buy and the position is held to resolution/);
+  bot.stop();
+});
+
+test('TP closes at a $0.99 midpoint and credits $1 per share', () => {
+  const { bot, record, setCandles } = setup();
+  setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
+  bot.processClosedCandles(START + 120_100);
+  const position = bot.positions.find((item) => item.side === 'UP');
+  const quote = {
+    ...levels(0.98, 1.00),
+    mid: 0.99,
+    updatedAt: START + 150_000,
+    receivedAt: START + 150_000,
+  };
+  bot.checkTakeProfits(record, 'UP', quote, START + 150_000);
+  assert.equal(position.status, 'TAKE_PROFIT');
+  assert.equal(position.exitPrice, 0.99);
+  assert.equal(position.exitPayout, 1);
+  assert.equal(position.realizedPnl, 200 - position.totalCost - position.fees);
+  const closed = bot.snapshot(START + 150_000).modelEngine.tradeHistory[0];
+  assert.equal(closed.exitPrice, 0.99);
+  assert.equal(closed.shares, 200);
+  assert.equal(closed.realizedPnl, position.realizedPnl);
+  bot.stop();
+});
+
+test('SL closes at a fresh $0.00 midpoint and credits zero payout', () => {
+  const { bot, record, setCandles } = setup();
+  setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
+  bot.processClosedCandles(START + 120_100);
+  const position = bot.positions.find((item) => item.side === 'UP');
+  const quote = {
+    ...levels(0, 0),
+    mid: 0,
+    updatedAt: START + 150_000,
+    receivedAt: START + 150_000,
+  };
+  bot.checkStopLosses(record, 'UP', quote, START + 150_000);
+  assert.equal(position.status, 'STOP_LOSS');
+  assert.equal(position.exitPrice, 0);
+  assert.equal(position.exitPayout, 0);
+  assert.equal(position.realizedPnl, -position.totalCost - position.fees);
+  bot.stop();
+});
+
+test('an unavailable midpoint does not trigger the zero stop', () => {
+  const { bot, record, setCandles } = setup();
+  setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
+  bot.processClosedCandles(START + 120_100);
+  const position = bot.positions.find((item) => item.side === 'UP');
+  const quote = { ...levels(0, 0.01), mid: null, updatedAt: START + 150_000, receivedAt: START + 150_000 };
+  bot.checkStopLosses(record, 'UP', quote, START + 150_000);
+  assert.equal(position.status, 'OPEN');
+  bot.stop();
+});
+
+test('the 200-share sweep excludes ask levels at $0.50 and above', () => {
+  const { bot, record, setCandles } = setup();
+  record.quotes.UP = {
+    ...levels(0.48, 0.49),
+    asks: [{ price: 0.49, size: 100 }, { price: 0.50, size: 500 }],
+    updatedAt: START + 120_100,
+    receivedAt: START + 120_100,
+  };
+  setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
+  bot.processClosedCandles(START + 120_100);
+  assert.equal(bot.orders[0].requestedShares, 200);
+  assert.equal(bot.orders[0].filledShares, 100);
+  assert.deepEqual(bot.orders[0].fills.map((fill) => fill.price), [0.49]);
+  bot.stop();
+});
+
 test('ledger stores the new strategy and processed candles to prevent duplicate entries after restart', () => {
   const { bot, setCandles } = setup();
   setCandles([candle(1, 'RED'), candle(2, 'GREEN')]);
@@ -234,6 +361,7 @@ test('ledger stores the new strategy and processed candles to prevent duplicate 
   assert.equal(ledger.strategyId, MinuteColorBot.STRATEGY.id);
   assert.equal(ledger.snapshot.strategy.id, MinuteColorBot.STRATEGY.id);
   assert.equal(ledger.snapshot.positions[0].shares, 200);
+  assert.deepEqual(ledger.snapshot.modelEngine.entryTakenWindowStarts, [START]);
 
   const restored = setup().bot;
   restored.restoreLedger(ledger);
