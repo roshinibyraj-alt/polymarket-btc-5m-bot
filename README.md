@@ -1,33 +1,35 @@
-# Invented BTC/ETH 5-minute cross-pair paper bot
+# BTC 5-minute explainable decision-model paper bot
 
-Invented tracks the Polymarket BTC and ETH UP/DOWN markets on 5-minute windows. It is a paper simulator only: it does not submit real orders or use wallet credentials.
+This service watches the BTC UP/DOWN market on 5-minute windows. It is paper-only: it does not submit real orders or sign with a wallet.
 
-## Strategy
+## Decision flow
 
-Four cross-pairs are evaluated independently:
+The bot samples Binance BTCUSDT aggregate trades once per second. Once a window is available, it records a review immediately and then every 15 seconds. Each review stores answers and reasons for eight prompts:
 
-- BTC UP + ETH DOWN
-- ETH UP + BTC DOWN
-- BTC UP + ETH UP
-- BTC DOWN + ETH DOWN
+- Why buy UP? Why not buy UP? Why hold UP? Why sell UP now?
+- Why buy DOWN? Why not buy DOWN? Why hold DOWN? Why sell DOWN now?
 
-For each pair, the bot watches the two fresh best asks from the Polymarket CLOB WebSocket. When their sum is strictly below $0.80, it makes one paper taker entry for that pair in the current 5-minute window. All four pairs can enter independently during the same window.
+The directional estimate combines:
 
-Each leg always requests 10 shares, regardless of previous results. The paper simulator sweeps visible asks up to $0.99, records simulated filled quantities, volume-weighted entry prices, and market-specific modeled taker fees, and cancels any unfilled remainder. A book must match the current market and token, have a post-open timestamp, and be no older than 2 seconds. Displayed ask depth is shared across all pair entries that use the same token and book update, so the same shares are not simulated as filled twice. Entry is skipped while the same cross-pair has an earlier position awaiting official resolution.
+- BTC's current move from the Binance 5-minute window open, scaled by recent volatility and time remaining;
+- buyer/seller aggressor imbalance and its direction, persistence, and acceleration over the latest ten one-second samples;
+- the latest three closed Binance 5-minute candles;
+- fresh UP and DOWN Polymarket midpoint prices.
 
-The four pairs are inverse-linked: BTC UP + ETH UP ↔ BTC DOWN + ETH DOWN, and BTC UP + ETH DOWN ↔ BTC DOWN + ETH UP. That relationship does not trigger a sale: an opposite pair may enter only when its own fresh ask sum is below $0.80, while existing positions remain open.
+This is a transparent weighted score mapped to an estimated probability. It has not been statistically calibrated, and is not a proven predictive edge.
 
-The previous per-side exits are restored: a best bid at or above $0.99 closes the remaining quantity with a modeled $1 payout per share; a fresh empty bid book triggers the $0 stop-loss. Any remaining shares at window end wait for the official result of their exact BTC or ETH market. The bot checks pending markets every 5 seconds and settles only after Polymarket publishes a closed market and a definitive winning outcome. Floating P&L estimates a full exit by sweeping visible bid depth and subtracting the estimated taker sell fee; any shares beyond visible depth are conservatively valued at $0. This estimate does not submit a sell order.
+## Paper orders
 
-Wins and losses do not change sizing. Each pair can have one entry per window. A delayed official result delays the next entry for that same pair, but does not block the other pairs.
+- UP and DOWN are independent positions. Either side may be held while the other is bought or sold.
+- A buy decision requests 50 shares. It can add another 50 on any later 15-second review that independently passes the filters.
+- A buy requires current Binance and Polymarket data, at least three recent valid pressure samples, a full 50-share visible ask sweep at or below $0.99, an estimated side probability of at least 58%, net estimated edge of at least $0.05/share after modeled taker fees, and sufficient paper cash.
+- The simulator records fills only against visible book depth. It does not invent a full fill when the book is shallow. Fees use market metadata when available and the configured crypto-fee fallback otherwise.
+- A position is sold only when the model estimates future payout is at least $0.03/share below its current visible net bid liquidation value. The sale sweeps visible bids; any unfilled shares remain open.
+- There is no fixed take-profit or stop-loss. Shares still open at expiry are sent to official Polymarket resolution; the result is polled every five seconds.
 
-## Data and dashboard
+## Dashboard and storage
 
-Market metadata and official outcomes come from Polymarket Gamma. The live order books use a Polymarket CLOB WebSocket subscription for the active BTC and ETH token IDs. Every new entry stores its market and token IDs, window, source and receive timestamps, both book sides, fee schedule, available simulated ask depth, and exact fill levels. The mobile-first dashboard shows this audit inside each pair leg. Fee rebates are not assumed. This remains a paper model: it does not receive exchange acknowledgements, and its simulated order submission has no modeled network or exchange latency.
-
-## Persistent paper history
-
-On Railway, `PAPER_LEDGER_PATH` should point into the mounted persistent volume. The 10-share reset deployment uses a new strategy ID to start a fresh $3,000 paper ledger; later restarts preserve that new history and any open positions.
+The mobile-first dashboard shows feed health, BTC window prices, estimated UP/DOWN probabilities, live position shares and floating P&L, all eight model questions and answers, recent 15-second reviews, orders, and activity. Paper ledger storage is controlled by `PAPER_LEDGER_PATH`. A new strategy ID resets any ledger from the replaced strategy; subsequent restarts preserve the new model's history and open positions.
 
 ## Run
 

@@ -8,7 +8,7 @@ async function restoreOrResetLedger(bot, savedLedger, strategyId) {
     return 'restored';
   }
   if (savedLedger) {
-    bot.log('Paper history reset for the four-pair strategy without inverse-triggered sells.', {
+    bot.log('Paper history reset because the saved ledger belongs to a different strategy.', {
       type: 'LEDGER_RESET',
       now: Date.now(),
     });
@@ -25,7 +25,7 @@ async function main() {
     return;
   }
 
-  const Bot = require('./cross-pair-bot');
+  const Bot = require('./decision-model-bot');
   const startServer = require('./server');
   const fs = require('node:fs');
   const path = require('node:path');
@@ -41,7 +41,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- BTC/ETH four-pair strategy; no live orders are sent.');
+  console.log('MODE: PAPER ONLY -- BTC 5-minute explainable decision model; no live orders are sent.');
 
   let stopping = false;
   const shutdown = async () => {

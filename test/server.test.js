@@ -44,43 +44,22 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard serves the BTC/ETH 5-minute cross-pair strategy', async t => {
+test('dashboard serves the BTC 5-minute explainable model', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const response = await fetch(`http://127.0.0.1:${server.address().port}/`);
   const html = await response.text();
   assert.equal(response.status, 200);
-  assert.match(html, /Invented/);
-  assert.match(html, /Four independent cross-pair entries/);
-  assert.match(html, /BTC UP \+ ETH DOWN, ETH UP \+ BTC DOWN, BTC UP \+ ETH UP, and BTC DOWN \+ ETH DOWN/);
-  assert.match(html, /Ask-sum entries \+ independent exits/);
-  assert.match(html, /below \$0\.80/);
-  assert.match(html, /Each leg requests 10 shares/);
-  assert.match(html, /same displayed token liquidity cannot be reused/);
-  assert.match(html, /History is saved in persistent Railway storage/);
-  assert.match(html, /capped at \$0\.99/);
-  assert.match(html, /Pairs do not force-sell one another/);
-  assert.match(html, /\$1 per remaining share/);
-  assert.match(html, /empty fresh bid book counts as a \$0 stop/i);
-  assert.doesNotMatch(html, /\$1\.22|1\.20\+|inverse-pair exit/i);
-  assert.match(html, /Existing shares stay open for their own take-profit, stop, or official resolution/);
-  assert.match(html, /Official result checked every/);
-  assert.match(html, /Last pre-resolution mark/);
-  assert.match(html, /pair-grid/);
-  assert.match(html, /Recent trades/);
+  assert.match(html, /BTC Decision Model/);
+  assert.match(html, /Current BTC 5-minute window/);
+  assert.match(html, /Why the model acted/);
+  assert.match(html, /Recent 15-second reviews/);
+  assert.match(html, /50-share visible-ask sweep/);
+  assert.match(html, /No fixed TP or SL/);
   assert.match(html, /official resolution/);
-  assert.match(html, /SIMULATION ONLY/);
-  assert.match(html, /positionList/);
-  assert.match(html, /orderList/);
-  assert.match(html, /eventList/);
-  assert.match(html, /Entry audit/);
-  assert.match(html, /Visible-bid sweep less estimated exit fees/);
-  assert.match(html, /Older fills have no saved book snapshot/);
-  assert.ok(html.indexOf('aria-label="Paper account summary"') < html.indexOf('id="positionsHeading"'));
-  assert.ok(html.indexOf('aria-label="Performance"') < html.indexOf('id="positionsHeading"'));
-  assert.ok(html.indexOf('aria-label="Market activity"') > html.indexOf('aria-labelledby="strategyHeading"'));
-  assert.ok(html.indexOf('aria-label="Market activity"') < html.indexOf('<footer>'));
+  assert.match(html, /PAPER ONLY/);
+  assert.match(html, /@media \(max-width: 680px\)/);
 });
 
 test('unknown dashboard paths still return 404', async t => {

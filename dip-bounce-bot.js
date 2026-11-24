@@ -115,13 +115,17 @@ class DipBounceBot {
     initialCapital = config.DEMO_CAPITAL,
     WebSocketImpl = globalThis.WebSocket,
     ledgerStore = null,
+    assets = ASSETS,
+    timeframes = TIMEFRAMES,
   } = {}) {
     this.marketData = marketData;
     this.now = now;
     this.initialCapital = Number(initialCapital);
     this.cash = this.initialCapital;
     this.WebSocketImpl = WebSocketImpl;
-    this.sizingByAsset = Object.fromEntries(ASSETS.map((asset) => [asset, {
+    this.assets = [...assets];
+    this.timeframes = [...timeframes];
+    this.sizingByAsset = Object.fromEntries(this.assets.map((asset) => [asset, {
       nextShares: config.DIP_BOUNCE_SHARES,
       lastOutcome: null,
       lastUpdatedAt: null,
@@ -132,8 +136,8 @@ class DipBounceBot {
       recoveryResetCount: 0,
     }]));
     this.records = new Map();
-    for (const asset of ASSETS) {
-      for (const timeframe of TIMEFRAMES) {
+    for (const asset of this.assets) {
+      for (const timeframe of this.timeframes) {
         const record = emptyMarketRecord(asset, timeframe);
         this.records.set(record.key, record);
       }
@@ -233,7 +237,7 @@ class DipBounceBot {
     this.positions = Array.isArray(snapshot.positions) ? snapshot.positions.map((position) => ({ ...position })) : [];
     this.orders = Array.isArray(snapshot.orders) ? snapshot.orders.map((order) => ({ ...order })) : [];
     this.events = Array.isArray(snapshot.events) ? snapshot.events.map((event) => ({ ...event })).slice(0, 200) : [];
-    this.sizingByAsset = Object.fromEntries(ASSETS.map((asset) => {
+    this.sizingByAsset = Object.fromEntries(this.assets.map((asset) => {
       const saved = snapshot.sizingByAsset?.[asset] || {};
       const nextShares = Number(saved.nextShares);
       return [asset, {
@@ -1063,15 +1067,15 @@ class DipBounceBot {
       account,
       websocket: { ...this.websocket },
       scanner: {
-        assets: [...ASSETS],
-        timeframes: [...TIMEFRAMES],
+        assets: [...this.assets],
+        timeframes: [...this.timeframes],
         activeMarkets: liveMarkets,
         totalMarkets: this.records.size,
         marketData: 'Polymarket Gamma metadata and CLOB market WebSocket only; no Binance fallback.',
         lastMessageAgeMs: this.websocket.lastMessageAt == null
           ? null : Math.max(0, now - this.websocket.lastMessageAt),
       },
-      sizingByAsset: Object.fromEntries(ASSETS.map((asset) => [asset, { ...this.sizingByAsset[asset] }])),
+      sizingByAsset: Object.fromEntries(this.assets.map((asset) => [asset, { ...this.sizingByAsset[asset] }])),
       ledgerPersistence: {
         enabled: this.ledgerPersistenceState.enabled,
         restored: this.ledgerPersistenceState.restored,
