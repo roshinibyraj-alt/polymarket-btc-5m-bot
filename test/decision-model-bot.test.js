@@ -136,6 +136,10 @@ test('only scans BTC 5-minute markets and keeps UP/DOWN independently', () => {
   assert.deepEqual(state.scanner.assets, ['BTC']);
   assert.deepEqual(state.scanner.timeframes, ['5m']);
   assert.equal(state.strategy.execution, 'PAPER ONLY — no real orders or wallet signing.');
+  assert.deepEqual(Object.keys(state.markets[0].sideStates.UP).sort(), [
+    'ageMs', 'bestAsk', 'bestBid', 'fresh', 'mid', 'updatedAt',
+  ]);
+  assert.equal(Object.hasOwn(state.modelEngine, 'tradeFlow'), false);
   bot.stop();
 });
 

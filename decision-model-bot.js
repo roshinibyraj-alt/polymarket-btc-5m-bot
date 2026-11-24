@@ -197,8 +197,11 @@ class DecisionModelBot extends DipBounceBot {
     const executed = review.actions.length
       ? ` Actions: ${review.actions.map((action) => `${action.type} ${action.side}`).join(', ')}.`
       : ' No order was placed.';
+    const probabilitySummary = review.probabilityUp == null || review.probabilityDown == null
+      ? 'probability unavailable; waiting for required inputs'
+      : `UP ${Math.round(review.probabilityUp * 100)}%, DOWN ${Math.round(review.probabilityDown * 100)}%`;
     this.log(
-      `Model review ${new Date(now).toISOString()}: UP ${Math.round(review.probabilityUp * 100)}%, DOWN ${Math.round(review.probabilityDown * 100)}%.${executed}`,
+      `Model review ${new Date(now).toISOString()}: ${probabilitySummary}.${executed}`,
       {
         asset: 'BTC',
         timeframe: '5m',
@@ -774,7 +777,23 @@ class DecisionModelBot extends DipBounceBot {
       totalMarkets: 1,
       marketData: 'BTC fully closed 5m, 15m, and 1h Binance candles drive direction. Polymarket CLOB UP/DOWN prices are used for execution and position valuation only.',
     };
-    state.markets = state.markets.filter((item) => item.asset === 'BTC' && item.timeframe === '5m');
+    state.markets = state.markets
+      .filter((item) => item.asset === 'BTC' && item.timeframe === '5m')
+      .map((item) => ({
+        ...item,
+        triggeredSide: null,
+        sideStates: Object.fromEntries(SIDES.map((side) => {
+          const quote = item.sideStates?.[side] || {};
+          return [side, {
+            bestBid: quote.bestBid ?? null,
+            bestAsk: quote.bestAsk ?? null,
+            mid: quote.mid ?? null,
+            updatedAt: quote.updatedAt ?? null,
+            ageMs: quote.ageMs ?? null,
+            fresh: Boolean(quote.fresh),
+          }];
+        })),
+      }));
     state.account = this.accountSnapshot();
     state.modelEngine = {
       status: feed.historyStatus === 'READY' ? 'READY' : feed.status,
