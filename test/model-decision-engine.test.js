@@ -12,13 +12,13 @@ function candle(minute, color, windowStart = START) {
   return { start, closeAt: start + 59_999, open, high: Math.max(open, close), low: Math.min(open, close), close };
 }
 
-test('fixed paper strategy is BTC 5m with 200 shares per eligible color-change trigger', () => {
+test('fixed paper strategy is BTC 5m with one 200-share entry per eligible candle', () => {
   assert.deepEqual(STRATEGY.assets, ['BTC']);
   assert.deepEqual(STRATEGY.timeframes, ['5m']);
   assert.equal(STRATEGY.sharesPerTrigger, 200);
-  assert.equal(STRATEGY.maximumEntriesPerWindow, 1);
-  assert.equal(STRATEGY.maximumEntryAsk, 0.50);
-  assert.equal(STRATEGY.oppositeSignalVetoBestBid, 0.65);
+  assert.equal(STRATEGY.maximumEntriesPerWindow, 3);
+  assert.equal(STRATEGY.maximumEntryAsk, null);
+  assert.equal(STRATEGY.oppositeSignalVetoBestBid, null);
   assert.equal(STRATEGY.signalValidityMs, 60_000);
   assert.equal(STRATEGY.takeProfitMid, 0.99);
   assert.equal(STRATEGY.stopLossMid, 0.00);
@@ -27,32 +27,42 @@ test('fixed paper strategy is BTC 5m with 200 shares per eligible color-change t
   assert.equal(STRATEGY.execution, 'PAPER ONLY');
 });
 
-test('minute 2 same color means no signal; a different candle chooses the new candle side', () => {
-  const same = classifyCandleTransition({
+test('consecutive colors enter their direction; a changed color exits the previous direction', () => {
+  const sameGreen = classifyCandleTransition({
     candle: candle(2, 'GREEN'),
     previousCandle: candle(1, 'GREEN'),
     windowStart: START,
   });
-  const changedUp = classifyCandleTransition({
-    candle: candle(2, 'GREEN'),
+  const sameRed = classifyCandleTransition({
+    candle: candle(2, 'RED'),
     previousCandle: candle(1, 'RED'),
     windowStart: START,
   });
-  const changedDown = classifyCandleTransition({
+  const toRed = classifyCandleTransition({
     candle: candle(2, 'RED'),
     previousCandle: candle(1, 'GREEN'),
     windowStart: START,
   });
-  assert.equal(same.side, null);
-  assert.equal(changedUp.side, 'UP');
-  assert.equal(changedDown.side, 'DOWN');
+  const toGreen = classifyCandleTransition({
+    candle: candle(2, 'GREEN'),
+    previousCandle: candle(1, 'RED'),
+    windowStart: START,
+  });
+  assert.equal(sameGreen.side, 'UP');
+  assert.equal(sameRed.side, 'DOWN');
+  assert.equal(toRed.side, null);
+  assert.equal(toRed.colorChanged, true);
+  assert.equal(toRed.exitSide, 'UP');
+  assert.equal(toGreen.side, null);
+  assert.equal(toGreen.colorChanged, true);
+  assert.equal(toGreen.exitSide, 'DOWN');
 });
 
-test('minute 1 and minute 5 are excluded; minute 2 through 4 are eligible', () => {
+test('minute 1 is reference-only, minute 2 through 4 are eligible, and minute 5 is excluded', () => {
   for (const minute of [1, 5]) {
     const result = classifyCandleTransition({
       candle: candle(minute, 'GREEN'),
-      previousCandle: candle(minute - 1, 'RED'),
+      previousCandle: candle(minute - 1, 'GREEN'),
       windowStart: START,
     });
     assert.equal(result.eligible, false);
@@ -61,7 +71,7 @@ test('minute 1 and minute 5 are excluded; minute 2 through 4 are eligible', () =
   for (const minute of [2, 3, 4]) {
     const result = classifyCandleTransition({
       candle: candle(minute, 'GREEN'),
-      previousCandle: candle(minute - 1, 'RED'),
+      previousCandle: candle(minute - 1, 'GREEN'),
       windowStart: START,
     });
     assert.equal(result.eligible, true);
@@ -69,7 +79,7 @@ test('minute 1 and minute 5 are excluded; minute 2 through 4 are eligible', () =
   }
 });
 
-test('doji candles do not create a directional signal', () => {
+test('doji candles do not create entry or exit signals', () => {
   const result = classifyCandleTransition({
     candle: candle(3, 'DOJI'),
     previousCandle: candle(2, 'RED'),
@@ -77,6 +87,7 @@ test('doji candles do not create a directional signal', () => {
   });
   assert.equal(candleColor(candle(3, 'DOJI')), 'DOJI');
   assert.equal(result.side, null);
+  assert.equal(result.colorChanged, false);
 });
 
 test('comparison requires the immediately preceding candle from the same window', () => {
@@ -86,5 +97,6 @@ test('comparison requires the immediately preceding candle from the same window'
     windowStart: START,
   });
   assert.equal(missing.side, null);
+  assert.equal(missing.colorChanged, false);
   assert.match(missing.reason, /immediately previous/);
 });

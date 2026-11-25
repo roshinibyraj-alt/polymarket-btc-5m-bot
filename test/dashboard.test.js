@@ -14,7 +14,7 @@ test('simple mobile dashboard shows large CLOB UP/DOWN prices and live 1-minute 
   assert.match(html, /font-size: clamp\(30px/);
   assert.match(html, /aria-label="Five one-minute candles"/);
   assert.match(html, /id="candleStrip"/);
-  assert.match(html, /Minute 1 is the reference/);
+  assert.match(html, /Minute 1 is reference-only/);
 });
 
 test('strategy details are at the bottom after the monitoring sections', () => {
@@ -27,20 +27,18 @@ test('strategy details are at the bottom after the monitoring sections', () => {
   assert.match(html, /details>/);
 });
 
-test('dashboard keeps the fixed-size candle color and single-entry explanation', () => {
-  assert.match(html, /200 shares on the current candle’s side/);
-  assert.match(html, /At most one buy may fill per five-minute window/);
-  assert.match(html, /Minute 5 has no new signal/);
+test('dashboard explains same-color entries and opposite-color exits', () => {
+  assert.match(html, /Two green candles in a row buy 200 UP shares/);
+  assert.match(html, /a color change sells the held side/);
+  assert.match(html, /Minute 5 is skipped/);
   assert.match(html, /PAPER ONLY/);
 });
 
-test('dashboard clearly explains the entry gate and opposite-signal veto', () => {
-  assert.match(html, /best ask must be below \$0\.50/);
-  assert.match(html, /best bid is above \$0\.65/);
-  assert.match(html, /ignore later signals/);
-  assert.match(html, /keep that signal active until the next one-minute candle closes/);
-  assert.match(html, /\$0\.99 \(credit \$1\/share\)/);
-  assert.match(html, /\$0\.00 \(credit \$0\/share\)/);
+test('dashboard explains uncapped entry prices and midpoint exits', () => {
+  assert.match(html, /There is no \$0\.50 price cap/);
+  assert.match(html, /Do not buy the new side on that same candle/);
+  assert.match(html, /Midpoint take-profit at \$0\.99 credits \$1\/share/);
+  assert.match(html, /midpoint stop at \$0\.00 credits \$0\/share/);
   assert.match(html, /id="upMid"/);
   assert.match(html, /id="downMid"/);
 });

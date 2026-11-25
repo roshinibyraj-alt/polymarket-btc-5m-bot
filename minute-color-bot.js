@@ -118,7 +118,7 @@ class MinuteColorBot extends DipBounceBot {
     this.binanceFeed = binanceFeed || new BinanceMinuteFeed({ now, WebSocketImpl });
     this.processedCandleKeys = new Set();
     this.pendingSignals = [];
-    this.entryTakenWindowStarts = new Set();
+    this.entryTakenCandleKeys = new Set();
     this.latestReview = null;
     this.reviews = [];
   }
@@ -164,7 +164,7 @@ class MinuteColorBot extends DipBounceBot {
       this.statusReason = 'Binance one-minute candles are live; waiting for Polymarket CLOB quotes to execute signals.';
     } else {
       this.status = 'RUNNING';
-      this.statusReason = 'Monitoring closed BTC one-minute candle colors for minute 2–4 signals.';
+      this.statusReason = 'Monitoring closed BTC one-minute candles for consecutive-color entries and opposite-color exits.';
     }
   }
 
@@ -303,22 +303,10 @@ class MinuteColorBot extends DipBounceBot {
           review.signalReason += ' Signal ignored because this candle was not confirmed by the live Binance WebSocket.';
         } else if (!feedFresh) {
           review.signalReason += ' Signal ignored because the Binance WebSocket is not fresh.';
-        } else if (this.hasEntryInWindow(start)) {
-          const heldPosition = this.positions.find((position) =>
-            Number(position.windowStart) === start && position.status === 'OPEN');
-          const heldQuote = heldPosition ? record.quotes[heldPosition.side] : null;
-          if (heldPosition
-            && transition.side !== heldPosition.side
-            && quoteIsFresh(heldQuote, now)
-            && Number(heldQuote.bestBid) > STRATEGY.oppositeSignalVetoBestBid) {
-            review.signalReason += ` Opposite signal invalid: held ${heldPosition.side} best bid is $${Number(heldQuote.bestBid).toFixed(3)}, above the $${STRATEGY.oppositeSignalVetoBestBid.toFixed(2)} veto.`;
-          } else if (heldPosition && transition.side !== heldPosition.side) {
-            review.signalReason += ' Opposite signal ignored: this window allows one buy and the position is held to resolution.';
-          } else {
-            review.signalReason += ' Signal ignored: this window has already used its one buy.';
-          }
+        } else if (this.hasEntryForCandle(start, Number(candle.start))) {
+          review.signalReason += ' This one-minute candle already used its entry.';
         } else {
-          review.signalReason += ` Signal remains active until the next one-minute close while waiting for best ask below $${STRATEGY.maximumEntryAsk.toFixed(2)}.`;
+          review.signalReason += ` Signal remains active until the next one-minute close while waiting for fresh CLOB quotes.`;
           this.pendingSignals.push({
             reviewId: review.id,
             windowStart: start,
@@ -327,6 +315,16 @@ class MinuteColorBot extends DipBounceBot {
             expiresAt: Number(candle.closeAt) + STRATEGY.signalValidityMs,
           });
         }
+      }
+
+      if ((transition.colorChanged || transition.side)
+        && candle.source === 'BINANCE_1M_WEBSOCKET'
+        && feedFresh
+        && closeDelayMs <= STRATEGY.maximumSignalDelayMs) {
+        const targetSide = transition.color === 'GREEN' ? 'UP' : 'DOWN';
+        const exit = this.exitOppositePositions(record, targetSide, candle, now);
+        review.actions.push(...exit.actions);
+        if (exit.reason) review.signalReason += ` ${exit.reason}`;
       }
 
       this.latestReview = review;
@@ -340,7 +338,7 @@ class MinuteColorBot extends DipBounceBot {
         {
           asset: 'BTC',
           timeframe: '5m',
-          side: transition.side,
+          side: transition.side || (transition.colorChanged ? (transition.color === 'GREEN' ? 'DOWN' : 'UP') : null),
           outcome: review.actions.length ? 'good' : transition.side ? 'bad' : 'neutral',
           type: 'MINUTE_CANDLE_REVIEW',
           now,
@@ -374,8 +372,8 @@ class MinuteColorBot extends DipBounceBot {
         ledgerChanged = true;
         continue;
       }
-      if (this.hasEntryInWindow(pending.windowStart)) {
-        review.signalReason += ' Signal expired because this window already used its one buy.';
+      if (this.hasEntryForCandle(pending.windowStart, Number(pending.candle.start))) {
+        review.signalReason += ' Signal expired because this one-minute candle already used its entry.';
         ledgerChanged = true;
         continue;
       }
@@ -385,24 +383,68 @@ class MinuteColorBot extends DipBounceBot {
         keep.push(pending);
         continue;
       }
-      if (Number(targetQuote.bestAsk) >= STRATEGY.maximumEntryAsk) {
-        keep.push(pending);
-        continue;
-      }
       const hasEligibleAskDepth = (targetQuote.asks || []).some((level) =>
-        Number(level.price) < STRATEGY.maximumEntryAsk && Number(level.size) > 0);
+        Number(level.price) > 0 && Number(level.price) < 1 && Number(level.size) > 0);
       if (!hasEligibleAskDepth) {
         keep.push(pending);
         continue;
       }
       const execution = this.executeColorSignal(record, pending.transition, pending.candle, now);
-      review.actions = execution.actions;
-      review.signalReason = review.signalReason.replace(/ Signal remains active until the next one-minute close while waiting for best ask below \$0\.50\./, ` ${execution.reason}`);
+      review.actions.push(...execution.actions);
+      review.signalReason = review.signalReason.replace(' Signal remains active until the next one-minute close while waiting for fresh CLOB quotes.', ` ${execution.reason}`);
       if (!execution.actions.length && now < Number(pending.expiresAt)) keep.push(pending);
       ledgerChanged = true;
     }
     this.pendingSignals = keep;
     if (ledgerChanged) this.scheduleLedgerSave();
+  }
+
+  exitOppositePositions(record, targetSide, candle, now) {
+    const sellSide = targetSide === 'UP' ? 'DOWN' : 'UP';
+    const marketId = String(record.market?.id || record.market?.slug || '');
+    const openPositions = this.positions.filter((position) =>
+      position.marketId === marketId
+      && position.side === sellSide
+      && position.status === 'OPEN'
+      && Number(position.shares) > EPSILON);
+    if (!openPositions.length) {
+      return { actions: [], reason: '' };
+    }
+
+    const quote = record.quotes[sellSide];
+    if (this.websocket.status !== 'CONNECTED' || !quoteIsFresh(quote, now)) {
+      return {
+        actions: [],
+        reason: `${sellSide} exit is waiting for a fresh CLOB quote; remaining shares stay open.`,
+      };
+    }
+    const requestedShares = openPositions.reduce((sum, position) => sum + Number(position.shares), 0);
+    const fee = normalizeFeeRate(record.market);
+    const sellSweep = sweep(quote.bids, requestedShares, fee.rate, 'SELL', 1);
+    if (!(sellSweep.filledShares > 0)) {
+      return {
+        actions: [],
+        reason: `No visible ${sellSide} bids to fill the signal exit; shares stay open and can retry on a later same-color candle.`,
+      };
+    }
+    const result = this.sellPositions(record, sellSide, sellSweep, now, {
+      feeRate: fee.rate,
+      feeSource: fee.source,
+      signalCandleStart: Number(candle.start),
+      signalCandleNumber: Math.floor((Number(candle.start) - Number(record.market.start)) / STRATEGY.candleIntervalMs) + 1,
+      signalColor: candleColor(candle),
+      previousColor: null,
+    });
+    if (!result) return { actions: [], reason: `${sellSide} exit did not close any shares.` };
+    return {
+      actions: [{
+        type: 'SELL',
+        side: sellSide,
+        orderId: result.id,
+        shares: result.filledShares,
+      }],
+      reason: `Opposite-color exit sold ${result.filledShares.toFixed(2)} of ${requestedShares.toFixed(2)} ${sellSide} shares; any remainder stays open.`,
+    };
   }
 
   executeColorSignal(record, transition, candle, now) {
@@ -419,8 +461,8 @@ class MinuteColorBot extends DipBounceBot {
     };
     const actions = [];
     const windowStart = Number(record.market.start);
-    if (this.hasEntryInWindow(windowStart)) {
-      return { actions, reason: 'Signal ignored because this window already used its one buy.' };
+    if (this.hasEntryForCandle(windowStart, Number(candle.start))) {
+      return { actions, reason: 'Signal ignored because this one-minute candle already used its entry.' };
     }
     const targetQuote = record.quotes[targetSide];
     if (!quoteIsFresh(targetQuote, now)) {
@@ -430,52 +472,47 @@ class MinuteColorBot extends DipBounceBot {
       );
       return { actions, reason: 'Signal remains active while waiting for a fresh CLOB quote.' };
     }
-    if (Number(targetQuote.bestAsk) >= STRATEGY.maximumEntryAsk) {
-      return {
-        actions,
-        reason: `Signal still waiting: best ask $${Number(targetQuote.bestAsk).toFixed(3)} is not below $${STRATEGY.maximumEntryAsk.toFixed(2)}.`,
-      };
-    }
-
-    const eligibleAsks = targetQuote.asks.filter((level) => Number(level.price) < STRATEGY.maximumEntryAsk);
+    const eligibleAsks = targetQuote.asks.filter((level) =>
+      Number(level.price) > 0 && Number(level.price) < 1);
     const buySweep = sweep(
       eligibleAsks,
       STRATEGY.sharesPerTrigger,
       fee.rate,
       'BUY',
-      STRATEGY.maximumBuyPrice,
+      1,
     );
     if (!(buySweep.filledShares > 0)) {
-      const reason = `${targetSide} signal found no visible ask depth strictly below $${STRATEGY.maximumBuyPrice.toFixed(2)}.`;
+      const reason = `${targetSide} signal found no visible ask depth at a valid market price.`;
       this.log(reason,
         { asset: 'BTC', timeframe: '5m', side: targetSide, outcome: 'bad', type: 'SIGNAL_ENTRY_SKIPPED', now },
       );
-      return { actions, reason: 'Signal remains active while waiting for visible ask depth below $0.50.' };
+      return { actions, reason: 'Signal remains active while waiting for visible ask depth.' };
     }
     const order = this.buyPosition(record, targetSide, buySweep, now, candidate);
     if (order?.filledShares > 0) {
       actions.push({ type: 'BUY', side: targetSide, orderId: order.id, shares: order.filledShares });
-      this.entryTakenWindowStarts.add(windowStart);
-      if (this.entryTakenWindowStarts.size > 100) {
-        this.entryTakenWindowStarts = new Set(
-          [...this.entryTakenWindowStarts].sort((a, b) => a - b).slice(-100),
-        );
+      this.entryTakenCandleKeys.add(`${windowStart}:${Number(candle.start)}`);
+      if (this.entryTakenCandleKeys.size > 300) {
+        this.entryTakenCandleKeys = new Set([...this.entryTakenCandleKeys].slice(-300));
       }
       this.pendingSignals = this.pendingSignals.filter((pending) =>
-        Number(pending.windowStart) !== windowStart);
+        Number(pending.windowStart) !== windowStart
+        || Number(pending.candle.start) !== Number(candle.start));
     }
     return {
       actions,
       reason: actions.length
-        ? 'Signal executed; this window’s one buy is used. Hold to resolution unless midpoint TP/SL triggers.'
+        ? `Signal executed; this one-minute candle’s ${STRATEGY.sharesPerTrigger}-share entry is recorded.`
         : 'Signal remains active because available paper cash could not cover the fill.',
     };
   }
 
-  hasEntryInWindow(windowStart) {
+  hasEntryForCandle(windowStart, candleStart) {
     const start = Number(windowStart);
-    return this.entryTakenWindowStarts.has(start)
+    const key = `${start}:${Number(candleStart)}`;
+    return this.entryTakenCandleKeys.has(key)
       || this.orders.some((order) => Number(order.windowStart) === start
+        && Number(order.signalCandleStart) === Number(candleStart)
         && String(order.action).startsWith('BUY')
         && Number(order.filledShares) > 0);
   }
@@ -514,7 +551,7 @@ class MinuteColorBot extends DipBounceBot {
       feeRate: signal.feeRate,
       feeSource: signal.feeSource,
       fills: result.fills,
-      fillRule: `Immediate visible-ask sweep up to $${STRATEGY.maximumBuyPrice.toFixed(2)}; partial fills reflect displayed book depth.`,
+      fillRule: 'Immediate visible-ask sweep across the available valid CLOB price range; partial fills reflect displayed book depth.',
       signalCandleStart: signal.signalCandleStart,
       signalCandleNumber: signal.signalCandleNumber,
       signalColor: signal.signalColor,
@@ -566,7 +603,7 @@ class MinuteColorBot extends DipBounceBot {
     };
     this.positions.unshift(position);
     this.log(
-      `${side} buy: ${result.filledShares.toFixed(2)} of ${STRATEGY.sharesPerTrigger} requested shares at $${result.averagePrice.toFixed(4)} average; minute ${signal.signalCandleNumber} changed to ${signal.signalColor}.`,
+      `${side} buy: ${result.filledShares.toFixed(2)} of ${STRATEGY.sharesPerTrigger} requested shares at $${result.averagePrice.toFixed(4)} average; minute ${signal.signalCandleNumber} confirmed consecutive ${signal.signalColor} candles.`,
       { asset: 'BTC', timeframe: '5m', side, outcome: 'good', type: 'CANDLE_SIGNAL_BUY', now },
     );
     this.updateAccountMetrics(now, true);
@@ -610,7 +647,7 @@ class MinuteColorBot extends DipBounceBot {
       feeRate: signal.feeRate,
       feeSource: signal.feeSource,
       fills: result.fills.map((fill) => ({ ...fill, shares: fill.shares * fillRatio, fee: fill.fee * fillRatio })),
-      fillRule: 'Sell sweep against visible bids on an opposite-color signal; any unavailable remainder stays open for resolution.',
+      fillRule: 'Sell sweep against visible bids on an opposite-color candle; any unavailable remainder stays open for resolution.',
       signalCandleStart: signal.signalCandleStart,
       signalCandleNumber: signal.signalCandleNumber,
       signalColor: signal.signalColor,
@@ -750,8 +787,8 @@ class MinuteColorBot extends DipBounceBot {
     this.pendingSignals = Array.isArray(savedModel.pendingSignals)
       ? savedModel.pendingSignals.slice(0, 10)
       : [];
-    this.entryTakenWindowStarts = new Set(Array.isArray(savedModel.entryTakenWindowStarts)
-      ? savedModel.entryTakenWindowStarts.slice(-100).map(Number).filter(Number.isFinite)
+    this.entryTakenCandleKeys = new Set(Array.isArray(savedModel.entryTakenCandleKeys)
+      ? savedModel.entryTakenCandleKeys.slice(-300).map(String)
       : []);
     this.strategyId = STRATEGY.id;
     this.strategyName = STRATEGY.name;
@@ -765,7 +802,7 @@ class MinuteColorBot extends DipBounceBot {
     snapshot.modelEngine = {
       processedCandleKeys: [...this.processedCandleKeys].slice(-60),
       pendingSignals: this.pendingSignals.slice(0, 10),
-      entryTakenWindowStarts: [...this.entryTakenWindowStarts].slice(-100),
+      entryTakenCandleKeys: [...this.entryTakenCandleKeys].slice(-300),
       reviews: this.reviews.slice(0, 100),
     };
     return {
@@ -831,13 +868,13 @@ class MinuteColorBot extends DipBounceBot {
     state.statusReason = this.statusReason;
     state.strategy = {
       ...STRATEGY,
-      summary: 'For each BTC five-minute market, compare closed one-minute candles 2–4 with the immediately prior candle. Same color means no trade; the first valid color change can buy once in that window.',
+      summary: 'For each BTC five-minute market, compare closed one-minute candles 2–4 with the immediately prior candle. A matching color buys that direction once for the candle; a color change sells the previously held side and does not enter the new side until a later matching candle.',
       execution: 'PAPER ONLY — no real orders or wallet signing.',
-      entry: `Only one buy per window. The first valid signal requests ${STRATEGY.sharesPerTrigger} shares when the signalled side’s best ask is below $${STRATEGY.maximumEntryAsk.toFixed(2)}; otherwise that signal remains active until the next one-minute close. The sweep only uses asks strictly below $${STRATEGY.maximumBuyPrice.toFixed(2)}.`,
-      exit: `After the one buy, ignore later signals. Take profit at midpoint $${STRATEGY.takeProfitMid.toFixed(2)} for $1/share or stop at midpoint $${STRATEGY.stopLossMid.toFixed(2)} for $0/share; otherwise hold to resolution. An opposite signal is invalid when the held side’s best bid is above $${STRATEGY.oppositeSignalVetoBestBid.toFixed(2)}.`,
+      entry: `On each eligible consecutive-color candle, request ${STRATEGY.sharesPerTrigger} shares of its direction: GREEN buys UP, RED buys DOWN. There is no $0.50 entry-price cap; buys sweep all visible asks at valid prices below $1.00. Each closed candle can create at most one entry.`,
+      exit: `When a closed candle changes color, sell the previously held side against visible bids; do not buy the new side on that same candle. Any unsold remainder stays open and can retry on a later candle. Midpoint take-profit at $${STRATEGY.takeProfitMid.toFixed(2)} credits $1/share; midpoint stop at $${STRATEGY.stopLossMid.toFixed(2)} credits $0/share; otherwise hold to resolution.`,
       takeProfit: `Close when the held side midpoint reaches $${STRATEGY.takeProfitMid.toFixed(2)}; credit $1 per remaining share.`,
       stopLoss: `Close when a fresh held-side midpoint reaches $${STRATEGY.stopLossMid.toFixed(2)}; credit $0 per remaining share. If the midpoint is unavailable, keep the position for resolution.`,
-      timing: 'Minute 1 is reference-only. Compare minute 2 to minute 1, minute 3 to minute 2, and minute 4 to minute 3. Minute 5 has no signal.',
+      timing: 'Minute 1 is reference-only. Minute 2–4 are eligible. Matching consecutive colors can buy; a color change only exits the previous side. Minute 5 has no signal.',
     };
     state.scanner = {
       ...state.scanner,
@@ -880,7 +917,6 @@ class MinuteColorBot extends DipBounceBot {
       firstSignalCandle: STRATEGY.firstSignalCandle,
       lastSignalCandle: STRATEGY.lastSignalCandle,
       sharesPerTrigger: STRATEGY.sharesPerTrigger,
-      maximumBuyPrice: STRATEGY.maximumBuyPrice,
       latestReview: currentReview,
       recentReviews: this.reviews.slice(0, 20),
       sides: sidePositions,
@@ -906,9 +942,6 @@ class MinuteColorBot extends DipBounceBot {
       rules: {
         sharesPerTrigger: STRATEGY.sharesPerTrigger,
         maximumEntriesPerWindow: STRATEGY.maximumEntriesPerWindow,
-        maximumEntryAsk: STRATEGY.maximumEntryAsk,
-        oppositeSignalVetoBestBid: STRATEGY.oppositeSignalVetoBestBid,
-        maximumBuyPrice: STRATEGY.maximumBuyPrice,
         firstSignalCandle: STRATEGY.firstSignalCandle,
         lastSignalCandle: STRATEGY.lastSignalCandle,
       },

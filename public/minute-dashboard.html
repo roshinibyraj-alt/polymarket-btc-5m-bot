@@ -133,7 +133,7 @@
     <header class="top">
       <div class="brand">
         <div class="brand-icon">₿</div>
-        <div><h1>BTC Candle Bot</h1><p class="sub">5-minute paper trading · 1-minute color changes</p></div>
+        <div><h1>BTC Candle Bot</h1><p class="sub">5-minute paper trading · 1-minute color follow-through</p></div>
       </div>
       <div id="status" class="status"><i class="dot"></i><span>CONNECTING</span></div>
     </header>
@@ -172,7 +172,7 @@
     </section>
 
     <section class="panel" aria-label="Current positions">
-      <div class="section-head"><div><h2>Positions</h2><p>One buy per window; midpoint TP/SL or hold to resolution.</p></div><span id="positionCount" class="pill">0 open</span></div>
+      <div class="section-head"><div><h2>Positions</h2><p>One 200-share entry per qualifying minute; opposite-color candles sell.</p></div><span id="positionCount" class="pill">0 open</span></div>
       <div class="position-grid">
         <article class="position-card up">
           <div class="position-head"><span class="side-tag">UP</span><span id="upPositionStatus" class="state">EMPTY</span></div>
@@ -198,13 +198,13 @@
     </section>
 
     <section class="panel" aria-label="Five one-minute candles">
-      <div class="section-head"><div><h2>One-minute candles</h2><p>Minute 1 is the reference. Minute 2–4 color changes trigger trades; minute 5 is skipped.</p></div><span id="binanceStatus" class="pill">Binance —</span></div>
+      <div class="section-head"><div><h2>One-minute candles</h2><p>Same color buys that direction; a color change sells the held side. Minute 5 is skipped.</p></div><span id="binanceStatus" class="pill">Binance —</span></div>
       <div id="candleStrip" class="candle-strip"></div>
       <div id="lastSignal" class="price-note">Waiting for a closed one-minute candle.</div>
     </section>
 
     <section class="panel" aria-label="Recent trades">
-      <div class="section-head"><div><h2>Recent orders</h2><p>Paper entry sweeps use visible asks strictly below $0.50.</p></div></div>
+      <div class="section-head"><div><h2>Recent orders</h2><p>Paper sweeps use the visible book; no $0.50 entry-price cap.</p></div></div>
       <div id="orderList" class="list"><div class="empty">No orders in this run yet.</div></div>
     </section>
 
@@ -224,12 +224,12 @@
         <div id="strategyCopy" class="strategy-copy">
           <ul>
             <li>Use Binance BTCUSDT one-minute kline WebSocket candles. No direction or signal comes from Polymarket prices or trade pressure.</li>
-            <li>Minute 1 is reference-only. At the close of minute 2 compare it with minute 1; repeat for minute 3 versus minute 2 and minute 4 versus minute 3.</li>
-            <li>If the two colors match, do nothing. If they differ, request 200 shares on the current candle’s side: green buys UP, red buys DOWN.</li>
-            <li>At most one buy may fill per five-minute window. Only the first valid signal can enter.</li>
-            <li>The signalled side’s best ask must be below $0.50. If it is not yet below $0.50, keep that signal active until the next one-minute candle closes, and buy if the ask falls below $0.50 in that time.</li>
-            <li>After the one buy, ignore later signals. Close when the held-side midpoint reaches $0.99 (credit $1/share) or $0.00 (credit $0/share); otherwise hold to official resolution. If the held side’s best bid is above $0.65, an opposite signal is invalid as well.</li>
-            <li>Minute 5 has no new signal. Paper taker fills use visible CLOB asks strictly below $0.50 and modeled fees; shallow books can partially fill.</li>
+            <li>Minute 1 is reference-only. Minute 2, 3, and 4 can each trigger one entry when their closed color matches the previous closed candle.</li>
+            <li>Two green candles in a row buy 200 UP shares; two red candles in a row buy 200 DOWN shares. There is no $0.50 price cap.</li>
+            <li>If a candle changes color, sell the previously held side against visible bids. Do not buy the new side on that same candle; the next same-color candle can enter it.</li>
+            <li>If the sell book only fills part of a position, keep the remainder open and retry on a later candle that continues the new color.</li>
+            <li>Midpoint take-profit at $0.99 credits $1/share; midpoint stop at $0.00 credits $0/share. Positions not closed by either rule are sent to official resolution at window end.</li>
+            <li>Paper taker-style buys and signal exits use visible CLOB depth and modeled fees; shallow books can partially fill.</li>
           </ul>
         </div>
       </details>

@@ -1,21 +1,21 @@
 'use strict';
 
 const STRATEGY = Object.freeze({
-  id: 'btc-5m-one-minute-color-one-buy-200-entry050-veto065-20261126',
-  name: 'BTC 5-minute one-minute color signal · one buy',
-  version: 1,
+  id: 'btc-5m-minute-color-persistence-add-200-opposite-close-20261126',
+  name: 'BTC 5-minute one-minute color persistence',
+  version: 2,
   assets: ['BTC'],
   timeframes: ['5m'],
   candleIntervalMs: 60_000,
   firstSignalCandle: 2,
   lastSignalCandle: 4,
   sharesPerTrigger: 200,
-  maximumEntriesPerWindow: 1,
-  maximumEntryAsk: 0.50,
-  oppositeSignalVetoBestBid: 0.65,
+  maximumEntriesPerWindow: 3,
+  maximumEntryAsk: null,
+  oppositeSignalVetoBestBid: null,
   takeProfitMid: 0.99,
   stopLossMid: 0.00,
-  maximumBuyPrice: 0.50,
+  maximumBuyPrice: 1.00,
   maximumQuoteAgeMs: 2_500,
   maximumSignalDelayMs: 5_000,
   signalValidityMs: 60_000,
@@ -44,7 +44,7 @@ function classifyCandleTransition({ candle, previousCandle, windowStart }) {
   const previousColor = candleColor(previousCandle);
 
   if (candleNumber == null) {
-    return { eligible: false, candleNumber: null, color, previousColor, side: null, reason: 'Candle does not align to this five-minute market.' };
+    return { eligible: false, candleNumber: null, color, previousColor, side: null, colorChanged: false, reason: 'Candle does not align to this five-minute market.' };
   }
   if (candleNumber < STRATEGY.firstSignalCandle || candleNumber > STRATEGY.lastSignalCandle) {
     return {
@@ -53,6 +53,7 @@ function classifyCandleTransition({ candle, previousCandle, windowStart }) {
       color,
       previousColor,
       side: null,
+      colorChanged: false,
       reason: candleNumber === 1
         ? 'Minute 1 is reference-only; no trade is allowed.'
         : candleNumber === 5
@@ -61,13 +62,31 @@ function classifyCandleTransition({ candle, previousCandle, windowStart }) {
     };
   }
   if (!Number.isFinite(previousStart) || previousStart !== start - interval) {
-    return { eligible: false, candleNumber, color, previousColor, side: null, reason: 'The immediately previous one-minute candle is not available.' };
+    return { eligible: false, candleNumber, color, previousColor, side: null, colorChanged: false, reason: 'The immediately previous one-minute candle is not available.' };
   }
   if (color === 'DOJI' || previousColor === 'DOJI' || color === 'UNKNOWN' || previousColor === 'UNKNOWN') {
-    return { eligible: true, candleNumber, color, previousColor, side: null, reason: 'A doji or unavailable candle has no usable colour; no trade.' };
+    return {
+      eligible: true,
+      candleNumber,
+      color,
+      previousColor,
+      side: null,
+      colorChanged: false,
+      reason: 'A doji or unavailable candle has no usable color; no trade.',
+    };
   }
-  if (color === previousColor) {
-    return { eligible: true, candleNumber, color, previousColor, side: null, reason: `Minute ${candleNumber} matches minute ${candleNumber - 1}; no trade.` };
+  if (color !== previousColor) {
+    const heldSide = previousColor === 'GREEN' ? 'UP' : 'DOWN';
+    return {
+      eligible: true,
+      candleNumber,
+      color,
+      previousColor,
+      side: null,
+      colorChanged: true,
+      exitSide: heldSide,
+      reason: `Minute ${candleNumber} changed from ${previousColor} to ${color}; sell the held ${heldSide} position and do not enter the new side on this candle.`,
+    };
   }
   return {
     eligible: true,
@@ -75,7 +94,8 @@ function classifyCandleTransition({ candle, previousCandle, windowStart }) {
     color,
     previousColor,
     side: color === 'GREEN' ? 'UP' : 'DOWN',
-    reason: `Minute ${candleNumber} changed from ${previousColor} to ${color}; buy ${color === 'GREEN' ? 'UP' : 'DOWN'}.`,
+    colorChanged: false,
+    reason: `Minute ${candleNumber} is consecutive ${color}; buy ${color === 'GREEN' ? 'UP' : 'DOWN'}.`,
   };
 }
 
