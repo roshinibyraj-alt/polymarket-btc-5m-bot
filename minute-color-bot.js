@@ -124,6 +124,7 @@ class MinuteColorBot extends DipBounceBot {
     this.processedCandleKeys = new Set();
     this.pendingSignals = [];
     this.entryTakenCandleKeys = new Set();
+    this.intraWindowTakeProfitState = null;
     this.latestReview = null;
     this.reviews = [];
   }
@@ -177,8 +178,60 @@ class MinuteColorBot extends DipBounceBot {
 
   checkTakeProfits(record, side, quote, now) {
     if (!record?.market || record.marketStatus !== 'OPEN' || !midpointIsFresh(quote, now)) return;
-    if (Number(quote.mid) < STRATEGY.takeProfitMid) return;
     const marketId = String(record.market.id || record.market.slug);
+    const mid = Number(quote.mid);
+    const existingTakeProfitState = this.intraWindowTakeProfitState?.marketId === marketId
+      ? this.intraWindowTakeProfitState
+      : null;
+
+    if (existingTakeProfitState?.disabledSide !== side
+      && mid >= STRATEGY.intraWindowTakeProfitMid) {
+      const eligiblePositions = this.positions.filter((position) =>
+        position.marketId === marketId
+        && position.side === side
+        && position.status === 'OPEN'
+        && Number(position.partialRealizedPnl || 0)
+          + Number(position.shares || 0) * STRATEGY.intraWindowTakeProfitMid
+          - Number(position.totalCost || 0)
+          - Number(position.fees || 0) >= -EPSILON);
+      const heldAtLoss = this.positions.filter((position) =>
+        position.marketId === marketId
+        && position.side === side
+        && position.status === 'OPEN'
+        && !eligiblePositions.includes(position));
+
+      if (eligiblePositions.length) {
+        const disabledSide = side === 'UP' ? 'DOWN' : 'UP';
+        this.intraWindowTakeProfitState = {
+          marketId,
+          triggeredSide: side,
+          disabledSide,
+          triggeredAt: now,
+        };
+        for (const position of eligiblePositions) {
+          this.closePositionAtTrigger(position, {
+            status: 'TAKE_PROFIT',
+            exitPrice: STRATEGY.intraWindowTakeProfitMid,
+            payoutPerShare: STRATEGY.intraWindowTakeProfitMid,
+            exitReason: 'INTRAWINDOW_TAKE_PROFIT_MID_085',
+            message: `${side} intra-window take-profit hit at a $0.85 midpoint; credited $0.85 per share. ${disabledSide}'s $0.85 intra-window target is disabled for this window; ${side}'s target remains available for later entries, and the separate $0.99 final take-profit remains active.`,
+            outcome: 'good',
+            eventType: 'INTRAWINDOW_TAKE_PROFIT',
+          }, quote, now);
+        }
+        this.scheduleLedgerSave();
+        return;
+      }
+
+      if (heldAtLoss.length) {
+        this.log(
+          `${side} reached the $0.85 intra-window target, but closing would realize a net loss after fees; the other side's target remains active.`,
+          { asset: 'BTC', timeframe: '5m', side, outcome: 'neutral', type: 'INTRAWINDOW_TP_HELD_LOSS', now },
+        );
+      }
+    }
+
+    if (mid < STRATEGY.takeProfitMid) return;
     for (const position of this.positions) {
       if (position.marketId !== marketId || position.side !== side || position.status !== 'OPEN') continue;
       const netResult = Number(position.partialRealizedPnl || 0)
@@ -187,7 +240,7 @@ class MinuteColorBot extends DipBounceBot {
           - Number(position.fees || 0);
       if (netResult < -EPSILON) {
         this.log(
-          `${side} reached the $0.99 midpoint TP, but closing would still realize a net loss after fees; keeping it open.`,
+          `${side} reached the $0.99 midpoint final TP, but closing would still realize a net loss after fees; keeping it open.`,
           { asset: 'BTC', timeframe: '5m', side, outcome: 'neutral', type: 'TAKE_PROFIT_HELD_LOSS', now },
         );
         continue;
@@ -197,7 +250,7 @@ class MinuteColorBot extends DipBounceBot {
         exitPrice: STRATEGY.takeProfitMid,
         payoutPerShare: 1,
         exitReason: 'TAKE_PROFIT_MID_099',
-        message: `${side} take-profit hit at a $0.99 midpoint; credited $1.00 per share.`,
+        message: `${side} final take-profit hit at a $0.99 midpoint; credited $1.00 per share.`,
         outcome: 'good',
         eventType: 'TAKE_PROFIT',
       }, quote, now);
@@ -676,6 +729,12 @@ class MinuteColorBot extends DipBounceBot {
     this.pendingSignals = Array.isArray(savedModel.pendingSignals)
       ? savedModel.pendingSignals.slice(0, 10)
       : [];
+    const savedTakeProfitState = savedModel.intraWindowTakeProfitState;
+    this.intraWindowTakeProfitState = savedTakeProfitState
+      && typeof savedTakeProfitState.marketId === 'string'
+      && SIDES.includes(savedTakeProfitState.triggeredSide)
+      ? { ...savedTakeProfitState }
+      : null;
     this.entryTakenCandleKeys = new Set(Array.isArray(savedModel.entryTakenCandleKeys)
       ? savedModel.entryTakenCandleKeys.slice(-300).map(String)
       : []);
@@ -692,6 +751,9 @@ class MinuteColorBot extends DipBounceBot {
       processedCandleKeys: [...this.processedCandleKeys].slice(-60),
       pendingSignals: this.pendingSignals.slice(0, 10),
       entryTakenCandleKeys: [...this.entryTakenCandleKeys].slice(-300),
+      intraWindowTakeProfitState: this.intraWindowTakeProfitState
+        ? { ...this.intraWindowTakeProfitState }
+        : null,
       reviews: this.reviews.slice(0, 100),
     };
     return {
@@ -710,6 +772,10 @@ class MinuteColorBot extends DipBounceBot {
     const feed = this.binanceFeed.snapshot();
     const windowStart = Number(market?.start);
     const windowEnd = Number(market?.end);
+    const marketId = market ? String(market.id || market.slug) : null;
+    const currentTakeProfitState = this.intraWindowTakeProfitState?.marketId === marketId
+      ? this.intraWindowTakeProfitState
+      : null;
     const closedCandles = feed.closedCandles || [];
     const previousWindowCandle = Number.isFinite(windowStart)
       ? closedCandles.find((candle) =>
@@ -764,8 +830,14 @@ class MinuteColorBot extends DipBounceBot {
       summary: `At the start of minutes 1–3 in each BTC five-minute market, use the immediately previous closed Binance candle: RED buys UP; GREEN buys DOWN. Minute 1 uses the prior window’s final candle. Entries require the signalled side’s best ask to be $${STRATEGY.minimumEntryAsk.toFixed(2)}–$${STRATEGY.maximumEntryAsk.toFixed(2)} inclusive. Minutes 4–5 do not trade. Candle signals never sell positions.`,
       execution: 'PAPER ONLY — no real orders or wallet signing.',
       entry: `At the start of minutes 1–3, request ${STRATEGY.sharesPerTrigger} shares based only on the previous closed candle: RED buys UP; GREEN buys DOWN. Minute 1 uses the prior window’s final candle; minutes 2–3 use the previous candle in this window. Entries are allowed only when the signalled side’s best ask is between $${STRATEGY.minimumEntryAsk.toFixed(2)} and $${STRATEGY.maximumEntryAsk.toFixed(2)}, inclusive; the simulated ask sweep is capped at $${STRATEGY.maximumEntryAsk.toFixed(2)}. A signal waits for a qualifying fresh quote until the next minute begins. Minutes 4–5 are skipped. Doji or unavailable reference candles do not create a directional entry.`,
-      exit: `Candle signals never sell positions, including on color changes. The $${STRATEGY.takeProfitMid.toFixed(2)} midpoint take-profit credits $1/share only if the remaining position still closes without a net loss. No stop-loss is active; positions not closed by take-profit are held to official resolution.`,
-      takeProfit: `At a held-side midpoint of $${STRATEGY.takeProfitMid.toFixed(2)}, close only if the resulting net position P&L after fees is not negative; credit $1 per remaining share.`,
+      exit: `Candle signals never sell positions, including on color changes. The first side with an open position to reach the $${STRATEGY.intraWindowTakeProfitMid.toFixed(2)} midpoint TP closes at $${STRATEGY.intraWindowTakeProfitMid.toFixed(2)}/share and disables only the opposite side's $${STRATEGY.intraWindowTakeProfitMid.toFixed(2)} intra-window TP for that window; later positions on the triggering side keep their $${STRATEGY.intraWindowTakeProfitMid.toFixed(2)} target. The separate $${STRATEGY.takeProfitMid.toFixed(2)} midpoint TP remains active and credits $1/share if it will not realize a net loss after fees. No stop-loss; remaining positions go to official resolution.`,
+      takeProfit: `The first side with an open position to reach a $${STRATEGY.intraWindowTakeProfitMid.toFixed(2)} midpoint closes at $${STRATEGY.intraWindowTakeProfitMid.toFixed(2)}/share and disables only the opposite side's intra-window target for that market window. The triggering side may still use its $${STRATEGY.intraWindowTakeProfitMid.toFixed(2)} target on later entries. The separate $${STRATEGY.takeProfitMid.toFixed(2)} midpoint target remains active and credits $1/share only if the resulting net P&L after fees is not negative.`,
+      intraWindowTakeProfit: {
+        midpoint: STRATEGY.intraWindowTakeProfitMid,
+        triggeredSide: currentTakeProfitState?.triggeredSide || null,
+        disabledSide: currentTakeProfitState?.disabledSide || null,
+        triggeredAt: currentTakeProfitState?.triggeredAt || null,
+      },
       stopLoss: 'Disabled: candle signals never sell; unresolved positions remain open for take-profit or official resolution.',
       timing: 'One buy decision is scheduled at the start of minutes 1, 2, and 3 only. RED on the previous closed candle buys UP; GREEN buys DOWN. Minute 1 carries over the previous five-minute window’s final candle. Minutes 4 and 5 are skipped. Candle color changes do not sell existing positions.',
     };
@@ -844,6 +916,8 @@ class MinuteColorBot extends DipBounceBot {
         lastSignalCandle: STRATEGY.lastSignalCandle,
         minimumEntryAsk: STRATEGY.minimumEntryAsk,
         maximumEntryAsk: STRATEGY.maximumEntryAsk,
+        intraWindowTakeProfitMid: STRATEGY.intraWindowTakeProfitMid,
+        finalTakeProfitMid: STRATEGY.takeProfitMid,
       },
     };
     state.sizingByAsset = undefined;

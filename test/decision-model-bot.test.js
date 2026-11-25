@@ -258,21 +258,75 @@ test('a minute signal waits for a fresh CLOB quote until the next minute starts'
   bot.stop();
 });
 
-test('TP closes only without a loss and there is no signal stop-loss', () => {
-  const { bot, record, setCandles } = setup();
+test('the first side to reach the $0.85 TP closes; the opposite $0.85 TP is disabled but its $0.99 TP remains', () => {
+  const { bot, record, setNow, setCandles } = setup();
   setCandles([previousWindowCandle('RED')]);
   bot.processClosedCandles(START + 100);
   const up = bot.positions.find((position) => position.side === 'UP');
-  const takeProfit = {
+  const intraTakeProfit = {
+    ...levels(0.84, 0.86),
+    mid: 0.85,
+    updatedAt: START + 30_000,
+    receivedAt: START + 30_000,
+  };
+  bot.checkTakeProfits(record, 'UP', intraTakeProfit, START + 30_000);
+  assert.equal(up.status, 'TAKE_PROFIT');
+  assert.equal(up.exitPrice, 0.85);
+  assert.equal(up.exitPayout, 0.85);
+  assert.deepEqual(bot.intraWindowTakeProfitState, {
+    marketId: 'btc-five-minute-market',
+    triggeredSide: 'UP',
+    disabledSide: 'DOWN',
+    triggeredAt: START + 30_000,
+  });
+  assert.deepEqual(bot.snapshot().strategy.intraWindowTakeProfit, {
+    midpoint: 0.85,
+    triggeredSide: 'UP',
+    disabledSide: 'DOWN',
+    triggeredAt: START + 30_000,
+  });
+
+  setNow(START + INTERVAL + 100);
+  setCandles([previousWindowCandle('RED'), candle(1, 'GREEN')]);
+  bot.processClosedCandles(START + INTERVAL + 100);
+  const down = bot.positions.find((position) => position.side === 'DOWN');
+  assert.equal(down.status, 'OPEN');
+  bot.checkTakeProfits(record, 'DOWN', {
+    ...intraTakeProfit,
+    updatedAt: START + 70_000,
+    receivedAt: START + 70_000,
+  }, START + 70_000);
+  assert.equal(down.status, 'OPEN', 'the opposite side no longer exits at $0.85');
+
+  setNow(START + 2 * INTERVAL + 100);
+  setCandles([
+    previousWindowCandle('RED'),
+    candle(1, 'GREEN'),
+    candle(2, 'RED'),
+  ]);
+  bot.processClosedCandles(START + 2 * INTERVAL + 100);
+  const laterUp = bot.positions.find((position) =>
+    position.side === 'UP' && position.status === 'OPEN');
+  assert.ok(laterUp, 'a later signal can open another position on the side that hit TP');
+  bot.checkTakeProfits(record, 'UP', {
+    ...levels(0.84, 0.86),
+    mid: 0.85,
+    updatedAt: START + 130_000,
+    receivedAt: START + 130_000,
+  }, START + 130_000);
+  assert.equal(laterUp.status, 'TAKE_PROFIT', 'the triggering side keeps its $0.85 target');
+  assert.equal(bot.intraWindowTakeProfitState.disabledSide, 'DOWN');
+
+  const finalTakeProfit = {
     ...levels(0.98, 1.00),
     mid: 0.99,
-    updatedAt: START + 150_000,
-    receivedAt: START + 150_000,
+    updatedAt: START + 170_000,
+    receivedAt: START + 170_000,
   };
-  bot.checkTakeProfits(record, 'UP', takeProfit, START + 150_000);
-  assert.equal(up.status, 'TAKE_PROFIT');
-  assert.equal(up.exitPrice, 0.99);
-  assert.equal(up.exitPayout, 1);
+  bot.checkTakeProfits(record, 'DOWN', finalTakeProfit, START + 170_000);
+  assert.equal(down.status, 'TAKE_PROFIT', 'the separate $0.99 final TP remains active');
+  assert.equal(down.exitPrice, 0.99);
+  assert.equal(down.exitPayout, 1);
 
   const { bot: lossTpBot, record: lossTpRecord, setCandles: setLossTpCandles } = setup();
   setLossTpCandles([previousWindowCandle('RED')]);
@@ -280,14 +334,32 @@ test('TP closes only without a loss and there is no signal stop-loss', () => {
   const lossTpPosition = lossTpBot.positions.find((position) => position.side === 'UP');
   lossTpPosition.totalCost = 201;
   lossTpPosition.fees = 0;
-  lossTpBot.checkTakeProfits(lossTpRecord, 'UP', takeProfit, START + 150_000);
+  lossTpBot.checkTakeProfits(lossTpRecord, 'UP', finalTakeProfit, START + 170_000);
   assert.equal(lossTpPosition.status, 'OPEN');
 
-  bot.checkStopLosses(record, 'UP', { ...levels(0, 0), mid: 0 }, START + 150_000);
+  bot.checkStopLosses(record, 'UP', { ...levels(0, 0), mid: 0 }, START + 170_000);
   assert.equal(up.status, 'TAKE_PROFIT');
   assert.equal(bot.orders.some((order) => order.action === 'SELL_TAKER'), false);
   bot.stop();
   lossTpBot.stop();
+});
+
+test('intra-window TP suppression persists for the current market across restarts', () => {
+  const { bot, record, setCandles } = setup();
+  setCandles([previousWindowCandle('RED')]);
+  bot.processClosedCandles(START + 100);
+  bot.checkTakeProfits(record, 'UP', {
+    ...levels(0.84, 0.86),
+    mid: 0.85,
+    updatedAt: START + 150_000,
+    receivedAt: START + 150_000,
+  }, START + 150_000);
+
+  const restored = setup().bot;
+  restored.restoreLedger(bot.exportLedger());
+  assert.deepEqual(restored.intraWindowTakeProfitState, bot.intraWindowTakeProfitState);
+  bot.stop();
+  restored.stop();
 });
 
 test('ledger persists one-entry-per-minute tracking under the new strategy id', () => {

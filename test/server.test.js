@@ -60,7 +60,8 @@ test('dashboard serves the BTC 5-minute previous-candle entry strategy', async t
   assert.match(html, /best ask is \$0\.11–\$0\.70 inclusive/);
   assert.match(html, /buy sweep never pays above \$0\.70/);
   assert.match(html, /never sell/i);
-  assert.match(html, /At a \$0\.99 midpoint, take profit/);
+  assert.match(html, /first open side to reach a \$0\.85 midpoint/i);
+  assert.match(html, /separate \$0\.99 midpoint target remains active/i);
   assert.match(html, /There is no stop-loss/);
   assert.match(html, /official resolution/);
   assert.match(html, /PAPER ONLY/);

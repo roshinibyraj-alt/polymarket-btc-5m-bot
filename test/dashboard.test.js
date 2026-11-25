@@ -41,7 +41,8 @@ test('dashboard explains the entry band, take-profit, and no stop-loss', () => {
   assert.match(html, /best ask is \$0\.11–\$0\.70 inclusive/);
   assert.match(html, /never pays above \$0\.70/);
   assert.match(html, /The current candle’s color does not affect that minute’s entry/i);
-  assert.match(html, /At a \$0\.99 midpoint, take profit/);
+  assert.match(html, /first open side to reach a \$0\.85 midpoint/i);
+  assert.match(html, /separate \$0\.99 midpoint target remains active/i);
   assert.match(html, /There is no stop-loss/);
   assert.match(html, /id="upMid"/);
   assert.match(html, /id="downMid"/);

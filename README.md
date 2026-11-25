@@ -10,7 +10,7 @@ At the start of minutes 1–3 in each five-minute market, use the immediately pr
 
 - Each of the first three minute starts requests 200 shares only when the signalled side’s best ask is between $0.11 and $0.70 inclusive. Buys sweep visible asks up to $0.70; actual fills can be partial if displayed depth is insufficient. A signal waits for an in-band fresh quote until the next minute starts. Minutes 4 and 5 are skipped.
 - Candle signals never sell positions. Each eligible minute can buy independently, including the opposite side while an earlier position remains open.
-- A fresh held-side midpoint at or above $0.99 triggers the $1/share take-profit only when the remaining position will not close at a net loss after fees. There is no stop-loss; positions not closed by take-profit remain open for official resolution.
+- The first side with an open position to reach a fresh $0.85 midpoint closes at $0.85/share and disables only the opposite side's $0.85 intra-window target for that market window; later entries on the triggering side can still use $0.85. The separate $0.99 midpoint target remains active and credits $1/share only when it will not close at a net loss after fees. There is no stop-loss; remaining positions are held for official resolution.
 - Taker-style paper buys use visible book depth; fees use market metadata when available and the configured crypto-fee fallback otherwise.
 - Shares still open at expiry are settled using the official Polymarket result, polled every five seconds.
 - Trading pauses if the Binance WebSocket is disconnected/stale or if the required CLOB quote is not fresh. REST candle history only seeds/reconciles closed candles; it does not replace the live WebSocket check for signal execution.

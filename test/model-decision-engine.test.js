@@ -37,6 +37,7 @@ test('strategy schedules one paper entry for only the first three one-minute int
   assert.equal(STRATEGY.lastSignalCandle, 3);
   assert.equal(STRATEGY.minimumEntryAsk, 0.11);
   assert.equal(STRATEGY.maximumEntryAsk, 0.70);
+  assert.equal(STRATEGY.intraWindowTakeProfitMid, 0.85);
   assert.equal(STRATEGY.takeProfitMid, 0.99);
   assert.equal(STRATEGY.stopLossMid, null);
   assert.equal(STRATEGY.execution, 'PAPER ONLY');

@@ -176,6 +176,7 @@
 
     <section class="panel" aria-label="Current positions">
       <div class="section-head"><div><h2>Positions</h2><p>One 200-share buy at the start of minutes 1–3, based on the previous closed candle. Minutes 4–5 are skipped; candle signals never sell.</p></div><span id="positionCount" class="pill">0 open</span></div>
+      <p id="intraTakeProfitState" class="price-note">Both sides' $0.85 intra-window take-profit is available; the separate $0.99 final target remains.</p>
       <div class="position-grid">
         <article class="position-card up">
           <div class="position-head"><span class="side-tag">UP</span><span id="upPositionStatus" class="state">EMPTY</span></div>
@@ -231,7 +232,7 @@
             <li>At the start of minutes 1–3, use the immediately previous closed Binance candle. Minute 1 uses the previous window’s final candle; minutes 2–3 use the preceding candle in the current window. Minutes 4–5 are skipped.</li>
             <li>A previous RED candle buys 200 UP shares; a previous GREEN candle buys 200 DOWN shares. The current candle’s color does not affect that minute’s entry. Doji or unavailable previous candles do not create a directional entry.</li>
             <li>Only minutes 1–3 can trigger one buy each, and only when the signalled side’s best ask is $0.11–$0.70 inclusive. The buy sweep never pays above $0.70. Minutes 4–5 never enter. Candle color changes never sell positions.</li>
-            <li>At a $0.99 midpoint, take profit by crediting $1/share only if the position will not close at a net loss after fees. There is no stop-loss; positions not closed by take-profit stay open for official resolution.</li>
+            <li>The first open side to reach a $0.85 midpoint closes at $0.85/share and disables only the other side's $0.85 intra-window target for that window. Later entries on the triggering side can still use $0.85. The separate $0.99 midpoint target remains active and credits $1/share only if it will not close at a net loss after fees. There is no stop-loss; positions not closed by take-profit stay open for official resolution.</li>
             <li>Paper taker-style buys use visible CLOB depth and modeled fees; shallow books can partially fill.</li>
           </ul>
         </div>
@@ -366,6 +367,10 @@
       renderCandles(engine);
       renderPosition('UP', engine.sides?.UP);
       renderPosition('DOWN', engine.sides?.DOWN);
+      const intraTp = state.strategy?.intraWindowTakeProfit;
+      $('intraTakeProfitState').textContent = intraTp?.triggeredSide
+        ? `${intraTp.triggeredSide} hit the $0.85 intra-window TP; ${intraTp.disabledSide}'s $0.85 target is disabled, but later ${intraTp.triggeredSide} entries retain it. The separate $0.99 final TP remains active.`
+        : 'Both sides’ $0.85 intra-window take-profit is available; the separate $0.99 final target remains.';
       $('positionCount').textContent = `${state.account.openPositions || 0} open · ${state.account.pendingResolution || 0} resolving`;
       renderOrders(state.orders);
       renderTrades(engine.tradeHistory);
