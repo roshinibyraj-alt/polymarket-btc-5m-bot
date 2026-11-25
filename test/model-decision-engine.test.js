@@ -2,7 +2,13 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { STRATEGY, candleColor, classifyMinuteEntry } = require('../minute-candle-strategy');
+const {
+  STRATEGY,
+  candleColor,
+  classifyMinuteEntry,
+  isEntryAskWithinBand,
+} = require('../minute-candle-strategy');
+const MinuteColorBot = require('../minute-color-bot');
 
 const START = 1_800_000_000_000;
 const INTERVAL = STRATEGY.candleIntervalMs;
@@ -29,10 +35,30 @@ test('strategy schedules one paper entry for only the first three one-minute int
   assert.equal(STRATEGY.maximumEntriesPerWindow, 3);
   assert.equal(STRATEGY.firstSignalCandle, 1);
   assert.equal(STRATEGY.lastSignalCandle, 3);
-  assert.equal(STRATEGY.maximumEntryAsk, null);
+  assert.equal(STRATEGY.minimumEntryAsk, 0.11);
+  assert.equal(STRATEGY.maximumEntryAsk, 0.70);
   assert.equal(STRATEGY.takeProfitMid, 0.99);
   assert.equal(STRATEGY.stopLossMid, null);
   assert.equal(STRATEGY.execution, 'PAPER ONLY');
+});
+
+test('entry band includes both boundaries and rejects prices outside it', () => {
+  assert.equal(isEntryAskWithinBand(0.11), true);
+  assert.equal(isEntryAskWithinBand(0.70), true);
+  assert.equal(isEntryAskWithinBand(0.109), false);
+  assert.equal(isEntryAskWithinBand(0.701), false);
+  assert.equal(isEntryAskWithinBand(null), false);
+});
+
+test('paper ask sweep cannot fill above the maximum entry price', () => {
+  const result = MinuteColorBot._test.sweep([
+    { price: 0.68, size: 50 },
+    { price: 0.70, size: 50 },
+    { price: 0.71, size: 100 },
+  ], 200, 0, 'BUY', STRATEGY.maximumEntryAsk);
+  assert.equal(result.filledShares, 100);
+  assert.deepEqual(result.fills.map((fill) => fill.price), [0.68, 0.70]);
+  assert.equal(result.fills.some((fill) => fill.price > STRATEGY.maximumEntryAsk), false);
 });
 
 test('a previous RED candle buys UP and a previous GREEN candle buys DOWN', () => {

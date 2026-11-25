@@ -208,7 +208,7 @@
     </section>
 
     <section class="panel" aria-label="Recent trades">
-      <div class="section-head"><div><h2>Recent orders</h2><p>Paper sweeps use the visible book; no $0.50 entry-price cap.</p></div></div>
+      <div class="section-head"><div><h2>Recent orders</h2><p>New buys require a best ask from $0.11 to $0.70; fills are capped at $0.70.</p></div></div>
       <div id="orderList" class="list"><div class="empty">No orders in this run yet.</div></div>
     </section>
 
@@ -230,7 +230,7 @@
             <li>Use Binance BTCUSDT one-minute kline WebSocket candles. No direction or signal comes from Polymarket prices or trade pressure.</li>
             <li>At the start of minutes 1–3, use the immediately previous closed Binance candle. Minute 1 uses the previous window’s final candle; minutes 2–3 use the preceding candle in the current window. Minutes 4–5 are skipped.</li>
             <li>A previous RED candle buys 200 UP shares; a previous GREEN candle buys 200 DOWN shares. The current candle’s color does not affect that minute’s entry. Doji or unavailable previous candles do not create a directional entry.</li>
-            <li>Only minutes 1–3 can trigger one buy each. Minutes 4–5 never enter. Candle color changes never sell positions.</li>
+            <li>Only minutes 1–3 can trigger one buy each, and only when the signalled side’s best ask is $0.11–$0.70 inclusive. The buy sweep never pays above $0.70. Minutes 4–5 never enter. Candle color changes never sell positions.</li>
             <li>At a $0.99 midpoint, take profit by crediting $1/share only if the position will not close at a net loss after fees. There is no stop-loss; positions not closed by take-profit stay open for official resolution.</li>
             <li>Paper taker-style buys use visible CLOB depth and modeled fees; shallow books can partially fill.</li>
           </ul>

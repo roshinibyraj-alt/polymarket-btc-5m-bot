@@ -7,6 +7,7 @@ const {
   STRATEGY,
   candleColor,
   classifyMinuteEntry,
+  isEntryAskWithinBand,
 } = require('./minute-candle-strategy');
 
 const SIDES = ['UP', 'DOWN'];
@@ -444,14 +445,24 @@ class MinuteColorBot extends DipBounceBot {
       );
       return { actions, reason: 'Signal remains active while waiting for a fresh CLOB quote.' };
     }
-    const eligibleAsks = targetQuote.asks.filter((level) =>
-      Number(level.price) > 0 && Number(level.price) < 1);
+    const bestAsk = Number(targetQuote.bestAsk);
+    if (!isEntryAskWithinBand(bestAsk)) {
+      const reason = Number.isFinite(bestAsk)
+        ? `${targetSide} best ask is $${bestAsk.toFixed(2)}, outside the $${STRATEGY.minimumEntryAsk.toFixed(2)}–$${STRATEGY.maximumEntryAsk.toFixed(2)} entry band; waiting for a qualifying price.`
+        : `${targetSide} best ask is unavailable; waiting for a qualifying price.`;
+      return { actions, reason };
+    }
+    const eligibleAsks = targetQuote.asks
+      .filter((level) => Number(level.price) >= STRATEGY.minimumEntryAsk
+        && Number(level.price) <= STRATEGY.maximumEntryAsk
+        && Number(level.size) > 0)
+      .sort((a, b) => Number(a.price) - Number(b.price));
     const buySweep = sweep(
       eligibleAsks,
       STRATEGY.sharesPerTrigger,
       fee.rate,
       'BUY',
-      1,
+      STRATEGY.maximumEntryAsk,
     );
     if (!(buySweep.filledShares > 0)) {
       const reason = `${targetSide} signal found no visible ask depth at a valid market price.`;
@@ -523,7 +534,7 @@ class MinuteColorBot extends DipBounceBot {
       feeRate: signal.feeRate,
       feeSource: signal.feeSource,
       fills: result.fills,
-      fillRule: 'Immediate visible-ask sweep across the available valid CLOB price range; partial fills reflect displayed book depth.',
+      fillRule: `Immediate visible-ask sweep from $${STRATEGY.minimumEntryAsk.toFixed(2)} to $${STRATEGY.maximumEntryAsk.toFixed(2)}; partial fills reflect displayed book depth.`,
       signalCandleStart: signal.signalCandleStart,
       signalCandleNumber: signal.signalCandleNumber,
       signalColor: signal.signalColor,
@@ -750,9 +761,9 @@ class MinuteColorBot extends DipBounceBot {
     state.statusReason = this.statusReason;
     state.strategy = {
       ...STRATEGY,
-      summary: 'At the start of minutes 1–3 in each BTC five-minute market, use the immediately previous closed Binance candle: RED buys UP; GREEN buys DOWN. Minute 1 uses the prior window’s final candle. Minutes 4–5 do not trade. Candle signals never sell positions.',
+      summary: `At the start of minutes 1–3 in each BTC five-minute market, use the immediately previous closed Binance candle: RED buys UP; GREEN buys DOWN. Minute 1 uses the prior window’s final candle. Entries require the signalled side’s best ask to be $${STRATEGY.minimumEntryAsk.toFixed(2)}–$${STRATEGY.maximumEntryAsk.toFixed(2)} inclusive. Minutes 4–5 do not trade. Candle signals never sell positions.`,
       execution: 'PAPER ONLY — no real orders or wallet signing.',
-      entry: `At the start of minutes 1–3, request ${STRATEGY.sharesPerTrigger} shares based only on the previous closed candle: RED buys UP; GREEN buys DOWN. Minute 1 uses the prior window’s final candle; minutes 2–3 use the previous candle in this window. Minutes 4–5 are skipped. There is no $0.50 entry-price cap; buys sweep visible asks below $1.00. Doji or unavailable reference candles do not create a directional entry.`,
+      entry: `At the start of minutes 1–3, request ${STRATEGY.sharesPerTrigger} shares based only on the previous closed candle: RED buys UP; GREEN buys DOWN. Minute 1 uses the prior window’s final candle; minutes 2–3 use the previous candle in this window. Entries are allowed only when the signalled side’s best ask is between $${STRATEGY.minimumEntryAsk.toFixed(2)} and $${STRATEGY.maximumEntryAsk.toFixed(2)}, inclusive; the simulated ask sweep is capped at $${STRATEGY.maximumEntryAsk.toFixed(2)}. A signal waits for a qualifying fresh quote until the next minute begins. Minutes 4–5 are skipped. Doji or unavailable reference candles do not create a directional entry.`,
       exit: `Candle signals never sell positions, including on color changes. The $${STRATEGY.takeProfitMid.toFixed(2)} midpoint take-profit credits $1/share only if the remaining position still closes without a net loss. No stop-loss is active; positions not closed by take-profit are held to official resolution.`,
       takeProfit: `At a held-side midpoint of $${STRATEGY.takeProfitMid.toFixed(2)}, close only if the resulting net position P&L after fees is not negative; credit $1 per remaining share.`,
       stopLoss: 'Disabled: candle signals never sell; unresolved positions remain open for take-profit or official resolution.',
@@ -801,6 +812,8 @@ class MinuteColorBot extends DipBounceBot {
       candleIntervalMs: STRATEGY.candleIntervalMs,
       firstSignalCandle: STRATEGY.firstSignalCandle,
       lastSignalCandle: STRATEGY.lastSignalCandle,
+      minimumEntryAsk: STRATEGY.minimumEntryAsk,
+      maximumEntryAsk: STRATEGY.maximumEntryAsk,
       sharesPerTrigger: STRATEGY.sharesPerTrigger,
       latestReview: currentReview,
       recentReviews: this.reviews.slice(0, 20),
@@ -829,6 +842,8 @@ class MinuteColorBot extends DipBounceBot {
         maximumEntriesPerWindow: STRATEGY.maximumEntriesPerWindow,
         firstSignalCandle: STRATEGY.firstSignalCandle,
         lastSignalCandle: STRATEGY.lastSignalCandle,
+        minimumEntryAsk: STRATEGY.minimumEntryAsk,
+        maximumEntryAsk: STRATEGY.maximumEntryAsk,
       },
     };
     state.sizingByAsset = undefined;
@@ -843,6 +858,7 @@ MinuteColorBot._test = {
   quoteIsFresh,
   positionSideAverage,
   candleColor,
+  isEntryAskWithinBand,
   classifyMinuteEntry,
 };
 

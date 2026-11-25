@@ -1,9 +1,9 @@
 'use strict';
 
 const STRATEGY = Object.freeze({
-  id: 'btc-5m-previous-closed-color-entry-first-three-minutes-20261125',
+  id: 'btc-5m-previous-closed-color-entry-first-three-minutes-band-011-070-20261125',
   name: 'BTC 5-minute previous-candle color entries',
-  version: 7,
+  version: 8,
   assets: ['BTC'],
   timeframes: ['5m'],
   candleIntervalMs: 60_000,
@@ -11,7 +11,8 @@ const STRATEGY = Object.freeze({
   lastSignalCandle: 3,
   sharesPerTrigger: 200,
   maximumEntriesPerWindow: 3,
-  maximumEntryAsk: null,
+  minimumEntryAsk: 0.11,
+  maximumEntryAsk: 0.70,
   oppositeSignalVetoBestBid: null,
   takeProfitMid: 0.99,
   stopLossMid: null,
@@ -35,6 +36,13 @@ function sideForColor(color) {
   if (color === 'GREEN') return 'DOWN';
   if (color === 'RED') return 'UP';
   return null;
+}
+
+function isEntryAskWithinBand(bestAsk) {
+  const ask = Number(bestAsk);
+  return Number.isFinite(ask)
+    && ask >= STRATEGY.minimumEntryAsk
+    && ask <= STRATEGY.maximumEntryAsk;
 }
 
 function classifyMinuteEntry({ previousCandle, targetCandleStart, windowStart }) {
@@ -98,4 +106,10 @@ function classifyMinuteEntry({ previousCandle, targetCandleStart, windowStart })
   };
 }
 
-module.exports = { STRATEGY, candleColor, sideForColor, classifyMinuteEntry };
+module.exports = {
+  STRATEGY,
+  candleColor,
+  sideForColor,
+  isEntryAskWithinBand,
+  classifyMinuteEntry,
+};

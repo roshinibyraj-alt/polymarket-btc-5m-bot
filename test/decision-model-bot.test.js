@@ -212,17 +212,27 @@ test('opposite candle signals add on the new side without selling existing posit
   bot.stop();
 });
 
-test('market buys have no $0.50 entry-price cap and sweep visible depth', () => {
-  const { bot, setCandles } = setup({ upAsk: 0.74 });
+test('market buys qualify at the $0.70 upper edge of the entry band', () => {
+  const { bot, setCandles } = setup({ upAsk: 0.70 });
   setCandles([previousWindowCandle('RED')]);
   bot.processClosedCandles(START + 100);
   assert.equal(bot.orders[0].side, 'UP');
-  assert.equal(bot.orders[0].fillPrice, 0.74);
+  assert.equal(bot.orders[0].fillPrice, 0.70);
+  bot.stop();
+});
+
+test('a signal waits without trading when the signalled best ask is outside the band', () => {
+  const { bot, setCandles } = setup({ upAsk: 0.71 });
+  setCandles([previousWindowCandle('RED')]);
+  bot.processClosedCandles(START + 100);
+  assert.equal(bot.orders.length, 0);
+  assert.equal(bot.pendingSignals.length, 1);
+  assert.match(bot.latestReview.signalReason, /outside the \$0\.11–\$0\.70 entry band/);
   bot.stop();
 });
 
 test('visible ask depth controls partial fills at the scheduled minute', () => {
-  const { bot, setCandles } = setup({ upAsk: 0.72, upAskSize: 75 });
+  const { bot, setCandles } = setup({ upAsk: 0.70, upAskSize: 75 });
   setCandles([previousWindowCandle('RED')]);
   bot.processClosedCandles(START + 100);
   assert.equal(bot.orders[0].requestedShares, 200);

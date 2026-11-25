@@ -57,7 +57,8 @@ test('dashboard serves the BTC 5-minute previous-candle entry strategy', async t
   assert.match(html, /previous closed RED candle buys UP; GREEN buys DOWN/);
   assert.match(html, /Minutes 4–5 are skipped/);
   assert.match(html, /A previous RED candle buys 200 UP shares; a previous GREEN candle buys 200 DOWN shares/);
-  assert.match(html, /no \$0\.50 entry-price cap/);
+  assert.match(html, /best ask is \$0\.11–\$0\.70 inclusive/);
+  assert.match(html, /buy sweep never pays above \$0\.70/);
   assert.match(html, /never sell/i);
   assert.match(html, /At a \$0\.99 midpoint, take profit/);
   assert.match(html, /There is no stop-loss/);

@@ -36,8 +36,10 @@ test('dashboard explains entries in minutes 1 through 3 and skips the final two'
   assert.match(html, /PAPER ONLY/);
 });
 
-test('dashboard explains uncapped entries, take-profit, and no stop-loss', () => {
-  assert.match(html, /no \$0\.50 entry-price cap/);
+test('dashboard explains the entry band, take-profit, and no stop-loss', () => {
+  assert.match(html, /best ask from \$0\.11 to \$0\.70/);
+  assert.match(html, /best ask is \$0\.11–\$0\.70 inclusive/);
+  assert.match(html, /never pays above \$0\.70/);
   assert.match(html, /The current candle’s color does not affect that minute’s entry/i);
   assert.match(html, /At a \$0\.99 midpoint, take profit/);
   assert.match(html, /There is no stop-loss/);

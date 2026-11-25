@@ -8,7 +8,7 @@ At the start of minutes 1–3 in each five-minute market, use the immediately pr
 
 ## Paper execution
 
-- Each of the first three minute starts requests 200 shares with no $0.50 entry-price gate. Buys sweep visible asks over the valid CLOB price range; actual fills can be partial if displayed depth is insufficient. Minutes 4 and 5 are skipped.
+- Each of the first three minute starts requests 200 shares only when the signalled side’s best ask is between $0.11 and $0.70 inclusive. Buys sweep visible asks up to $0.70; actual fills can be partial if displayed depth is insufficient. A signal waits for an in-band fresh quote until the next minute starts. Minutes 4 and 5 are skipped.
 - Candle signals never sell positions. Each eligible minute can buy independently, including the opposite side while an earlier position remains open.
 - A fresh held-side midpoint at or above $0.99 triggers the $1/share take-profit only when the remaining position will not close at a net loss after fees. There is no stop-loss; positions not closed by take-profit remain open for official resolution.
 - Taker-style paper buys use visible book depth; fees use market metadata when available and the configured crypto-fee fallback otherwise.
