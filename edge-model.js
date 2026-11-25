@@ -1,11 +1,12 @@
 'use strict';
 
 const RULES = Object.freeze({
-  id: 'btc-5m-selective-edge-paper-v1',
+  id: 'btc-5m-selective-edge-paper-v2-cadence',
   name: 'BTC Edge Lab',
   minimumHistory: 60,
   minimumElapsedSeconds: 45,
   lastEntrySecond: 210,
+  fallbackAfterSecond: 180,
   maximumDataAgeMs: 2000,
   minimumProbability: 0.60,
   minimumNetEdge: 0.05,
@@ -23,6 +24,7 @@ const RULES = Object.freeze({
   decisionIntervalMs: 1000,
   fillLatencyMs: 300,
   depthParticipation: 0.5,
+  fallbackMaximumAsk: 0.99,
 });
 
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
@@ -116,21 +118,29 @@ function freshQuote(quote, market, side, now) {
     && Number(quote.bestBid) <= Number(quote.bestAsk);
 }
 
-function candidate({ model, quote, market, side, now, budget }) {
+function candidate({ model, quote, market, side, now, budget, cadenceFallback = false }) {
   const probability = side === 'UP' ? model.lowerUp : model.lowerDown;
   const base = { side, estimate: side === 'UP' ? model.rawUp : 1 - model.rawUp,
-    conservativeProbability: probability, bestAsk: quote?.bestAsk ?? null, eligible: false };
+    conservativeProbability: probability, bestAsk: quote?.bestAsk ?? null, eligible: false,
+    cadenceFallback };
   const no = reason => ({ ...base, reason });
   if (!freshQuote(quote, market, side, now)) return no('Stale, missing, crossed, or wrong-window book.');
   const spread = quote.bestAsk - quote.bestBid;
   base.spread = spread;
   if (spread > RULES.maximumSpread + 1e-8) return no('Spread exceeds $0.03.');
-  if (quote.bestAsk < RULES.minimumAsk || quote.bestAsk > RULES.maximumAsk) return no('Ask outside $0.10–$0.85 safety band.');
+  const minAsk = cadenceFallback ? 0.01 : RULES.minimumAsk;
+  const maxAsk = cadenceFallback ? RULES.fallbackMaximumAsk : RULES.maximumAsk;
+  if (quote.bestAsk < minAsk || quote.bestAsk > maxAsk) {
+    return no(cadenceFallback ? 'Ask outside the $0.01–$0.99 paper fallback band.'
+      : 'Ask outside $0.10–$0.85 value-entry band.');
+  }
   const fee = marketFee(market);
   if (!fee) return no('Unknown or unsupported fee schedule; no fee-free assumption.');
-  const maxPrice = Math.min(RULES.maximumAsk, probability - RULES.minimumNetEdge - RULES.slippageReserve);
+  const maxPrice = cadenceFallback ? maxAsk
+    : Math.min(RULES.maximumAsk, probability - RULES.minimumNetEdge - RULES.slippageReserve);
   const requestedShares = Math.min(RULES.maxShares,
-    Math.floor(budget / (quote.bestAsk + fee.rate * quote.bestAsk * (1 - quote.bestAsk) + RULES.slippageReserve)));
+    Math.floor(budget / (quote.bestAsk + fee.rate * quote.bestAsk * (1 - quote.bestAsk)
+      + (cadenceFallback ? 0 : RULES.slippageReserve))));
   const fills = [];
   let remaining = requestedShares;
   let cost = 0;
@@ -149,11 +159,17 @@ function candidate({ model, quote, market, side, now, budget }) {
   }
   const filledShares = requestedShares - remaining;
   const allInCost = filledShares > 0 ? (cost + fees) / filledShares : null;
-  const netEdge = allInCost == null ? null : probability - allInCost - RULES.slippageReserve;
+  const netEdge = allInCost == null ? null : probability - allInCost
+    - (cadenceFallback ? 0 : RULES.slippageReserve);
   Object.assign(base, { requestedShares, filledShares, allInCost, netEdge, cost, fees, fills,
     averagePrice: filledShares > 0 ? cost / filledShares : null, feeRate: fee.rate });
+  if (cadenceFallback) {
+    if (filledShares < 5 || cost < 1) return no('Fallback needs at least 5 shares and $1 filled notional.');
+    return { ...base, eligible: true,
+      reason: 'Two-window paper fallback; probability and positive-edge filters are intentionally bypassed.' };
+  }
   if (probability < RULES.minimumProbability) return no('Conservative chance below 60%.');
-  if (filledShares < 5 || cost < 1) return no('Insufficient eligible depth or risk budget for minimum size.');
+  if (filledShares < 5 || cost < 1) return no('No executable asks at prices that clear the edge and risk budget.');
   if (netEdge < RULES.minimumNetEdge - 1e-8) return no('Less than $0.05 edge after fees and execution reserve.');
   return { ...base, eligible: true, reason: 'Conservative scenario edge clears costs and reserve.' };
 }
