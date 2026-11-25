@@ -27,7 +27,7 @@ test('fixed paper strategy is BTC 5m with one 200-share entry per eligible candl
   assert.equal(STRATEGY.execution, 'PAPER ONLY');
 });
 
-test('consecutive colors buy the opposite side; a changed color exits that prior side', () => {
+test('consecutive colors buy the opposite side; a changed color does not sell', () => {
   const sameGreen = classifyCandleTransition({
     candle: candle(2, 'GREEN'),
     previousCandle: candle(1, 'GREEN'),
@@ -52,10 +52,10 @@ test('consecutive colors buy the opposite side; a changed color exits that prior
   assert.equal(sameRed.side, 'UP');
   assert.equal(toRed.side, null);
   assert.equal(toRed.colorChanged, true);
-  assert.equal(toRed.exitSide, 'DOWN');
+  assert.equal(toRed.exitSide, undefined);
   assert.equal(toGreen.side, null);
   assert.equal(toGreen.colorChanged, true);
-  assert.equal(toGreen.exitSide, 'UP');
+  assert.equal(toGreen.exitSide, undefined);
 });
 
 test('minute 1 compares with the previous window and minutes 2–4 remain eligible', () => {
@@ -114,5 +114,5 @@ test('comparison requires the immediately preceding candle, including across the
   });
   assert.equal(boundaryChange.eligible, true);
   assert.equal(boundaryChange.colorChanged, true);
-  assert.equal(boundaryChange.exitSide, 'DOWN');
+  assert.equal(boundaryChange.exitSide, undefined);
 });

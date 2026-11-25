@@ -28,16 +28,16 @@ test('strategy details are at the bottom after the monitoring sections', () => {
   assert.match(html, /details>/);
 });
 
-test('dashboard explains same-color entries and opposite-color exits', () => {
+test('dashboard explains reversed same-color entries and no signal exits', () => {
   assert.match(html, /Two green candles in a row buy 200 DOWN shares; two red candles in a row buy 200 UP shares/);
-  assert.match(html, /a color change sells the held side only if profitable/i);
+  assert.match(html, /color changes never sell/i);
   assert.match(html, /Minute 5 is skipped/);
   assert.match(html, /PAPER ONLY/);
 });
 
-test('dashboard explains uncapped entries, profitable exits, and no stop-loss', () => {
+test('dashboard explains uncapped entries, take-profit, and no stop-loss', () => {
   assert.match(html, /There is no \$0\.50 price cap/);
-  assert.match(html, /do not buy the new side on that same candle/i);
+  assert.match(html, /do not create an entry on the change candle/i);
   assert.match(html, /At a \$0\.99 midpoint, take profit/);
   assert.match(html, /There is no stop-loss/);
   assert.match(html, /id="upMid"/);

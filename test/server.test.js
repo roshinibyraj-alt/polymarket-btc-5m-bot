@@ -57,7 +57,7 @@ test('dashboard serves the BTC 5-minute color-follow-through strategy', async t 
   assert.match(html, /Minute 1 compares with the prior window’s last candle/);
   assert.match(html, /Two green candles in a row buy 200 DOWN shares; two red candles in a row buy 200 UP shares/);
   assert.match(html, /no \$0\.50 entry-price cap/);
-  assert.match(html, /sell the previously held side/);
+  assert.match(html, /Color changes never sell/);
   assert.match(html, /At a \$0\.99 midpoint, take profit/);
   assert.match(html, /There is no stop-loss/);
   assert.match(html, /official resolution/);

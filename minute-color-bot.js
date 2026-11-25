@@ -6,7 +6,6 @@ const BinanceMinuteFeed = require('./binance-minute-feed');
 const {
   STRATEGY,
   candleColor,
-  sideForColor,
   classifyCandleTransition,
 } = require('./minute-candle-strategy');
 
@@ -100,28 +99,6 @@ function positionSideAverage(positions) {
   };
 }
 
-function profitableFifoExit(positions, result) {
-  let remainingShares = Number(result?.filledShares || 0);
-  const totalShares = remainingShares;
-  const netProceeds = Number(result?.notional || 0) - Number(result?.fees || 0);
-  for (const position of positions) {
-    if (remainingShares <= EPSILON) break;
-    const openShares = Number(position.shares || 0);
-    if (!(openShares > EPSILON)) continue;
-    const soldShares = Math.min(openShares, remainingShares);
-    const ratio = soldShares / openShares;
-    const releasedBasis = (Number(position.totalCost || 0) + Number(position.fees || 0)) * ratio;
-    const allocatedProceeds = totalShares > EPSILON
-      ? netProceeds * (soldShares / totalShares)
-      : 0;
-    if (allocatedProceeds - releasedBasis < -EPSILON) {
-      return { profitable: false, side: position.side, soldShares };
-    }
-    remainingShares -= soldShares;
-  }
-  return { profitable: remainingShares <= EPSILON };
-}
-
 class MinuteColorBot extends DipBounceBot {
   constructor({
     marketData,
@@ -191,7 +168,7 @@ class MinuteColorBot extends DipBounceBot {
       this.statusReason = 'Binance one-minute candles are live; waiting for Polymarket CLOB quotes to execute signals.';
     } else {
       this.status = 'RUNNING';
-      this.statusReason = 'Monitoring closed BTC one-minute candles for consecutive-color entries and profitable-only opposite-color exits.';
+      this.statusReason = 'Monitoring closed BTC one-minute candles for reversed-color entries; candle signals do not sell positions.';
     }
   }
 
@@ -342,16 +319,6 @@ class MinuteColorBot extends DipBounceBot {
         }
       }
 
-      if ((transition.colorChanged || transition.side)
-        && candle.source === 'BINANCE_1M_WEBSOCKET'
-        && feedFresh
-        && closeDelayMs <= STRATEGY.maximumSignalDelayMs) {
-        const targetSide = sideForColor(transition.color);
-        const exit = this.exitOppositePositions(record, targetSide, candle, now);
-        review.actions.push(...exit.actions);
-        if (exit.reason) review.signalReason += ` ${exit.reason}`;
-      }
-
       this.latestReview = review;
       this.reviews.unshift(review);
       if (this.reviews.length > 100) this.reviews.length = 100;
@@ -363,7 +330,7 @@ class MinuteColorBot extends DipBounceBot {
         {
           asset: 'BTC',
           timeframe: '5m',
-          side: transition.side || (transition.colorChanged ? sideForColor(transition.previousColor) : null),
+          side: transition.side,
           outcome: review.actions.length ? 'good' : transition.side ? 'bad' : 'neutral',
           type: 'MINUTE_CANDLE_REVIEW',
           now,
@@ -422,65 +389,6 @@ class MinuteColorBot extends DipBounceBot {
     }
     this.pendingSignals = keep;
     if (ledgerChanged) this.scheduleLedgerSave();
-  }
-
-  exitOppositePositions(record, targetSide, candle, now) {
-    const sellSide = targetSide === 'UP' ? 'DOWN' : 'UP';
-    const marketId = String(record.market?.id || record.market?.slug || '');
-    const openPositions = this.positions.filter((position) =>
-      position.marketId === marketId
-      && position.side === sellSide
-      && position.status === 'OPEN'
-      && Number(position.shares) > EPSILON);
-    if (!openPositions.length) {
-      return { actions: [], reason: '' };
-    }
-
-    const quote = record.quotes[sellSide];
-    if (this.websocket.status !== 'CONNECTED' || !quoteIsFresh(quote, now)) {
-      return {
-        actions: [],
-        reason: `${sellSide} exit is waiting for a fresh CLOB quote; remaining shares stay open.`,
-      };
-    }
-    const requestedShares = openPositions.reduce((sum, position) => sum + Number(position.shares), 0);
-    const fee = normalizeFeeRate(record.market);
-    const sellSweep = sweep(quote.bids, requestedShares, fee.rate, 'SELL', 1);
-    if (!(sellSweep.filledShares > 0)) {
-      return {
-        actions: [],
-        reason: `No visible ${sellSide} bids to fill the signal exit; shares stay open and can retry on a later same-color candle.`,
-      };
-    }
-    const profitability = profitableFifoExit(openPositions, sellSweep);
-    if (!profitability.profitable) {
-      this.log(
-        `${sellSide} opposite-color exit was held because the executable sell would realize a loss after fees; keep the position open.`,
-        { asset: 'BTC', timeframe: '5m', side: sellSide, outcome: 'neutral', type: 'CANDLE_EXIT_HELD_LOSS', now },
-      );
-      return {
-        actions: [],
-        reason: `No sale: selling ${sellSide} now would realize a loss after fees, so those shares stay open.`,
-      };
-    }
-    const result = this.sellPositions(record, sellSide, sellSweep, now, {
-      feeRate: fee.rate,
-      feeSource: fee.source,
-      signalCandleStart: Number(candle.start),
-      signalCandleNumber: Math.floor((Number(candle.start) - Number(record.market.start)) / STRATEGY.candleIntervalMs) + 1,
-      signalColor: candleColor(candle),
-      previousColor: null,
-    });
-    if (!result) return { actions: [], reason: `${sellSide} exit did not close any shares.` };
-    return {
-      actions: [{
-        type: 'SELL',
-        side: sellSide,
-        orderId: result.id,
-        shares: result.filledShares,
-      }],
-      reason: `Opposite-color exit sold ${result.filledShares.toFixed(2)} of ${requestedShares.toFixed(2)} ${sellSide} shares; any remainder stays open.`,
-    };
   }
 
   executeColorSignal(record, transition, candle, now) {
@@ -642,104 +550,6 @@ class MinuteColorBot extends DipBounceBot {
       `${side} buy: ${result.filledShares.toFixed(2)} of ${STRATEGY.sharesPerTrigger} requested shares at $${result.averagePrice.toFixed(4)} average; minute ${signal.signalCandleNumber} confirmed consecutive ${signal.signalColor} candles.`,
       { asset: 'BTC', timeframe: '5m', side, outcome: 'good', type: 'CANDLE_SIGNAL_BUY', now },
     );
-    this.updateAccountMetrics(now, true);
-    return order;
-  }
-
-  sellPositions(record, side, result, now, signal) {
-    if (!(result?.filledShares > 0)) return null;
-    const marketId = String(record.market.id || record.market.slug);
-    const positions = this.positions
-      .filter((position) => position.marketId === marketId
-        && position.side === side
-        && position.status === 'OPEN')
-      .sort((a, b) => Number(a.entryAt) - Number(b.entryAt));
-    const availableShares = positions.reduce((sum, position) => sum + Number(position.shares || 0), 0);
-    const filledShares = Math.min(result.filledShares, availableShares);
-    if (!(filledShares > 0)) return null;
-    const fillRatio = filledShares / result.filledShares;
-    const grossProceeds = result.notional * fillRatio;
-    const exitFees = result.fees * fillRatio;
-    const order = {
-      id: `color-order-${++this.orderSequence}`,
-      marketId,
-      marketSlug: record.market.slug,
-      marketTitle: record.market.title,
-      asset: 'BTC',
-      timeframe: '5m',
-      windowStart: Number(record.market.start),
-      windowEnd: Number(record.market.end),
-      side,
-      action: 'SELL_TAKER',
-      status: filledShares + EPSILON >= result.requestedShares ? 'FILLED' : 'PARTIALLY_FILLED',
-      requestedShares: result.requestedShares,
-      filledShares,
-      unfilledShares: Math.max(0, result.requestedShares - filledShares),
-      placedAt: now,
-      filledAt: now,
-      fillPrice: result.notional / result.filledShares,
-      proceeds: grossProceeds,
-      fees: exitFees,
-      feeRate: signal.feeRate,
-      feeSource: signal.feeSource,
-      fills: result.fills.map((fill) => ({ ...fill, shares: fill.shares * fillRatio, fee: fill.fee * fillRatio })),
-      fillRule: 'Sell against visible bids only when the FIFO-position result is not a loss after fees; otherwise keep the shares open.',
-      signalCandleStart: signal.signalCandleStart,
-      signalCandleNumber: signal.signalCandleNumber,
-      signalColor: signal.signalColor,
-      previousColor: signal.previousColor,
-    };
-    this.orders.unshift(order);
-    this.cash += grossProceeds - exitFees;
-
-    let leftToAllocate = filledShares;
-    let realizedTotal = 0;
-    for (const position of positions) {
-      if (leftToAllocate <= EPSILON) break;
-      const beforeShares = Number(position.shares);
-      const soldShares = Math.min(beforeShares, leftToAllocate);
-      const ratio = soldShares / beforeShares;
-      const releasedCost = Number(position.totalCost || 0) * ratio;
-      const releasedEntryFees = Number(position.fees || 0) * ratio;
-      const proceeds = grossProceeds * (soldShares / filledShares);
-      const allocatedExitFees = exitFees * (soldShares / filledShares);
-      const realized = proceeds - allocatedExitFees - releasedCost - releasedEntryFees;
-      realizedTotal += realized;
-      position.partialRealizedPnl = Number(position.partialRealizedPnl || 0) + realized;
-      position.soldShares = Number(position.soldShares || 0) + soldShares;
-      position.exitProceeds = Number(position.exitProceeds || 0) + proceeds;
-      position.exitFees = Number(position.exitFees || 0) + allocatedExitFees;
-      position.closedShares = Number(position.closedShares || 0) + soldShares;
-      position.totalCost = Math.max(0, Number(position.totalCost || 0) - releasedCost);
-      position.fees = Math.max(0, Number(position.fees || 0) - releasedEntryFees);
-      position.shares = Math.max(0, beforeShares - soldShares);
-      position.exitAt = now;
-      position.exitPrice = Number(position.exitProceeds) / Number(position.soldShares);
-      position.exitReason = position.shares <= EPSILON ? 'CANDLE_COLOR_FLIP' : 'PARTIAL_CANDLE_COLOR_FLIP';
-      position.markUpdatedAt = record.quotes[side].updatedAt;
-      position.markStatus = position.shares <= EPSILON ? 'CLOSED' : 'LIVE';
-      position.unrealizedPnl = position.shares > EPSILON
-        ? (Number(record.quotes[side].bestBid) || 0) * position.shares - position.totalCost - position.fees
-        : null;
-      if (position.shares <= EPSILON) {
-        position.status = 'SIGNAL_SOLD';
-        position.realizedPnl = position.partialRealizedPnl;
-        position.closedAt = now;
-      }
-      leftToAllocate -= soldShares;
-    }
-    this.log(
-      `${side} flip exit: sold ${filledShares.toFixed(2)} shares at $${order.fillPrice.toFixed(4)} average; net realized ${realizedTotal >= 0 ? 'profit' : 'loss'} $${Math.abs(realizedTotal).toFixed(2)} after modeled fees.`,
-      {
-        asset: 'BTC',
-        timeframe: '5m',
-        side,
-        outcome: realizedTotal >= 0 ? 'good' : 'bad',
-        type: 'CANDLE_FLIP_SELL',
-        now,
-      },
-    );
-    this.markPositions(now);
     this.updateAccountMetrics(now, true);
     return order;
   }
@@ -908,13 +718,13 @@ class MinuteColorBot extends DipBounceBot {
     state.statusReason = this.statusReason;
     state.strategy = {
       ...STRATEGY,
-      summary: 'For each BTC five-minute market, compare minute 1 with the previous window’s final one-minute candle, then compare minutes 2–4 with the immediately prior candle. A matching GREEN candle buys DOWN; a matching RED candle buys UP. A color change sells the previously held side only when the executable exit is profitable after fees, and does not enter the new side until a later matching candle.',
+      summary: 'For each BTC five-minute market, compare minute 1 with the previous window’s final one-minute candle, then compare minutes 2–4 with the immediately prior candle. A matching GREEN candle buys DOWN; a matching RED candle buys UP. Candle signals never sell; positions remain open through color changes and exit only at take-profit or official resolution.',
       execution: 'PAPER ONLY — no real orders or wallet signing.',
       entry: `On each eligible consecutive-color candle, request ${STRATEGY.sharesPerTrigger} shares on the opposite side of its direction: GREEN buys DOWN, RED buys UP. There is no $0.50 entry-price cap; buys sweep all visible asks at valid prices below $1.00. Each closed candle can create at most one entry.`,
-      exit: `When a closed candle changes color, sell the previously held side against visible bids only if the estimated exit is not a loss after fees; otherwise keep it open. Do not buy the new side on that same candle. The $${STRATEGY.takeProfitMid.toFixed(2)} midpoint TP credits $1/share only if the remaining position still closes without a net loss. No stop-loss is active; any position not closed profitably is held to official resolution.`,
+      exit: `Candle signals never sell positions, including on color changes. The $${STRATEGY.takeProfitMid.toFixed(2)} midpoint take-profit credits $1/share only if the remaining position still closes without a net loss. No stop-loss is active; positions not closed by take-profit are held to official resolution.`,
       takeProfit: `At a held-side midpoint of $${STRATEGY.takeProfitMid.toFixed(2)}, close only if the resulting net position P&L after fees is not negative; credit $1 per remaining share.`,
-      stopLoss: 'Disabled: do not sell a losing position; hold it for a later profitable exit or official resolution.',
-      timing: 'Minute 1 compares with the previous window’s final one-minute candle; minutes 2–4 compare with the prior minute in the same window. Matching GREEN colors buy DOWN; matching RED colors buy UP. A color change only sells the previous side if the executable exit is profitable. Minute 5 has no signal.',
+      stopLoss: 'Disabled: candle signals never sell; unresolved positions remain open for take-profit or official resolution.',
+      timing: 'Minute 1 compares with the previous window’s final one-minute candle; minutes 2–4 compare with the prior minute in the same window. Matching GREEN colors buy DOWN; matching RED colors buy UP. A color change neither sells nor enters. Minute 5 has no signal.',
     };
     state.scanner = {
       ...state.scanner,

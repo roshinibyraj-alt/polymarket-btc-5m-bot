@@ -164,7 +164,7 @@ test('two consecutive green candles buy DOWN and the next green candle adds once
   bot.stop();
 });
 
-test('a changed candle sells the prior inverse side without entering the new inverse side', () => {
+test('a changed candle neither sells the held side nor enters the new inverse side', () => {
   const { bot, record, setNow, setCandles } = setup();
   setCandles([candle(1, 'GREEN'), candle(2, 'GREEN')]);
   bot.processClosedCandles(START + 120_100);
@@ -177,33 +177,33 @@ test('a changed candle sells the prior inverse side without entering the new inv
   setCandles([candle(1, 'GREEN'), candle(2, 'GREEN'), candle(3, 'RED')]);
   bot.processClosedCandles(START + 180_100);
 
-  assert.equal(down.status, 'SIGNAL_SOLD');
-  assert.deepEqual(closedColors(bot), ['SELL_TAKER:DOWN', 'BUY_TAKER:DOWN']);
+  assert.equal(down.status, 'OPEN');
+  assert.deepEqual(closedColors(bot), ['BUY_TAKER:DOWN']);
   assert.equal(bot.orders.some((order) => order.action.startsWith('BUY') && order.side === 'UP'), false);
-  assert.equal(down.exitReason, 'CANDLE_COLOR_FLIP');
-  assert.equal(down.exitPrice, 0.60);
+  assert.equal(bot.orders.some((order) => order.action === 'SELL_TAKER'), false);
+  assert.match(bot.latestReview.signalReason, /no entry or signal-based sale/);
   bot.stop();
 });
 
-test('a color change holds the old position when a visible-book sale would lose money', () => {
+test('a color change never sells even when the visible bid is profitable', () => {
   const { bot, record, setNow, setCandles } = setup();
   setCandles([candle(1, 'GREEN'), candle(2, 'GREEN')]);
   bot.processClosedCandles(START + 120_100);
   const down = bot.positions.find((position) => position.side === 'DOWN');
 
   setNow(START + 180_100);
-  record.quotes.DOWN = { ...levels(0.30, 0.31), updatedAt: START + 180_100, receivedAt: START + 180_100 };
+  record.quotes.DOWN = { ...levels(0.60, 0.61), updatedAt: START + 180_100, receivedAt: START + 180_100 };
   setCandles([candle(1, 'GREEN'), candle(2, 'GREEN'), candle(3, 'RED')]);
   bot.processClosedCandles(START + 180_100);
 
   assert.equal(down.status, 'OPEN');
   assert.equal(down.shares, 200);
   assert.equal(bot.orders.some((order) => order.action === 'SELL_TAKER'), false);
-  assert.match(bot.latestReview.signalReason, /would realize a loss after fees/);
+  assert.match(bot.latestReview.signalReason, /no entry or signal-based sale/);
   bot.stop();
 });
 
-test('new inverse side can enter on the next candle if its color continues', () => {
+test('new inverse side can enter later while the original side remains open', () => {
   const { bot, record, setNow, setCandles } = setup();
   setCandles([candle(1, 'GREEN'), candle(2, 'GREEN')]);
   bot.processClosedCandles(START + 120_100);
@@ -212,13 +212,14 @@ test('new inverse side can enter on the next candle if its color continues', () 
   record.quotes.DOWN = { ...levels(0.60, 0.61), updatedAt: START + 180_100, receivedAt: START + 180_100 };
   setCandles([candle(1, 'GREEN'), candle(2, 'GREEN'), candle(3, 'RED')]);
   bot.processClosedCandles(START + 180_100);
-  assert.equal(bot.orders[0].action, 'SELL_TAKER');
+  assert.equal(bot.orders[0].action, 'BUY_TAKER');
   assert.equal(bot.orders[0].side, 'DOWN');
 
   setNow(START + 240_100);
   setCandles([candle(1, 'GREEN'), candle(2, 'GREEN'), candle(3, 'RED'), candle(4, 'RED')]);
   bot.processClosedCandles(START + 240_100);
-  assert.deepEqual(closedColors(bot), ['BUY_TAKER:UP', 'SELL_TAKER:DOWN', 'BUY_TAKER:DOWN']);
+  assert.deepEqual(closedColors(bot), ['BUY_TAKER:UP', 'BUY_TAKER:DOWN']);
+  assert.equal(bot.positions.some((position) => position.side === 'DOWN' && position.status === 'OPEN'), true);
   assert.equal(bot.positions.some((position) => position.side === 'UP' && position.status === 'OPEN'), true);
   bot.stop();
 });
@@ -263,7 +264,7 @@ test('visible depth controls partial inverse-side fills at any valid price', () 
   bot.stop();
 });
 
-test('a partial signal exit retries when a later candle continues the new color', () => {
+test('signal changes never sell a position, regardless of visible bid depth', () => {
   const { bot, record, setNow, setCandles } = setup();
   setCandles([candle(1, 'GREEN'), candle(2, 'GREEN')]);
   bot.processClosedCandles(START + 120_100);
@@ -273,16 +274,16 @@ test('a partial signal exit retries when a later candle continues the new color'
   record.quotes.DOWN = { ...levels(0.60, 0.61, 50), updatedAt: START + 180_100, receivedAt: START + 180_100 };
   setCandles([candle(1, 'GREEN'), candle(2, 'GREEN'), candle(3, 'RED')]);
   bot.processClosedCandles(START + 180_100);
-  assert.equal(downPosition.shares, 150);
+  assert.equal(downPosition.shares, 200);
   assert.equal(downPosition.status, 'OPEN');
 
   setNow(START + 240_100);
   record.quotes.DOWN = { ...levels(0.58, 0.59), updatedAt: START + 240_100, receivedAt: START + 240_100 };
   setCandles([candle(1, 'GREEN'), candle(2, 'GREEN'), candle(3, 'RED'), candle(4, 'RED')]);
   bot.processClosedCandles(START + 240_100);
-  assert.equal(downPosition.status, 'SIGNAL_SOLD');
-  assert.equal(downPosition.shares, 0);
-  assert.equal(bot.orders.filter((order) => order.action === 'SELL_TAKER').length, 2);
+  assert.equal(downPosition.status, 'OPEN');
+  assert.equal(downPosition.shares, 200);
+  assert.equal(bot.orders.filter((order) => order.action === 'SELL_TAKER').length, 0);
   bot.stop();
 });
 

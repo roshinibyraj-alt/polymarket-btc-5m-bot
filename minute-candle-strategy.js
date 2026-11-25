@@ -1,9 +1,9 @@
 'use strict';
 
 const STRATEGY = Object.freeze({
-  id: 'btc-5m-cross-window-inverted-color-profitable-exits-20261125',
-  name: 'BTC 5-minute inverted one-minute color signals',
-  version: 4,
+  id: 'btc-5m-cross-window-inverted-color-no-signal-sells-20261125',
+  name: 'BTC 5-minute inverted one-minute color entries',
+  version: 5,
   assets: ['BTC'],
   timeframes: ['5m'],
   candleIntervalMs: 60_000,
@@ -80,7 +80,6 @@ function classifyCandleTransition({ candle, previousCandle, windowStart }) {
     };
   }
   if (color !== previousColor) {
-    const heldSide = sideForColor(previousColor);
     return {
       eligible: true,
       candleNumber,
@@ -88,8 +87,7 @@ function classifyCandleTransition({ candle, previousCandle, windowStart }) {
       previousColor,
       side: null,
       colorChanged: true,
-      exitSide: heldSide,
-      reason: `Minute ${candleNumber} changed from ${previousColor} to ${color}; sell the held ${heldSide} position and do not enter the new side on this candle.`,
+      reason: `Minute ${candleNumber} changed from ${previousColor} to ${color}; no entry or signal-based sale on this candle.`,
     };
   }
   return {
