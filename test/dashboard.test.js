@@ -29,8 +29,8 @@ test('strategy details are at the bottom after the monitoring sections', () => {
 });
 
 test('dashboard explains same-color entries and opposite-color exits', () => {
-  assert.match(html, /Two green candles in a row buy 200 UP shares/);
-  assert.match(html, /a color change sells the held side/);
+  assert.match(html, /Two green candles in a row buy 200 DOWN shares; two red candles in a row buy 200 UP shares/);
+  assert.match(html, /a color change sells the held side only if profitable/i);
   assert.match(html, /Minute 5 is skipped/);
   assert.match(html, /PAPER ONLY/);
 });

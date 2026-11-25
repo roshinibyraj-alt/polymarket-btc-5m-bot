@@ -4,7 +4,7 @@ This service watches BTC UP/DOWN five-minute markets. It uses Binance BTCUSDT on
 
 ## Signal flow
 
-At the close of minute 1 in each five-minute window, compare it with the previous window’s final one-minute candle. For minutes 2–4, compare with the immediately preceding candle in the current window. Two consecutive green candles signal UP; two consecutive red candles signal DOWN. Each qualifying one-minute candle can produce one entry. A candle that changes color exits the previously held side and does not enter the new side in that same candle; the next candle continuing the new color can enter. Minute 5 has no new entry or exit signal. Doji candles are neutral.
+At the close of minute 1 in each five-minute window, compare it with the previous window’s final one-minute candle. For minutes 2–4, compare with the immediately preceding candle in the current window. Two consecutive green candles buy DOWN; two consecutive red candles buy UP. Each qualifying one-minute candle can produce one entry. A candle that changes color exits the previously held side only if the sale is profitable after fees, and does not enter the new side in that same candle; the next candle continuing the new color can enter. Minute 5 has no new entry or exit signal. Doji candles are neutral.
 
 ## Paper execution
 

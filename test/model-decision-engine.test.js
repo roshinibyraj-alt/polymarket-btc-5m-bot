@@ -27,7 +27,7 @@ test('fixed paper strategy is BTC 5m with one 200-share entry per eligible candl
   assert.equal(STRATEGY.execution, 'PAPER ONLY');
 });
 
-test('consecutive colors enter their direction; a changed color exits the previous direction', () => {
+test('consecutive colors buy the opposite side; a changed color exits that prior side', () => {
   const sameGreen = classifyCandleTransition({
     candle: candle(2, 'GREEN'),
     previousCandle: candle(1, 'GREEN'),
@@ -48,14 +48,14 @@ test('consecutive colors enter their direction; a changed color exits the previo
     previousCandle: candle(1, 'RED'),
     windowStart: START,
   });
-  assert.equal(sameGreen.side, 'UP');
-  assert.equal(sameRed.side, 'DOWN');
+  assert.equal(sameGreen.side, 'DOWN');
+  assert.equal(sameRed.side, 'UP');
   assert.equal(toRed.side, null);
   assert.equal(toRed.colorChanged, true);
-  assert.equal(toRed.exitSide, 'UP');
+  assert.equal(toRed.exitSide, 'DOWN');
   assert.equal(toGreen.side, null);
   assert.equal(toGreen.colorChanged, true);
-  assert.equal(toGreen.exitSide, 'DOWN');
+  assert.equal(toGreen.exitSide, 'UP');
 });
 
 test('minute 1 compares with the previous window and minutes 2–4 remain eligible', () => {
@@ -65,7 +65,7 @@ test('minute 1 compares with the previous window and minutes 2–4 remain eligib
     windowStart: START,
   });
   assert.equal(firstMinute.eligible, true);
-  assert.equal(firstMinute.side, 'UP');
+  assert.equal(firstMinute.side, 'DOWN');
 
   const minuteFive = classifyCandleTransition({
     candle: candle(5, 'GREEN'),
@@ -82,7 +82,7 @@ test('minute 1 compares with the previous window and minutes 2–4 remain eligib
       windowStart: START,
     });
     assert.equal(result.eligible, true);
-    assert.equal(result.side, 'UP');
+    assert.equal(result.side, 'DOWN');
   }
 });
 
@@ -114,5 +114,5 @@ test('comparison requires the immediately preceding candle, including across the
   });
   assert.equal(boundaryChange.eligible, true);
   assert.equal(boundaryChange.colorChanged, true);
-  assert.equal(boundaryChange.exitSide, 'UP');
+  assert.equal(boundaryChange.exitSide, 'DOWN');
 });

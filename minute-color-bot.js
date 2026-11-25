@@ -3,7 +3,12 @@
 const config = require('./config');
 const DipBounceBot = require('./dip-bounce-bot');
 const BinanceMinuteFeed = require('./binance-minute-feed');
-const { STRATEGY, candleColor, classifyCandleTransition } = require('./minute-candle-strategy');
+const {
+  STRATEGY,
+  candleColor,
+  sideForColor,
+  classifyCandleTransition,
+} = require('./minute-candle-strategy');
 
 const SIDES = ['UP', 'DOWN'];
 const EPSILON = 1e-8;
@@ -341,7 +346,7 @@ class MinuteColorBot extends DipBounceBot {
         && candle.source === 'BINANCE_1M_WEBSOCKET'
         && feedFresh
         && closeDelayMs <= STRATEGY.maximumSignalDelayMs) {
-        const targetSide = transition.color === 'GREEN' ? 'UP' : 'DOWN';
+        const targetSide = sideForColor(transition.color);
         const exit = this.exitOppositePositions(record, targetSide, candle, now);
         review.actions.push(...exit.actions);
         if (exit.reason) review.signalReason += ` ${exit.reason}`;
@@ -358,7 +363,7 @@ class MinuteColorBot extends DipBounceBot {
         {
           asset: 'BTC',
           timeframe: '5m',
-          side: transition.side || (transition.colorChanged ? (transition.color === 'GREEN' ? 'DOWN' : 'UP') : null),
+          side: transition.side || (transition.colorChanged ? sideForColor(transition.previousColor) : null),
           outcome: review.actions.length ? 'good' : transition.side ? 'bad' : 'neutral',
           type: 'MINUTE_CANDLE_REVIEW',
           now,
@@ -903,13 +908,13 @@ class MinuteColorBot extends DipBounceBot {
     state.statusReason = this.statusReason;
     state.strategy = {
       ...STRATEGY,
-      summary: 'For each BTC five-minute market, compare minute 1 with the previous window’s final one-minute candle, then compare minutes 2–4 with the immediately prior candle. A matching color buys that direction once for the candle; a color change sells the previously held side only when the executable exit is profitable after fees, and does not enter the new side until a later matching candle.',
+      summary: 'For each BTC five-minute market, compare minute 1 with the previous window’s final one-minute candle, then compare minutes 2–4 with the immediately prior candle. A matching GREEN candle buys DOWN; a matching RED candle buys UP. A color change sells the previously held side only when the executable exit is profitable after fees, and does not enter the new side until a later matching candle.',
       execution: 'PAPER ONLY — no real orders or wallet signing.',
-      entry: `On each eligible consecutive-color candle, request ${STRATEGY.sharesPerTrigger} shares of its direction: GREEN buys UP, RED buys DOWN. There is no $0.50 entry-price cap; buys sweep all visible asks at valid prices below $1.00. Each closed candle can create at most one entry.`,
+      entry: `On each eligible consecutive-color candle, request ${STRATEGY.sharesPerTrigger} shares on the opposite side of its direction: GREEN buys DOWN, RED buys UP. There is no $0.50 entry-price cap; buys sweep all visible asks at valid prices below $1.00. Each closed candle can create at most one entry.`,
       exit: `When a closed candle changes color, sell the previously held side against visible bids only if the estimated exit is not a loss after fees; otherwise keep it open. Do not buy the new side on that same candle. The $${STRATEGY.takeProfitMid.toFixed(2)} midpoint TP credits $1/share only if the remaining position still closes without a net loss. No stop-loss is active; any position not closed profitably is held to official resolution.`,
       takeProfit: `At a held-side midpoint of $${STRATEGY.takeProfitMid.toFixed(2)}, close only if the resulting net position P&L after fees is not negative; credit $1 per remaining share.`,
       stopLoss: 'Disabled: do not sell a losing position; hold it for a later profitable exit or official resolution.',
-      timing: 'Minute 1 compares with the previous window’s final one-minute candle; minutes 2–4 compare with the prior minute in the same window. Matching colors can buy; a color change only sells the previous side if the executable exit is profitable. Minute 5 has no signal.',
+      timing: 'Minute 1 compares with the previous window’s final one-minute candle; minutes 2–4 compare with the prior minute in the same window. Matching GREEN colors buy DOWN; matching RED colors buy UP. A color change only sells the previous side if the executable exit is profitable. Minute 5 has no signal.',
     };
     state.scanner = {
       ...state.scanner,

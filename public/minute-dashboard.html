@@ -201,7 +201,7 @@
     </section>
 
     <section class="panel" aria-label="Five one-minute candles">
-      <div class="section-head"><div><h2>One-minute candles</h2><p>Minute 1 compares with the prior window’s last candle. Same color buys that direction; a color change sells the held side. Minute 5 is skipped.</p></div><span id="binanceStatus" class="pill">Binance —</span></div>
+      <div class="section-head"><div><h2>One-minute candles</h2><p>Minute 1 compares with the prior window’s last candle. Same green buys DOWN; same red buys UP. A color change sells the held side only if profitable. Minute 5 is skipped.</p></div><span id="binanceStatus" class="pill">Binance —</span></div>
       <div id="previousWindowReference" class="previous-reference">Previous window final candle · waiting</div>
       <div id="candleStrip" class="candle-strip"></div>
       <div id="lastSignal" class="price-note">Waiting for a closed one-minute candle.</div>
@@ -229,7 +229,7 @@
           <ul>
             <li>Use Binance BTCUSDT one-minute kline WebSocket candles. No direction or signal comes from Polymarket prices or trade pressure.</li>
             <li>Minute 1 compares with the previous window’s final closed candle. Minutes 2–4 compare with the prior candle in the same window; any of those can trigger one entry when colors match.</li>
-            <li>Two green candles in a row buy 200 UP shares; two red candles in a row buy 200 DOWN shares. There is no $0.50 price cap.</li>
+            <li>Two green candles in a row buy 200 DOWN shares; two red candles in a row buy 200 UP shares. There is no $0.50 price cap.</li>
             <li>If a candle changes color, sell the previously held side only when the estimated FIFO exit is profitable after fees. Otherwise keep those shares open; do not buy the new side on that same candle.</li>
             <li>If the sell book only fills part of a position, keep the remainder open and retry on a later candle that continues the new color.</li>
             <li>At a $0.99 midpoint, take profit by crediting $1/share only if the position will not close at a net loss after fees. There is no stop-loss; losing positions stay open for a later profitable exit or official resolution.</li>

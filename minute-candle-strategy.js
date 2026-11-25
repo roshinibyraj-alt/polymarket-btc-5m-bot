@@ -1,9 +1,9 @@
 'use strict';
 
 const STRATEGY = Object.freeze({
-  id: 'btc-5m-cross-window-color-persistence-profitable-exits-20261126',
-  name: 'BTC 5-minute cross-window one-minute color persistence',
-  version: 3,
+  id: 'btc-5m-cross-window-inverted-color-profitable-exits-20261125',
+  name: 'BTC 5-minute inverted one-minute color signals',
+  version: 4,
   assets: ['BTC'],
   timeframes: ['5m'],
   candleIntervalMs: 60_000,
@@ -29,6 +29,12 @@ function candleColor(candle) {
   if (close > open) return 'GREEN';
   if (close < open) return 'RED';
   return 'DOJI';
+}
+
+function sideForColor(color) {
+  if (color === 'GREEN') return 'DOWN';
+  if (color === 'RED') return 'UP';
+  return null;
 }
 
 function classifyCandleTransition({ candle, previousCandle, windowStart }) {
@@ -74,7 +80,7 @@ function classifyCandleTransition({ candle, previousCandle, windowStart }) {
     };
   }
   if (color !== previousColor) {
-    const heldSide = previousColor === 'GREEN' ? 'UP' : 'DOWN';
+    const heldSide = sideForColor(previousColor);
     return {
       eligible: true,
       candleNumber,
@@ -91,10 +97,10 @@ function classifyCandleTransition({ candle, previousCandle, windowStart }) {
     candleNumber,
     color,
     previousColor,
-    side: color === 'GREEN' ? 'UP' : 'DOWN',
+    side: sideForColor(color),
     colorChanged: false,
-    reason: `Minute ${candleNumber} is consecutive ${color}; buy ${color === 'GREEN' ? 'UP' : 'DOWN'}.`,
+    reason: `Minute ${candleNumber} is consecutive ${color}; the reversed signal buys ${sideForColor(color)}.`,
   };
 }
 
-module.exports = { STRATEGY, candleColor, classifyCandleTransition };
+module.exports = { STRATEGY, candleColor, sideForColor, classifyCandleTransition };
