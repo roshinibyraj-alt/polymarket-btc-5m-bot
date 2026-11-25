@@ -25,14 +25,32 @@ final-60-second average. Entry ends before that averaging interval starts.
 
 - Evaluate once per second from seconds 45 through 210.
 - Require the same side on three consecutive fresh trade ticks.
-- Conservative scenario chance ≥60%; edge ≥$0.05/share after executable
+- Normal value entries require conservative scenario chance ≥60%; edge ≥$0.05/share after executable
   ask VWAP, taker fees and a $0.01/share execution reserve.
 - Ask $0.10–$0.85; spread ≤$0.03; exchange and receive timestamps ≤2 seconds old.
 - Only current-market outcome IDs and books hydrated on this connection qualify.
 - One entry per window, maximum 50 shares and min($15, 0.5% of available capital).
 - All unsettled entry cost, including fees, capped at 2% of starting capital.
 - A 5% peak drawdown stops new entries persistently across restarts.
-- No martingale, forced trades, flips, or opposite hedges.
+- No martingale, flips, or opposite hedges. The cadence fallback is the only
+  forced-entry path and follows the safeguards described below.
+
+## Two-window paper cadence fallback
+
+To meet the user's requested trading cadence, if both the current window and
+the immediately previous window had no filled entry, the bot starts a fallback
+at second 180. It chooses the side with the higher conservative model estimate
+and buys it after three fresh confirmations, **even when its estimate is below
+60% and its estimated net edge is zero or negative**. The fallback buy cap is
+$0.99; that is a maximum accepted ask, not a guaranteed profitable price. The
+same $15 / 50-share / total-exposure / drawdown caps apply. It still requires
+fresh BTC and CLOB data, known fee schedule, spread ≤$0.03, at least five
+shares and $1 filled notional, and visible asks (at most half the displayed
+depth). Thus the intended cadence is one filled trade in each two-window
+stretch **when those execution safeguards can be met**; missing/stale books,
+unsupported fees, risk stops, or insufficient executable depth can still cause
+a skip. This fallback explicitly sacrifices the model's edge requirement and
+may lose the entire entry cost.
 
 ## Conservative paper accounting
 
