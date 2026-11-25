@@ -112,7 +112,7 @@ summary{padding:11px 12px;cursor:pointer;font-size:12px;font-weight:800}
 </section>
 
 <section class="card">
-  <div class="h"><div><h2>Open positions</h2><p>Live positions mark to best bid. Pending positions await official resolution.</p></div><span class="pill" id="posCount">—</span></div>
+  <div class="h"><div><h2>Open positions</h2><p>Floating value uses visible bid depth after fees, not midpoint. Pending positions await official resolution.</p></div><span class="pill" id="posCount">—</span></div>
   <div id="openList"><div class="empty">No open paper positions.</div></div>
 </section>
 
@@ -171,7 +171,7 @@ const fresh=q?.fresh===true;$('q'+side).classList.toggle('stale',!fresh);const a
 
 function posCard(p){const pend=p.status!=='OPEN'&&p.resolvedAt==null;const s=String(p.side||'').toUpperCase();const f=p.entryForecast||{};
 return `<article class="pos ${s==='UP'?'up':'down'}"><div class="row"><strong class="${s==='UP'?'green':'red'}" style="font:900 15px var(--mono)">${esc(s)} · ${esc(fx(p.shares,2))} sh</strong><span class="tag ${pend?'pend':'live'}">${pend?'PENDING SETTLEMENT':'LIVE'}</span></div>
-<div class="grid4"><div class="d"><span>Entry</span><strong>${px(p.entryPrice)}</strong></div><div class="d"><span>Mark bid</span><strong>${px(p.markBid)} ${p.markStatus?'· '+esc(p.markStatus):''}</strong></div>
+<div class="grid4"><div class="d"><span>Entry</span><strong>${px(p.entryPrice)}</strong></div><div class="d"><span>Net bid estimate</span><strong>${px(p.markBid)} ${p.markStatus?'· '+esc(p.markStatus):''}</strong></div>
 <div class="d"><span>Cost + fees</span><strong>${money(p.totalCost)} · ${money(p.fees,3)}</strong></div><div class="d"><span>Unrealized</span><strong class="${tone(p.unrealizedPnl)}">${smoney(p.unrealizedPnl)}</strong></div>
 <div class="d"><span>Entry estimate / cons.</span><strong>${pct(f.estimate)} / ${pct(f.conservativeProbability)}</strong></div><div class="d"><span>All-in / net edge est.</span><strong>${px(f.allInCost)} / ${pct(f.netEdge)}</strong></div></div>
 <p class="small" style="margin-top:6px;text-transform:none;letter-spacing:0">Entered ${tm(p.entryAt)} · window ${tm(p.windowStart)}–${tm(p.windowEnd)}</p></article>`}
