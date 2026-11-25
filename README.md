@@ -1,15 +1,15 @@
-# BTC 5-minute cross-window candle-color paper bot
+# BTC 5-minute previous-candle color paper bot
 
 This service watches BTC UP/DOWN five-minute markets. It uses Binance BTCUSDT one-minute kline WebSocket candles for direction and the Polymarket CLOB WebSocket for paper execution quotes. It is paper-only: it does not submit real orders or sign with a wallet.
 
 ## Signal flow
 
-At the close of minute 1 in each five-minute window, compare it with the previous window’s final one-minute candle. For minutes 2–4, compare with the immediately preceding candle in the current window. Two consecutive green candles buy DOWN; two consecutive red candles buy UP. Each qualifying one-minute candle can produce one entry. Candle color changes never sell and do not create an entry on the change candle; the next candle continuing the new color can enter. Minute 5 has no new entry or exit signal. Doji candles are neutral.
+At the start of every one-minute interval, use the immediately preceding closed Binance candle to choose a side: RED buys UP; GREEN buys DOWN. Minute 1 of each five-minute market uses the previous market window’s final one-minute candle. Minutes 2–5 use the preceding candle in the current window, so all five minutes can create one entry each. The current candle’s color does not change that interval’s entry. Doji candles are neutral and do not create an entry.
 
 ## Paper execution
 
-- Each qualifying candle requests 200 shares with no $0.50 entry-price gate. Buys sweep visible asks over the valid CLOB price range; actual fills can be partial if displayed depth is insufficient.
-- Candle signals never sell positions, including on a color change; they only create entries when consecutive colors match. The change candle itself does not create an entry.
+- Each minute start requests 200 shares with no $0.50 entry-price gate. Buys sweep visible asks over the valid CLOB price range; actual fills can be partial if displayed depth is insufficient.
+- Candle signals never sell positions. Each minute can buy independently, including the opposite side while an earlier position remains open.
 - A fresh held-side midpoint at or above $0.99 triggers the $1/share take-profit only when the remaining position will not close at a net loss after fees. There is no stop-loss; positions not closed by take-profit remain open for official resolution.
 - Taker-style paper buys use visible book depth; fees use market metadata when available and the configured crypto-fee fallback otherwise.
 - Shares still open at expiry are settled using the official Polymarket result, polled every five seconds.

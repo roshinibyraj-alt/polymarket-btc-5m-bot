@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard serves the BTC 5-minute color-follow-through strategy', async t => {
+test('dashboard serves the BTC 5-minute previous-candle entry strategy', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -54,10 +54,10 @@ test('dashboard serves the BTC 5-minute color-follow-through strategy', async t 
   assert.match(html, /BTC Candle Bot/);
   assert.match(html, /Current BTC market/);
   assert.match(html, /Five one-minute candles/);
-  assert.match(html, /Minute 1 compares with the prior window’s last candle/);
-  assert.match(html, /Two green candles in a row buy 200 DOWN shares; two red candles in a row buy 200 UP shares/);
+  assert.match(html, /At each minute start, the previous closed RED candle buys UP; GREEN buys DOWN/);
+  assert.match(html, /A previous RED candle buys 200 UP shares; a previous GREEN candle buys 200 DOWN shares/);
   assert.match(html, /no \$0\.50 entry-price cap/);
-  assert.match(html, /Color changes never sell/);
+  assert.match(html, /never sell/i);
   assert.match(html, /At a \$0\.99 midpoint, take profit/);
   assert.match(html, /There is no stop-loss/);
   assert.match(html, /official resolution/);

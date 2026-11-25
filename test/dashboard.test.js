@@ -7,7 +7,7 @@ const path = require('node:path');
 
 const html = fs.readFileSync(path.join(__dirname, '../public/minute-dashboard.html'), 'utf8');
 
-test('simple mobile dashboard shows prices and the cross-window candle reference', () => {
+test('simple mobile dashboard shows prices and the prior-candle reference', () => {
   assert.match(html, /aria-label="Current Polymarket prices"/);
   assert.match(html, /id="upAsk"/);
   assert.match(html, /id="downAsk"/);
@@ -15,7 +15,7 @@ test('simple mobile dashboard shows prices and the cross-window candle reference
   assert.match(html, /aria-label="Five one-minute candles"/);
   assert.match(html, /id="previousWindowReference"/);
   assert.match(html, /id="candleStrip"/);
-  assert.match(html, /Minute 1 compares with the prior window’s last candle/);
+  assert.match(html, /Minute 1 uses the previous window’s last candle/);
 });
 
 test('strategy details are at the bottom after the monitoring sections', () => {
@@ -28,16 +28,16 @@ test('strategy details are at the bottom after the monitoring sections', () => {
   assert.match(html, /details>/);
 });
 
-test('dashboard explains reversed same-color entries and no signal exits', () => {
-  assert.match(html, /Two green candles in a row buy 200 DOWN shares; two red candles in a row buy 200 UP shares/);
-  assert.match(html, /color changes never sell/i);
-  assert.match(html, /Minute 5 is skipped/);
+test('dashboard explains one entry at every minute start and no signal exits', () => {
+  assert.match(html, /A previous RED candle buys 200 UP shares; a previous GREEN candle buys 200 DOWN shares/);
+  assert.match(html, /never sell/i);
+  assert.match(html, /All five minutes are included/);
   assert.match(html, /PAPER ONLY/);
 });
 
 test('dashboard explains uncapped entries, take-profit, and no stop-loss', () => {
-  assert.match(html, /There is no \$0\.50 price cap/);
-  assert.match(html, /do not create an entry on the change candle/i);
+  assert.match(html, /no \$0\.50 entry-price cap/);
+  assert.match(html, /The current candle’s color does not affect that minute’s entry/i);
   assert.match(html, /At a \$0\.99 midpoint, take profit/);
   assert.match(html, /There is no stop-loss/);
   assert.match(html, /id="upMid"/);

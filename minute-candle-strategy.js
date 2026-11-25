@@ -1,16 +1,16 @@
 'use strict';
 
 const STRATEGY = Object.freeze({
-  id: 'btc-5m-cross-window-inverted-color-no-signal-sells-20261125',
-  name: 'BTC 5-minute inverted one-minute color entries',
-  version: 5,
+  id: 'btc-5m-previous-closed-color-entry-every-minute-20261125',
+  name: 'BTC 5-minute previous-candle color entries',
+  version: 6,
   assets: ['BTC'],
   timeframes: ['5m'],
   candleIntervalMs: 60_000,
   firstSignalCandle: 1,
-  lastSignalCandle: 4,
+  lastSignalCandle: 5,
   sharesPerTrigger: 200,
-  maximumEntriesPerWindow: 4,
+  maximumEntriesPerWindow: 5,
   maximumEntryAsk: null,
   oppositeSignalVetoBestBid: null,
   takeProfitMid: 0.99,
@@ -37,68 +37,65 @@ function sideForColor(color) {
   return null;
 }
 
-function classifyCandleTransition({ candle, previousCandle, windowStart }) {
-  const start = Number(candle?.start);
+function classifyMinuteEntry({ previousCandle, targetCandleStart, windowStart }) {
+  const targetStart = Number(targetCandleStart);
   const previousStart = Number(previousCandle?.start);
   const marketStart = Number(windowStart);
   const interval = STRATEGY.candleIntervalMs;
-  const offset = start - marketStart;
+  const offset = targetStart - marketStart;
   const candleNumber = Number.isFinite(offset) && offset >= 0 && offset % interval === 0
     ? Math.floor(offset / interval) + 1
     : null;
-  const color = candleColor(candle);
-  const previousColor = candleColor(previousCandle);
+  const referenceColor = candleColor(previousCandle);
 
   if (candleNumber == null) {
-    return { eligible: false, candleNumber: null, color, previousColor, side: null, colorChanged: false, reason: 'Candle does not align to this five-minute market.' };
+    return {
+      eligible: false,
+      candleNumber: null,
+      referenceColor,
+      side: null,
+      reason: 'The target minute does not align to this five-minute market.',
+    };
   }
   if (candleNumber < STRATEGY.firstSignalCandle || candleNumber > STRATEGY.lastSignalCandle) {
     return {
       eligible: false,
       candleNumber,
-      color,
-      previousColor,
+      referenceColor,
       side: null,
-      colorChanged: false,
-      reason: candleNumber === 5
-        ? 'Minute 5 is excluded from entries.'
-        : 'This candle is outside the signal minutes.',
+      reason: 'This minute is outside the entry schedule.',
     };
   }
-  if (!Number.isFinite(previousStart) || previousStart !== start - interval) {
-    return { eligible: false, candleNumber, color, previousColor, side: null, colorChanged: false, reason: 'The immediately previous one-minute candle is not available.' };
+  if (!Number.isFinite(previousStart)
+    || previousStart !== targetStart - interval
+    || previousCandle?.closed === false
+    || !Number.isFinite(Number(previousCandle?.closeAt))
+    || Number(previousCandle.closeAt) > targetStart) {
+    return {
+      eligible: false,
+      candleNumber,
+      referenceColor,
+      side: null,
+      reason: 'The immediately previous closed one-minute candle is not available.',
+    };
   }
-  if (color === 'DOJI' || previousColor === 'DOJI' || color === 'UNKNOWN' || previousColor === 'UNKNOWN') {
+  if (referenceColor === 'DOJI' || referenceColor === 'UNKNOWN') {
     return {
       eligible: true,
       candleNumber,
-      color,
-      previousColor,
+      referenceColor,
       side: null,
-      colorChanged: false,
-      reason: 'A doji or unavailable candle has no usable color; no trade.',
+      reason: `Minute ${candleNumber} has no entry because the previous candle was ${referenceColor}.`,
     };
   }
-  if (color !== previousColor) {
-    return {
-      eligible: true,
-      candleNumber,
-      color,
-      previousColor,
-      side: null,
-      colorChanged: true,
-      reason: `Minute ${candleNumber} changed from ${previousColor} to ${color}; no entry or signal-based sale on this candle.`,
-    };
-  }
+  const side = sideForColor(referenceColor);
   return {
     eligible: true,
     candleNumber,
-    color,
-    previousColor,
-    side: sideForColor(color),
-    colorChanged: false,
-    reason: `Minute ${candleNumber} is consecutive ${color}; the reversed signal buys ${sideForColor(color)}.`,
+    referenceColor,
+    side,
+    reason: `Minute ${candleNumber} uses the previous ${referenceColor} candle; buy ${side}.`,
   };
 }
 
-module.exports = { STRATEGY, candleColor, sideForColor, classifyCandleTransition };
+module.exports = { STRATEGY, candleColor, sideForColor, classifyMinuteEntry };

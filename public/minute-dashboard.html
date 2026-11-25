@@ -175,7 +175,7 @@
     </section>
 
     <section class="panel" aria-label="Current positions">
-      <div class="section-head"><div><h2>Positions</h2><p>One 200-share entry per qualifying minute; candle signals never sell. Positions exit by take-profit or resolution.</p></div><span id="positionCount" class="pill">0 open</span></div>
+      <div class="section-head"><div><h2>Positions</h2><p>One 200-share buy at each minute start, based on the previous closed candle. Candle signals never sell.</p></div><span id="positionCount" class="pill">0 open</span></div>
       <div class="position-grid">
         <article class="position-card up">
           <div class="position-head"><span class="side-tag">UP</span><span id="upPositionStatus" class="state">EMPTY</span></div>
@@ -201,7 +201,7 @@
     </section>
 
     <section class="panel" aria-label="Five one-minute candles">
-      <div class="section-head"><div><h2>One-minute candles</h2><p>Minute 1 compares with the prior window’s last candle. Same green buys DOWN; same red buys UP. Color changes never sell. Positions exit by take-profit or resolution. Minute 5 is skipped.</p></div><span id="binanceStatus" class="pill">Binance —</span></div>
+      <div class="section-head"><div><h2>One-minute candles</h2><p>At each minute start, the previous closed RED candle buys UP; GREEN buys DOWN. Minute 1 uses the previous window’s last candle. All five minutes are included; candle colors do not sell positions.</p></div><span id="binanceStatus" class="pill">Binance —</span></div>
       <div id="previousWindowReference" class="previous-reference">Previous window final candle · waiting</div>
       <div id="candleStrip" class="candle-strip"></div>
       <div id="lastSignal" class="price-note">Waiting for a closed one-minute candle.</div>
@@ -228,9 +228,9 @@
         <div id="strategyCopy" class="strategy-copy">
           <ul>
             <li>Use Binance BTCUSDT one-minute kline WebSocket candles. No direction or signal comes from Polymarket prices or trade pressure.</li>
-            <li>Minute 1 compares with the previous window’s final closed candle. Minutes 2–4 compare with the prior candle in the same window; any of those can trigger one entry when colors match.</li>
-            <li>Two green candles in a row buy 200 DOWN shares; two red candles in a row buy 200 UP shares. There is no $0.50 price cap.</li>
-            <li>Candle color changes never sell positions and do not create an entry on the change candle; a later matching-color candle can enter.</li>
+            <li>At the start of every one-minute candle, use the immediately previous closed Binance candle. Minute 1 uses the previous window’s final candle; minutes 2–5 use the preceding candle in the current window.</li>
+            <li>A previous RED candle buys 200 UP shares; a previous GREEN candle buys 200 DOWN shares. The current candle’s color does not affect that minute’s entry. Doji or unavailable previous candles do not create a directional entry.</li>
+            <li>Each of the five one-minute candles can trigger one buy. Candle color changes never sell positions.</li>
             <li>At a $0.99 midpoint, take profit by crediting $1/share only if the position will not close at a net loss after fees. There is no stop-loss; positions not closed by take-profit stay open for official resolution.</li>
             <li>Paper taker-style buys use visible CLOB depth and modeled fees; shallow books can partially fill.</li>
           </ul>
@@ -303,7 +303,7 @@
         const minute = index + 1;
         const candle = byMinute.get(minute);
         if (!candle) {
-          return `<div class="candle"><span class="minute">MIN ${minute}</span><b>—</b><span class="range">Not closed</span><span class="state">${minute === 1 ? 'Cross-window' : minute === 5 ? 'Skipped' : 'Waiting'}</span></div>`;
+          return `<div class="candle"><span class="minute">MIN ${minute}</span><b>—</b><span class="range">Not closed</span><span class="state">${minute === 1 ? 'Previous window drives entry' : 'Entry at minute start'}</span></div>`;
         }
         const color = String(candle.color || 'UNKNOWN');
         const tone = color === 'GREEN' ? 'green' : color === 'RED' ? 'red' : '';
@@ -313,8 +313,8 @@
       $('candleStrip').innerHTML = html;
       const review = engine?.latestReview;
       $('lastSignal').textContent = review
-        ? `Latest: minute ${review.candleNumber} ${review.currentColor} after ${review.previousColor} · ${review.signalReason}`
-        : 'Waiting for the first closed minute candle.';
+        ? `Minute ${review.candleNumber}: previous ${review.referenceColor || review.previousColor || '—'} → ${review.signalSide || 'no entry'} · ${review.signalReason}`
+        : 'Waiting for the previous closed one-minute candle.';
       $('binanceStatus').textContent = `Binance 1m WebSocket · ${engine?.status || '—'} · ${engine?.historyStatus || 'history —'}`;
     }
     function renderOrders(orders) {
@@ -325,7 +325,7 @@
         return `<article class="item">
           <div class="order-head"><strong class="${bought ? 'green' : 'red'}">${esc(titleCase(order.action))} · ${esc(order.side)}</strong><time>${time(order.placedAt)}</time></div>
           <p>${Number(order.filledShares || 0).toFixed(2)} / ${Number(order.requestedShares || 0).toFixed(0)} shares · average ${money(order.fillPrice, 4)} · fees ${money(order.fees)} · <b class="${outcome}">${esc(titleCase(order.status))}</b></p>
-          <p>Minute ${order.signalCandleNumber || '—'}: ${esc(order.previousColor || '—')} → ${esc(order.signalColor || '—')}</p>
+          <p>Minute ${order.signalCandleNumber || '—'}: previous ${esc(order.referenceColor || order.signalColor || '—')} candle → buy ${esc(order.side)}</p>
         </article>`;
       }).join('') : '<div class="empty">No orders in this run yet.</div>';
     }
