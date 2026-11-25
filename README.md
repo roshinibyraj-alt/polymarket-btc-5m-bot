@@ -4,12 +4,12 @@ This service watches BTC UP/DOWN five-minute markets. It uses Binance BTCUSDT on
 
 ## Signal flow
 
-At the start of every one-minute interval, use the immediately preceding closed Binance candle to choose a side: RED buys UP; GREEN buys DOWN. Minute 1 of each five-minute market uses the previous market window’s final one-minute candle. Minutes 2–5 use the preceding candle in the current window, so all five minutes can create one entry each. The current candle’s color does not change that interval’s entry. Doji candles are neutral and do not create an entry.
+At the start of minutes 1–3 in each five-minute market, use the immediately preceding closed Binance candle to choose a side: RED buys UP; GREEN buys DOWN. Minute 1 of each five-minute market uses the previous market window’s final one-minute candle. Minutes 2–3 use the preceding candle in the current window. Minutes 4 and 5 do not trade. The current candle’s color does not change that interval’s entry. Doji candles are neutral and do not create an entry.
 
 ## Paper execution
 
-- Each minute start requests 200 shares with no $0.50 entry-price gate. Buys sweep visible asks over the valid CLOB price range; actual fills can be partial if displayed depth is insufficient.
-- Candle signals never sell positions. Each minute can buy independently, including the opposite side while an earlier position remains open.
+- Each of the first three minute starts requests 200 shares with no $0.50 entry-price gate. Buys sweep visible asks over the valid CLOB price range; actual fills can be partial if displayed depth is insufficient. Minutes 4 and 5 are skipped.
+- Candle signals never sell positions. Each eligible minute can buy independently, including the opposite side while an earlier position remains open.
 - A fresh held-side midpoint at or above $0.99 triggers the $1/share take-profit only when the remaining position will not close at a net loss after fees. There is no stop-loss; positions not closed by take-profit remain open for official resolution.
 - Taker-style paper buys use visible book depth; fees use market metadata when available and the configured crypto-fee fallback otherwise.
 - Shares still open at expiry are settled using the official Polymarket result, polled every five seconds.

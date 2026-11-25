@@ -28,10 +28,11 @@ test('strategy details are at the bottom after the monitoring sections', () => {
   assert.match(html, /details>/);
 });
 
-test('dashboard explains one entry at every minute start and no signal exits', () => {
+test('dashboard explains entries in minutes 1 through 3 and skips the final two', () => {
   assert.match(html, /A previous RED candle buys 200 UP shares; a previous GREEN candle buys 200 DOWN shares/);
   assert.match(html, /never sell/i);
-  assert.match(html, /All five minutes are included/);
+  assert.match(html, /Minutes 4–5 are skipped/);
+  assert.match(html, /Only minutes 1–3 can trigger one buy each/);
   assert.match(html, /PAPER ONLY/);
 });
 

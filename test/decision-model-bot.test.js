@@ -158,14 +158,14 @@ test('green previous candle buys DOWN at the next minute start', () => {
   bot.stop();
 });
 
-test('every minute 1 through 5 gets one buy from the immediately previous closed candle', () => {
+test('only minutes 1 through 3 get buys from the immediately previous closed candle', () => {
   const { bot, setNow, setCandles } = setup();
   const previous = previousWindowCandle('RED');
   const colors = ['GREEN', 'RED', 'GREEN', 'GREEN'];
   setCandles([previous]);
   bot.processClosedCandles(START + 100);
 
-  for (let minute = 2; minute <= 5; minute += 1) {
+  for (let minute = 2; minute <= 3; minute += 1) {
     const now = START + (minute - 1) * INTERVAL + 100;
     setNow(now);
     setCandles([previous, ...colors.slice(0, minute - 1).map((color, index) => candle(index + 1, color))]);
@@ -173,15 +173,23 @@ test('every minute 1 through 5 gets one buy from the immediately previous closed
   }
 
   const orders = orderedByMinute(bot);
-  assert.equal(orders.length, 5);
-  assert.deepEqual(orders.map((order) => order.signalCandleNumber), [1, 2, 3, 4, 5]);
-  assert.deepEqual(orders.map((order) => order.side), ['UP', 'DOWN', 'UP', 'DOWN', 'DOWN']);
+  assert.equal(orders.length, 3);
+  assert.deepEqual(orders.map((order) => order.signalCandleNumber), [1, 2, 3]);
+  assert.deepEqual(orders.map((order) => order.side), ['UP', 'DOWN', 'UP']);
   assert.ok(orders.every((order) => order.requestedShares === 200));
 
-  const duplicateTime = START + 4 * INTERVAL + 200;
+  for (const minute of [4, 5]) {
+    const now = START + (minute - 1) * INTERVAL + 100;
+    setNow(now);
+    setCandles([previous, ...colors.slice(0, minute - 1).map((color, index) => candle(index + 1, color))]);
+    bot.processClosedCandles(now);
+  }
+  assert.equal(orderedByMinute(bot).length, 3);
+
+  const duplicateTime = START + 2 * INTERVAL + 200;
   setNow(duplicateTime);
   bot.processClosedCandles(duplicateTime);
-  assert.equal(orderedByMinute(bot).length, 5);
+  assert.equal(orderedByMinute(bot).length, 3);
   bot.stop();
 });
 

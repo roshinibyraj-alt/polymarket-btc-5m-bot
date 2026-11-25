@@ -54,7 +54,8 @@ test('dashboard serves the BTC 5-minute previous-candle entry strategy', async t
   assert.match(html, /BTC Candle Bot/);
   assert.match(html, /Current BTC market/);
   assert.match(html, /Five one-minute candles/);
-  assert.match(html, /At each minute start, the previous closed RED candle buys UP; GREEN buys DOWN/);
+  assert.match(html, /previous closed RED candle buys UP; GREEN buys DOWN/);
+  assert.match(html, /Minutes 4–5 are skipped/);
   assert.match(html, /A previous RED candle buys 200 UP shares; a previous GREEN candle buys 200 DOWN shares/);
   assert.match(html, /no \$0\.50 entry-price cap/);
   assert.match(html, /never sell/i);

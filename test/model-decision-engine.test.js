@@ -22,13 +22,13 @@ function candleAt(start, color) {
   };
 }
 
-test('strategy schedules one paper entry for all five one-minute intervals', () => {
+test('strategy schedules one paper entry for only the first three one-minute intervals', () => {
   assert.deepEqual(STRATEGY.assets, ['BTC']);
   assert.deepEqual(STRATEGY.timeframes, ['5m']);
   assert.equal(STRATEGY.sharesPerTrigger, 200);
-  assert.equal(STRATEGY.maximumEntriesPerWindow, 5);
+  assert.equal(STRATEGY.maximumEntriesPerWindow, 3);
   assert.equal(STRATEGY.firstSignalCandle, 1);
-  assert.equal(STRATEGY.lastSignalCandle, 5);
+  assert.equal(STRATEGY.lastSignalCandle, 3);
   assert.equal(STRATEGY.maximumEntryAsk, null);
   assert.equal(STRATEGY.takeProfitMid, 0.99);
   assert.equal(STRATEGY.stopLossMid, null);
@@ -52,14 +52,23 @@ test('a previous RED candle buys UP and a previous GREEN candle buys DOWN', () =
   assert.equal(green.referenceColor, 'GREEN');
 });
 
-test('each minute including minute 5 uses only its immediately previous closed candle', () => {
-  for (let minute = 1; minute <= 5; minute += 1) {
+test('minutes 1 through 3 use the prior closed candle; minutes 4 and 5 are excluded', () => {
+  for (let minute = 1; minute <= 3; minute += 1) {
     const targetCandleStart = START + (minute - 1) * INTERVAL;
     const previousCandle = candleAt(targetCandleStart - INTERVAL, minute % 2 ? 'RED' : 'GREEN');
     const result = classifyMinuteEntry({ previousCandle, targetCandleStart, windowStart: START });
     assert.equal(result.eligible, true);
     assert.equal(result.candleNumber, minute);
     assert.equal(result.side, minute % 2 ? 'UP' : 'DOWN');
+  }
+  for (const minute of [4, 5]) {
+    const targetCandleStart = START + (minute - 1) * INTERVAL;
+    const previousCandle = candleAt(targetCandleStart - INTERVAL, 'RED');
+    const result = classifyMinuteEntry({ previousCandle, targetCandleStart, windowStart: START });
+    assert.equal(result.eligible, false);
+    assert.equal(result.candleNumber, minute);
+    assert.equal(result.side, null);
+    assert.match(result.reason, /outside the entry schedule/);
   }
 });
 

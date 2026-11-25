@@ -175,7 +175,7 @@
     </section>
 
     <section class="panel" aria-label="Current positions">
-      <div class="section-head"><div><h2>Positions</h2><p>One 200-share buy at each minute start, based on the previous closed candle. Candle signals never sell.</p></div><span id="positionCount" class="pill">0 open</span></div>
+      <div class="section-head"><div><h2>Positions</h2><p>One 200-share buy at the start of minutes 1–3, based on the previous closed candle. Minutes 4–5 are skipped; candle signals never sell.</p></div><span id="positionCount" class="pill">0 open</span></div>
       <div class="position-grid">
         <article class="position-card up">
           <div class="position-head"><span class="side-tag">UP</span><span id="upPositionStatus" class="state">EMPTY</span></div>
@@ -201,7 +201,7 @@
     </section>
 
     <section class="panel" aria-label="Five one-minute candles">
-      <div class="section-head"><div><h2>One-minute candles</h2><p>At each minute start, the previous closed RED candle buys UP; GREEN buys DOWN. Minute 1 uses the previous window’s last candle. All five minutes are included; candle colors do not sell positions.</p></div><span id="binanceStatus" class="pill">Binance —</span></div>
+      <div class="section-head"><div><h2>One-minute candles</h2><p>At minutes 1–3, the previous closed RED candle buys UP; GREEN buys DOWN. Minute 1 uses the previous window’s last candle. Minutes 4–5 are skipped; candle colors do not sell positions.</p></div><span id="binanceStatus" class="pill">Binance —</span></div>
       <div id="previousWindowReference" class="previous-reference">Previous window final candle · waiting</div>
       <div id="candleStrip" class="candle-strip"></div>
       <div id="lastSignal" class="price-note">Waiting for a closed one-minute candle.</div>
@@ -228,9 +228,9 @@
         <div id="strategyCopy" class="strategy-copy">
           <ul>
             <li>Use Binance BTCUSDT one-minute kline WebSocket candles. No direction or signal comes from Polymarket prices or trade pressure.</li>
-            <li>At the start of every one-minute candle, use the immediately previous closed Binance candle. Minute 1 uses the previous window’s final candle; minutes 2–5 use the preceding candle in the current window.</li>
+            <li>At the start of minutes 1–3, use the immediately previous closed Binance candle. Minute 1 uses the previous window’s final candle; minutes 2–3 use the preceding candle in the current window. Minutes 4–5 are skipped.</li>
             <li>A previous RED candle buys 200 UP shares; a previous GREEN candle buys 200 DOWN shares. The current candle’s color does not affect that minute’s entry. Doji or unavailable previous candles do not create a directional entry.</li>
-            <li>Each of the five one-minute candles can trigger one buy. Candle color changes never sell positions.</li>
+            <li>Only minutes 1–3 can trigger one buy each. Minutes 4–5 never enter. Candle color changes never sell positions.</li>
             <li>At a $0.99 midpoint, take profit by crediting $1/share only if the position will not close at a net loss after fees. There is no stop-loss; positions not closed by take-profit stay open for official resolution.</li>
             <li>Paper taker-style buys use visible CLOB depth and modeled fees; shallow books can partially fill.</li>
           </ul>

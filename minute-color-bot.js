@@ -750,13 +750,13 @@ class MinuteColorBot extends DipBounceBot {
     state.statusReason = this.statusReason;
     state.strategy = {
       ...STRATEGY,
-      summary: 'At the start of every one-minute candle in each BTC five-minute market, use the immediately previous closed Binance candle: RED buys UP; GREEN buys DOWN. Minute 1 uses the prior window’s final candle, and minute 5 is included. Candle signals never sell positions.',
+      summary: 'At the start of minutes 1–3 in each BTC five-minute market, use the immediately previous closed Binance candle: RED buys UP; GREEN buys DOWN. Minute 1 uses the prior window’s final candle. Minutes 4–5 do not trade. Candle signals never sell positions.',
       execution: 'PAPER ONLY — no real orders or wallet signing.',
-      entry: `At each minute start, request ${STRATEGY.sharesPerTrigger} shares based only on the previous closed candle: RED buys UP; GREEN buys DOWN. Minute 1 uses the prior window’s final candle; minutes 2–5 use the previous candle in this window. There is no $0.50 entry-price cap; buys sweep visible asks below $1.00. Doji or unavailable reference candles do not create a directional entry.`,
+      entry: `At the start of minutes 1–3, request ${STRATEGY.sharesPerTrigger} shares based only on the previous closed candle: RED buys UP; GREEN buys DOWN. Minute 1 uses the prior window’s final candle; minutes 2–3 use the previous candle in this window. Minutes 4–5 are skipped. There is no $0.50 entry-price cap; buys sweep visible asks below $1.00. Doji or unavailable reference candles do not create a directional entry.`,
       exit: `Candle signals never sell positions, including on color changes. The $${STRATEGY.takeProfitMid.toFixed(2)} midpoint take-profit credits $1/share only if the remaining position still closes without a net loss. No stop-loss is active; positions not closed by take-profit are held to official resolution.`,
       takeProfit: `At a held-side midpoint of $${STRATEGY.takeProfitMid.toFixed(2)}, close only if the resulting net position P&L after fees is not negative; credit $1 per remaining share.`,
       stopLoss: 'Disabled: candle signals never sell; unresolved positions remain open for take-profit or official resolution.',
-      timing: 'One buy decision is scheduled at the start of each of the five one-minute candles. RED on the previous closed candle buys UP; GREEN buys DOWN. Minute 1 carries over the previous five-minute window’s final candle, and minute 5 is included. Candle color changes do not sell existing positions.',
+      timing: 'One buy decision is scheduled at the start of minutes 1, 2, and 3 only. RED on the previous closed candle buys UP; GREEN buys DOWN. Minute 1 carries over the previous five-minute window’s final candle. Minutes 4 and 5 are skipped. Candle color changes do not sell existing positions.',
     };
     state.scanner = {
       ...state.scanner,

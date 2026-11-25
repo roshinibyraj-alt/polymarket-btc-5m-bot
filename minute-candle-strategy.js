@@ -1,16 +1,16 @@
 'use strict';
 
 const STRATEGY = Object.freeze({
-  id: 'btc-5m-previous-closed-color-entry-every-minute-20261125',
+  id: 'btc-5m-previous-closed-color-entry-first-three-minutes-20261125',
   name: 'BTC 5-minute previous-candle color entries',
-  version: 6,
+  version: 7,
   assets: ['BTC'],
   timeframes: ['5m'],
   candleIntervalMs: 60_000,
   firstSignalCandle: 1,
-  lastSignalCandle: 5,
+  lastSignalCandle: 3,
   sharesPerTrigger: 200,
-  maximumEntriesPerWindow: 5,
+  maximumEntriesPerWindow: 3,
   maximumEntryAsk: null,
   oppositeSignalVetoBestBid: null,
   takeProfitMid: 0.99,
