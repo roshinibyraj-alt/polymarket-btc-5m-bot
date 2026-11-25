@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0d1b2a">
+<title>BTC Edge Lab · Paper</title>
+<style>
+:root{color-scheme:dark;--bg:#0d1720;--panel:#15232f;--panel2:#1b2d3b;--line:#2c4555;--text:#f3efe4;--muted:#a9b6bd;--up:#3fe0b0;--upbg:#0f3b35;--down:#ff8a6b;--downbg:#43261f;--amber:#ffc857;--violet:#b9a3ff;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+*{box-sizing:border-box}h1,h2,h3,p{margin:0}
+body{margin:0;min-height:100dvh;color:var(--text);background:radial-gradient(700px 380px at 100% -8%,#3a2a12 0,transparent 65%),radial-gradient(700px 420px at 0 -10%,#103d3c 0,transparent 62%),var(--bg)}
+.shell{width:min(820px,100%);margin:0 auto;padding:12px 12px 40px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.top{margin:4px 2px 12px}
+.mark{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;font:900 15px var(--mono);color:#10202a;background:linear-gradient(135deg,var(--amber),var(--up))}
+h1{font-size:17px;letter-spacing:-.02em}.sub{color:var(--muted);font-size:11px;margin-top:2px}
+.conn{display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid var(--line);border-radius:999px;font:800 10px var(--mono);letter-spacing:.05em;white-space:nowrap;transition:background .3s,border-color .3s}
+.conn i{width:8px;height:8px;border-radius:50%;background:var(--amber)}
+.conn.ok i{background:var(--up)}.conn.bad{border-color:#8a3b2c;background:#3a1a14}.conn.bad i{background:var(--down)}.conn.stale{border-color:#806222;background:#33280f}
+.banner{display:none;margin-bottom:10px;padding:10px 12px;border-radius:12px;border:1px solid #8a3b2c;background:#3a1a14;color:#ffd1c4;font-size:12px;font-weight:700}
+.banner.show{display:block}
+.paper{padding:8px 12px;border-radius:12px;background:repeating-linear-gradient(135deg,#2f2610 0 10px,#29210d 10px 20px);border:1px solid #6b5419;color:#ffe3a0;font-size:11px;line-height:1.45;margin-bottom:10px}
+.paper b{font-family:var(--mono)}
+.card{border:1px solid var(--line);border-radius:16px;background:var(--panel);padding:13px;margin-top:10px}
+.h{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:10px}
+.h h2{font-size:14px}.h p{color:var(--muted);font-size:11px;margin-top:3px;line-height:1.4}
+.pill{padding:5px 8px;border-radius:8px;background:#0b151d;border:1px solid var(--line);font:700 10px var(--mono);color:#d6dde0;white-space:nowrap}
+.hero{background:linear-gradient(140deg,#17303a,#1a2534 70%);border-color:#35596a}
+.eyebrow{color:var(--amber);font:800 10px var(--mono);letter-spacing:.12em;text-transform:uppercase}
+.hero h2{font-size:17px;margin-top:5px;line-height:1.25;overflow-wrap:anywhere}
+.clock{min-width:80px;text-align:center;padding:8px;border-radius:12px;background:#0b151d99;border:1px solid #ffffff1c}
+.clock strong{display:block;font:800 24px var(--mono)}.clock small{color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}
+.prices{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:12px}
+.q{border-radius:14px;padding:12px;border:1px solid;transition:opacity .3s}
+.q.up{background:linear-gradient(160deg,var(--upbg),#11232c);border-color:#2a7d68}
+.q.down{background:linear-gradient(160deg,var(--downbg),#1d1f29);border-color:#86493a}
+.q.stale{opacity:.55}
+.side{font:900 13px var(--mono);letter-spacing:.1em}.up .side,.up .big{color:var(--up)}.down .side,.down .big{color:var(--down)}
+.big{font:900 clamp(38px,12vw,58px) var(--mono);letter-spacing:-.05em;line-height:1;margin-top:8px;font-variant-numeric:tabular-nums}
+.small{color:var(--muted);font-size:10px;margin-top:4px;text-transform:uppercase;letter-spacing:.08em}
+.bid{margin-top:8px;font:700 13px var(--mono)}
+.metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}
+.m{border:1px solid var(--line);border-radius:14px;background:var(--panel);padding:11px 12px;min-width:0}
+.m.lead{grid-column:1/-1;background:linear-gradient(120deg,#1d2a3f,#22263a);border-color:#4b4878}
+.m span,.lbl{color:var(--muted);font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
+.m strong{display:block;margin-top:4px;font:800 19px var(--mono);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.m.lead strong{font-size:30px;color:var(--violet)}
+.spark{display:block;width:100%;height:46px;margin-top:8px}
+.pos{border:1px solid var(--line);border-radius:13px;padding:11px;background:var(--panel2);margin-top:8px}
+.pos.up{border-left:4px solid var(--up)}.pos.down{border-left:4px solid var(--down)}
+.grid4{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:8px}
+.d{background:#0b151d;border-radius:9px;padding:7px;min-width:0}.d span{display:block;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.06em}.d strong{display:block;margin-top:2px;font:700 13px var(--mono);overflow-wrap:anywhere}
+.tag{font:800 10px var(--mono);padding:3px 7px;border-radius:6px;letter-spacing:.05em}
+.tag.live{background:#103b33;color:var(--up)}.tag.pend{background:#3a2e10;color:var(--amber)}
+.green{color:var(--up)!important}.red{color:var(--down)!important}.amber{color:var(--amber)!important}
+.decision{border-radius:13px;padding:12px;background:#0b151d;border:1px solid var(--line)}
+.decision .code{font:900 15px var(--mono);color:var(--amber)}.decision p{margin-top:6px;font-size:13px;line-height:1.45;color:#e4e0d4;overflow-wrap:anywhere}
+.cands{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:9px}
+.cand{border-radius:12px;padding:10px;background:var(--panel2);border:1px solid var(--line)}
+.cand.ok{border-color:#2a7d68}
+.bar{position:relative;height:10px;border-radius:5px;background:#0b151d;margin-top:8px;overflow:hidden}
+.bar i{position:absolute;top:0;bottom:0;left:0;border-radius:5px;transition:transform .4s;transform-origin:left}
+.bar i.cost{background:var(--down);opacity:.85}.bar i.est{background:var(--up);height:4px;top:3px;opacity:.95}
+.list{display:grid;gap:7px}
+.item{padding:10px;border:1px solid var(--line);border-radius:11px;background:#111d27}
+.item.win{border-left:4px solid var(--up)}.item.loss{border-left:4px solid var(--down)}
+.item strong{font-size:12px}.item time{color:var(--muted);font:600 10px var(--mono)}
+.item p{margin-top:5px;color:#c8d0d2;font-size:11px;line-height:1.45;overflow-wrap:anywhere}
+.empty{padding:14px;border:1px dashed var(--line);border-radius:11px;color:var(--muted);font-size:12px;text-align:center}
+details{border:1px solid var(--line);border-radius:12px;background:#111d27;margin-top:8px}
+summary{padding:11px 12px;cursor:pointer;font-size:12px;font-weight:800}
+.dc{padding:0 12px 12px;font-size:12px;line-height:1.55;color:#cdd3d2}
+.dc dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0}.dc dt{color:var(--muted);font:600 11px var(--mono)}.dc dd{margin:0;font:600 11px var(--mono);overflow-wrap:anywhere}
+.dc h3{font-size:11px;color:var(--amber);text-transform:uppercase;letter-spacing:.08em;margin:10px 0 3px}
+.foot{padding:16px 4px 0;color:#8796a0;text-align:center;font-size:10px;line-height:1.5}
+.flash{animation:fl .6s ease}@keyframes fl{from{opacity:.45}to{opacity:1}}
+@media(min-width:700px){.metrics{grid-template-columns:repeat(4,1fr)}}
+@media(max-width:360px){.shell{padding:9px 8px 30px}.big{font-size:34px}.cands{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main class="shell">
+<header class="row top">
+  <div class="row" style="justify-content:flex-start"><div class="mark">EL</div><div><h1>BTC Edge Lab</h1><p class="sub">5-minute up/down · paper experiment</p></div></div>
+  <div id="conn" class="conn"><i></i><span>CONNECTING</span></div>
+</header>
+<div id="banner" class="banner"></div>
+<div class="paper"><b>PAPER ONLY.</b> No real orders. Profitability is unproven; forecasts are model estimates, not verified probabilities, and no edge is guaranteed. <span id="sysStatus"></span></div>
+
+<section class="card hero">
+  <div class="row" style="align-items:flex-start">
+    <div style="min-width:0"><div class="eyebrow" id="mStatus">Active window</div><h2 id="mTitle">Loading market…</h2></div>
+    <div class="clock"><strong id="clock">--:--</strong><small>left</small></div>
+  </div>
+  <div class="prices">
+    <article class="q up" id="qUP"><div class="row"><span class="side">UP</span><span class="small">best ask</span></div><div class="big" id="UPask">—</div><div class="bid">bid <span id="UPbid">—</span> · mid <span id="UPmid">—</span></div><div class="small" id="UPage">waiting</div></article>
+    <article class="q down" id="qDOWN"><div class="row"><span class="side">DOWN</span><span class="small">best ask</span></div><div class="big" id="DOWNask">—</div><div class="bid">bid <span id="DOWNbid">—</span> · mid <span id="DOWNmid">—</span></div><div class="small" id="DOWNage">waiting</div></article>
+  </div>
+  <div class="row" style="margin-top:10px;flex-wrap:wrap;justify-content:flex-start"><span class="pill" id="clobPill">CLOB —</span><span class="pill" id="feedPill">BTC feed —</span><span class="pill" id="btcPill">BTC —</span></div>
+</section>
+
+<section class="metrics">
+  <div class="m lead"><span>Paper equity</span><strong id="equity">—</strong><div class="small" id="eqSub">start —</div><svg id="spark" class="spark" viewBox="0 0 300 46" preserveAspectRatio="none" aria-label="Equity curve"></svg></div>
+  <div class="m"><span>Cash</span><strong id="cash">—</strong></div>
+  <div class="m"><span>Realized P&amp;L</span><strong id="real">—</strong></div>
+  <div class="m"><span>Unrealized</span><strong id="unreal">—</strong></div>
+  <div class="m"><span>Fees paid</span><strong id="fees">—</strong></div>
+  <div class="m"><span>Wins / losses</span><strong id="wl">—</strong></div>
+  <div class="m"><span>Win rate</span><strong id="wr">—</strong></div>
+  <div class="m"><span>Max drawdown</span><strong id="dd">—</strong></div>
+  <div class="m"><span>Marked value</span><strong id="mv">—</strong></div>
+</section>
+
+<section class="card">
+  <div class="h"><div><h2>Open positions</h2><p>Live positions mark to best bid. Pending positions await official resolution.</p></div><span class="pill" id="posCount">—</span></div>
+  <div id="openList"><div class="empty">No open paper positions.</div></div>
+</section>
+
+<section class="card">
+  <div class="h"><div><h2>Trade or wait</h2><p>The bot only buys when all-in cost sits below its conservative estimate. Waiting is the default.</p></div><span class="pill" id="phase">—</span></div>
+  <div class="decision"><div class="row"><span class="code" id="dCode">—</span><time class="pill" id="dAt">—</time></div><p id="dReason">Waiting for the first decision.</p></div>
+  <div class="cands" id="cands"></div>
+  <p class="small" style="text-transform:none;letter-spacing:0;margin-top:8px">Red bar = all-in cost per share. Green line = conservative estimate. A trade needs green beyond red by the required margin.</p>
+</section>
+
+<section class="card">
+  <div class="h"><div><h2>Closed history</h2><p>Most recent first. Realized after fees.</p></div><span class="pill" id="closedCount">—</span></div>
+  <div id="closedList" class="list"><div class="empty">No settled positions yet.</div></div>
+</section>
+
+<section class="card">
+  <div class="h"><div><h2>Activity</h2><p>Entries, settlements, and system events.</p></div></div>
+  <div id="events" class="list"><div class="empty">Waiting for activity.</div></div>
+</section>
+
+<section class="card">
+  <div class="h"><div><h2>Evidence and strategy</h2><p>Sample size is small and results are labelled unproven until shown otherwise.</p></div><span class="pill" id="sample">—</span></div>
+  <details><summary>Calibration statistics</summary><div class="dc"><dl id="stats"></dl><h3>Skip reasons</h3><dl id="skips"></dl></div></details>
+  <details><summary>Model inputs (latest decision)</summary><div class="dc"><dl id="model"></dl><p style="margin-top:8px">BTC price comes from a proxy feed, not the official resolution source. Basis differences can flip close outcomes.</p></div></details>
+  <details><summary>Risk limits</summary><div class="dc"><dl id="risk"></dl></div></details>
+  <details><summary>Recent decisions</summary><div class="dc"><div id="recent" class="list"></div></div></details>
+  <details><summary>Strategy rules</summary><div class="dc" id="strategy"></div></details>
+  <details><summary>Feeds and persistence</summary><div class="dc"><dl id="sys"></dl></div></details>
+</section>
+<footer class="foot">BTC Edge Lab · PAPER ONLY · Simulated fills from visible CLOB depth may differ from real fills. Past paper results do not predict future profit.</footer>
+</main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+const num=v=>(v===null||v===undefined||v==='')?null:(Number.isFinite(Number(v))?Number(v):null);
+const D='—';
+const money=(v,d=2)=>{const n=num(v);if(n==null)return D;return (n<0?'-':'')+'$'+Math.abs(n).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d})};
+const smoney=(v,d=2)=>{const n=num(v);if(n==null)return D;return (n>0?'+':'')+money(n,d)};
+const px=v=>{const n=num(v);return n==null?D:n.toFixed(3)};
+const pct=(v,d=1)=>{const n=num(v);return n==null?D:(n*100).toFixed(d)+'%'};
+const fx=(v,d=2)=>{const n=num(v);return n==null?D:n.toFixed(d)};
+const tone=v=>{const n=num(v);return n==null||n===0?'':n>0?'green':'red'};
+const tm=v=>{if(v==null)return D;const t=typeof v==='number'?v:Date.parse(v);return Number.isFinite(t)?new Date(t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}):D};
+const set=(id,t,cls)=>{const e=$(id);if(e.textContent!==t){e.textContent=t;e.classList.remove('flash');void e.offsetWidth;e.classList.add('flash')}if(cls!==undefined){e.classList.remove('green','red','amber');if(cls)e.classList.add(cls)}};
+const dl=(rows)=>rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+let lastOk=0,inflight=false,last=null;
+
+function conn(cls,txt,msg){$('conn').className='conn '+cls;$('conn').querySelector('span').textContent=txt;$('banner').textContent=msg||'';$('banner').classList.toggle('show',!!msg)}
+
+function spark(curve){const s=$('spark');const pts=(curve||[]).map(p=>num(p.equity)).filter(v=>v!=null);if(pts.length<2){s.innerHTML='<text x="150" y="28" fill="#a9b6bd" font-size="11" text-anchor="middle">equity curve appears after more samples</text>';return}
+const mn=Math.min(...pts),mx=Math.max(...pts),r=mx-mn||1;const p=pts.map((v,i)=>`${(i/(pts.length-1)*300).toFixed(1)},${(42-(v-mn)/r*38).toFixed(1)}`).join(' ');const c=pts[pts.length-1]>=pts[0]?'#3fe0b0':'#ff8a6b';s.innerHTML=`<polyline points="${p}" fill="none" stroke="${c}" stroke-width="2" vector-effect="non-scaling-stroke"/>`}
+
+function quote(side,q){set(side+'ask',px(q?.bestAsk));$(side+'bid').textContent=px(q?.bestBid);$(side+'mid').textContent=px(q?.mid);
+const fresh=q?.fresh===true;$('q'+side).classList.toggle('stale',!fresh);const a=num(q?.ageMs);$(side+'age').textContent=fresh?'fresh'+(a!=null?' · '+(a/1000).toFixed(1)+'s':''):(a!=null?'stale · '+(a/1000).toFixed(0)+'s old':'no quote')}
+
+function posCard(p){const pend=p.status!=='OPEN'&&p.resolvedAt==null;const s=String(p.side||'').toUpperCase();const f=p.entryForecast||{};
+return `<article class="pos ${s==='UP'?'up':'down'}"><div class="row"><strong class="${s==='UP'?'green':'red'}" style="font:900 15px var(--mono)">${esc(s)} · ${esc(fx(p.shares,2))} sh</strong><span class="tag ${pend?'pend':'live'}">${pend?'PENDING SETTLEMENT':'LIVE'}</span></div>
+<div class="grid4"><div class="d"><span>Entry</span><strong>${px(p.entryPrice)}</strong></div><div class="d"><span>Mark bid</span><strong>${px(p.markBid)} ${p.markStatus?'· '+esc(p.markStatus):''}</strong></div>
+<div class="d"><span>Cost + fees</span><strong>${money(p.totalCost)} · ${money(p.fees,3)}</strong></div><div class="d"><span>Unrealized</span><strong class="${tone(p.unrealizedPnl)}">${smoney(p.unrealizedPnl)}</strong></div>
+<div class="d"><span>Entry estimate / cons.</span><strong>${pct(f.estimate)} / ${pct(f.conservativeProbability)}</strong></div><div class="d"><span>All-in / net edge est.</span><strong>${px(f.allInCost)} / ${pct(f.netEdge)}</strong></div></div>
+<p class="small" style="margin-top:6px;text-transform:none;letter-spacing:0">Entered ${tm(p.entryAt)} · window ${tm(p.windowStart)}–${tm(p.windowEnd)}</p></article>`}
+
+function cand(c){const cost=num(c.allInCost),est=num(c.conservativeProbability);const s=String(c.side||'');
+return `<div class="cand ${c.eligible?'ok':''}"><div class="row"><span class="side ${s==='UP'?'green':'red'}">${esc(s)}</span><span class="tag ${c.eligible?'live':'pend'}">${c.eligible?'ELIGIBLE':'WAIT'}</span></div>
+<div class="grid4"><div class="d"><span>All-in cost</span><strong>${px(cost)}</strong></div><div class="d"><span>Conservative est.</span><strong>${pct(est)}</strong></div><div class="d"><span>Net edge est.</span><strong class="${tone(c.netEdge)}">${pct(c.netEdge,2)}</strong></div><div class="d"><span>Ask / spread</span><strong>${px(c.bestAsk)} / ${px(c.spread)}</strong></div></div>
+<div class="bar"><i class="cost" style="width:100%;transform:scaleX(${cost==null?0:Math.min(1,Math.max(0,cost))})"></i><i class="est" style="width:100%;transform:scaleX(${est==null?0:Math.min(1,Math.max(0,est))})"></i></div>
+<p class="small" style="text-transform:none;letter-spacing:0;margin-top:6px">${esc(c.reason||'')}${num(c.requestedShares)!=null?` · ${fx(c.filledShares,1)}/${fx(c.requestedShares,0)} sh`:''}</p></div>`}
+
+function render(s){
+  const a=s.account||{},e=s.edgeEngine||{},ld=e.latestDecision||{},m=(s.markets||[])[0];
+  $('sysStatus').textContent=`Mode ${s.mode||D} · ${s.status||D}${s.statusReason?' · '+s.statusReason:''}`;
+  $('mTitle').textContent=m?.title||'No active BTC 5-minute market';
+  $('mStatus').textContent=m?.marketStatus?'Window · '+m.marketStatus:'Active window';
+  const sr=num(m?.secondsRemaining);$('clock').textContent=sr==null?'--:--':`${String(Math.floor(Math.max(0,sr)/60)).padStart(2,'0')}:${String(Math.floor(Math.max(0,sr)%60)).padStart(2,'0')}`;
+  quote('UP',m?.sideStates?.UP);quote('DOWN',m?.sideStates?.DOWN);
+  const ws=s.websocket||{};$('clobPill').textContent='CLOB '+(ws.status||D);$('clobPill').className='pill '+(ws.status==='CONNECTED'?'green':'amber');
+  const fd=e.feed||{};$('feedPill').textContent='BTC feed '+(fd.status||D)+(num(fd.messageAgeMs)!=null?' · '+(fd.messageAgeMs/1000).toFixed(1)+'s':'');$('feedPill').className='pill '+(fd.status==='CONNECTED'?'green':'amber');
+  $('btcPill').textContent='BTC proxy '+money(fd.price,1);
+  set('equity',money(a.equity));$('eqSub').textContent=`started ${money(a.initialCapital)} · change ${smoney(num(a.equity)!=null&&num(a.initialCapital)!=null?a.equity-a.initialCapital:null)}`;
+  set('cash',money(a.cash));set('real',smoney(a.realizedPnl),tone(a.realizedPnl));set('unreal',smoney(a.unrealizedPnl),tone(a.unrealizedPnl));
+  set('fees',money(a.totalFees,3));set('wl',(num(a.wins)??D)+' / '+(num(a.losses)??D));set('wr',num(a.winRate)==null?D:Number(a.winRate).toFixed(1)+'%');set('dd',money(a.maxDrawdown));set('mv',money(a.markedValue));
+  spark(a.equityCurve);
+  const pos=s.positions||[];const open=pos.filter(p=>p.resolvedAt==null&&(p.status==='OPEN'||String(p.status).startsWith('PENDING')||p.realizedPnl==null));
+  const closed=pos.filter(p=>!open.includes(p)).sort((x,y)=>(Date.parse(y.resolvedAt)||num(y.resolvedAt)||0)-(Date.parse(x.resolvedAt)||num(x.resolvedAt)||0));
+  $('posCount').textContent=`${num(a.openPositions)??D} live · ${num(a.pendingResolution)??D} pending`;
+  $('openList').innerHTML=open.length?open.map(posCard).join(''):'<div class="empty">No open paper positions. The bot is waiting for a qualifying price.</div>';
+  $('closedCount').textContent=(num(a.settledPositions)??D)+' settled';
+  $('closedList').innerHTML=closed.length?closed.slice(0,30).map(p=>{const r=num(p.realizedPnl);return `<article class="item ${r==null?'':r>=0?'win':'loss'}"><div class="row"><strong>${esc(p.side)} · ${esc(fx(p.shares,2))} sh · winner ${esc(p.resolutionWinner||D)}</strong><time>${tm(p.resolvedAt)}</time></div><p>entry ${px(p.entryPrice)} · exit ${px(p.exitPrice)} · fees ${money(p.fees,3)} · <b class="${tone(r)}" style="font-family:var(--mono)">${smoney(r)}</b></p></article>`}).join(''):'<div class="empty">No settled positions yet. No results to judge.</div>';
+  $('phase').textContent=e.phase||D;
+  set('dCode',ld.code||D);$('dAt').textContent=tm(ld.at);$('dReason').textContent=ld.reason||e.reason||'Waiting for the first decision.';
+  const cs=ld.candidates||[];$('cands').innerHTML=cs.length?cs.map(cand).join(''):'<div class="empty" style="grid-column:1/-1">No candidates evaluated this tick.</div>';
+  $('events').innerHTML=(s.events||[]).slice(0,10).map(v=>`<article class="item"><div class="row"><strong>${esc(v.type)}${v.outcome?' · '+esc(v.outcome):''}</strong><time>${tm(v.time)}</time></div><p>${esc(v.message)}</p></article>`).join('')||'<div class="empty">Waiting for activity.</div>';
+  const st=e.statistics||{};$('sample').textContent='sample: '+(st.sampleLabel||'unproven');
+  $('stats').innerHTML=dl([['decisions',num(st.decisionCount)??D],['traded windows',num(st.tradedWindows)??D],['skipped windows',num(st.skippedWindows)??D],['settled windows',num(st.settledWindows)??D],['mean forecast',pct(st.meanForecast)],['observed win rate',pct(st.observedWinRate)],['Brier score',fx(st.brierScore,4)],['label',st.sampleLabel||'unproven']]);
+  const sk=Object.entries(st.skipCounts||{}).sort((x,y)=>y[1]-x[1]);$('skips').innerHTML=sk.length?dl(sk):'<dt>none</dt><dd>'+D+'</dd>';
+  const md=ld.model||{};$('model').innerHTML=dl([['ready',md.ready==null?D:String(md.ready)],['reason',md.reason||D],['price (proxy)',money(md.price,2)],['window anchor',money(md.anchor,2)],['sigma / minute',fx(md.sigmaPerMinute,4)],['seconds left',num(md.remainingSeconds)??D],['raw UP estimate',pct(md.rawUp)],['lower UP',pct(md.lowerUp)],['lower DOWN',pct(md.lowerDown)],['basis buffer',money(md.basisBufferUsd)],['confirmations',num(ld.confirmationCount)??D]]);
+  const rk=e.risk||{};$('risk').innerHTML=dl([['per-window budget',money(rk.perWindowBudget)],['open cost',money(rk.openCost)],['max open cost',money(rk.maxOpenCost)],['drawdown stop',money(rk.drawdownLimitUsd)],['risk stopped',rk.riskStopped==null?D:rk.riskStopped?'YES':'no']]);
+  const rd=(e.recentDecisions||[]).slice(0,12);$('recent').innerHTML=rd.length?rd.map(d=>`<div class="item"><div class="row"><strong>${esc(d.code||D)}${d.side?' · '+esc(d.side):''}</strong><time>${tm(d.at)}</time></div><p>${esc(d.reason||'')}</p></div>`).join(''):'<div class="empty">No decisions recorded.</div>';
+  const sg=s.strategy||{};const sec=(k,t)=>sg[k]?`<h3>${t}</h3><p>${esc(Array.isArray(sg[k])?sg[k].join(' · '):sg[k])}</p>`:'';
+  $('strategy').innerHTML=`<p><b>${esc(sg.name||D)}</b> <span class="pill">${esc(sg.id||'')}</span></p>`+sec('entry','Entry')+sec('execution','Execution')+sec('risk','Risk')+sec('resolution','Resolution')+sec('limitations','Limitations');
+  const lp=s.ledgerPersistence||{};$('sys').innerHTML=dl([['CLOB websocket',ws.status||D],['last CLOB message',tm(ws.lastMessageAt)],['CLOB error',ws.error||D],['BTC feed',fd.status||D],['history',fd.historyStatus||D],['last tick',tm(fd.tickAt)],['ledger saving',lp.enabled==null?D:String(lp.enabled)],['last saved',tm(lp.lastSavedAt)],['ledger error',lp.error||D],['server time',tm(s.now)]]);
+  return {ws,fd,lp};
+}
+
+function health(){const age=Date.now()-lastOk;
+  if(!lastOk)return;
+  if(age>5000)return conn('bad','DISCONNECTED',`Dashboard lost contact with the server ${Math.round(age/1000)}s ago. Numbers below are frozen.`);
+  if(age>2500)return conn('stale','STALE',`Last update ${(age/1000).toFixed(1)}s ago.`);
+  const s=last;if(!s)return;
+  const issues=[];if(s.websocket?.status!=='CONNECTED')issues.push('CLOB feed '+(s.websocket?.status||'unknown'));
+  if(Date.now()-Number(s.now)>3000)issues.push('server snapshot stale');
+  const f=s.edgeEngine?.feed;if(f&&f.status!=='CONNECTED')issues.push('BTC feed '+(f.status||'unknown'));
+  if(f&&(f.messageAgeMs==null||Number(f.messageAgeMs)>2000))issues.push('BTC ticks stale');
+  if(s.edgeEngine?.risk?.riskStopped)issues.push('risk stop active');
+  if(s.ledgerPersistence?.error)issues.push('ledger save error');
+  issues.length?conn('stale','DEGRADED',issues.join(' · ')):conn('ok','LIVE · PAPER','');
+}
+
+async function poll(){if(inflight)return;inflight=true;
+  try{const r=await fetch('api/state?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const s=await r.json();last=s;lastOk=Date.now();render(s)}
+  catch(err){if(!lastOk)conn('bad','DISCONNECTED','Cannot reach api/state: '+(err&&err.message||'error'));else if(Date.now()-lastOk>2500)conn('bad','HTTP ERROR','Request failed: '+(err&&err.message||'error')+'. Showing last known data.')}
+  finally{inflight=false;health()}}
+poll();setInterval(poll,1000);setInterval(health,1000);
+</script>
+</body>
+</html>

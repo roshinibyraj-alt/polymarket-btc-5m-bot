@@ -4,46 +4,28 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
+const html = fs.readFileSync(path.join(__dirname, '../public/edge-dashboard.html'), 'utf8');
 
-const html = fs.readFileSync(path.join(__dirname, '../public/minute-dashboard.html'), 'utf8');
-
-test('simple mobile dashboard shows prices and the prior-candle reference', () => {
-  assert.match(html, /aria-label="Current Polymarket prices"/);
-  assert.match(html, /id="upAsk"/);
-  assert.match(html, /id="downAsk"/);
-  assert.match(html, /font-size: clamp\(30px/);
-  assert.match(html, /aria-label="Five one-minute candles"/);
-  assert.match(html, /id="previousWindowReference"/);
-  assert.match(html, /id="candleStrip"/);
-  assert.match(html, /Minute 1 uses the previous window’s last candle/);
+test('active dashboard labels the experiment, large prices, costs and evidence honestly', () => {
+  assert.match(html, /BTC Edge Lab/);
+  assert.match(html, /profitability is unproven/i);
+  assert.match(html, /No edge is guaranteed/i);
+  assert.match(html, /UPask/);
+  assert.match(html, /DOWNask/);
+  assert.match(html, /Unrealized/);
+  assert.match(html, /Brier score/);
+  assert.match(html, /realizedPnl/);
+  assert.match(html, /exitPrice/);
 });
 
-test('strategy details are at the bottom after the monitoring sections', () => {
-  const activityIndex = html.indexOf('aria-label="Recent activity"');
-  const strategyIndex = html.indexOf('aria-label="Strategy details"');
-  const footerIndex = html.indexOf('<footer class="footer">');
-  assert.ok(activityIndex > 0);
-  assert.ok(strategyIndex > activityIndex);
-  assert.ok(footerIndex > strategyIndex);
-  assert.match(html, /details>/);
-});
-
-test('dashboard explains entries in minutes 1 through 3 and skips the final two', () => {
-  assert.match(html, /A previous RED candle buys 200 UP shares; a previous GREEN candle buys 200 DOWN shares/);
-  assert.match(html, /never sell/i);
-  assert.match(html, /Minutes 4–5 are skipped/);
-  assert.match(html, /Only minutes 1–3 can trigger one buy each/);
-  assert.match(html, /PAPER ONLY/);
-});
-
-test('dashboard explains the entry band, take-profit, and no stop-loss', () => {
-  assert.match(html, /best ask from \$0\.11 to \$0\.70/);
-  assert.match(html, /best ask is \$0\.11–\$0\.70 inclusive/);
-  assert.match(html, /never pays above \$0\.70/);
-  assert.match(html, /The current candle’s color does not affect that minute’s entry/i);
-  assert.match(html, /first open side to reach a \$0\.85 midpoint/i);
-  assert.match(html, /separate \$0\.99 midpoint target remains active/i);
-  assert.match(html, /There is no stop-loss/);
-  assert.match(html, /id="upMid"/);
-  assert.match(html, /id="downMid"/);
+test('dashboard uses escaped strings, overlap-free polling and correct percentage units', () => {
+  assert.match(html, /if\(inflight\)return/);
+  assert.match(html, /fetch\('api\/state/);
+  assert.match(html, /const esc=/);
+  assert.match(html, /Number\(a\.winRate\)\.toFixed\(1\)/);
+  assert.match(html, /recentDecisions\|\|\[\]\)\.slice\(0,12\)/);
+  assert.match(html, /BTC ticks stale/);
+  const js = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+  assert.doesNotThrow(() => new vm.Script(js));
 });

@@ -37,10 +37,14 @@ class BinanceMinuteFeed {
     fetchImpl = globalThis.fetch,
     WebSocketImpl = globalThis.WebSocket,
     now = Date.now,
+    streamUrl = STREAM_URL,
+    historyLimit = HISTORY_LIMIT,
   } = {}) {
     this.fetchImpl = fetchImpl;
     this.WebSocketImpl = WebSocketImpl;
     this.now = now;
+    this.streamUrl = streamUrl;
+    this.historyLimit = historyLimit;
     this.status = 'WAITING';
     this.historyStatus = 'WAITING';
     this.error = null;
@@ -90,7 +94,7 @@ class BinanceMinuteFeed {
     url.search = new URLSearchParams({
       symbol: 'BTCUSDT',
       interval: '1m',
-      limit: String(HISTORY_LIMIT),
+      limit: String(this.historyLimit),
     }).toString();
     try {
       const response = await this.fetchImpl(url.toString(), {
@@ -115,7 +119,7 @@ class BinanceMinuteFeed {
       }
       this.closedCandles = [...candlesByStart.values()]
         .sort((a, b) => a.start - b.start)
-        .slice(-HISTORY_LIMIT);
+        .slice(-this.historyLimit);
       const currentRow = rows.map(parseRow).find((candle) => candle.closeAt >= now);
       if (currentRow && currentRow.open > 0 && currentRow.close > 0
         && this.currentCandle?.start !== currentRow.start) {
@@ -140,7 +144,7 @@ class BinanceMinuteFeed {
     }
     this.status = 'CONNECTING';
     try {
-      const socket = new this.WebSocketImpl(STREAM_URL);
+      const socket = new this.WebSocketImpl(this.streamUrl);
       this.socket = socket;
       socket.addEventListener('open', () => {
         this.status = 'CONNECTED';
@@ -186,7 +190,7 @@ class BinanceMinuteFeed {
         if (existingIndex >= 0) this.closedCandles[existingIndex] = candle;
         else this.closedCandles.push(candle);
         this.closedCandles.sort((a, b) => a.start - b.start);
-        this.closedCandles = this.closedCandles.slice(-HISTORY_LIMIT);
+        this.closedCandles = this.closedCandles.slice(-this.historyLimit);
         this.historyStatus = this.closedCandles.length >= 2 ? 'READY' : 'WAITING';
       }
     } catch (error) {

@@ -44,28 +44,18 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard serves the BTC 5-minute previous-candle entry strategy', async t => {
+test('dashboard serves the paper edge experiment rather than the obsolete candle rules', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const response = await fetch(`http://127.0.0.1:${server.address().port}/`);
   const html = await response.text();
   assert.equal(response.status, 200);
-  assert.match(html, /BTC Candle Bot/);
-  assert.match(html, /Current BTC market/);
-  assert.match(html, /Five one-minute candles/);
-  assert.match(html, /previous closed RED candle buys UP; GREEN buys DOWN/);
-  assert.match(html, /Minutes 4–5 are skipped/);
-  assert.match(html, /A previous RED candle buys 200 UP shares; a previous GREEN candle buys 200 DOWN shares/);
-  assert.match(html, /best ask is \$0\.11–\$0\.70 inclusive/);
-  assert.match(html, /buy sweep never pays above \$0\.70/);
-  assert.match(html, /never sell/i);
-  assert.match(html, /first open side to reach a \$0\.85 midpoint/i);
-  assert.match(html, /separate \$0\.99 midpoint target remains active/i);
-  assert.match(html, /There is no stop-loss/);
-  assert.match(html, /official resolution/);
-  assert.match(html, /PAPER ONLY/);
-  assert.match(html, /@media \(max-width: 360px\)/);
+  assert.match(html, /BTC Edge Lab/);
+  assert.match(html, /profitability is unproven/i);
+  assert.match(html, /api\/state/);
+  assert.match(html, /PAPER ONLY/i);
+  assert.doesNotMatch(html, /BTC Candle Bot/);
 });
 
 test('unknown dashboard paths still return 404', async t => {

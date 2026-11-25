@@ -1,27 +1,75 @@
-# BTC 5-minute previous-candle color paper bot
+# BTC Edge Lab — paper experiment
 
-This service watches BTC UP/DOWN five-minute markets. It uses Binance BTCUSDT one-minute kline WebSocket candles for direction and the Polymarket CLOB WebSocket for paper execution quotes. It is paper-only: it does not submit real orders or sign with a wallet.
+**No profit guarantee. No live execution.** The active engine is `selective-edge-bot.js`.
+Older engines remain only as inactive reference/test fixtures; startup never loads them.
 
-## Signal flow
+## Hypothesis
 
-At the start of minutes 1–3 in each five-minute market, use the immediately preceding closed Binance candle to choose a side: RED buys UP; GREEN buys DOWN. Minute 1 of each five-minute market uses the previous market window’s final one-minute candle. Minutes 2–3 use the preceding candle in the current window. Minutes 4 and 5 do not trade. The current candle’s color does not change that interval’s entry. Doji candles are neutral and do not create an entry.
+An option-style short-horizon BTC forecast might identify executable Polymarket
+odds that underestimate a side's chance of paying $1. This is a hypothesis, not
+a demonstrated edge. The service can skip all windows.
 
-## Paper execution
+Binance aggregate-trade WebSocket prices supply live spot data. The last 120
+one-minute candles seed volatility, with at least 60 gap-free completed candles
+required. Volatility is the maximum of 10-minute return RMS, 60-minute return RMS,
+30-minute high/low volatility and a floor. No future candles enter the model.
 
-- Each of the first three minute starts requests 200 shares only when the signalled side’s best ask is between $0.11 and $0.70 inclusive. Buys sweep visible asks up to $0.70; actual fills can be partial if displayed depth is insufficient. A signal waits for an in-band fresh quote until the next minute starts. Minutes 4 and 5 are skipped.
-- Candle signals never sell positions. Each eligible minute can buy independently, including the opposite side while an earlier position remains open.
-- The first side with an open position to reach a fresh $0.85 midpoint closes at $0.85/share and disables only the opposite side's $0.85 intra-window target for that market window; later entries on the triggering side can still use $0.85. The separate $0.99 midpoint target remains active and credits $1/share only when it will not close at a net loss after fees. There is no stop-loss; remaining positions are held for official resolution.
-- Taker-style paper buys use visible book depth; fees use market metadata when available and the configured crypto-fee fallback otherwise.
-- Shares still open at expiry are settled using the official Polymarket result, polled every five seconds.
-- Trading pauses if the Binance WebSocket is disconnected/stale or if the required CLOB quote is not fresh. REST candle history only seeds/reconciles closed candles; it does not replace the live WebSocket check for signal execution.
+The Binance window-open price is explicitly a **proxy** for the Chainlink strike.
+Alternative zero/small-drift forecasts, 1×/1.5× volatility, and an adverse strike
+buffer of max($15, half one-minute dollar volatility) create a scenario range.
+Subtract another five probability points before deciding. This is not a
+statistical confidence interval. TWAP-enabled markets use the variance of the
+final-60-second average. Entry ends before that averaging interval starts.
 
-## Dashboard and history
+## Entry and risk
 
-The mobile dashboard puts large UP/DOWN CLOB prices near the top, followed by paper account totals, current positions, the five one-minute candle colors, and recent orders/results. The strategy explanation is last. `PAPER_LEDGER_PATH` controls paper-history storage. The new strategy ID resets the replaced strategy's ledger on deploy; restarts after this deploy keep this strategy's positions and history.
+- Evaluate once per second from seconds 45 through 210.
+- Require the same side on three consecutive fresh trade ticks.
+- Conservative scenario chance ≥60%; edge ≥$0.05/share after executable
+  ask VWAP, taker fees and a $0.01/share execution reserve.
+- Ask $0.10–$0.85; spread ≤$0.03; exchange and receive timestamps ≤2 seconds old.
+- Only current-market outcome IDs and books hydrated on this connection qualify.
+- One entry per window, maximum 50 shares and min($15, 0.5% of available capital).
+- All unsettled entry cost, including fees, capped at 2% of starting capital.
+- A 5% peak drawdown stops new entries persistently across restarts.
+- No martingale, forced trades, flips, or opposite hedges.
 
-## Run
+## Conservative paper accounting
 
-```sh
-npm test
-npm start
-```
+Signals wait at least 300 ms and require a new book update before execution;
+all filters are revalidated. Use at most half the visible shares per ask level.
+Partial fills are allowed; any remainder cancels. This still cannot model all
+real latency, cancellations, adverse selection or exchange execution effects.
+
+Fees are read from market metadata. Unsupported/missing schedules block entries.
+For the current BTC schedule, fee = shares × rate × price × (1-price), calculated
+per fill level. Taker buys earn no maker rebates. The one-cent execution reserve
+is a decision buffer, not an additional booked fee.
+
+Hold positions until **official resolution**, polled every five seconds after
+expiry. A 99-cent quote never fabricates a $1 early payout. No empty-book loss.
+Pending settlement does not block later windows except through the total risk cap.
+Floating marks use net bid VWAP at half displayed depth, valuing any unliquidatable
+remainder at zero without closing it. Stale marks are explicitly labelled estimates.
+
+## Evaluation and operation
+
+The mobile dashboard shows costs, fill details, skip reasons, floating and
+realized results, fees, drawdown, and live feed health. Brier score, average entry
+forecast and observed win rate are measured from actual official settlements,
+not invented backtests. The model is **uncalibrated and profitability unproven**.
+Collect fresh results across multiple market regimes before considering any
+real-money use; a few wins or a positive backtest are not validation.
+
+`PAPER_LEDGER_PATH` persists this strategy through restarts. The different
+strategy ID starts a new isolated $3,000 paper ledger on first replacement.
+`LIVE_TRADING=true` refuses startup. No private key is read and no wallet signing
+or exchange order submission code is loaded. Real-money services are separate.
+
+Run `npm test`, then `npm start` (Node 22+). Dashboard `/`, JSON `/api/state`,
+health `/api/healthz`.
+
+References checked when implementing:
+- https://docs.polymarket.com/trading/fees
+- https://docs.polymarket.com/market-data/realtime-data
+- Current market Gamma metadata, description and `feeSchedule`

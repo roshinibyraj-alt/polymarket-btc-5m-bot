@@ -25,7 +25,7 @@ async function main() {
     return;
   }
 
-  const Bot = require('./minute-color-bot');
+  const Bot = require('./selective-edge-bot');
   const startServer = require('./server');
   const fs = require('node:fs');
   const path = require('node:path');
@@ -41,7 +41,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: PAPER ONLY -- BTC 5-minute cross-window one-minute candle color strategy; no live orders are sent.');
+  console.log('MODE: PAPER ONLY -- BTC Edge Lab; selective forecast-versus-odds experiment; no live orders or wallet signing.');
 
   let stopping = false;
   const shutdown = async () => {
