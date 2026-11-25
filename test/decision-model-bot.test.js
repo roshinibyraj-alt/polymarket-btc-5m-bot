@@ -6,10 +6,10 @@ const MinuteColorBot = require('../minute-color-bot');
 
 const START = 1_800_000_000_000;
 
-function candle(minute, color) {
+function candle(minute, color, windowStart = START) {
   const open = 100;
   const close = color === 'GREEN' ? 101 : color === 'RED' ? 99 : 100;
-  const start = START + (minute - 1) * 60_000;
+  const start = windowStart + (minute - 1) * 60_000;
   return {
     start,
     closeAt: start + 59_999,
@@ -119,11 +119,31 @@ function closedColors(bot) {
   return bot.orders.map((order) => `${order.action}:${order.side}`);
 }
 
-test('minute 1 alone is reference-only', () => {
+test('minute 1 compares against the previous window final candle', () => {
   const { bot, setCandles } = setup();
-  setCandles([candle(1, 'GREEN')]);
+  setCandles([
+    candle(5, 'GREEN', START - 300_000),
+    candle(1, 'GREEN'),
+  ]);
+  bot.processClosedCandles(START + 60_100);
+  assert.equal(bot.orders.length, 1);
+  assert.equal(bot.orders[0].side, 'UP');
+  assert.equal(bot.orders[0].signalCandleNumber, 1);
+  assert.equal(bot.snapshot().modelEngine.previousWindowCandle.color, 'GREEN');
+  bot.stop();
+});
+
+test('a minute 1 color change is detected against the previous window and does not buy', () => {
+  const { bot, setCandles } = setup();
+  setCandles([
+    candle(5, 'GREEN', START - 300_000),
+    candle(1, 'RED'),
+  ]);
   bot.processClosedCandles(START + 60_100);
   assert.equal(bot.orders.length, 0);
+  assert.equal(bot.latestReview.candleNumber, 1);
+  assert.equal(bot.latestReview.signalSide, null);
+  assert.match(bot.latestReview.signalReason, /changed from GREEN to RED/);
   bot.stop();
 });
 
@@ -161,6 +181,24 @@ test('a changed candle sells the held side without buying the new side in that c
   assert.equal(bot.orders.some((order) => order.action.startsWith('BUY') && order.side === 'DOWN'), false);
   assert.equal(up.exitReason, 'CANDLE_COLOR_FLIP');
   assert.equal(up.exitPrice, 0.60);
+  bot.stop();
+});
+
+test('a color change holds the old position when a visible-book sale would lose money', () => {
+  const { bot, record, setNow, setCandles } = setup();
+  setCandles([candle(1, 'GREEN'), candle(2, 'GREEN')]);
+  bot.processClosedCandles(START + 120_100);
+  const up = bot.positions.find((position) => position.side === 'UP');
+
+  setNow(START + 180_100);
+  record.quotes.UP = { ...levels(0.30, 0.31), updatedAt: START + 180_100, receivedAt: START + 180_100 };
+  setCandles([candle(1, 'GREEN'), candle(2, 'GREEN'), candle(3, 'RED')]);
+  bot.processClosedCandles(START + 180_100);
+
+  assert.equal(up.status, 'OPEN');
+  assert.equal(up.shares, 200);
+  assert.equal(bot.orders.some((order) => order.action === 'SELL_TAKER'), false);
+  assert.match(bot.latestReview.signalReason, /would realize a loss after fees/);
   bot.stop();
 });
 
@@ -260,7 +298,7 @@ test('a valid consecutive-color signal waits for a fresh CLOB quote', () => {
   bot.stop();
 });
 
-test('TP and SL retain their midpoint payout rules', () => {
+test('TP closes only without a loss and no stop-loss closes positions', () => {
   const { bot, record, setCandles } = setup();
   setCandles([candle(1, 'GREEN'), candle(2, 'GREEN')]);
   bot.processClosedCandles(START + 120_100);
@@ -276,6 +314,15 @@ test('TP and SL retain their midpoint payout rules', () => {
   assert.equal(up.exitPrice, 0.99);
   assert.equal(up.exitPayout, 1);
 
+  const { bot: lossTpBot, record: lossTpRecord, setCandles: setLossTpCandles } = setup();
+  setLossTpCandles([candle(1, 'GREEN'), candle(2, 'GREEN')]);
+  lossTpBot.processClosedCandles(START + 120_100);
+  const lossTpPosition = lossTpBot.positions.find((position) => position.side === 'UP');
+  lossTpPosition.totalCost = 201;
+  lossTpPosition.fees = 0;
+  lossTpBot.checkTakeProfits(lossTpRecord, 'UP', takeProfit, START + 150_000);
+  assert.equal(lossTpPosition.status, 'OPEN');
+
   const { bot: stopBot, record: stopRecord, setCandles: setStopCandles } = setup();
   setStopCandles([candle(1, 'GREEN'), candle(2, 'GREEN')]);
   stopBot.processClosedCandles(START + 120_100);
@@ -286,10 +333,12 @@ test('TP and SL retain their midpoint payout rules', () => {
     updatedAt: START + 150_000,
     receivedAt: START + 150_000,
   }, START + 150_000);
-  assert.equal(down.status, 'STOP_LOSS');
-  assert.equal(down.exitPayout, 0);
+  assert.equal(down.status, 'OPEN');
+  assert.equal(down.shares, 200);
+  assert.equal(stopBot.orders.some((order) => order.action === 'SELL_TAKER'), false);
   bot.stop();
   stopBot.stop();
+  lossTpBot.stop();
 });
 
 test('ledger persists per-candle entry tracking and processed candles', () => {

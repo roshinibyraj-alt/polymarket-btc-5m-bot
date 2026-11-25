@@ -54,11 +54,12 @@ test('dashboard serves the BTC 5-minute color-follow-through strategy', async t 
   assert.match(html, /BTC Candle Bot/);
   assert.match(html, /Current BTC market/);
   assert.match(html, /Five one-minute candles/);
+  assert.match(html, /Minute 1 compares with the prior window’s last candle/);
   assert.match(html, /Two green candles in a row buy 200 UP shares/);
   assert.match(html, /no \$0\.50 entry-price cap/);
   assert.match(html, /sell the previously held side/);
-  assert.match(html, /Midpoint take-profit at \$0\.99 credits \$1\/share/);
-  assert.match(html, /midpoint stop at \$0\.00 credits \$0\/share/);
+  assert.match(html, /At a \$0\.99 midpoint, take profit/);
+  assert.match(html, /There is no stop-loss/);
   assert.match(html, /official resolution/);
   assert.match(html, /PAPER ONLY/);
   assert.match(html, /@media \(max-width: 360px\)/);

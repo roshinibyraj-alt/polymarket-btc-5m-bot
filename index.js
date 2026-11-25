@@ -41,7 +41,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: PAPER ONLY -- BTC 5-minute consecutive one-minute candle color strategy; no live orders are sent.');
+  console.log('MODE: PAPER ONLY -- BTC 5-minute cross-window one-minute candle color strategy; no live orders are sent.');
 
   let stopping = false;
   const shutdown = async () => {

@@ -7,14 +7,15 @@ const path = require('node:path');
 
 const html = fs.readFileSync(path.join(__dirname, '../public/minute-dashboard.html'), 'utf8');
 
-test('simple mobile dashboard shows large CLOB UP/DOWN prices and live 1-minute candles', () => {
+test('simple mobile dashboard shows prices and the cross-window candle reference', () => {
   assert.match(html, /aria-label="Current Polymarket prices"/);
   assert.match(html, /id="upAsk"/);
   assert.match(html, /id="downAsk"/);
   assert.match(html, /font-size: clamp\(30px/);
   assert.match(html, /aria-label="Five one-minute candles"/);
+  assert.match(html, /id="previousWindowReference"/);
   assert.match(html, /id="candleStrip"/);
-  assert.match(html, /Minute 1 is reference-only/);
+  assert.match(html, /Minute 1 compares with the prior window’s last candle/);
 });
 
 test('strategy details are at the bottom after the monitoring sections', () => {
@@ -34,11 +35,11 @@ test('dashboard explains same-color entries and opposite-color exits', () => {
   assert.match(html, /PAPER ONLY/);
 });
 
-test('dashboard explains uncapped entry prices and midpoint exits', () => {
+test('dashboard explains uncapped entries, profitable exits, and no stop-loss', () => {
   assert.match(html, /There is no \$0\.50 price cap/);
-  assert.match(html, /Do not buy the new side on that same candle/);
-  assert.match(html, /Midpoint take-profit at \$0\.99 credits \$1\/share/);
-  assert.match(html, /midpoint stop at \$0\.00 credits \$0\/share/);
+  assert.match(html, /do not buy the new side on that same candle/i);
+  assert.match(html, /At a \$0\.99 midpoint, take profit/);
+  assert.match(html, /There is no stop-loss/);
   assert.match(html, /id="upMid"/);
   assert.match(html, /id="downMid"/);
 });

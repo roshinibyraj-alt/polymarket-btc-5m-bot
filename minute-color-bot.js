@@ -95,6 +95,28 @@ function positionSideAverage(positions) {
   };
 }
 
+function profitableFifoExit(positions, result) {
+  let remainingShares = Number(result?.filledShares || 0);
+  const totalShares = remainingShares;
+  const netProceeds = Number(result?.notional || 0) - Number(result?.fees || 0);
+  for (const position of positions) {
+    if (remainingShares <= EPSILON) break;
+    const openShares = Number(position.shares || 0);
+    if (!(openShares > EPSILON)) continue;
+    const soldShares = Math.min(openShares, remainingShares);
+    const ratio = soldShares / openShares;
+    const releasedBasis = (Number(position.totalCost || 0) + Number(position.fees || 0)) * ratio;
+    const allocatedProceeds = totalShares > EPSILON
+      ? netProceeds * (soldShares / totalShares)
+      : 0;
+    if (allocatedProceeds - releasedBasis < -EPSILON) {
+      return { profitable: false, side: position.side, soldShares };
+    }
+    remainingShares -= soldShares;
+  }
+  return { profitable: remainingShares <= EPSILON };
+}
+
 class MinuteColorBot extends DipBounceBot {
   constructor({
     marketData,
@@ -164,7 +186,7 @@ class MinuteColorBot extends DipBounceBot {
       this.statusReason = 'Binance one-minute candles are live; waiting for Polymarket CLOB quotes to execute signals.';
     } else {
       this.status = 'RUNNING';
-      this.statusReason = 'Monitoring closed BTC one-minute candles for consecutive-color entries and opposite-color exits.';
+      this.statusReason = 'Monitoring closed BTC one-minute candles for consecutive-color entries and profitable-only opposite-color exits.';
     }
   }
 
@@ -176,6 +198,17 @@ class MinuteColorBot extends DipBounceBot {
     const marketId = String(record.market.id || record.market.slug);
     for (const position of this.positions) {
       if (position.marketId !== marketId || position.side !== side || position.status !== 'OPEN') continue;
+      const netResult = Number(position.partialRealizedPnl || 0)
+        + Number(position.shares || 0)
+          - Number(position.totalCost || 0)
+          - Number(position.fees || 0);
+      if (netResult < -EPSILON) {
+        this.log(
+          `${side} reached the $0.99 midpoint TP, but closing would still realize a net loss after fees; keeping it open.`,
+          { asset: 'BTC', timeframe: '5m', side, outcome: 'neutral', type: 'TAKE_PROFIT_HELD_LOSS', now },
+        );
+        continue;
+      }
       this.closePositionAtTrigger(position, {
         status: 'TAKE_PROFIT',
         exitPrice: STRATEGY.takeProfitMid,
@@ -189,21 +222,7 @@ class MinuteColorBot extends DipBounceBot {
   }
 
   checkStopLosses(record, side, quote, now) {
-    if (!record?.market || record.marketStatus !== 'OPEN' || !midpointIsFresh(quote, now)) return;
-    if (Number(quote.mid) > STRATEGY.stopLossMid) return;
-    const marketId = String(record.market.id || record.market.slug);
-    for (const position of this.positions) {
-      if (position.marketId !== marketId || position.side !== side || position.status !== 'OPEN') continue;
-      this.closePositionAtTrigger(position, {
-        status: 'STOP_LOSS',
-        exitPrice: STRATEGY.stopLossMid,
-        payoutPerShare: 0,
-        exitReason: 'STOP_LOSS_MID_000',
-        message: `${side} stop-loss hit at a $0.00 midpoint; position closed for zero payout.`,
-        outcome: 'bad',
-        eventType: 'STOP_LOSS',
-      }, quote, now);
-    }
+    // Losing positions are held for a later profitable exit or official resolution.
   }
 
   closePositionAtTrigger(position, trigger, quote, now) {
@@ -218,7 +237,8 @@ class MinuteColorBot extends DipBounceBot {
     position.exitReason = trigger.exitReason;
     position.closedAt = now;
     position.closedShares = shares;
-    position.realizedPnl = payout - Number(position.totalCost || 0) - Number(position.fees || 0);
+    position.realizedPnl = Number(position.partialRealizedPnl || 0)
+      + payout - Number(position.totalCost || 0) - Number(position.fees || 0);
     position.markBid = Number.isFinite(Number(quote.bestBid)) ? Number(quote.bestBid) : null;
     position.markUpdatedAt = quote.updatedAt;
     position.markStatus = 'CLOSED';
@@ -425,6 +445,17 @@ class MinuteColorBot extends DipBounceBot {
       return {
         actions: [],
         reason: `No visible ${sellSide} bids to fill the signal exit; shares stay open and can retry on a later same-color candle.`,
+      };
+    }
+    const profitability = profitableFifoExit(openPositions, sellSweep);
+    if (!profitability.profitable) {
+      this.log(
+        `${sellSide} opposite-color exit was held because the executable sell would realize a loss after fees; keep the position open.`,
+        { asset: 'BTC', timeframe: '5m', side: sellSide, outcome: 'neutral', type: 'CANDLE_EXIT_HELD_LOSS', now },
+      );
+      return {
+        actions: [],
+        reason: `No sale: selling ${sellSide} now would realize a loss after fees, so those shares stay open.`,
       };
     }
     const result = this.sellPositions(record, sellSide, sellSweep, now, {
@@ -647,7 +678,7 @@ class MinuteColorBot extends DipBounceBot {
       feeRate: signal.feeRate,
       feeSource: signal.feeSource,
       fills: result.fills.map((fill) => ({ ...fill, shares: fill.shares * fillRatio, fee: fill.fee * fillRatio })),
-      fillRule: 'Sell sweep against visible bids on an opposite-color candle; any unavailable remainder stays open for resolution.',
+      fillRule: 'Sell against visible bids only when the FIFO-position result is not a loss after fees; otherwise keep the shares open.',
       signalCandleStart: signal.signalCandleStart,
       signalCandleNumber: signal.signalCandleNumber,
       signalColor: signal.signalColor,
@@ -822,6 +853,10 @@ class MinuteColorBot extends DipBounceBot {
     const windowStart = Number(market?.start);
     const windowEnd = Number(market?.end);
     const closedCandles = feed.closedCandles || [];
+    const previousWindowCandle = Number.isFinite(windowStart)
+      ? closedCandles.find((candle) =>
+        Number(candle.start) === windowStart - STRATEGY.candleIntervalMs)
+      : null;
     const windowCandles = Number.isFinite(windowStart) && Number.isFinite(windowEnd)
       ? closedCandles.filter((candle) =>
         Number(candle.start) >= windowStart && Number(candle.start) < windowEnd)
@@ -868,13 +903,13 @@ class MinuteColorBot extends DipBounceBot {
     state.statusReason = this.statusReason;
     state.strategy = {
       ...STRATEGY,
-      summary: 'For each BTC five-minute market, compare closed one-minute candles 2–4 with the immediately prior candle. A matching color buys that direction once for the candle; a color change sells the previously held side and does not enter the new side until a later matching candle.',
+      summary: 'For each BTC five-minute market, compare minute 1 with the previous window’s final one-minute candle, then compare minutes 2–4 with the immediately prior candle. A matching color buys that direction once for the candle; a color change sells the previously held side only when the executable exit is profitable after fees, and does not enter the new side until a later matching candle.',
       execution: 'PAPER ONLY — no real orders or wallet signing.',
       entry: `On each eligible consecutive-color candle, request ${STRATEGY.sharesPerTrigger} shares of its direction: GREEN buys UP, RED buys DOWN. There is no $0.50 entry-price cap; buys sweep all visible asks at valid prices below $1.00. Each closed candle can create at most one entry.`,
-      exit: `When a closed candle changes color, sell the previously held side against visible bids; do not buy the new side on that same candle. Any unsold remainder stays open and can retry on a later candle. Midpoint take-profit at $${STRATEGY.takeProfitMid.toFixed(2)} credits $1/share; midpoint stop at $${STRATEGY.stopLossMid.toFixed(2)} credits $0/share; otherwise hold to resolution.`,
-      takeProfit: `Close when the held side midpoint reaches $${STRATEGY.takeProfitMid.toFixed(2)}; credit $1 per remaining share.`,
-      stopLoss: `Close when a fresh held-side midpoint reaches $${STRATEGY.stopLossMid.toFixed(2)}; credit $0 per remaining share. If the midpoint is unavailable, keep the position for resolution.`,
-      timing: 'Minute 1 is reference-only. Minute 2–4 are eligible. Matching consecutive colors can buy; a color change only exits the previous side. Minute 5 has no signal.',
+      exit: `When a closed candle changes color, sell the previously held side against visible bids only if the estimated exit is not a loss after fees; otherwise keep it open. Do not buy the new side on that same candle. The $${STRATEGY.takeProfitMid.toFixed(2)} midpoint TP credits $1/share only if the remaining position still closes without a net loss. No stop-loss is active; any position not closed profitably is held to official resolution.`,
+      takeProfit: `At a held-side midpoint of $${STRATEGY.takeProfitMid.toFixed(2)}, close only if the resulting net position P&L after fees is not negative; credit $1 per remaining share.`,
+      stopLoss: 'Disabled: do not sell a losing position; hold it for a later profitable exit or official resolution.',
+      timing: 'Minute 1 compares with the previous window’s final one-minute candle; minutes 2–4 compare with the prior minute in the same window. Matching colors can buy; a color change only sells the previous side if the executable exit is profitable. Minute 5 has no signal.',
     };
     state.scanner = {
       ...state.scanner,
@@ -911,6 +946,9 @@ class MinuteColorBot extends DipBounceBot {
       messageAgeMs: feed.messageAgeMs,
       currentCandle: feed.currentCandle,
       closedCandles: closedCandles.map((candle) => ({ ...candle, color: candleColor(candle) })),
+      previousWindowCandle: previousWindowCandle
+        ? { ...previousWindowCandle, color: candleColor(previousWindowCandle) }
+        : null,
       windowCandles,
       candleCounts: feed.candleCounts,
       candleIntervalMs: STRATEGY.candleIntervalMs,

@@ -1,20 +1,20 @@
 'use strict';
 
 const STRATEGY = Object.freeze({
-  id: 'btc-5m-minute-color-persistence-add-200-opposite-close-20261126',
-  name: 'BTC 5-minute one-minute color persistence',
-  version: 2,
+  id: 'btc-5m-cross-window-color-persistence-profitable-exits-20261126',
+  name: 'BTC 5-minute cross-window one-minute color persistence',
+  version: 3,
   assets: ['BTC'],
   timeframes: ['5m'],
   candleIntervalMs: 60_000,
-  firstSignalCandle: 2,
+  firstSignalCandle: 1,
   lastSignalCandle: 4,
   sharesPerTrigger: 200,
-  maximumEntriesPerWindow: 3,
+  maximumEntriesPerWindow: 4,
   maximumEntryAsk: null,
   oppositeSignalVetoBestBid: null,
   takeProfitMid: 0.99,
-  stopLossMid: 0.00,
+  stopLossMid: null,
   maximumBuyPrice: 1.00,
   maximumQuoteAgeMs: 2_500,
   maximumSignalDelayMs: 5_000,
@@ -54,11 +54,9 @@ function classifyCandleTransition({ candle, previousCandle, windowStart }) {
       previousColor,
       side: null,
       colorChanged: false,
-      reason: candleNumber === 1
-        ? 'Minute 1 is reference-only; no trade is allowed.'
-        : candleNumber === 5
-          ? 'Minute 5 is excluded from entries.'
-          : 'This candle is outside the signal minutes.',
+      reason: candleNumber === 5
+        ? 'Minute 5 is excluded from entries.'
+        : 'This candle is outside the signal minutes.',
     };
   }
   if (!Number.isFinite(previousStart) || previousStart !== start - interval) {

@@ -104,6 +104,9 @@
     .candle b { display: block; margin-top: 5px; font-size: 14px; }
     .candle .range { display: block; margin-top: 4px; color: #c5d4e3; font-size: 8px; line-height: 1.3; overflow-wrap: anywhere; }
     .candle .state { display: block; margin-top: 4px; color: var(--muted); font-size: 7px; text-transform: uppercase; }
+    .previous-reference { margin: 0 0 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font-size: 10px; font-weight: 850; }
+    .previous-reference.green { border-color: #28765e; background: var(--green-bg); }
+    .previous-reference.red { border-color: #754052; background: var(--red-bg); }
     .list { display: grid; gap: 7px; }
     .item { padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: #0a1827; }
     .order-head strong, .trade-head strong { font-size: 11px; }
@@ -198,7 +201,8 @@
     </section>
 
     <section class="panel" aria-label="Five one-minute candles">
-      <div class="section-head"><div><h2>One-minute candles</h2><p>Same color buys that direction; a color change sells the held side. Minute 5 is skipped.</p></div><span id="binanceStatus" class="pill">Binance —</span></div>
+      <div class="section-head"><div><h2>One-minute candles</h2><p>Minute 1 compares with the prior window’s last candle. Same color buys that direction; a color change sells the held side. Minute 5 is skipped.</p></div><span id="binanceStatus" class="pill">Binance —</span></div>
+      <div id="previousWindowReference" class="previous-reference">Previous window final candle · waiting</div>
       <div id="candleStrip" class="candle-strip"></div>
       <div id="lastSignal" class="price-note">Waiting for a closed one-minute candle.</div>
     </section>
@@ -224,11 +228,11 @@
         <div id="strategyCopy" class="strategy-copy">
           <ul>
             <li>Use Binance BTCUSDT one-minute kline WebSocket candles. No direction or signal comes from Polymarket prices or trade pressure.</li>
-            <li>Minute 1 is reference-only. Minute 2, 3, and 4 can each trigger one entry when their closed color matches the previous closed candle.</li>
+            <li>Minute 1 compares with the previous window’s final closed candle. Minutes 2–4 compare with the prior candle in the same window; any of those can trigger one entry when colors match.</li>
             <li>Two green candles in a row buy 200 UP shares; two red candles in a row buy 200 DOWN shares. There is no $0.50 price cap.</li>
-            <li>If a candle changes color, sell the previously held side against visible bids. Do not buy the new side on that same candle; the next same-color candle can enter it.</li>
+            <li>If a candle changes color, sell the previously held side only when the estimated FIFO exit is profitable after fees. Otherwise keep those shares open; do not buy the new side on that same candle.</li>
             <li>If the sell book only fills part of a position, keep the remainder open and retry on a later candle that continues the new color.</li>
-            <li>Midpoint take-profit at $0.99 credits $1/share; midpoint stop at $0.00 credits $0/share. Positions not closed by either rule are sent to official resolution at window end.</li>
+            <li>At a $0.99 midpoint, take profit by crediting $1/share only if the position will not close at a net loss after fees. There is no stop-loss; losing positions stay open for a later profitable exit or official resolution.</li>
             <li>Paper taker-style buys and signal exits use visible CLOB depth and modeled fees; shallow books can partially fill.</li>
           </ul>
         </div>
@@ -288,13 +292,19 @@
     }
     function renderCandles(engine) {
       const candles = engine?.windowCandles || [];
+      const previous = engine?.previousWindowCandle;
+      const previousTone = previous?.color === 'GREEN' ? 'green' : previous?.color === 'RED' ? 'red' : '';
+      $('previousWindowReference').className = `previous-reference ${previousTone}`;
+      $('previousWindowReference').textContent = previous
+        ? `Previous window final candle · ${previous.color} · close ${money(previous.close, 1)}`
+        : 'Previous window final candle · unavailable';
       const byMinute = new Map(candles.map((candle) => [Number(candle.minute), candle]));
       const active = engine?.currentCandle;
       const html = Array.from({ length: 5 }, (_, index) => {
         const minute = index + 1;
         const candle = byMinute.get(minute);
         if (!candle) {
-          return `<div class="candle"><span class="minute">MIN ${minute}</span><b>—</b><span class="range">Not closed</span><span class="state">${minute === 1 ? 'Reference' : minute === 5 ? 'Skipped' : 'Waiting'}</span></div>`;
+          return `<div class="candle"><span class="minute">MIN ${minute}</span><b>—</b><span class="range">Not closed</span><span class="state">${minute === 1 ? 'Cross-window' : minute === 5 ? 'Skipped' : 'Waiting'}</span></div>`;
         }
         const color = String(candle.color || 'UNKNOWN');
         const tone = color === 'GREEN' ? 'green' : color === 'RED' ? 'red' : '';
@@ -305,7 +315,7 @@
       const review = engine?.latestReview;
       $('lastSignal').textContent = review
         ? `Latest: minute ${review.candleNumber} ${review.currentColor} after ${review.previousColor} · ${review.signalReason}`
-        : 'Waiting for minute 2 to close.';
+        : 'Waiting for the first closed minute candle.';
       $('binanceStatus').textContent = `Binance 1m WebSocket · ${engine?.status || '—'} · ${engine?.historyStatus || 'history —'}`;
     }
     function renderOrders(orders) {
