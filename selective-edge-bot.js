@@ -10,7 +10,7 @@ const ACTIVE = new Set(['OPEN', 'PENDING_RESOLUTION']);
 const STRATEGY = Object.freeze({
   ...RULES,
   execution: 'PAPER ONLY. Delayed visible-ask sweeps, maximum 50% of displayed depth, actual market fee metadata. No rebates or invented $1 early exits.',
-  entry: 'Value entries: once per second from seconds 45–210, require three consecutive fresh same-side checks, conservative probability at least 52% and net edge at least $0.01 after fees and a $0.01 reserve. Ask $0.05–$0.95; spread ≤$0.03. No forced-entry path; windows may be skipped. Maximum one entry per window.',
+  entry: 'Value entries: once per second from seconds 20–240, require two consecutive fresh same-side checks, conservative probability at least 52% with a 3-percentage-point haircut and net edge at least $0.005 after fees and a $0.01 reserve. Ask $0.05–$0.95; spread ≤$0.03. No forced-entry path; windows may be skipped. Maximum one entry per window.',
   risk: 'No martingale. At most 50 shares and min($15, 0.5% of available capital) per window; all unsettled cost capped at 2% of starting capital. A 5% drawdown stops new entries. Settlement continues.',
   resolution: 'Hold to official Polymarket resolution; check every 5 seconds after expiry. Winners pay $1, losers $0. No artificial TP or empty-book stop.',
   limitations: 'Experimental and uncalibrated. Looser entry gates may increase trade frequency, but do not guarantee a trade in every window or profitability. Binance USD(T) is not the Chainlink settlement oracle.',
@@ -154,8 +154,8 @@ class SelectiveEdgeBot extends DipBounceBot {
     const risk = this.riskSnapshot();
     if (risk.riskStopped) return skip('RISK_STOP', 'Drawdown limit reached. New entries paused; official settlement continues.');
     const elapsed = (now - market.start) / 1000;
-    if (elapsed < RULES.minimumElapsedSeconds) return skip('OPENING_WAIT', 'Observing the first 45 seconds; no forced opening entry.');
-    if (elapsed > RULES.lastEntrySecond) return skip('LATE_WINDOW', 'Entry cut-off reached. No new positions after second 210.');
+    if (elapsed < RULES.minimumElapsedSeconds) return skip('OPENING_WAIT', 'Observing the first 20 seconds; no forced opening entry.');
+    if (elapsed > RULES.lastEntrySecond) return skip('LATE_WINDOW', 'Entry cut-off reached. No new positions after second 240.');
     if (this.orders.some(o => o.marketId === String(market.id) && o.filledShares > 0)) {
       return skip('WINDOW_USED', 'This window already has its one entry. Holding to official resolution.');
     }
@@ -177,7 +177,7 @@ class SelectiveEdgeBot extends DipBounceBot {
     } else this.confirmation = { side: best.side, marketId: String(market.id), count: 1,
       tickAt: feed.tickAt, at: now };
     this.recordDecision('CONFIRMING',
-      `${best.side} qualifies; ${this.confirmation.count}/3 fresh consecutive checks.`,
+      `${best.side} qualifies; ${this.confirmation.count}/${RULES.confirmations} fresh consecutive checks.`,
       now, { model, candidates, side: best.side });
     if (this.confirmation.count >= RULES.confirmations) {
       this.pendingEntry = {

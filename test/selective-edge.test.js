@@ -122,13 +122,12 @@ test('wrong tokens, prior-window books, stale and crossed quotes fail validation
 function enter(f) {
   f.bot.evaluate(f.now());
   f.bot.evaluate(f.advance(1000));
-  f.bot.evaluate(f.advance(1000));
   assert.ok(f.bot.pendingEntry, JSON.stringify(f.bot.latestDecision));
   f.bot.evaluate(f.advance(500));
   assert.equal(f.bot.positions.length, 1);
 }
 
-test('three fresh confirmations then a later book are required before entry', () => {
+test('two fresh confirmations then a later book are required before entry', () => {
   const f = fixture();
   enter(f);
   const p = f.bot.positions[0];
@@ -150,7 +149,11 @@ test('one entry per window; no adding, martingale, or forced opposite entries', 
 test('relaxed edge gates admit a lower-positive-edge value entry', () => {
   const f = fixture();
   assert.equal(RULES.minimumProbability, 0.52);
-  assert.equal(RULES.minimumNetEdge, 0.01);
+  assert.equal(RULES.minimumNetEdge, 0.005);
+  assert.equal(RULES.probabilityHaircut, 0.03);
+  assert.equal(RULES.confirmations, 2);
+  assert.equal(RULES.minimumElapsedSeconds, 20);
+  assert.equal(RULES.lastEntrySecond, 240);
   assert.equal(RULES.minimumAsk, 0.05);
   assert.equal(RULES.maximumAsk, 0.95);
   const quote = { ...f.record.quotes.UP, bestAsk: 0.515, bestBid: 0.505,
@@ -158,22 +161,28 @@ test('relaxed edge gates admit a lower-positive-edge value entry', () => {
   const c = candidate({ model: { lowerUp: 0.55, lowerDown: 0.4, rawUp: 0.6 },
     quote, market: f.market, side: 'UP', now: f.now(), budget: 15 });
   assert.equal(c.eligible, true, JSON.stringify(c));
-  assert.ok(c.netEdge >= 0.01);
+  assert.ok(c.netEdge >= 0.005);
   assert.ok(c.cost + c.fees <= 15);
 });
 
-test('relaxed rules still reject sub-52% chance and edge below one cent', () => {
+test('relaxed rules admit half-cent edge but reject lower edge and sub-52% chance', () => {
   const f = fixture();
   const lowProbability = candidate({ model: { lowerUp: 0.519, lowerDown: 0.4, rawUp: 0.6 },
     quote: f.record.quotes.UP, market: f.market, side: 'UP', now: f.now(), budget: 15 });
   assert.equal(lowProbability.eligible, false);
   assert.match(lowProbability.reason, /below 52%/);
-  const narrowEdge = candidate({ model: { lowerUp: 0.55, lowerDown: 0.4, rawUp: 0.6 },
+  const halfCentEdge = candidate({ model: { lowerUp: 0.55, lowerDown: 0.4, rawUp: 0.6 },
     quote: { ...f.record.quotes.UP, bestAsk: 0.52, bestBid: 0.51,
       asks: [{ price: 0.52, size: 1000 }] },
     market: f.market, side: 'UP', now: f.now(), budget: 15 });
+  assert.equal(halfCentEdge.eligible, true);
+  assert.ok(halfCentEdge.netEdge >= 0.005 && halfCentEdge.netEdge < 0.01);
+  const narrowEdge = candidate({ model: { lowerUp: 0.55, lowerDown: 0.4, rawUp: 0.6 },
+    quote: { ...f.record.quotes.UP, bestAsk: 0.525, bestBid: 0.515,
+      asks: [{ price: 0.525, size: 1000 }] },
+    market: f.market, side: 'UP', now: f.now(), budget: 15 });
   assert.equal(narrowEdge.eligible, false);
-  assert.match(narrowEdge.reason, /Less than \$0\.01 edge/);
+  assert.match(narrowEdge.reason, /Less than \$0\.005 edge/);
 });
 
 test('regular entry keeps the widened ask band and has no forced entry at second 180', () => {
@@ -213,7 +222,6 @@ test('no new book means no paper fill and expired request cancels', () => {
   const f = fixture();
   f.bot.evaluate(f.now());
   f.bot.evaluate(f.advance(1000));
-  f.bot.evaluate(f.advance(1000));
   const sequence = f.record.quotes.UP.sequence;
   f.advance(500); f.record.quotes.UP.sequence = sequence;
   f.bot.evaluate(f.now());
@@ -228,12 +236,26 @@ test('execution revalidation cancels when asks move to a bad price', () => {
   const f = fixture();
   f.bot.evaluate(f.now());
   f.bot.evaluate(f.advance(1000));
-  f.bot.evaluate(f.advance(1000));
   f.advance(500);
   Object.assign(f.record.quotes.UP, { bestBid: 0.95, bestAsk: 0.96, asks: [{ price: 0.96, size: 500 }] });
   f.bot.evaluate(f.now());
   assert.equal(f.bot.positions.length, 0);
   assert.equal(f.bot.latestDecision.code, 'ORDER_CANCELLED');
+});
+
+test('entry timing includes seconds 20 through 240 and excludes outside boundaries', () => {
+  const f = fixture();
+  f.advance(-70_001);
+  f.feed.currentCandle = { start: START, open: 60_000, close: 60_220 };
+  f.bot.evaluate(f.now());
+  assert.equal(f.bot.latestDecision.code, 'OPENING_WAIT');
+  f.bot.lastDecisionAt = null;
+  f.bot.evaluate(f.advance(1));
+  assert.equal(f.bot.latestDecision.code, 'CONFIRMING');
+  f.bot.evaluate(f.advance(220_000));
+  assert.notEqual(f.bot.latestDecision.code, 'LATE_WINDOW');
+  f.bot.evaluate(f.advance(1001));
+  assert.equal(f.bot.latestDecision.code, 'LATE_WINDOW');
 });
 
 test('opening and late windows skip; exposure and drawdown stop new buys', () => {
@@ -242,7 +264,7 @@ test('opening and late windows skip; exposure and drawdown stop new buys', () =>
   f.bot.evaluate(f.now());
   assert.equal(f.bot.latestDecision.code, 'OPENING_WAIT');
   f.market.start = START;
-  f.bot.evaluate(f.advance(130_000));
+  f.bot.evaluate(f.advance(151_000));
   assert.equal(f.bot.latestDecision.code, 'LATE_WINDOW');
   const g = fixture();
   g.bot.maxDrawdown = 150;

@@ -4,12 +4,12 @@ const RULES = Object.freeze({
   id: 'btc-5m-selective-edge-paper-v2-cadence',
   name: 'BTC Edge Lab',
   minimumHistory: 60,
-  minimumElapsedSeconds: 45,
-  lastEntrySecond: 210,
+  minimumElapsedSeconds: 20,
+  lastEntrySecond: 240,
   maximumDataAgeMs: 2000,
   minimumProbability: 0.52,
-  minimumNetEdge: 0.01,
-  probabilityHaircut: 0.05,
+  minimumNetEdge: 0.005,
+  probabilityHaircut: 0.03,
   minimumAsk: 0.05,
   maximumAsk: 0.95,
   maximumSpread: 0.03,
@@ -19,7 +19,7 @@ const RULES = Object.freeze({
   perWindowDollarCap: 15,
   maximumOpenFraction: 0.02,
   drawdownLimitFraction: 0.05,
-  confirmations: 3,
+  confirmations: 2,
   decisionIntervalMs: 1000,
   fillLatencyMs: 300,
   depthParticipation: 0.5,
@@ -67,7 +67,7 @@ function forecast({ feed, market, now }) {
   const sigma = Math.max(slow, fast, range, 0.00012);
   const remainingSeconds = Math.max(1, (market.end - now) / 1000);
   // Final-60s TWAP averages a Brownian path: variance is T - 2L/3 before
-  // the averaging interval begins. Entries close at second 210, before that interval.
+  // the averaging interval begins. Entries close at second 240, at that boundary.
   const twap = /twap|time-weighted/i.test(market.raw?.description || '')
     || market.raw?.cryptoMarketConfig?.twapEnabled === true;
   const effectiveMinutes = Math.max(1 / 60, (remainingSeconds - (twap ? 40 : 0)) / 60);
@@ -157,7 +157,7 @@ function candidate({ model, quote, market, side, now, budget }) {
     averagePrice: filledShares > 0 ? cost / filledShares : null, feeRate: fee.rate });
   if (probability < RULES.minimumProbability) return no('Conservative chance below 52%.');
   if (filledShares < 5 || cost < 1) return no('No executable asks at prices that clear the edge and risk budget.');
-  if (netEdge < RULES.minimumNetEdge - 1e-8) return no('Less than $0.01 edge after fees and execution reserve.');
+  if (netEdge < RULES.minimumNetEdge - 1e-8) return no('Less than $0.005 edge after fees and execution reserve.');
   return { ...base, eligible: true, reason: 'Conservative scenario edge clears costs and reserve.' };
 }
 
