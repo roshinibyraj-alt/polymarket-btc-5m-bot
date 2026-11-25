@@ -10,10 +10,10 @@ const ACTIVE = new Set(['OPEN', 'PENDING_RESOLUTION']);
 const STRATEGY = Object.freeze({
   ...RULES,
   execution: 'PAPER ONLY. Delayed visible-ask sweeps, maximum 50% of displayed depth, actual market fee metadata. No rebates or invented $1 early exits.',
-  entry: 'Value entries: once per second from seconds 45–210, require three consecutive fresh same-side checks, conservative probability at least 60% and net edge at least $0.05 after fees and a $0.01 reserve. Cadence fallback: if neither the current nor previous 5-minute window had an entry, at second 180 the strongest model side may buy despite weak/negative estimated edge. Fallback asks are capped at $0.99; it still requires fresh data, spread ≤$0.03, known fees, visible depth, three confirmations and the risk limits. Maximum one entry per window.',
+  entry: 'Value entries: once per second from seconds 45–210, require three consecutive fresh same-side checks, conservative probability at least 52% and net edge at least $0.01 after fees and a $0.01 reserve. Ask $0.05–$0.95; spread ≤$0.03. No forced-entry path; windows may be skipped. Maximum one entry per window.',
   risk: 'No martingale. At most 50 shares and min($15, 0.5% of available capital) per window; all unsettled cost capped at 2% of starting capital. A 5% drawdown stops new entries. Settlement continues.',
   resolution: 'Hold to official Polymarket resolution; check every 5 seconds after expiry. Winners pay $1, losers $0. No artificial TP or empty-book stop.',
-  limitations: 'Experimental and uncalibrated. The fallback deliberately sacrifices estimated edge to target one trade per two windows; it can lose the full entry cost. Binance USD(T) is not the Chainlink settlement oracle. Profitability is unproven.',
+  limitations: 'Experimental and uncalibrated. Looser entry gates may increase trade frequency, but do not guarantee a trade in every window or profitability. Binance USD(T) is not the Chainlink settlement oracle.',
 });
 
 class SelectiveEdgeBot extends DipBounceBot {
@@ -121,20 +121,6 @@ class SelectiveEdgeBot extends DipBounceBot {
     };
   }
 
-  windowHasEntry(windowStart) {
-    const start = Number(windowStart);
-    const positions = this.positions.some(p => Number(p.windowStart) === start && Number(p.shares) > 0);
-    const orders = this.orders.some(o => Number(o.windowStart) === start && Number(o.filledShares) > 0);
-    const summary = this.windowSummaries.find(w => Number(w.start) === start);
-    return positions || orders || Boolean(summary?.traded);
-  }
-
-  cadenceFallbackDue(market, elapsedSeconds) {
-    if (elapsedSeconds < RULES.fallbackAfterSecond) return false;
-    const previousWindowStart = Number(market.start) - (Number(market.end) - Number(market.start));
-    return !this.windowHasEntry(market.start) && !this.windowHasEntry(previousWindowStart);
-  }
-
   recordDecision(code, reason, now, extra = {}) {
     const decision = { at: now, code, reason, confirmationCount: this.confirmation?.count || 0, ...extra };
     this.latestDecision = decision;
@@ -182,38 +168,22 @@ class SelectiveEdgeBot extends DipBounceBot {
     const candidates = ['UP', 'DOWN'].map(side =>
       candidate({ model, quote: record.quotes[side], market, side, now, budget: risk.perWindowBudget }));
     let best = candidates.filter(c => c.eligible).sort((a, b) => b.netEdge - a.netEdge)[0];
-    let cadenceFallback = false;
-    if (!best && this.cadenceFallbackDue(market, elapsed)) {
-      const fallbackCandidates = ['UP', 'DOWN'].map(side =>
-        candidate({ model, quote: record.quotes[side], market, side, now,
-          budget: risk.perWindowBudget, cadenceFallback: true }));
-      best = fallbackCandidates.filter(c => c.eligible)
-        .sort((a, b) => b.conservativeProbability - a.conservativeProbability
-          || a.bestAsk - b.bestAsk)[0];
-      if (!best) return skip('CADENCE_FALLBACK_WAIT',
-        `Two-window fallback is due, but no side passed paper execution safeguards: ${fallbackCandidates.map(c => `${c.side}: ${c.reason}`).join(' ')}`,
-        { model, candidates: fallbackCandidates, cadenceFallback: true });
-      cadenceFallback = true;
-    }
     if (!best) return skip('NO_EDGE', candidates.map(c => `${c.side}: ${c.reason}`).join(' '), { model, candidates });
     if (this.confirmation?.side === best.side && this.confirmation.marketId === String(market.id)
-      && this.confirmation.cadenceFallback === cadenceFallback
       && feed.tickAt > this.confirmation.tickAt && now - this.confirmation.at <= 2500) {
       this.confirmation.count += 1;
       this.confirmation.tickAt = feed.tickAt;
       this.confirmation.at = now;
     } else this.confirmation = { side: best.side, marketId: String(market.id), count: 1,
-      tickAt: feed.tickAt, at: now, cadenceFallback };
-    this.recordDecision(cadenceFallback ? 'CADENCE_FALLBACK_CONFIRMING' : 'CONFIRMING',
-      cadenceFallback
-        ? `${best.side} cadence fallback; estimated edge/probability gate bypassed. ${this.confirmation.count}/3 fresh checks.`
-        : `${best.side} qualifies; ${this.confirmation.count}/3 fresh consecutive checks.`,
-      now, { model, candidates, side: best.side, cadenceFallback });
+      tickAt: feed.tickAt, at: now };
+    this.recordDecision('CONFIRMING',
+      `${best.side} qualifies; ${this.confirmation.count}/3 fresh consecutive checks.`,
+      now, { model, candidates, side: best.side });
     if (this.confirmation.count >= RULES.confirmations) {
       this.pendingEntry = {
         marketId: String(market.id), side: best.side, requestedAt: now,
         executeAfter: now + RULES.fillLatencyMs, expiresAt: now + 2000,
-        sequence: record.quotes[best.side].sequence, cadenceFallback,
+        sequence: record.quotes[best.side].sequence,
       };
       this.scheduleLedgerSave();
     }
@@ -235,12 +205,8 @@ class SelectiveEdgeBot extends DipBounceBot {
     const risk = this.riskSnapshot();
     const model = forecast({ feed: this.binanceFeed.snapshot(), market, now });
     if (!model.ready || risk.riskStopped || this.websocket.status !== 'CONNECTED') return cancel('Data or risk checks failed during execution delay.');
-    if (pending.cadenceFallback
-      && !this.cadenceFallbackDue(market, (now - market.start) / 1000)) {
-      return cancel('Two-window fallback is no longer due; cadence state changed before execution.');
-    }
     const fill = candidate({ model, quote: record.quotes[pending.side], market, side: pending.side, now,
-      budget: risk.perWindowBudget, cadenceFallback: pending.cadenceFallback });
+      budget: risk.perWindowBudget });
     if (!fill.eligible) return cancel(`Price moved before execution: ${fill.reason}`);
     if (this.orders.some(o => o.marketId === pending.marketId && o.filledShares > 0)) return cancel('Duplicate window entry rejected.');
     this.pendingEntry = null;
@@ -254,8 +220,7 @@ class SelectiveEdgeBot extends DipBounceBot {
       placedAt: pending.requestedAt, filledAt: now, fillPrice: fill.averagePrice, fees: fill.fees,
       feeRate: fill.feeRate, cost: fill.cost, fills: fill.fills, latencyMs: now - pending.requestedAt,
       bookSequence: record.quotes[pending.side].sequence,
-      fillRule: `Fresh post-delay asks; max 50% displayed depth per level. Remainder cancelled.${pending.cadenceFallback ? ' Two-window fallback bypasses estimated probability and edge.' : ''}`,
-      cadenceFallback: Boolean(pending.cadenceFallback),
+      fillRule: 'Fresh post-delay asks; max 50% displayed depth per level. Remainder cancelled.',
     };
     this.cash -= fill.cost + fill.fees;
     this.orders.unshift(order);
@@ -266,7 +231,6 @@ class SelectiveEdgeBot extends DipBounceBot {
       shares: fill.filledShares, requestedShares: fill.requestedShares,
       entryAt: now, entryPrice: fill.averagePrice, totalCost: fill.cost, fees: fill.fees,
       totalEntryFees: fill.fees, estimatedMakerRebate: 0, windowStart: market.start, windowEnd: market.end,
-      cadenceFallback: Boolean(pending.cadenceFallback),
       markBid: record.quotes[pending.side].bestBid, markStatus: 'LIVE', markUpdatedAt: now,
       unrealizedPnl: null, realizedPnl: null, exitPrice: null,
       entryForecast: { estimate: fill.estimate, conservativeProbability: fill.conservativeProbability,
@@ -274,9 +238,9 @@ class SelectiveEdgeBot extends DipBounceBot {
     });
     this.markPositions(now);
     this.updateAccountMetrics(now, true);
-    this.recordDecision(pending.cadenceFallback ? 'CADENCE_FALLBACK_BUY' : 'BOUGHT',
-      `${pending.side}: ${fill.filledShares.toFixed(2)} shares at $${fill.averagePrice.toFixed(4)}, fees $${fill.fees.toFixed(3)}.${pending.cadenceFallback ? ' Paper cadence fallback bypassed estimated edge.' : ''}`,
-      now, { model, side: pending.side, candidates: [fill], cadenceFallback: Boolean(pending.cadenceFallback) });
+    this.recordDecision('BOUGHT',
+      `${pending.side}: ${fill.filledShares.toFixed(2)} shares at $${fill.averagePrice.toFixed(4)}, fees $${fill.fees.toFixed(3)}.`,
+      now, { model, side: pending.side, candidates: [fill] });
     this.log(this.latestDecision.reason, { side: pending.side, type: 'EDGE_BUY', now });
   }
 
@@ -335,7 +299,7 @@ class SelectiveEdgeBot extends DipBounceBot {
       decisionCount: this.decisionCount, skipCounts: this.skipCounts,
       skippedWindows: this.windowSummaries.filter(w => !w.traded).length,
       tradedWindows: new Set(this.positions.map(p => p.marketId)).size,
-      cadenceFallbackEntries: this.positions.filter(p => p.cadenceFallback).length,
+      historicalFallbackEntries: this.positions.filter(p => p.cadenceFallback).length,
       settledWindows: new Set(settled.map(p => p.marketId)).size,
       brierScore: brier,
       meanForecast: settled.length ? settled.reduce((s, p) => s + p.entryForecast.estimate, 0) / settled.length : null,

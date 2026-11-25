@@ -147,65 +147,55 @@ test('one entry per window; no adding, martingale, or forced opposite entries', 
   assert.equal(f.bot.latestDecision.code, 'WINDOW_USED');
 });
 
-test('fallback buys the best safely quoted side after two consecutive empty windows', () => {
+test('relaxed edge gates admit a lower-positive-edge value entry', () => {
   const f = fixture();
-  f.feed.price = 60_000;
+  assert.equal(RULES.minimumProbability, 0.52);
+  assert.equal(RULES.minimumNetEdge, 0.01);
+  assert.equal(RULES.minimumAsk, 0.05);
+  assert.equal(RULES.maximumAsk, 0.95);
+  const quote = { ...f.record.quotes.UP, bestAsk: 0.515, bestBid: 0.505,
+    asks: [{ price: 0.515, size: 1000 }] };
+  const c = candidate({ model: { lowerUp: 0.55, lowerDown: 0.4, rawUp: 0.6 },
+    quote, market: f.market, side: 'UP', now: f.now(), budget: 15 });
+  assert.equal(c.eligible, true, JSON.stringify(c));
+  assert.ok(c.netEdge >= 0.01);
+  assert.ok(c.cost + c.fees <= 15);
+});
+
+test('relaxed rules still reject sub-52% chance and edge below one cent', () => {
+  const f = fixture();
+  const lowProbability = candidate({ model: { lowerUp: 0.519, lowerDown: 0.4, rawUp: 0.6 },
+    quote: f.record.quotes.UP, market: f.market, side: 'UP', now: f.now(), budget: 15 });
+  assert.equal(lowProbability.eligible, false);
+  assert.match(lowProbability.reason, /below 52%/);
+  const narrowEdge = candidate({ model: { lowerUp: 0.55, lowerDown: 0.4, rawUp: 0.6 },
+    quote: { ...f.record.quotes.UP, bestAsk: 0.52, bestBid: 0.51,
+      asks: [{ price: 0.52, size: 1000 }] },
+    market: f.market, side: 'UP', now: f.now(), budget: 15 });
+  assert.equal(narrowEdge.eligible, false);
+  assert.match(narrowEdge.reason, /Less than \$0\.01 edge/);
+});
+
+test('regular entry keeps the widened ask band and has no forced entry at second 180', () => {
+  const f = fixture();
+  f.advance(90_000);
   for (const minute of [1, 2]) f.feed.closedCandles.push({
     start: START + minute * 60_000, closeAt: START + minute * 60_000 + 59_999,
     open: 60_000, high: 60_002, low: 59_998, close: 60_000, closed: true,
   });
   f.feed.currentCandle = { start: START + 180_000, open: 60_000, close: 60_000 };
-  f.record.quotes.UP.bestAsk = 0.95;
-  f.record.quotes.UP.bestBid = 0.94;
-  f.record.quotes.UP.asks = [{ price: 0.95, size: 1000 }];
-  f.record.quotes.DOWN.bestAsk = 0.04;
-  f.record.quotes.DOWN.bestBid = 0.03;
-  f.record.quotes.DOWN.asks = [{ price: 0.04, size: 1000 }];
-  f.advance(90_000);
-  assert.equal(f.bot.cadenceFallbackDue(f.market, 179), false);
-  assert.equal(f.bot.cadenceFallbackDue(f.market, 180), true);
-  enter(f);
-  const position = f.bot.positions[0];
-  assert.equal(position.cadenceFallback, true);
-  assert.ok(position.totalCost + position.fees <= RULES.perWindowDollarCap);
-  assert.ok(position.shares <= RULES.maxShares);
-  assert.equal(f.bot.orders[0].cadenceFallback, true);
-  assert.ok([0.04, 0.95].includes(position.entryPrice));
-  assert.equal(f.bot.latestDecision.code, 'CADENCE_FALLBACK_BUY');
-  assert.equal(f.bot.cadenceFallbackDue(f.market, 190), false);
-});
-
-test('the cadence fallback waits after a trade in the immediately preceding window', () => {
-  const f = fixture();
-  f.market.start = START + 300_000;
-  f.market.end = START + 600_000;
-  f.market.id = 'second-window';
-  assert.equal(f.bot.cadenceFallbackDue(f.market, 180), true);
-  f.bot.positions.push({ marketId: 'first-window', windowStart: START, shares: 10 });
-  assert.equal(f.bot.cadenceFallbackDue(f.market, 180), false);
-  f.market.start = START + 600_000;
-  f.market.end = START + 900_000;
-  assert.equal(f.bot.cadenceFallbackDue(f.market, 180), true);
-});
-
-test('fallback remains blocked by unsafe books, unknown fees, and risk stop', () => {
-  const f = fixture();
-  const c = (side, ask, patches = {}) => candidate({
-    model: { lowerUp: 0.3, lowerDown: 0.3, rawUp: 0.5 }, quote: { ...f.record.quotes[side],
-      bestAsk: ask, bestBid: ask - 0.01, asks: [{ price: ask, size: 1000 }], ...patches },
-    market: f.market, side, now: f.now(), budget: 15, cadenceFallback: true,
-  });
-  assert.match(c('UP', 0.5, { updatedAt: f.now() - 3000 }).reason, /Stale/);
-  assert.match(c('UP', 0.5, { bestBid: 0.40 }).reason, /Spread/);
-  assert.equal(c('UP', 0.5).eligible, true); // Standard fixture has valid known fees.
-  const noFees = { ...f.market, feesEnabled: true, feeSchedule: null };
-  assert.match(candidate({ model: { lowerUp: 0.3, lowerDown: 0.3, rawUp: 0.5 },
-    quote: f.record.quotes.UP, market: noFees, side: 'UP', now: f.now(),
-    budget: 15, cadenceFallback: true }).reason, /fee schedule/);
-  f.bot.riskStopped = true;
-  f.advance(90_000);
+  for (const side of ['UP', 'DOWN']) {
+    const q = f.record.quotes[side];
+    q.bestAsk = 0.96;
+    q.bestBid = 0.95;
+    q.asks = [{ price: 0.96, size: 1000 }];
+    q.bids = [{ price: 0.95, size: 1000 }];
+  }
   f.bot.evaluate(f.now());
-  assert.equal(f.bot.latestDecision.code, 'RISK_STOP');
+  assert.equal(f.bot.positions.length, 0);
+  assert.equal(f.bot.latestDecision.code, 'NO_EDGE');
+  assert.match(f.bot.latestDecision.reason, /Ask outside/);
+  assert.equal('fallbackAfterSecond' in RULES, false);
 });
 
 test('a stale repeated Binance tick does not count as a fresh confirmation', () => {
@@ -240,7 +230,7 @@ test('execution revalidation cancels when asks move to a bad price', () => {
   f.bot.evaluate(f.advance(1000));
   f.bot.evaluate(f.advance(1000));
   f.advance(500);
-  Object.assign(f.record.quotes.UP, { bestBid: 0.86, bestAsk: 0.87, asks: [{ price: 0.87, size: 500 }] });
+  Object.assign(f.record.quotes.UP, { bestBid: 0.95, bestAsk: 0.96, asks: [{ price: 0.96, size: 500 }] });
   f.bot.evaluate(f.now());
   assert.equal(f.bot.positions.length, 0);
   assert.equal(f.bot.latestDecision.code, 'ORDER_CANCELLED');
@@ -358,7 +348,8 @@ test('new strategy snapshots exclude obsolete TP, sizing progression and candle 
   assert.equal(RULES.id, 'btc-5m-selective-edge-paper-v2-cadence');
   assert.equal(s.strategy.id, RULES.id);
   assert.equal(s.sizingByAsset, undefined);
-  assert.equal(s.strategy.entry.includes('Cadence fallback'), true);
+  assert.equal(s.strategy.entry.includes('fallback'), false);
+  assert.equal(s.strategy.entry.includes('52%'), true);
   assert.ok(s.edgeEngine.latestDecision === null);
   assert.equal(s.edgeEngine.statistics.brierScore, null);
 });
