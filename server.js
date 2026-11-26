@@ -4,34 +4,53 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'edge-dashboard.html'));
-function startServer(bot, port) {
-  const server = http.createServer((req, res) => {
-    const pathname = new URL(req.url, 'http://localhost').pathname;
+const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'perps-copy-dashboard.html'));
+
+function sendJson(response, status, body) {
+  response.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  response.end(JSON.stringify(body));
+}
+
+function startServer(bot, port, { listen = true } = {}) {
+  const server = http.createServer((request, response) => {
+    const pathname = new URL(request.url, 'http://localhost').pathname;
     if (pathname === '/api/healthz') {
       const state = bot.snapshot();
-      const healthy = state.status !== 'blocked_or_error' && state.status !== 'ERROR';
-      res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify({ ok: healthy, mode: 'DEMO', status: state.status, now: state.now }));
+      const healthy = state.status !== 'persistence_error';
+      sendJson(response, healthy ? 200 : 503, {
+        ok: healthy,
+        mode: state.mode,
+        status: state.status,
+        now: state.now,
+      });
       return;
     }
-    if (pathname === '/api/state' || pathname === '/api/strategy/state') {
-      const body = JSON.stringify(bot.snapshot());
-      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-      res.end(body);
+    if (pathname === '/api/state') {
+      sendJson(response, 200, bot.snapshot());
       return;
     }
     if (pathname === '/' || pathname === '/index.html') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(INDEX_HTML);
+      response.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer',
+      });
+      response.end(INDEX_HTML);
       return;
     }
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('not found');
+    response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    response.end('not found');
   });
-  server.listen(port, () => {
-    console.log(`[dashboard] listening on :${port}`);
-  });
+  if (listen) {
+    server.listen(port, '0.0.0.0', () => {
+      console.log(`[dashboard] listening on :${port}`);
+    });
+  }
   return server;
 }
 

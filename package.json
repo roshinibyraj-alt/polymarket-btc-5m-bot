@@ -1,12 +1,12 @@
 {
-  "name": "polymarket-btc-5m-minute-color-paper-bot",
+  "name": "polymarket-perps-paper-copy-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Paper-only BTC 5-minute strategy driven by one-minute candle color changes.",
+  "description": "Paper-only proportional copy simulator for a Polymarket Perps wallet.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/perps-copy-bot.test.js"
   },
   "engines": {
     "node": ">=22"

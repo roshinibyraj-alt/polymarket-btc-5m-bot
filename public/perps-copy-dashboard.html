@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#07111f">
+  <title>Perps Paper Copy</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111f;
+      --panel: #101e31;
+      --panel-2: #14263c;
+      --line: #263a54;
+      --text: #f5f8ff;
+      --muted: #9bb0c9;
+      --green: #45dfa3;
+      --red: #ff7185;
+      --blue: #72c7ff;
+      --yellow: #ffd166;
+      --shadow: 0 16px 35px rgba(0, 0, 0, .18);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: max(14px, env(safe-area-inset-top)) 14px max(28px, env(safe-area-inset-bottom));
+      background:
+        radial-gradient(ellipse at 90% -10%, rgba(78, 138, 255, .18), transparent 38%),
+        radial-gradient(ellipse at -15% 40%, rgba(25, 207, 161, .10), transparent 36%),
+        var(--bg);
+      color: var(--text);
+      font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 1080px; margin: 0 auto; }
+    h1, h2, p { margin: 0; }
+    button { font: inherit; }
+    .header {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 12px; margin: 6px 0 18px;
+    }
+    .brand { display: flex; align-items: center; gap: 11px; }
+    .brand-mark {
+      width: 42px; height: 42px; border-radius: 14px; display: grid; place-items: center;
+      background: linear-gradient(135deg, #46e0aa, #37a9ff); color: #061423;
+      font-weight: 950; font-size: 19px; box-shadow: var(--shadow);
+    }
+    h1 { font-size: 21px; line-height: 1.1; letter-spacing: -.4px; }
+    .subhead { margin-top: 5px; color: var(--muted); font-size: 12px; }
+    .status {
+      flex: 0 0 auto; border: 1px solid var(--line); border-radius: 999px;
+      padding: 7px 10px; color: var(--yellow); background: rgba(255, 209, 102, .09);
+      font-size: 11px; font-weight: 850; letter-spacing: .4px; text-transform: uppercase;
+    }
+    .status.running { color: var(--green); background: rgba(69, 223, 163, .10); border-color: rgba(69, 223, 163, .32); }
+    .status.degraded, .status.persistence_error { color: var(--red); background: rgba(255, 113, 133, .10); border-color: rgba(255, 113, 133, .32); }
+    .hero {
+      padding: 19px; border: 1px solid rgba(114, 199, 255, .27); border-radius: 22px;
+      background: linear-gradient(135deg, rgba(38, 89, 127, .58), rgba(20, 38, 60, .96) 62%, rgba(40, 47, 95, .66));
+      box-shadow: var(--shadow); overflow: hidden; position: relative;
+    }
+    .hero::after {
+      content: ""; position: absolute; width: 190px; height: 190px; border-radius: 50%;
+      right: -75px; top: -90px; background: rgba(69, 223, 163, .14); filter: blur(2px);
+    }
+    .hero-label { color: #c6ddf3; text-transform: uppercase; font-size: 11px; letter-spacing: 1px; font-weight: 800; }
+    .hero-value { font-size: clamp(34px, 10vw, 50px); line-height: 1.04; font-weight: 900; letter-spacing: -1.5px; margin-top: 6px; }
+    .hero-meta { color: #d2e5f5; font-size: 13px; margin-top: 9px; }
+    .metrics {
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 12px 0;
+    }
+    .metric, .panel {
+      border: 1px solid var(--line); border-radius: 17px; background: rgba(16, 30, 49, .94);
+      box-shadow: var(--shadow);
+    }
+    .metric { padding: 13px 14px; min-height: 82px; }
+    .metric-label { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .55px; }
+    .metric-value { font-size: 21px; line-height: 1.2; font-weight: 850; margin-top: 6px; }
+    .good { color: var(--green); }
+    .bad { color: var(--red); }
+    .neutral { color: var(--text); }
+    .cap-wrap { margin-top: 12px; }
+    .cap-row { display: flex; justify-content: space-between; gap: 8px; color: #d8e7f6; font-size: 12px; font-weight: 750; }
+    .meter { height: 9px; background: rgba(6, 15, 27, .75); border-radius: 9px; margin-top: 8px; overflow: hidden; }
+    .meter-fill { height: 100%; width: 0%; border-radius: inherit; background: linear-gradient(90deg, #45dfa3, #72c7ff, #ffd166); transition: width .3s ease; }
+    .panel { padding: 16px; margin-top: 12px; }
+    .section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+    h2 { font-size: 16px; letter-spacing: -.2px; }
+    .section-note { color: var(--muted); font-size: 11px; text-align: right; }
+    .source-grid { display: grid; gap: 9px; }
+    .source-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; font-size: 13px; }
+    .source-line span:first-child { color: var(--muted); }
+    .address { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #c8e4ff; font-size: 11px; text-align: right; overflow-wrap: anywhere; }
+    .notice {
+      color: #f4d48d; font-size: 12px; background: rgba(255, 209, 102, .08);
+      border: 1px solid rgba(255, 209, 102, .18); border-radius: 12px; padding: 10px 11px; margin-top: 12px;
+    }
+    .list { display: grid; gap: 9px; }
+    .position, .trade, .event {
+      border: 1px solid #20344d; background: linear-gradient(125deg, rgba(20, 38, 60, .92), rgba(13, 27, 44, .92));
+      border-radius: 14px; padding: 12px;
+    }
+    .position-top, .trade-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .symbol { font-weight: 900; font-size: 16px; }
+    .side {
+      font-size: 10px; font-weight: 900; letter-spacing: .5px; padding: 5px 8px; border-radius: 99px;
+      background: rgba(69, 223, 163, .12); color: var(--green); border: 1px solid rgba(69, 223, 163, .23);
+    }
+    .side.short { background: rgba(255, 113, 133, .11); color: var(--red); border-color: rgba(255, 113, 133, .24); }
+    .position-pnl { font-size: 19px; font-weight: 900; margin: 11px 0 8px; }
+    .details-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 12px; }
+    .detail { color: var(--muted); font-size: 11px; }
+    .detail b { color: var(--text); display: block; font-size: 13px; margin-top: 1px; font-weight: 750; }
+    .trade-action { font-weight: 900; font-size: 12px; letter-spacing: .35px; }
+    .trade-symbol { color: var(--text); font-weight: 800; }
+    .trade-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; color: var(--muted); font-size: 11px; margin-top: 8px; }
+    .empty { border: 1px dashed #314762; border-radius: 13px; padding: 19px 13px; color: var(--muted); text-align: center; font-size: 13px; }
+    .event { font-size: 12px; color: #dce9f6; }
+    .event time { display: block; font-size: 10px; color: var(--muted); margin-top: 4px; }
+    details { margin-top: 12px; }
+    summary { color: #c5dcf2; cursor: pointer; font-weight: 800; font-size: 13px; padding: 3px 0; }
+    .strategy { color: #c7d7e9; font-size: 12px; display: grid; gap: 8px; margin-top: 11px; }
+    .strategy b { color: var(--text); }
+    .footer { text-align: center; color: #71869e; font-size: 10px; margin: 16px 0 2px; }
+    @media (min-width: 760px) {
+      body { padding-left: 24px; padding-right: 24px; }
+      .header { align-items: center; margin-top: 12px; }
+      .overview { display: grid; grid-template-columns: 1.2fr 1fr; gap: 12px; align-items: stretch; }
+      .metrics { margin: 0; }
+      .hero { min-height: 186px; display: flex; flex-direction: column; justify-content: center; }
+      .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
+      .two-col .panel { margin-top: 12px; }
+      .panel { padding: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header class="header">
+      <div class="brand">
+        <div class="brand-mark">P</div>
+        <div>
+          <h1>Perps Paper Copy</h1>
+          <p class="subhead">All instruments · proportional sizing · no real orders</p>
+        </div>
+      </div>
+      <div id="status" class="status">CONNECTING</div>
+    </header>
+
+    <section class="overview" aria-label="Paper account overview">
+      <div class="hero">
+        <div class="hero-label">Paper equity</div>
+        <div id="equity" class="hero-value">$500.00</div>
+        <p id="equityMeta" class="hero-meta">Starting paper capital: $500.00</p>
+      </div>
+      <div class="metrics">
+        <div class="metric"><div class="metric-label">Realized P&amp;L</div><div id="realized" class="metric-value">$0.00</div></div>
+        <div class="metric"><div class="metric-label">Floating P&amp;L</div><div id="floating" class="metric-value">$0.00</div></div>
+        <div class="metric"><div class="metric-label">Open positions</div><div id="positionCount" class="metric-value">0</div></div>
+        <div class="metric"><div class="metric-label">Fees paid</div><div id="fees" class="metric-value">$0.00</div></div>
+      </div>
+    </section>
+
+    <section class="panel cap-wrap" aria-label="Exposure limit">
+      <div class="cap-row"><span>Open notional</span><span id="capLabel">$0 / $500</span></div>
+      <div class="meter"><div id="capMeter" class="meter-fill"></div></div>
+      <div class="section-note" style="text-align:left;margin-top:7px">The $500 cap applies across all copied positions.</div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head"><h2>Source account</h2><span id="sourceEquity" class="section-note">Perps equity loading</span></div>
+      <div class="source-grid">
+        <div class="source-line"><span>Owner EOA used by Perps</span><span id="ownerAddress" class="address">—</span></div>
+        <div class="source-line"><span>Polymarket smart wallet</span><span id="proxyAddress" class="address">—</span></div>
+        <div class="source-line"><span>Source positions</span><strong id="sourcePositionCount">—</strong></div>
+        <div class="source-line"><span>Last source fill</span><strong id="lastFill">—</strong></div>
+      </div>
+      <div class="notice">This starts from a clean baseline. Positions already open when the copier starts are not adopted; only subsequent source exposure changes are simulated.</div>
+    </section>
+
+    <div class="two-col">
+      <section class="panel">
+        <div class="section-head"><h2>Paper positions</h2><span class="section-note">Mark-to-market</span></div>
+        <div id="positions" class="list"><div class="empty">Waiting for a new source fill.</div></div>
+      </section>
+      <section class="panel">
+        <div class="section-head"><h2>Copied actions</h2><span id="fillCount" class="section-note">0 copied</span></div>
+        <div id="trades" class="list"><div class="empty">No post-start fills copied yet.</div></div>
+      </section>
+    </div>
+
+    <section class="panel">
+      <div class="section-head"><h2>Activity</h2><span class="section-note">Latest first</span></div>
+      <div id="events" class="list"><div class="empty">Waiting for the source baseline.</div></div>
+    </section>
+
+    <details class="panel">
+      <summary>How this paper copy works</summary>
+      <div class="strategy">
+        <p><b>Source:</b> reads public Perps fills and portfolio snapshots for the selected owner EOA. It never signs or submits orders.</p>
+        <p><b>Proportional size:</b> source position changes are scaled against a $500 paper account using source equity captured at startup.</p>
+        <p><b>Paper execution:</b> simulates each change one tick worse than the reported source fill and applies the current tier-0 taker fee estimate (0.05%).</p>
+        <p><b>Risk cap:</b> new exposure is clipped at $500 total marked notional; if price moves push exposure above the cap, paper positions are trimmed.</p>
+        <p><b>Limitations:</b> funding payments and market impact beyond one tick are not included. This is a simulator, not a promise of live execution or profitability.</p>
+      </div>
+    </details>
+    <p id="updated" class="footer">Connecting to public Perps data…</p>
+  </main>
+
+  <script>
+    const money = (value) => '$' + Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const signedMoney = (value) => `${Number(value || 0) > 0 ? '+' : ''}${money(value)}`;
+    const safe = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+    const time = (value) => value ? new Date(Number(value)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
+    const pnlClass = (value) => Number(value) > 0 ? 'good' : Number(value) < 0 ? 'bad' : 'neutral';
+    const shortAddress = (value) => value ? `${value.slice(0, 8)}…${value.slice(-6)}` : '—';
+
+    function renderPositions(state) {
+      const host = document.getElementById('positions');
+      if (!state.positions?.length) {
+        host.innerHTML = '<div class="empty">No copied open positions yet.</div>';
+        return;
+      }
+      host.innerHTML = state.positions.map((position) => {
+        const side = Number(position.size) >= 0 ? 'LONG' : 'SHORT';
+        return `<article class="position">
+          <div class="position-top"><span class="symbol">${safe(position.symbol)}</span><span class="side ${side === 'SHORT' ? 'short' : ''}">${side}</span></div>
+          <div class="position-pnl ${pnlClass(position.unrealizedPnl)}">${signedMoney(position.unrealizedPnl)}</div>
+          <div class="details-grid">
+            <div class="detail">Paper size<b>${Math.abs(Number(position.size)).toLocaleString(undefined, { maximumFractionDigits: 6 })}</b></div>
+            <div class="detail">Open notional<b>${money(position.notional)}</b></div>
+            <div class="detail">Avg entry<b>${money(position.averageEntryPrice)}</b></div>
+            <div class="detail">Current mark<b>${money(position.markPrice)}</b></div>
+          </div>
+        </article>`;
+      }).join('');
+    }
+
+    function renderTrades(state) {
+      const host = document.getElementById('trades');
+      document.getElementById('fillCount').textContent = `${state.stats?.copiedFills || 0} copied`;
+      if (!state.trades?.length) {
+        host.innerHTML = '<div class="empty">No post-start source fills copied yet.</div>';
+        return;
+      }
+      host.innerHTML = state.trades.slice(0, 12).map((trade) => {
+        const actionClass = trade.side === 'BUY' ? 'good' : 'bad';
+        return `<article class="trade">
+          <div class="trade-top"><span class="trade-action ${actionClass}">${safe(trade.action)} ${safe(trade.side)}</span><span class="trade-symbol">${safe(trade.symbol)}</span></div>
+          <div class="trade-meta">
+            <span>${Math.abs(Number(trade.quantity)).toLocaleString(undefined, { maximumFractionDigits: 6 })} @ ${money(trade.price)}</span>
+            <span>Fee ${money(trade.fee)}</span>
+            <span class="${pnlClass(trade.netRealizedPnl)}">Net ${signedMoney(trade.netRealizedPnl)}</span>
+            <span>${time(trade.timestamp)}</span>
+          </div>
+        </article>`;
+      }).join('');
+    }
+
+    function renderEvents(state) {
+      const host = document.getElementById('events');
+      if (!state.events?.length) {
+        host.innerHTML = '<div class="empty">No activity yet.</div>';
+        return;
+      }
+      host.innerHTML = state.events.slice(0, 8).map((event) => `<article class="event">
+        <strong>${safe(event.type.replaceAll('_', ' '))}</strong> · ${safe(event.message)}
+        <time>${time(event.timestamp)}</time>
+      </article>`).join('');
+    }
+
+    function render(state) {
+      const status = document.getElementById('status');
+      status.textContent = String(state.status || 'unknown').replaceAll('_', ' ');
+      status.className = `status ${safe(state.status || '')}`;
+      const account = state.account || {};
+      document.getElementById('equity').textContent = money(account.equity);
+      document.getElementById('equity').className = `hero-value ${pnlClass(Number(account.equity) - Number(account.startingCapital))}`;
+      document.getElementById('equityMeta').textContent = `${state.statusMessage || 'Paper account'} · start ${money(account.startingCapital)}`;
+      for (const [id, key] of [['realized', 'realizedPnl'], ['floating', 'floatingPnl']]) {
+        const element = document.getElementById(id);
+        element.textContent = signedMoney(account[key]);
+        element.className = `metric-value ${pnlClass(account[key])}`;
+      }
+      document.getElementById('fees').textContent = money(account.fees);
+      document.getElementById('positionCount').textContent = String(state.positions?.length || 0);
+      const cap = Number(state.sizing?.maxOpenNotional || 500);
+      const notional = Number(account.openNotional || 0);
+      document.getElementById('capLabel').textContent = `${money(notional)} / ${money(cap)}`;
+      document.getElementById('capMeter').style.width = `${Math.min(100, cap > 0 ? notional / cap * 100 : 0)}%`;
+      document.getElementById('sourceEquity').textContent = `Source equity ${money(state.source?.equity)}`;
+      document.getElementById('ownerAddress').textContent = shortAddress(state.source?.ownerEoa);
+      document.getElementById('ownerAddress').title = state.source?.ownerEoa || '';
+      document.getElementById('proxyAddress').textContent = shortAddress(state.source?.proxyWallet);
+      document.getElementById('proxyAddress').title = state.source?.proxyWallet || '';
+      document.getElementById('sourcePositionCount').textContent = `${state.source?.positionCount || 0} open · ${state.source?.baselinePositionCount || 0} at start`;
+      document.getElementById('lastFill').textContent = time(state.source?.lastFillAt);
+      renderPositions(state);
+      renderTrades(state);
+      renderEvents(state);
+      document.getElementById('updated').textContent = `Updated ${time(state.now)} · API snapshot ${time(state.source?.lastPortfolioAt)}`;
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch('/api/state', { cache: 'no-store' });
+        if (!response.ok) throw new Error(`Dashboard API returned ${response.status}`);
+        render(await response.json());
+      } catch (error) {
+        const status = document.getElementById('status');
+        status.textContent = 'dashboard offline';
+        status.className = 'status degraded';
+        document.getElementById('updated').textContent = error.message;
+      }
+    }
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+</html>

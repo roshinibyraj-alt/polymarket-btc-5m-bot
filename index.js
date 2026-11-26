@@ -1,70 +1,65 @@
 'use strict';
 
-async function restoreOrResetLedger(bot, savedLedger, strategyId) {
-  const savedStrategyId = savedLedger?.snapshot?.strategy?.id || savedLedger?.strategyId;
-  if (savedLedger && savedStrategyId === strategyId) {
-    bot.restoreLedger(savedLedger);
-    await bot.flushLedger();
-    return 'restored';
-  }
-  if (savedLedger) {
-    bot.log('Paper history reset because the saved ledger belongs to a different strategy.', {
-      type: 'LEDGER_RESET',
-      now: Date.now(),
-    });
-    await bot.flushLedger();
-    return 'reset';
-  }
-  return 'fresh';
-}
+const fs = require('node:fs');
+const path = require('node:path');
+const { PerpsPublicApi } = require('./perps-public-api');
+const { PerpsPaperStore } = require('./perps-paper-store');
+const { PerpsCopyBot } = require('./perps-copy-bot');
+const startServer = require('./server');
 
-async function main() {
-  if (process.env.LIVE_TRADING === 'true') {
-    console.error('Live execution was removed. Unset LIVE_TRADING; this bot runs in demo mode only.');
-    process.exitCode = 1;
-    return;
+async function startApplication({
+  env = process.env,
+  port = Number(env.PORT || 8080),
+  api = null,
+  store = null,
+  bot = null,
+  listen = true,
+} = {}) {
+  if (String(env.LIVE_TRADING || '').toLowerCase() === 'true') {
+    throw new Error('Safety stop: this copy bot is paper-only; LIVE_TRADING must not be enabled.');
   }
 
-  const Bot = require('./selective-edge-bot');
-  const startServer = require('./server');
-  const fs = require('node:fs');
-  const path = require('node:path');
-  const PaperLedgerStore = require('./paper-ledger-store');
-  const ledgerPath = process.env.PAPER_LEDGER_PATH || null;
-  const ledgerStore = ledgerPath ? new PaperLedgerStore(ledgerPath) : null;
-  if (ledgerPath && !fs.existsSync(path.dirname(ledgerStore.filePath))) {
-    throw new Error(`Paper-history storage is not mounted at ${path.dirname(ledgerStore.filePath)}.`);
+  const resolvedStore = store || new PerpsPaperStore(
+    env.PERPS_COPY_LEDGER_PATH
+      || (env.RAILWAY_PROJECT_ID || env.RAILWAY_ENVIRONMENT_ID
+        ? '/data/perps-copy-paper-state.json'
+        : path.join(__dirname, '.data', 'perps-copy-paper-state.json')),
+  );
+  const railwayRuntime = Boolean(env.RAILWAY_PROJECT_ID || env.RAILWAY_ENVIRONMENT_ID);
+  if (railwayRuntime && !fs.existsSync(path.dirname(resolvedStore.filePath))) {
+    throw new Error(`Perps paper-history storage is unavailable at ${path.dirname(resolvedStore.filePath)}.`);
   }
-  const bot = new Bot({ ledgerStore });
-  const savedLedger = ledgerStore?.load() || PaperLedgerStore.decodeBootstrap(process.env.PAPER_LEDGER_BOOTSTRAP);
-  await restoreOrResetLedger(bot, savedLedger, Bot.STRATEGY.id);
-  bot.start();
-  const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: PAPER ONLY -- BTC Edge Lab; selective forecast-versus-odds experiment; no live orders or wallet signing.');
+  const resolvedBot = bot || new PerpsCopyBot({
+    api: api || new PerpsPublicApi(),
+    store: resolvedStore,
+  });
+  await resolvedBot.initialize();
+  resolvedBot.start();
+  const server = startServer(resolvedBot, port, { listen });
 
-  let stopping = false;
+  console.log('MODE: PAPER ONLY — Polymarket Perps public fills; no wallet signing or order placement.');
+  console.log(`[paper-state] using separate ledger ${resolvedStore.filePath}`);
+
   const shutdown = async () => {
-    if (stopping) return;
-    stopping = true;
-    bot.stop();
-    const forcedExit = setTimeout(() => process.exit(1), 10_000);
-    forcedExit.unref?.();
-    await bot.flushLedger();
-    server.close(() => {
-      clearTimeout(forcedExit);
-      process.exit(0);
-    });
+    try {
+      await resolvedBot.stopAndFlush();
+    } catch (error) {
+      console.error(`[paper-state] final save failed: ${error.message || String(error)}`);
+    }
+    if (server.listening) server.close(() => process.exit(0));
+    else process.exit(0);
   };
   process.once('SIGTERM', shutdown);
   process.once('SIGINT', shutdown);
+  return { bot: resolvedBot, server };
 }
 
 if (require.main === module) {
-  main().catch((e) => {
-    console.error('Fatal startup error:', e);
+  startApplication().catch((error) => {
+    console.error('Fatal startup error:', error);
     process.exit(1);
   });
 }
 
-module.exports = { restoreOrResetLedger };
+module.exports = { startApplication };

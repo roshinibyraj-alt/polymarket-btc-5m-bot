@@ -1,78 +1,42 @@
-# BTC Edge Lab — paper experiment
+# Polymarket Perps paper copy bot
 
-**No profit guarantee. No live execution.** The active engine is `selective-edge-bot.js`.
-Older engines remain only as inactive reference/test fixtures; startup never loads them.
+This service replaces the BTC paper strategy with a **paper-only** copy simulator for the selected Polymarket Perps account. It reads public Perps portfolio and fill endpoints. It does not load a wallet signer, submit orders, or access private credentials.
 
-## Hypothesis
+## Source account
 
-An option-style short-horizon BTC forecast might identify executable Polymarket
-odds that underestimate a side's chance of paying $1. This is a hypothesis, not
-a demonstrated edge. The service can skip all windows.
+- Public smart-wallet address: `0x23ecee90767f510347d5005dc680ff5d24c7325c`
+- Perps owner EOA: `0x5eee21f22ac3bb72c979d801270d7f322d6b2d6f`
+- Polymarket's Perps API keys registration, portfolio, and fills to the owner EOA. The app checks that account before initializing.
 
-Binance aggregate-trade WebSocket prices supply live spot data. The last 120
-one-minute candles seed volatility, with at least 60 gap-free completed candles
-required. Volatility is the maximum of 10-minute return RMS, 60-minute return RMS,
-30-minute high/low volatility and a floor. No future candles enter the model.
+The first successful start captures a baseline of existing positions and the newest fill watermark. Pre-existing positions are **not** adopted; only subsequent source exposure changes are copied, avoiding a surprise opening of old positions on deploy.
 
-The Binance window-open price is explicitly a **proxy** for the Chainlink strike.
-Alternative zero/small-drift forecasts, 1×/1.5× volatility, and an adverse strike
-buffer of max($15, half one-minute dollar volatility) create a scenario range.
-Subtract another five probability points before deciding. This is not a
-statistical confidence interval. TWAP-enabled markets use the variance of the
-final-60-second average. Entry ends before that averaging interval starts.
+## Paper sizing and accounting
 
-## Entry and risk
+- Starting paper capital: `$500`
+- Proportional multiplier: `$500 / source equity at baseline`
+- Maximum marked open notional across all instruments: `$500`
+- New paper exposure is clipped to available cap; if mark movement takes total notional over the cap, the simulator trims positions.
+- Simulated fills use one adverse price tick from each observed source fill and a tier-0 taker-fee estimate of `0.05%`.
+- Floating P&L uses mark prices derived from the public source portfolio snapshots.
+- Funding payments are not included. The dashboard labels this limitation.
 
-- Evaluate once per second from seconds 45 through 210.
-- Require the same side on three consecutive fresh trade ticks.
-- Normal value entries require conservative scenario chance ≥52%; edge ≥$0.01/share after executable
-  ask VWAP, taker fees and a $0.01/share execution reserve.
-- Ask $0.05–$0.95; spread ≤$0.03; exchange and receive timestamps ≤2 seconds old.
-- Only current-market outcome IDs and books hydrated on this connection qualify.
-- One entry per window, maximum 50 shares and min($15, 0.5% of available capital).
-- All unsettled entry cost, including fees, capped at 2% of starting capital.
-- A 5% peak drawdown stops new entries persistently across restarts.
-- No martingale, flips, opposite hedges, or forced-entry path. Windows may be
-  skipped when no side passes the regular entry criteria.
+The proportional multiplier stays fixed for the run. The ledger persists the baseline, source fill IDs, paper positions, P&L, and activity so restarts do not replay fills.
 
-## Conservative paper accounting
+## Data and service
 
-Signals wait at least 300 ms and require a new book update before execution;
-all filters are revalidated. Use at most half the visible shares per ask level.
-Partial fills are allowed; any remainder cancels. This still cannot model all
-real latency, cancellations, adverse selection or exchange execution effects.
+- Public API base: `https://api.perpetuals.polymarket.com`
+- Fill polling is every five seconds; portfolio/mark snapshots refresh every fifteen seconds.
+- The public fills endpoint is paginated and de-duplicated by trade ID.
+- The ledger is stored at `/data/perps-copy-paper-state.json` on Railway. It is separate from the previous BTC strategy ledger, which is left untouched.
+- Local runs use `./.data/perps-copy-paper-state.json`.
 
-Fees are read from market metadata. Unsupported/missing schedules block entries.
-For the current BTC schedule, fee = shares × rate × price × (1-price), calculated
-per fill level. Taker buys earn no maker rebates. The one-cent execution reserve
-is a decision buffer, not an additional booked fee.
+Set `LIVE_TRADING=true` only to verify the startup safety stop; the app will refuse to start. The source code never uses private-key or order-placement modules.
 
-Hold positions until **official resolution**, polled every five seconds after
-expiry. A 99-cent quote never fabricates a $1 early payout. No empty-book loss.
-Pending settlement does not block later windows except through the total risk cap.
-Floating marks use net bid VWAP at half displayed depth, valuing any unliquidatable
-remainder at zero without closing it. Stale marks are explicitly labelled estimates.
+## Verify
 
-## Evaluation and operation
+```sh
+npm test
+npm start
+```
 
-The mobile dashboard shows costs, fill details, skip reasons, floating and
-realized results, fees, drawdown, and live feed health. Brier score, average entry
-forecast and observed win rate are measured from actual official settlements,
-not invented backtests. The model is **uncalibrated and profitability unproven**.
-Collect fresh results across multiple market regimes before considering any
-real-money use; a few wins or a positive backtest are not validation.
-
-`PAPER_LEDGER_PATH` persists this strategy through restarts. The strategy ID
-remains stable across this filter adjustment to preserve existing history and
-open positions. Historical entries made under the removed cadence fallback
-remain visible in the ledger; new trades must pass the normal entry filters.
-`LIVE_TRADING=true` refuses startup. No private key is read and no wallet signing
-or exchange order submission code is loaded. Real-money services are separate.
-
-Run `npm test`, then `npm start` (Node 22+). Dashboard `/`, JSON `/api/state`,
-health `/api/healthz`.
-
-References checked when implementing:
-- https://docs.polymarket.com/trading/fees
-- https://docs.polymarket.com/market-data/realtime-data
-- Current market Gamma metadata, description and `feeSchedule`
+The dashboard is mobile-first and available at `/`. `/api/state` returns the paper ledger view and `/api/healthz` reports process health.
