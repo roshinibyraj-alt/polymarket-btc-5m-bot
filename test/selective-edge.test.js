@@ -149,7 +149,8 @@ test('one entry per window; no adding, martingale, or forced opposite entries', 
 test('relaxed edge gates admit a lower-positive-edge value entry', () => {
   const f = fixture();
   assert.equal(RULES.minimumProbability, 0.52);
-  assert.equal(RULES.minimumNetEdge, 0.005);
+  assert.equal(RULES.minimumNetEdge, null);
+  assert.equal(RULES.maximumSpread, null);
   assert.equal(RULES.probabilityHaircut, 0.03);
   assert.equal(RULES.confirmations, 2);
   assert.equal(RULES.minimumElapsedSeconds, 20);
@@ -165,7 +166,7 @@ test('relaxed edge gates admit a lower-positive-edge value entry', () => {
   assert.ok(c.cost + c.fees <= 15);
 });
 
-test('relaxed rules admit half-cent edge but reject lower edge and sub-52% chance', () => {
+test('no minimum edge is required but sub-52% chance is still rejected', () => {
   const f = fixture();
   const lowProbability = candidate({ model: { lowerUp: 0.519, lowerDown: 0.4, rawUp: 0.6 },
     quote: f.record.quotes.UP, market: f.market, side: 'UP', now: f.now(), budget: 15 });
@@ -181,8 +182,35 @@ test('relaxed rules admit half-cent edge but reject lower edge and sub-52% chanc
     quote: { ...f.record.quotes.UP, bestAsk: 0.525, bestBid: 0.515,
       asks: [{ price: 0.525, size: 1000 }] },
     market: f.market, side: 'UP', now: f.now(), budget: 15 });
-  assert.equal(narrowEdge.eligible, false);
-  assert.match(narrowEdge.reason, /Less than \$0\.005 edge/);
+  assert.equal(narrowEdge.eligible, true);
+  assert.ok(narrowEdge.netEdge < 0.005);
+});
+
+test('wide spreads and negative edge do not block executable buys', () => {
+  const f = fixture();
+  const quote = { ...f.record.quotes.UP, bestAsk: 0.8, bestBid: 0.3,
+    asks: [{ price: 0.8, size: 1000 }], bids: [{ price: 0.3, size: 1000 }] };
+  const c = candidate({ model: { lowerUp: 0.52, lowerDown: 0.3, rawUp: 0.6 },
+    quote, market: f.market, side: 'UP', now: f.now(), budget: 15 });
+  assert.equal(c.eligible, true, JSON.stringify(c));
+  assert.ok(c.netEdge < 0);
+  assert.equal(c.spread, 0.5);
+  assert.ok(c.cost + c.fees <= 15);
+  assert.ok(c.filledShares <= 50);
+});
+
+test('removing edge checks does not invent asks, bypass budget or change price band', () => {
+  const f = fixture();
+  const model = { lowerUp: 0.8, lowerDown: 0.1, rawUp: 0.9 };
+  const args = { model, market: f.market, side: 'UP', now: f.now(), budget: 15 };
+  for (const quote of [
+    { ...f.record.quotes.UP, asks: [] },
+    { ...f.record.quotes.UP, asks: [{ price: 0.4, size: 4 }] },
+    { ...f.record.quotes.UP, bestAsk: 0.96, asks: [{ price: 0.96, size: 1000 }] },
+  ]) assert.equal(candidate({ ...args, quote }).eligible, false);
+  const c = candidate({ ...args, quote: f.record.quotes.UP, budget: 0.5 });
+  assert.equal(c.eligible, false);
+  assert.ok(c.cost + c.fees <= 0.5);
 });
 
 test('regular entry keeps the widened ask band and has no forced entry at second 180', () => {

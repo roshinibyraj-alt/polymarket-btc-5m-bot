@@ -8,11 +8,11 @@ const RULES = Object.freeze({
   lastEntrySecond: 240,
   maximumDataAgeMs: 2000,
   minimumProbability: 0.52,
-  minimumNetEdge: 0.005,
+  minimumNetEdge: null,
   probabilityHaircut: 0.03,
   minimumAsk: 0.05,
   maximumAsk: 0.95,
-  maximumSpread: 0.03,
+  maximumSpread: null,
   slippageReserve: 0.01,
   maxShares: 50,
   perWindowFraction: 0.005,
@@ -124,13 +124,14 @@ function candidate({ model, quote, market, side, now, budget }) {
   if (!freshQuote(quote, market, side, now)) return no('Stale, missing, crossed, or wrong-window book.');
   const spread = quote.bestAsk - quote.bestBid;
   base.spread = spread;
-  if (spread > RULES.maximumSpread + 1e-8) return no('Spread exceeds $0.03.');
   if (quote.bestAsk < RULES.minimumAsk || quote.bestAsk > RULES.maximumAsk) {
     return no('Ask outside $0.05–$0.95 value-entry band.');
   }
   const fee = marketFee(market);
   if (!fee) return no('Unknown or unsupported fee schedule; no fee-free assumption.');
-  const maxPrice = Math.min(RULES.maximumAsk, probability - RULES.minimumNetEdge - RULES.slippageReserve);
+  // Probability and estimated edge no longer limit executable ask prices.
+  // Keep the explicit entry-price band, visible depth and capital budget.
+  const maxPrice = RULES.maximumAsk;
   const requestedShares = Math.min(RULES.maxShares,
     Math.floor(budget / (quote.bestAsk + fee.rate * quote.bestAsk * (1 - quote.bestAsk)
       + RULES.slippageReserve)));
@@ -156,9 +157,8 @@ function candidate({ model, quote, market, side, now, budget }) {
   Object.assign(base, { requestedShares, filledShares, allInCost, netEdge, cost, fees, fills,
     averagePrice: filledShares > 0 ? cost / filledShares : null, feeRate: fee.rate });
   if (probability < RULES.minimumProbability) return no('Conservative chance below 52%.');
-  if (filledShares < 5 || cost < 1) return no('No executable asks at prices that clear the edge and risk budget.');
-  if (netEdge < RULES.minimumNetEdge - 1e-8) return no('Less than $0.005 edge after fees and execution reserve.');
-  return { ...base, eligible: true, reason: 'Conservative scenario edge clears costs and reserve.' };
+  if (filledShares < 5 || cost < 1) return no('Insufficient executable ask depth within the price band and capital budget (minimum 5 shares and $1 cost).');
+  return { ...base, eligible: true, reason: 'Probability threshold met with executable asks within the price band and capital budget; spread and estimated edge are informational only.' };
 }
 
 module.exports = { RULES, forecast, candidate, marketFee, freshQuote, normalCdf };

@@ -10,7 +10,7 @@ const ACTIVE = new Set(['OPEN', 'PENDING_RESOLUTION']);
 const STRATEGY = Object.freeze({
   ...RULES,
   execution: 'PAPER ONLY. Delayed visible-ask sweeps, maximum 50% of displayed depth, actual market fee metadata. No rebates or invented $1 early exits.',
-  entry: 'Value entries: once per second from seconds 20–240, require two consecutive fresh same-side checks, conservative probability at least 52% with a 3-percentage-point haircut and net edge at least $0.005 after fees and a $0.01 reserve. Ask $0.05–$0.95; spread ≤$0.03. No forced-entry path; windows may be skipped. Maximum one entry per window.',
+  entry: 'Once per second from seconds 20–240, require two consecutive fresh same-side checks and conservative probability at least 52% with a 3-percentage-point haircut. Ask $0.05–$0.95. No minimum net-edge or maximum-spread filter; both remain informational. Fresh executable depth, fee metadata and capital limits still apply, including the sizing reserve. No forced-entry path; windows may be skipped. Maximum one entry per window.',
   risk: 'No martingale. At most 50 shares and min($15, 0.5% of available capital) per window; all unsettled cost capped at 2% of starting capital. A 5% drawdown stops new entries. Settlement continues.',
   resolution: 'Hold to official Polymarket resolution; check every 5 seconds after expiry. Winners pay $1, losers $0. No artificial TP or empty-book stop.',
   limitations: 'Experimental and uncalibrated. Looser entry gates may increase trade frequency, but do not guarantee a trade in every window or profitability. Binance USD(T) is not the Chainlink settlement oracle.',
