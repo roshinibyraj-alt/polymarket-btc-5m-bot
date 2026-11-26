@@ -149,8 +149,8 @@
     <section class="overview" aria-label="Paper account overview">
       <div class="hero">
         <div class="hero-label">Paper equity</div>
-        <div id="equity" class="hero-value">$500.00</div>
-        <p id="equityMeta" class="hero-meta">Starting paper capital: $500.00</p>
+        <div id="equity" class="hero-value">$5,000.00</div>
+        <p id="equityMeta" class="hero-meta">Starting paper capital: $5,000.00</p>
       </div>
       <div class="metrics">
         <div class="metric"><div class="metric-label">Realized P&amp;L</div><div id="realized" class="metric-value">$0.00</div></div>
@@ -174,7 +174,7 @@
         <div class="source-line"><span>Source positions</span><strong id="sourcePositionCount">—</strong></div>
         <div class="source-line"><span>Last source fill</span><strong id="lastFill">—</strong></div>
       </div>
-      <div class="notice">This starts from a clean baseline. Positions already open when the copier starts are not adopted; only subsequent source exposure changes are simulated.</div>
+      <div class="notice">Current source positions are adopted at their live marks, with no pre-start profit or loss imported. After this baseline, new source exposure changes are simulated. If the initial portfolio exceeds the cap, positions are scaled down proportionally.</div>
     </section>
 
     <div class="two-col">
@@ -197,7 +197,7 @@
       <summary>How this paper copy works</summary>
       <div class="strategy">
         <p><b>Source:</b> reads public Perps fills and portfolio snapshots for the selected owner EOA. It never signs or submits orders.</p>
-        <p><b>Proportional size:</b> source position changes are scaled against a $500 paper account using source equity captured at startup.</p>
+        <p><b>Proportional size:</b> current positions are adopted at startup, then source position changes are scaled against a $5,000 paper account using source equity captured at baseline. If the startup basket exceeds the $500 exposure cap, the same additional scaling applies to later copied exposure.</p>
         <p><b>Paper execution:</b> simulates each change one tick worse than the reported source fill and applies the current tier-0 taker fee estimate (0.05%).</p>
         <p><b>Risk cap:</b> new exposure is clipped at $500 total marked notional; if price moves push exposure above the cap, paper positions are trimmed.</p>
         <p><b>Limitations:</b> funding payments and market impact beyond one tick are not included. This is a simulator, not a promise of live execution or profitability.</p>

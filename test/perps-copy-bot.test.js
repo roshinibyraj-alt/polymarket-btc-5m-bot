@@ -57,13 +57,13 @@ function fill({ id, timestamp, side, quantity, price, previousSize = '0', instru
 }
 
 async function readyBot(api, now = 1_000_000) {
-  const bot = new PerpsCopyBot({ api, clock: () => now, pollIntervalMs: 60_000 });
+  const bot = new PerpsCopyBot({ api, paperCapital: 500, clock: () => now, pollIntervalMs: 60_000 });
   await bot.initialize();
   assert.equal(bot.state.status, 'running');
   return bot;
 }
 
-test('computes source exposure beyond the startup baseline without adopting old positions', async () => {
+test('adopts the startup position and copies its later reduction and flip', async () => {
   assert.equal(attributedExposure(5, 10), 0);
   assert.equal(attributedExposure(13, 10), 3);
   assert.equal(attributedExposure(-2, 10), -2);
@@ -92,12 +92,12 @@ test('computes source exposure beyond the startup baseline without adopting old 
     }],
   });
   const bot = await readyBot(api);
-  assert.equal(bot.state.positions.length, 0, 'startup positions remain unadopted');
+  assert.equal(bot.state.positions.length, 1, 'startup positions are adopted');
   await bot.pollOnce();
   assert.equal(bot.state.positions.length, 1);
   assert.equal(bot.state.positions[0].size, -1, 'only the new short exposure is mirrored at 0.5x');
-  assert.equal(bot.state.stats.copiedFills, 1);
-  assert.equal(bot.state.stats.ignoredZeroChangeFills, 1);
+  assert.equal(bot.state.stats.copiedFills, 2);
+  assert.equal(bot.state.stats.ignoredZeroChangeFills, 0);
 });
 
 test('scales long fills, estimates fees, and reduces on source exits', async () => {
@@ -108,7 +108,7 @@ test('scales long fills, estimates fees, and reduces on source exits', async () 
     ],
   });
   let now = 1_000_000;
-  const bot = new PerpsCopyBot({ api, clock: () => now, pollIntervalMs: 60_000 });
+  const bot = new PerpsCopyBot({ api, paperCapital: 500, clock: () => now, pollIntervalMs: 60_000 });
   await bot.initialize();
   now += 1_000;
   await bot.pollOnce();
@@ -134,6 +134,7 @@ test('clips entries to the aggregate open-notional cap', async () => {
   let now = 1_000_000;
   const bot = new PerpsCopyBot({
     api,
+    paperCapital: 500,
     clock: () => now,
     pollIntervalMs: 60_000,
     maxOpenNotional: 500,
@@ -155,7 +156,7 @@ test('deduplicates fills that appear again on the next poll', async () => {
     ],
   });
   let now = 1_000_000;
-  const bot = new PerpsCopyBot({ api, clock: () => now, pollIntervalMs: 60_000 });
+  const bot = new PerpsCopyBot({ api, paperCapital: 500, clock: () => now, pollIntervalMs: 60_000 });
   await bot.initialize();
   now += 1_000;
   await bot.pollOnce();
@@ -164,6 +165,58 @@ test('deduplicates fills that appear again on the next poll', async () => {
   await bot.pollOnce();
   assert.equal(bot.state.positions[0].size, sizeAfterFirstRead);
   assert.equal(bot.state.stats.copiedFills, 1);
+});
+
+test('adopts current positions at live marks without importing earlier P&L', async () => {
+  const api = makeApi({
+    portfolioPositions: [{
+      instrument_id: 1,
+      symbol: 'BTC-USD',
+      size: '2',
+      entry_price: '100',
+      unrealized_pnl: '10',
+    }],
+  });
+  const bot = await readyBot(api);
+  assert.equal(bot.state.positions.length, 1);
+  assert.equal(bot.state.positions[0].size, 1);
+  assert.equal(bot.state.positions[0].markPrice, 105);
+  assert.equal(bot.state.positions[0].averageEntryPrice, 105.01);
+  assert.equal(bot.state.trades[0].action, 'ADOPT');
+  assert.ok(bot.state.account.fees > 0);
+  assert.ok(bot.state.positions[0].unrealizedPnl < 0, 'only the adverse entry tick, not the source’s earlier gain, is reflected');
+  assert.ok(bot.state.source.existingPositionsAdoptedAt);
+});
+
+test('migrates an earlier clean-baseline ledger to adopted positions only once', async () => {
+  const api = makeApi({
+    portfolioPositions: [{
+      instrument_id: 1,
+      symbol: 'BTC-USD',
+      size: '2',
+      entry_price: '100',
+      unrealized_pnl: '10',
+    }],
+  });
+  const original = await readyBot(api);
+  const oldState = JSON.parse(JSON.stringify(original.state));
+  delete oldState.source.existingPositionsAdoptedAt;
+  const expectedSize = oldState.positions[0].size;
+  const expectedTrades = oldState.trades.length;
+  const store = { load: async () => oldState, save: async () => {} };
+  const restored = new PerpsCopyBot({ api: makeApi({
+    portfolioPositions: [{
+      instrument_id: 1,
+      symbol: 'BTC-USD',
+      size: '2',
+      entry_price: '100',
+      unrealized_pnl: '10',
+    }],
+  }), store, paperCapital: 500, clock: () => 1_000_000 });
+  await restored.initialize();
+  assert.ok(restored.state.source.existingPositionsAdoptedAt);
+  assert.equal(restored.state.positions[0].size, expectedSize);
+  assert.equal(restored.state.trades.length, expectedTrades);
 });
 
 test('public API uses the official Perps paths and sends no credentials', async () => {
@@ -184,4 +237,37 @@ test('public API uses the official Perps paths and sends no credentials', async 
   assert.equal(seen[0].url, 'https://unit.test/v1/info/registered?address=0xabc');
   assert.deepEqual(seen[0].options.headers, { accept: 'application/json' });
   assert.equal(seen[0].options.headers.authorization, undefined);
+});
+
+test('defaults to $5000 capital while retaining the separate $500 exposure cap', async () => {
+  const bot = new PerpsCopyBot({ api: makeApi(), clock: () => 1_000_000 });
+  await bot.initialize();
+  assert.equal(bot.state.account.startingCapital, 5000);
+  assert.equal(bot.state.account.cash, 5000);
+  assert.equal(bot.state.sizing.paperCapital, 5000);
+  assert.equal(bot.state.sizing.multiplier, 5);
+  assert.equal(bot.state.sizing.maxOpenNotional, 500);
+});
+
+test('capital migration preserves P&L and is idempotent', async () => {
+  const previous = await readyBot(makeApi());
+  previous.state.account.cash = 487;
+  previous.state.account.realizedPnl = -12;
+  previous.state.account.fees = 1;
+  previous.recalculateAccount();
+  let saved = JSON.parse(JSON.stringify(previous.state));
+  const store = {
+    load: async () => JSON.parse(JSON.stringify(saved)),
+    save: async (state) => { saved = JSON.parse(JSON.stringify(state)); },
+  };
+  const upgraded = new PerpsCopyBot({ api: makeApi(), store, clock: () => 1_000_000 });
+  await upgraded.initialize();
+  assert.equal(upgraded.state.account.startingCapital, 5000);
+  assert.equal(upgraded.state.account.cash, 4987);
+  assert.equal(upgraded.state.account.realizedPnl, -12);
+  assert.equal(upgraded.state.account.fees, 1);
+  assert.equal(upgraded.state.sizing.maxOpenNotional, 500);
+  const restarted = new PerpsCopyBot({ api: makeApi(), store, clock: () => 1_000_000 });
+  await restarted.initialize();
+  assert.equal(restarted.state.account.cash, 4987);
 });
