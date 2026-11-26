@@ -86,6 +86,7 @@ summary{padding:11px 12px;cursor:pointer;font-size:12px;font-weight:800}
 </header>
 <div id="banner" class="banner"></div>
 <div class="paper"><b>PAPER ONLY.</b> No real orders. Profitability is unproven; forecasts are model estimates, not verified probabilities, and no edge is guaranteed. <span id="sysStatus"></span></div>
+<div class="paper" id="recoveryStatus">Sizing: loading settled recovery status…</div>
 
 <section class="card hero">
   <div class="row" style="align-items:flex-start">
@@ -210,7 +211,8 @@ function render(s){
   $('stats').innerHTML=dl([['decisions',num(st.decisionCount)??D],['traded windows',num(st.tradedWindows)??D],['historical fallback entries',num(st.historicalFallbackEntries)??0],['skipped windows',num(st.skippedWindows)??D],['settled windows',num(st.settledWindows)??D],['mean forecast',pct(st.meanForecast)],['observed win rate',pct(st.observedWinRate)],['Brier score',fx(st.brierScore,4)],['label',st.sampleLabel||'unproven']]);
   const sk=Object.entries(st.skipCounts||{}).sort((x,y)=>y[1]-x[1]);$('skips').innerHTML=sk.length?dl(sk):'<dt>none</dt><dd>'+D+'</dd>';
   const md=ld.model||{};$('model').innerHTML=dl([['ready',md.ready==null?D:String(md.ready)],['reason',md.reason||D],['price (proxy)',money(md.price,2)],['window anchor',money(md.anchor,2)],['sigma / minute',fx(md.sigmaPerMinute,4)],['seconds left',num(md.remainingSeconds)??D],['raw UP estimate',pct(md.rawUp)],['lower UP',pct(md.lowerUp)],['lower DOWN',pct(md.lowerDown)],['basis buffer',money(md.basisBufferUsd)],['confirmations',num(ld.confirmationCount)??D]]);
-  const rk=e.risk||{};$('risk').innerHTML=dl([['per-window budget',money(rk.perWindowBudget)],['open cost',money(rk.openCost)],['max open cost',money(rk.maxOpenCost)],['drawdown stop',money(rk.drawdownLimitUsd)],['risk stopped',rk.riskStopped==null?D:rk.riskStopped?'YES':'no']]);
+  const rk=e.risk||{};$('recoveryStatus').textContent=`Sizing: ${rk.sizingMultiplier||1}× ${rk.recoveryActive?'RECOVERY':'BASE'} · Settled balance ${money(rk.settledBalance)} · Peak ${money(rk.settledPeak)} · Unresolved cost ${money(rk.openCost)} / ${money(rk.maxOpenCost)}`;
+  $('risk').innerHTML=dl([['sizing mode',rk.recoveryActive?'RECOVERY · 2×':'BASE · 1×'],['settled balance',money(rk.settledBalance)],['settled peak',money(rk.settledPeak)],['settled drawdown',money(rk.settledDrawdown)],['base budget',money(rk.baseBudget)],['per-window budget',money(rk.perWindowBudget)],['max shares',rk.maxShares],['open cost incl fees',money(rk.openCost)],['max open cost',money(rk.maxOpenCost)],['drawdown stop',money(rk.drawdownLimitUsd)],['risk stopped',rk.riskStopped==null?D:rk.riskStopped?'YES':'no']]);
   const rd=(e.recentDecisions||[]).slice(0,12);$('recent').innerHTML=rd.length?rd.map(d=>`<div class="item"><div class="row"><strong>${esc(d.code||D)}${d.side?' · '+esc(d.side):''}</strong><time>${tm(d.at)}</time></div><p>${esc(d.reason||'')}</p></div>`).join(''):'<div class="empty">No decisions recorded.</div>';
   const sg=s.strategy||{};const sec=(k,t)=>sg[k]?`<h3>${t}</h3><p>${esc(Array.isArray(sg[k])?sg[k].join(' · '):sg[k])}</p>`:'';
   $('strategy').innerHTML=`<p><b>${esc(sg.name||D)}</b> <span class="pill">${esc(sg.id||'')}</span></p>`+sec('entry','Entry')+sec('execution','Execution')+sec('risk','Risk')+sec('resolution','Resolution')+sec('limitations','Limitations');

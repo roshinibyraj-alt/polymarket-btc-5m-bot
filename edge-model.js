@@ -18,6 +18,8 @@ const RULES = Object.freeze({
   perWindowFraction: 0.005,
   perWindowDollarCap: 15,
   maximumOpenFraction: 0.02,
+  maximumOpenCost: 60,
+  recoveryMultiplier: 2,
   drawdownLimitFraction: 0.05,
   confirmations: 2,
   decisionIntervalMs: 1000,
@@ -116,7 +118,7 @@ function freshQuote(quote, market, side, now) {
     && Number(quote.bestBid) <= Number(quote.bestAsk);
 }
 
-function candidate({ model, quote, market, side, now, budget }) {
+function candidate({ model, quote, market, side, now, budget, baseBudget = budget, sizingMultiplier = 1 }) {
   const probability = side === 'UP' ? model.lowerUp : model.lowerDown;
   const base = { side, estimate: side === 'UP' ? model.rawUp : 1 - model.rawUp,
     conservativeProbability: probability, bestAsk: quote?.bestAsk ?? null, eligible: false };
@@ -132,9 +134,12 @@ function candidate({ model, quote, market, side, now, budget }) {
   // Probability and estimated edge no longer limit executable ask prices.
   // Keep the explicit entry-price band, visible depth and capital budget.
   const maxPrice = RULES.maximumAsk;
-  const requestedShares = Math.min(RULES.maxShares,
-    Math.floor(budget / (quote.bestAsk + fee.rate * quote.bestAsk * (1 - quote.bestAsk)
-      + RULES.slippageReserve)));
+  const multiplier = sizingMultiplier === RULES.recoveryMultiplier ? RULES.recoveryMultiplier : 1;
+  const unitBudget = quote.bestAsk + fee.rate * quote.bestAsk * (1 - quote.bestAsk)
+    + RULES.slippageReserve;
+  const normalShares = Math.min(RULES.maxShares, Math.floor(baseBudget / unitBudget));
+  const requestedShares = Math.max(0, Math.min(normalShares * multiplier,
+    Math.floor(budget / unitBudget)));
   const fills = [];
   let remaining = requestedShares;
   let cost = 0;

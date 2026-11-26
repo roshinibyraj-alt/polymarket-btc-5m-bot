@@ -11,7 +11,7 @@ const STRATEGY = Object.freeze({
   ...RULES,
   execution: 'PAPER ONLY. Delayed visible-ask sweeps, maximum 50% of displayed depth, actual market fee metadata. No rebates or invented $1 early exits.',
   entry: 'Once per second from seconds 20–240, require two consecutive fresh same-side checks and conservative probability at least 52% with a 3-percentage-point haircut. Ask $0.05–$0.95. No minimum net-edge or maximum-spread filter; both remain informational. Fresh executable depth, fee metadata and capital limits still apply, including the sizing reserve. No forced-entry path; windows may be skipped. Maximum one entry per window.',
-  risk: 'No martingale. At most 50 shares and min($15, 0.5% of available capital) per window; all unsettled cost capped at 2% of starting capital. A 5% drawdown stops new entries. Settlement continues.',
+  risk: 'Base sizing: at most 50 shares and min($15, 0.5% of available capital). Below the previous settled-balance peak, use fixed 2x normal shares, at most 100 shares and $30; never compound to 4x. Reset to base only above the previous settled peak. Total unresolved cost including fees is capped at $60. Existing 5% drawdown stop remains; settlement continues.',
   resolution: 'Hold to official Polymarket resolution; check every 5 seconds after expiry. Winners pay $1, losers $0. No artificial TP or empty-book stop.',
   limitations: 'Experimental and uncalibrated. Looser entry gates may increase trade frequency, but do not guarantee a trade in every window or profitability. Binance USD(T) is not the Chainlink settlement oracle.',
 });
@@ -108,15 +108,36 @@ class SelectiveEdgeBot extends DipBounceBot {
   }
 
   riskSnapshot() {
+    // Full persisted history, in actual settlement order. Floating marks and
+    // unresolved outcomes never activate recovery or move its target.
+    let settledBalance = this.initialCapital;
+    let settledPeak = settledBalance;
+    let sizingMultiplier = 1;
+    const settled = this.positions.filter(p => p.realizedPnl != null
+      && Number.isFinite(p.realizedPnl)).sort((a, b) => a.resolvedAt - b.resolvedAt);
+    for (const p of settled) {
+      settledBalance += p.realizedPnl;
+      if (settledBalance > settledPeak + 1e-8) {
+        settledPeak = settledBalance;
+        sizingMultiplier = 1;
+      } else if (settledBalance < settledPeak - 1e-8) {
+        sizingMultiplier = RULES.recoveryMultiplier;
+      }
+    }
+    // At exact recovery retain 2x until the balance strictly exceeds the peak.
     const openCost = this.positions.filter(p => ACTIVE.has(p.status))
       .reduce((sum, p) => sum + p.totalCost + p.fees, 0);
-    const maxOpenCost = this.initialCapital * RULES.maximumOpenFraction;
+    const maxOpenCost = RULES.maximumOpenCost;
     const drawdownLimitUsd = this.initialCapital * RULES.drawdownLimitFraction;
     if (this.maxDrawdown >= drawdownLimitUsd) this.riskStopped = true;
+    const baseBudget = Math.max(0, Math.min(RULES.perWindowDollarCap,
+      Math.min(this.cash, this.accountSnapshot().equity) * RULES.perWindowFraction));
     return {
-      perWindowBudget: Math.max(0, Math.min(RULES.perWindowDollarCap,
-        Math.min(this.cash, this.accountSnapshot().equity) * RULES.perWindowFraction,
-        maxOpenCost - openCost)),
+      baseBudget, sizingMultiplier, recoveryActive: sizingMultiplier === RULES.recoveryMultiplier,
+      settledBalance, settledPeak, settledDrawdown: Math.max(0, settledPeak - settledBalance),
+      maxShares: RULES.maxShares * sizingMultiplier,
+      perWindowBudget: Math.max(0, Math.min(baseBudget * sizingMultiplier,
+        this.cash, maxOpenCost - openCost)),
       openCost, maxOpenCost, drawdownLimitUsd, riskStopped: this.riskStopped,
     };
   }
@@ -166,7 +187,8 @@ class SelectiveEdgeBot extends DipBounceBot {
     if (!model.ready) return skip('MODEL_WAIT', model.reason, { model });
     if (this.websocket.status !== 'CONNECTED') return skip('CLOB_WAIT', 'Polymarket disconnected; new entries paused.', { model });
     const candidates = ['UP', 'DOWN'].map(side =>
-      candidate({ model, quote: record.quotes[side], market, side, now, budget: risk.perWindowBudget }));
+      candidate({ model, quote: record.quotes[side], market, side, now, budget: risk.perWindowBudget,
+        baseBudget: risk.baseBudget, sizingMultiplier: risk.sizingMultiplier }));
     let best = candidates.filter(c => c.eligible).sort((a, b) => b.netEdge - a.netEdge)[0];
     if (!best) return skip('NO_EDGE', candidates.map(c => `${c.side}: ${c.reason}`).join(' '), { model, candidates });
     if (this.confirmation?.side === best.side && this.confirmation.marketId === String(market.id)
@@ -206,7 +228,7 @@ class SelectiveEdgeBot extends DipBounceBot {
     const model = forecast({ feed: this.binanceFeed.snapshot(), market, now });
     if (!model.ready || risk.riskStopped || this.websocket.status !== 'CONNECTED') return cancel('Data or risk checks failed during execution delay.');
     const fill = candidate({ model, quote: record.quotes[pending.side], market, side: pending.side, now,
-      budget: risk.perWindowBudget });
+      budget: risk.perWindowBudget, baseBudget: risk.baseBudget, sizingMultiplier: risk.sizingMultiplier });
     if (!fill.eligible) return cancel(`Price moved before execution: ${fill.reason}`);
     if (this.orders.some(o => o.marketId === pending.marketId && o.filledShares > 0)) return cancel('Duplicate window entry rejected.');
     this.pendingEntry = null;
@@ -220,6 +242,7 @@ class SelectiveEdgeBot extends DipBounceBot {
       placedAt: pending.requestedAt, filledAt: now, fillPrice: fill.averagePrice, fees: fill.fees,
       feeRate: fill.feeRate, cost: fill.cost, fills: fill.fills, latencyMs: now - pending.requestedAt,
       bookSequence: record.quotes[pending.side].sequence,
+      sizingMultiplier: risk.sizingMultiplier, settledPeakAtEntry: risk.settledPeak,
       fillRule: 'Fresh post-delay asks; max 50% displayed depth per level. Remainder cancelled.',
     };
     this.cash -= fill.cost + fill.fees;
@@ -230,6 +253,7 @@ class SelectiveEdgeBot extends DipBounceBot {
       asset: 'BTC', timeframe: '5m', side: pending.side, status: 'OPEN',
       shares: fill.filledShares, requestedShares: fill.requestedShares,
       entryAt: now, entryPrice: fill.averagePrice, totalCost: fill.cost, fees: fill.fees,
+      sizingMultiplier: risk.sizingMultiplier, settledPeakAtEntry: risk.settledPeak,
       totalEntryFees: fill.fees, estimatedMakerRebate: 0, windowStart: market.start, windowEnd: market.end,
       markBid: record.quotes[pending.side].bestBid, markStatus: 'LIVE', markUpdatedAt: now,
       unrealizedPnl: null, realizedPnl: null, exitPrice: null,

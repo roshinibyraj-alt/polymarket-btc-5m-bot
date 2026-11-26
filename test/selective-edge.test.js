@@ -354,7 +354,7 @@ test('restart restores risk and history but never a pending signal or duplicate 
   assert.equal(g.bot.cash, f.bot.cash);
 });
 
-test('official losing settlement loses only entry cost and does not increase the next stake', () => {
+test('official losing settlement activates fixed double sizing', () => {
   const f = fixture();
   enter(f);
   const p = f.bot.positions[0];
@@ -362,8 +362,64 @@ test('official losing settlement loses only entry cost and does not increase the
   f.bot.settleMarket('current', 'DOWN', f.market.end + 5000);
   assert.equal(p.realizedPnl, -p.totalCost - p.fees);
   assert.equal(p.exitPrice, 0);
-  assert.ok(f.bot.riskSnapshot().perWindowBudget <= 15);
+  assert.ok(f.bot.riskSnapshot().perWindowBudget <= 30);
+  assert.equal(f.bot.riskSnapshot().sizingMultiplier, 2);
   assert.ok(Math.abs(f.bot.cash - f.bot.accountSnapshot().equity) < 1e-9);
+});
+
+test('recovery stays fixed at 2x through losses and partial recovery, resets only above peak', () => {
+  const f = fixture();
+  const add = pnl => f.bot.positions.push({ realizedPnl: pnl,
+    resolvedAt: START + f.bot.positions.length, status: pnl > 0 ? 'RESOLVED_WIN' : 'RESOLVED_LOSS' });
+  add(10);
+  assert.equal(f.bot.riskSnapshot().sizingMultiplier, 1);
+  add(-5);
+  add(-5);
+  assert.equal(f.bot.riskSnapshot().sizingMultiplier, 2);
+  add(5);
+  assert.equal(f.bot.riskSnapshot().sizingMultiplier, 2);
+  add(5);
+  assert.equal(f.bot.riskSnapshot().sizingMultiplier, 2);
+  add(1);
+  assert.equal(f.bot.riskSnapshot().sizingMultiplier, 1);
+  assert.equal(f.bot.riskSnapshot().settledPeak, 3011);
+});
+
+test('floating losses and unresolved positions never activate recovery', () => {
+  const f = fixture();
+  enter(f);
+  f.bot.positions[0].unrealizedPnl = -10;
+  assert.equal(f.bot.riskSnapshot().sizingMultiplier, 1);
+  f.bot.expireMarket(f.record, f.market.end);
+  assert.equal(f.bot.riskSnapshot().sizingMultiplier, 1);
+});
+
+test('recovery doubles normal requested shares, respects depth and remaining dollar exposure', () => {
+  const f = fixture();
+  const args = { model: { lowerUp: .8, lowerDown: .1, rawUp: .9 },
+    quote: f.record.quotes.UP, market: f.market, side: 'UP', now: f.now(), baseBudget: 15 };
+  const normal = candidate({ ...args, budget: 15 });
+  const doubled = candidate({ ...args, budget: 30, sizingMultiplier: 2 });
+  assert.equal(doubled.requestedShares, normal.requestedShares * 2);
+  assert.ok(doubled.cost + doubled.fees <= 30);
+  const capped = candidate({ ...args, budget: 3, sizingMultiplier: 2 });
+  assert.ok(capped.cost + capped.fees <= 3);
+  f.record.quotes.UP.asks[0].size = 12;
+  assert.equal(candidate({ ...args, budget: 30, sizingMultiplier: 2 }).filledShares, 6);
+});
+
+test('recovery and historical settled peak survive ledger restoration without resetting positions', () => {
+  const f = fixture();
+  enter(f);
+  f.bot.expireMarket(f.record, f.market.end);
+  f.bot.settleMarket('current', 'DOWN', f.market.end + 5000);
+  const g = fixture();
+  g.bot.restoreLedger(JSON.parse(JSON.stringify(f.bot.exportLedger())));
+  assert.equal(g.bot.riskSnapshot().sizingMultiplier, 2);
+  assert.equal(g.bot.riskSnapshot().settledPeak, 3000);
+  assert.equal(g.bot.cash, f.bot.cash);
+  assert.equal(g.bot.positions.length, f.bot.positions.length);
+  assert.equal(g.bot.riskSnapshot().maxOpenCost, 60);
 });
 
 test('risk budget includes pending-resolution costs and cannot exceed total exposure cap', () => {
@@ -372,6 +428,18 @@ test('risk budget includes pending-resolution costs and cannot exceed total expo
   assert.equal(f.bot.riskSnapshot().perWindowBudget, 0.5);
   f.bot.evaluate(f.now());
   assert.equal(f.bot.latestDecision.code, 'EXPOSURE_CAP');
+});
+
+test('execution rechecks the $60 fee-inclusive ceiling even after a signal was queued', () => {
+  const f = fixture();
+  f.bot.evaluate(f.now());
+  f.bot.evaluate(f.advance(1000));
+  assert.ok(f.bot.pendingEntry);
+  f.bot.positions.push({ status: 'PENDING_RESOLUTION', totalCost: 59, fees: .5, shares: 100 });
+  f.bot.evaluate(f.advance(500));
+  assert.equal(f.bot.orders.length, 0);
+  assert.equal(f.bot.pendingEntry, null);
+  assert.equal(f.bot.latestDecision.code, 'ORDER_CANCELLED');
 });
 
 test('a fresh reconnect must receive an initial book before price deltas can hydrate it', () => {
