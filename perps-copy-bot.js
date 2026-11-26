@@ -3,7 +3,6 @@
 const SOURCE_PROXY_WALLET = '0x23ecee90767f510347d5005dc680ff5d24c7325c';
 const SOURCE_OWNER_EOA = '0x5eee21f22ac3bb72c979d801270d7f322d6b2d6f';
 const STARTING_PAPER_CAPITAL = 5000;
-const MAX_OPEN_NOTIONAL = 500;
 const TAKER_FEE_RATE = 0.0005;
 const DEFAULT_POLL_MS = 5_000;
 const PORTFOLIO_REFRESH_MS = 15_000;
@@ -74,10 +73,12 @@ function makeInitialState(now, paperCapital = STARTING_PAPER_CAPITAL) {
     },
     sizing: {
       paperCapital,
-      maxOpenNotional: MAX_OPEN_NOTIONAL,
+      mode: 'equity_ratio',
+      maxOpenNotional: null,
       sourceEquityAtStart: null,
       multiplier: null,
-      startupAdoptionScale: 1,
+      paperEquityAtSizing: null,
+      sourceEquityAtSizing: null,
       feeRate: TAKER_FEE_RATE,
     },
     account: {
@@ -120,7 +121,6 @@ class PerpsCopyBot {
     pollIntervalMs = DEFAULT_POLL_MS,
     portfolioRefreshMs = PORTFOLIO_REFRESH_MS,
     paperCapital = STARTING_PAPER_CAPITAL,
-    maxOpenNotional = MAX_OPEN_NOTIONAL,
   } = {}) {
     if (!api) throw new Error('A Perps public API client is required');
     this.api = api;
@@ -129,7 +129,6 @@ class PerpsCopyBot {
     this.pollIntervalMs = pollIntervalMs;
     this.portfolioRefreshMs = portfolioRefreshMs;
     this.paperCapital = paperCapital;
-    this.maxOpenNotional = maxOpenNotional;
     this.state = makeInitialState(this.clock(), paperCapital);
     this.timer = null;
     this.polling = false;
@@ -141,6 +140,10 @@ class PerpsCopyBot {
       if (saved) {
         this.state = saved;
         this.updatePaperCapital();
+        this.state.sizing.mode = 'equity_ratio';
+        this.state.sizing.maxOpenNotional = null;
+        delete this.state.sizing.startupAdoptionScale;
+        this.state.source.lastPortfolioAt = null;
         this.addEvent('PAPER_STATE_RESTORED', 'Restored the separate Perps paper ledger.');
         if (!this.state.source.existingPositionsAdoptedAt) {
           try {
@@ -171,7 +174,7 @@ class PerpsCopyBot {
     this.state.sizing.paperCapital = this.paperCapital;
     const sourceEquity = finite(this.state.sizing.sourceEquityAtStart);
     if (sourceEquity > 0) this.state.sizing.multiplier = this.paperCapital / sourceEquity;
-    this.addEvent('PAPER_CAPITAL_UPDATED', `Starting paper capital changed to $${this.paperCapital}; existing P&L and the $${this.maxOpenNotional} exposure cap were preserved.`);
+    this.addEvent('PAPER_CAPITAL_UPDATED', `Starting paper capital changed to $${this.paperCapital}; existing P&L was preserved.`);
     this.recalculateAccount();
   }
 
@@ -236,7 +239,7 @@ class PerpsCopyBot {
       this.state.sizing.sourceEquityAtStart = equity;
       this.state.sizing.multiplier = this.paperCapital / equity;
       this.state.sizing.paperCapital = this.paperCapital;
-      this.state.sizing.maxOpenNotional = this.maxOpenNotional;
+      this.state.sizing.maxOpenNotional = null;
       this.state.lastProcessedAt = baselineAt;
       this.rememberFills(baselineFills.data || []);
       this.state.status = 'running';
@@ -295,12 +298,12 @@ class PerpsCopyBot {
       }
 
       const now = this.clock();
+      await this.processNewFills();
       if (!this.state.source.lastPortfolioAt
         || now - this.state.source.lastPortfolioAt >= this.portfolioRefreshMs) {
         await this.refreshPortfolio();
       }
 
-      await this.processNewFills();
       this.state.source.lastPollAt = now;
       this.state.source.lastError = null;
       this.state.status = 'running';
@@ -321,6 +324,9 @@ class PerpsCopyBot {
 
   async refreshPortfolio() {
     const portfolio = await this.api.portfolio(SOURCE_OWNER_EOA);
+    if (!(finite(portfolio.equity) > 0) || !Array.isArray(portfolio.positions)) {
+      throw new Error('A valid source equity and positions snapshot is required for proportional sizing.');
+    }
     const positions = portfolio.positions || [];
     const nextSourcePositions = {};
     const nextMarks = { ...this.state.marks };
@@ -333,7 +339,7 @@ class PerpsCopyBot {
       if (mark !== null) nextMarks[id] = mark;
     }
     this.state.sourcePositions = nextSourcePositions;
-    this.state.source.equity = finite(portfolio.equity, this.state.source.equity);
+    this.state.source.equity = Number(portfolio.equity);
     this.state.source.positionCount = Object.keys(nextSourcePositions).length;
     this.state.source.lastPortfolioAt = finite(portfolio.timestamp, this.clock());
     this.state.marks = nextMarks;
@@ -345,7 +351,46 @@ class PerpsCopyBot {
       }
     }
     this.recalculateAccount();
-    this.enforceExposureCap();
+    this.rebalanceToSource();
+  }
+
+  updateSizingRatio() {
+    this.recalculateAccount();
+    const sourceEquity = finite(this.state.source.equity);
+    if (!(sourceEquity > 0)) throw new Error('Source equity is unavailable; proportional copying is paused.');
+    const paperEquity = Math.max(0, this.state.account.equity);
+    this.state.sizing.mode = 'equity_ratio';
+    this.state.sizing.maxOpenNotional = null;
+    this.state.sizing.paperEquityAtSizing = paperEquity;
+    this.state.sizing.sourceEquityAtSizing = sourceEquity;
+    this.state.sizing.multiplier = paperEquity / sourceEquity;
+    return this.state.sizing.multiplier;
+  }
+
+  rebalanceToSource() {
+    const multiplier = this.updateSizingRatio();
+    if (!(multiplier > 0)) {
+      throw new Error('Paper equity is exhausted; copying is paused. Liquidation and funding are not simulated.');
+    }
+    const ids = new Set([
+      ...Object.keys(this.state.sourcePositions),
+      ...this.state.positions.map(p => String(p.instrumentId)),
+    ]);
+    for (const id of ids) {
+      const existing = this.findPosition(id);
+      const sourceSize = finite(this.state.sourcePositions[id]);
+      const mark = finite(this.state.marks[id], existing?.markPrice);
+      if (!(mark > 0)) throw new Error(`Current price is unavailable for instrument ${id}; cannot rebalance.`);
+      const instrument = this.state.instruments[id] || {
+        id: Number(id), symbol: existing?.symbol || `Instrument ${id}`, priceDecimals: 2, quantityDecimals: 8,
+      };
+      this.movePositionToTarget(instrument, sourceSize * multiplier, mark, {
+        sourceFillId: `equity-rebalance:${this.clock()}:${id}`,
+        sourceTimestamp: this.state.source.lastPortfolioAt,
+        sourceSide: 'rebalance',
+      });
+    }
+    this.recalculateAccount();
   }
 
   async rebaselineAndAdoptCurrentPositions() {
@@ -416,7 +461,7 @@ class PerpsCopyBot {
   }
 
   adoptCurrentBaselinePositions() {
-    const multiplier = finite(this.state.sizing.multiplier);
+    const multiplier = this.updateSizingRatio();
     if (!(multiplier > 0)) return;
     const candidates = Object.entries(this.state.baselinePositions || {}).map(([instrumentId, sourceSize]) => {
       const instrument = this.state.instruments[instrumentId] || {
@@ -428,16 +473,6 @@ class PerpsCopyBot {
       const mark = finite(this.state.marks[instrumentId]);
       return { instrumentId, sourceSize, instrument, mark };
     });
-    const intendedNotional = candidates.reduce((sum, item) => {
-      if (!(item.mark > 0)) return sum;
-      const size = roundSize(signedSize(item.sourceSize) * multiplier, item.instrument.quantityDecimals ?? 8);
-      return sum + (Math.abs(size) * item.mark);
-    }, 0);
-    const adoptionScale = intendedNotional > this.maxOpenNotional
-      ? this.maxOpenNotional / intendedNotional
-      : 1;
-    this.state.sizing.startupAdoptionScale = adoptionScale;
-
     for (const { instrumentId, sourceSize, instrument, mark } of candidates) {
       if (!(mark > 0)) {
         this.addEvent('POSITION_ADOPTION_SKIPPED', `Instrument ${instrumentId} has no current mark; it was not fabricated.`);
@@ -446,7 +481,7 @@ class PerpsCopyBot {
       const sourceFillId = `baseline-adoption:${this.state.source.baselineAt}:${instrumentId}`;
       this.movePositionToTarget(
         instrument,
-        roundSize(signedSize(sourceSize) * multiplier * adoptionScale, instrument.quantityDecimals ?? 8),
+        roundSize(signedSize(sourceSize) * multiplier, instrument.quantityDecimals ?? 8),
         mark,
         {
           sourceFillId,
@@ -531,11 +566,16 @@ class PerpsCopyBot {
     const baseline = finite(this.state.baselinePositions[instrumentId]);
     const adopted = Boolean(this.state.source.existingPositionsAdoptedAt);
     const eligible = adopted ? after : attributedExposure(after, baseline);
-    const multiplier = finite(this.state.sizing.multiplier)
-      * (adopted ? finite(this.state.sizing.startupAdoptionScale, 1) : 1);
-    const desired = roundSize(eligible * multiplier, 8);
     this.state.sourcePositions[instrumentId] = after;
     this.state.marks[instrumentId] = price;
+    const existingPosition = this.findPosition(instrumentId);
+    if (existingPosition) {
+      existingPosition.markPrice = price;
+      existingPosition.markUpdatedAt = finite(fill.timestamp, this.clock());
+    }
+    const multiplier = this.updateSizingRatio();
+    if (!(multiplier > 0)) throw new Error('Paper equity is exhausted; copying is paused.');
+    const desired = roundSize(eligible * multiplier, 8);
     const instrument = this.state.instruments[instrumentId] || {
       id: Number(instrumentId),
       symbol: fill.symbol || `Instrument ${instrumentId}`,
@@ -581,13 +621,7 @@ class PerpsCopyBot {
     if (remainingTarget !== 0) {
       const isAdding = afterClose === 0 || Math.sign(afterClose) === Math.sign(remainingTarget);
       if (isAdding) {
-        const available = Math.max(0, this.maxOpenNotional - this.calculateOpenNotional());
-        const maxAdditional = available / basePrice;
-        const allowed = Math.min(Math.abs(remainingTarget), maxAdditional);
-        if (allowed < Math.abs(remainingTarget)) {
-          this.state.stats.capLimitedEntries += 1;
-          this.addEvent('EXPOSURE_CAP', `${instrument.symbol}: entry clipped by the $${this.maxOpenNotional} open-notional limit.`);
-        }
+        const allowed = Math.abs(remainingTarget);
         if (allowed > 0) {
           this.executePaperDelta(
             instrument,
@@ -691,43 +725,12 @@ class PerpsCopyBot {
     this.state.account.cash -= fee;
     this.state.trades.unshift({
       ...tradeBase,
-      action: 'OPEN',
+      action: tradeBase.sourceSide === 'rebalance' ? 'REBALANCE_OPEN' : 'OPEN',
       quantity: size,
       realizedPnl: 0,
       netRealizedPnl: -fee,
       fee,
     });
-  }
-
-  enforceExposureCap() {
-    this.recalculateAccount();
-    if (this.state.account.openNotional <= this.maxOpenNotional + 1e-6) return;
-    const ordered = [...this.state.positions].sort((a, b) => {
-      return (Math.abs(b.size) * b.markPrice) - (Math.abs(a.size) * a.markPrice);
-    });
-    for (const position of ordered) {
-      const excess = this.state.account.openNotional - this.maxOpenNotional;
-      if (excess <= 1e-6) break;
-      const mark = position.markPrice;
-      if (!(mark > 0)) continue;
-      const trim = Math.min(Math.abs(position.size), excess / mark);
-      const instrument = this.state.instruments[String(position.instrumentId)] || {
-        id: position.instrumentId,
-        symbol: position.symbol,
-        priceDecimals: 2,
-        quantityDecimals: 8,
-      };
-      this.executePaperDelta(
-        instrument,
-        -Math.sign(position.size) * trim,
-        mark,
-        { sourceFillId: 'exposure-cap', sourceTimestamp: this.clock(), sourceSide: 'risk' },
-        position,
-      );
-      const latestTrade = this.state.trades[0];
-      if (latestTrade) latestTrade.action = 'CAP_TRIM';
-      this.recalculateAccount();
-    }
   }
 
   calculateOpenNotional() {
@@ -811,6 +814,5 @@ module.exports = {
   SOURCE_PROXY_WALLET,
   SOURCE_OWNER_EOA,
   STARTING_PAPER_CAPITAL,
-  MAX_OPEN_NOTIONAL,
   TAKER_FEE_RATE,
 };

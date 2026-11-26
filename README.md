@@ -8,19 +8,20 @@ This service replaces the BTC paper strategy with a **paper-only** copy simulato
 - Perps owner EOA: `0x5eee21f22ac3bb72c979d801270d7f322d6b2d6f`
 - Polymarket's Perps API keys registration, portfolio, and fills to the owner EOA. The app checks that account before initializing.
 
-The first successful start captures current positions and the newest fill watermark. Current positions are adopted at their live marks, without importing pre-start profit or loss; only subsequent source exposure changes are copied. If the intended startup basket exceeds the $500 cap, its positions are scaled down proportionally. This also applies as a one-time migration to the already-deployed paper ledger.
+The first successful start captures current positions and the newest fill watermark. Current positions are adopted at their live marks without importing pre-start profit or loss. The existing ledger is retained on updates; positions are adjusted to the current equity ratio rather than reset.
 
 ## Paper sizing and accounting
 
 - Starting paper capital: `$5,000`
-- Proportional multiplier: `$5,000 / source equity at baseline`; when the startup basket exceeds the cap, its proportional reduction also applies to later copied exposure.
-- Maximum marked open notional across all instruments: `$500`
-- New paper exposure is clipped to available cap; if mark movement takes total notional over the cap, the simulator trims positions.
+- Proportional multiplier: `current paper equity / current source equity`.
+- Target quantity: `source signed position quantity × multiplier`, rounded down to instrument precision.
+- There is no fixed notional cap and no additional margin reserve. Match the master's gross effective leverage; notional can exceed paper equity.
+- Existing positions are rebalanced at each portfolio snapshot; new fills use the latest available equity ratio. Adjustments incur simulated costs.
 - Simulated fills use one adverse price tick from each observed source fill and a tier-0 taker-fee estimate of `0.05%`.
 - Floating P&L uses mark prices derived from the public source portfolio snapshots.
 - Funding payments are not included. The dashboard labels this limitation.
 
-The proportional multiplier stays fixed for the run. The ledger persists the baseline, source fill IDs, paper positions, P&L, and activity so restarts do not replay fills.
+The proportional multiplier adapts as either account's equity changes. Fees, latency, instrument precision and slippage mean the resulting effective leverage is approximate, not tick-perfect. If either account has non-positive or unavailable equity, copying pauses explicitly. Liquidation and funding payments are not simulated; matching leverage does not guarantee capital preservation. The ledger persists source fill IDs, paper positions, P&L, and activity so restarts do not replay fills.
 
 ## Data and service
 

@@ -160,10 +160,13 @@
       </div>
     </section>
 
-    <section class="panel cap-wrap" aria-label="Exposure limit">
-      <div class="cap-row"><span>Open notional</span><span id="capLabel">$0 / $500</span></div>
-      <div class="meter"><div id="capMeter" class="meter-fill"></div></div>
-      <div class="section-note" style="text-align:left;margin-top:7px">The $500 cap applies across all copied positions.</div>
+    <section class="panel cap-wrap" aria-label="Proportional exposure">
+      <div class="cap-row"><span>Open notional · no fixed cap</span><span id="capLabel">—</span></div>
+      <div class="source-grid" style="margin-top:12px">
+        <div class="source-line"><span>Current copy ratio</span><strong id="copyRatio">—</strong></div>
+        <div class="source-line"><span>Your / master effective leverage</span><strong id="leverage">—</strong></div>
+      </div>
+      <div class="section-note" style="text-align:left;margin-top:7px">Position size = master size × paper equity ÷ master equity. No extra margin reserve. Refreshed with each portfolio snapshot.</div>
     </section>
 
     <section class="panel">
@@ -174,7 +177,7 @@
         <div class="source-line"><span>Source positions</span><strong id="sourcePositionCount">—</strong></div>
         <div class="source-line"><span>Last source fill</span><strong id="lastFill">—</strong></div>
       </div>
-      <div class="notice">Current source positions are adopted at their live marks, with no pre-start profit or loss imported. After this baseline, new source exposure changes are simulated. If the initial portfolio exceeds the cap, positions are scaled down proportionally.</div>
+      <div class="notice">Current positions are copied proportionally using live equity, without importing pre-start profit or loss. Matching the master’s leverage can lose the entire paper capital. Liquidation and funding are not simulated.</div>
     </section>
 
     <div class="two-col">
@@ -197,9 +200,9 @@
       <summary>How this paper copy works</summary>
       <div class="strategy">
         <p><b>Source:</b> reads public Perps fills and portfolio snapshots for the selected owner EOA. It never signs or submits orders.</p>
-        <p><b>Proportional size:</b> current positions are adopted at startup, then source position changes are scaled against a $5,000 paper account using source equity captured at baseline. If the startup basket exceeds the $500 exposure cap, the same additional scaling applies to later copied exposure.</p>
+        <p><b>Proportional size:</b> starting capital is $5,000. Each position targets master size × current paper equity ÷ current master equity. Existing positions are adjusted at each portfolio snapshot; sizes are rounded down to instrument precision.</p>
         <p><b>Paper execution:</b> simulates each change one tick worse than the reported source fill and applies the current tier-0 taker fee estimate (0.05%).</p>
-        <p><b>Risk cap:</b> new exposure is clipped at $500 total marked notional; if price moves push exposure above the cap, paper positions are trimmed.</p>
+        <p><b>No fixed notional cap:</b> the bot matches the master’s effective leverage, without an extra margin reserve. Notional can exceed paper equity. Adjustments incur simulated fees and slippage, so matching is approximate after costs and rounding.</p>
         <p><b>Limitations:</b> funding payments and market impact beyond one tick are not included. This is a simulator, not a promise of live execution or profitability.</p>
       </div>
     </details>
@@ -283,10 +286,13 @@
       }
       document.getElementById('fees').textContent = money(account.fees);
       document.getElementById('positionCount').textContent = String(state.positions?.length || 0);
-      const cap = Number(state.sizing?.maxOpenNotional || 500);
       const notional = Number(account.openNotional || 0);
-      document.getElementById('capLabel').textContent = `${money(notional)} / ${money(cap)}`;
-      document.getElementById('capMeter').style.width = `${Math.min(100, cap > 0 ? notional / cap * 100 : 0)}%`;
+      document.getElementById('capLabel').textContent = money(notional);
+      document.getElementById('copyRatio').textContent = `${(Number(state.sizing?.multiplier || 0) * 100).toFixed(5)}%`;
+      const sourceNotional = Object.entries(state.sourcePositions || {}).reduce((sum, [id, size]) => sum + Math.abs(Number(size)) * Number(state.marks?.[id] || 0), 0);
+      const paperLeverage = Number(account.equity) > 0 ? notional / Number(account.equity) : null;
+      const masterLeverage = Number(state.source?.equity) > 0 ? sourceNotional / Number(state.source.equity) : null;
+      document.getElementById('leverage').textContent = `${paperLeverage === null ? '—' : paperLeverage.toFixed(2) + '×'} / ${masterLeverage === null ? '—' : masterLeverage.toFixed(2) + '×'}`;
       document.getElementById('sourceEquity').textContent = `Source equity ${money(state.source?.equity)}`;
       document.getElementById('ownerAddress').textContent = shortAddress(state.source?.ownerEoa);
       document.getElementById('ownerAddress').title = state.source?.ownerEoa || '';
