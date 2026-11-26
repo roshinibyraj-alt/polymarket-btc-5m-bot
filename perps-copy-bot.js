@@ -1,5 +1,7 @@
 'use strict';
 
+const { PaperOrderEngine, CONFIGURED_LEVERAGE } = require('./perps-paper-orders');
+
 const SOURCE_PROXY_WALLET = '0x23ecee90767f510347d5005dc680ff5d24c7325c';
 const SOURCE_OWNER_EOA = '0x5eee21f22ac3bb72c979d801270d7f322d6b2d6f';
 const STARTING_PAPER_CAPITAL = 5000;
@@ -22,7 +24,8 @@ function signedSize(value) {
 function roundSize(value, decimals = 8) {
   if (!Number.isFinite(value)) return 0;
   const factor = 10 ** Math.min(12, Math.max(0, decimals));
-  return Math.trunc(value * factor) / factor;
+  // Floating-point subtraction (0.7 - 0.2) must not discard a whole lot.
+  return Math.sign(value) * Math.floor(Math.abs(value) * factor + 1e-8) / factor;
 }
 
 function fillDelta(fill) {
@@ -101,6 +104,13 @@ function makeInitialState(now, paperCapital = STARTING_PAPER_CAPITAL) {
     trades: [],
     events: [],
     seenFillIds: [],
+    orders: [],
+    orderCounter: 0,
+    execution: {
+      version: 'master-limit-5m-v1', configuredLeverage: CONFIGURED_LEVERAGE,
+      limitWaitMs: 300_000, feeTier: 'Standard tier 0 (paper estimate)',
+      feeSchedule: [], feeEstimates: {}, feesUpdatedAt: null, lastBooks: {},
+    },
     lastProcessedAt: null,
     stats: {
       sourceFillsSeen: 0,
@@ -132,6 +142,32 @@ class PerpsCopyBot {
     this.state = makeInitialState(this.clock(), paperCapital);
     this.timer = null;
     this.polling = false;
+    this.orders = new PaperOrderEngine(this);
+  }
+
+  roundOrderSize(value, decimals = 8) {
+    return roundSize(value, decimals);
+  }
+
+  async refreshExecutionData() {
+    this.state.execution.feeEstimates ??= {};
+    if (!this.state.execution.feesUpdatedAt || this.clock() - this.state.execution.feesUpdatedAt > 86_400_000) {
+      const [fees, metadata] = await Promise.all([this.api.fees(), this.api.instruments()]);
+      if (!Array.isArray(fees.fee_schedule) || !fees.fee_schedule.length) throw new Error('Published Perps fee schedule unavailable.');
+      this.state.execution.feeSchedule = fees.fee_schedule;
+      for (const item of Array.isArray(metadata) ? metadata : metadata.data || []) {
+        const id = String(item.instrument_id ?? item.id);
+        this.state.instruments[id] = {
+          ...this.state.instruments[id],
+          id: Number(id), symbol: item.display_symbol || item.symbol,
+          category: item.category, priceDecimals: Number(item.price_decimals ?? 2),
+          quantityDecimals: Number(item.quantity_decimals ?? 8),
+          minNotional: finite(item.min_notional), maxLeverage: Number(item.max_leverage ?? 5),
+          feeOverride: item.fee_override || null,
+        };
+      }
+      this.state.execution.feesUpdatedAt = this.clock();
+    }
   }
 
   async initialize() {
@@ -139,6 +175,12 @@ class PerpsCopyBot {
       const saved = await this.store.load();
       if (saved) {
         this.state = saved;
+        this.state.orders ??= [];
+        this.state.orderCounter ??= 0;
+        this.state.execution ??= makeInitialState(this.clock()).execution;
+        this.state.execution.configuredLeverage = CONFIGURED_LEVERAGE;
+        this.state.execution.version = 'master-limit-5m-v1';
+        this.state.execution.feesUpdatedAt = null;
         this.updatePaperCapital();
         this.state.sizing.mode = 'equity_ratio';
         this.state.sizing.maxOpenNotional = null;
@@ -182,6 +224,7 @@ class PerpsCopyBot {
     this.state.status = 'connecting';
     this.state.statusMessage = 'Checking the source account and taking a no-replay baseline.';
     try {
+      await this.refreshExecutionData();
       const registered = await this.api.registration(SOURCE_OWNER_EOA);
       this.state.source.registered = registered.registered === true;
       if (!this.state.source.registered) {
@@ -201,6 +244,8 @@ class PerpsCopyBot {
             quantityDecimals: Number(item.quantity_decimals ?? item.quantityDecimals ?? 6),
             priceBounds: finite(item.price_bounds ?? item.priceBounds, 0),
             minNotional: finite(item.min_notional ?? item.minNotional, 0),
+            maxLeverage: Number(item.max_leverage ?? 5),
+            feeOverride: item.fee_override || null,
             category: item.category || 'unknown',
           }]),
       );
@@ -245,6 +290,7 @@ class PerpsCopyBot {
       this.state.status = 'running';
       this.state.statusMessage = 'Copying all current source exposure in paper mode, then following new fills.';
       this.adoptCurrentBaselinePositions();
+      await this.orders.process();
       this.addEvent(
         'BASELINE_READY',
         `Started at ${new Date(baselineAt).toISOString()}; existing source positions were adopted at current marks.`,
@@ -298,11 +344,13 @@ class PerpsCopyBot {
       }
 
       const now = this.clock();
+      await this.refreshExecutionData();
       await this.processNewFills();
       if (!this.state.source.lastPortfolioAt
         || now - this.state.source.lastPortfolioAt >= this.portfolioRefreshMs) {
         await this.refreshPortfolio();
       }
+      await this.orders.process();
 
       this.state.source.lastPollAt = now;
       this.state.source.lastError = null;
@@ -351,7 +399,20 @@ class PerpsCopyBot {
       }
     }
     this.recalculateAccount();
-    this.rebalanceToSource();
+    // Portfolio snapshots only mark positions; never bypass outstanding limits
+    // or generate autonomous rebalance trades without a master fill.
+    const tickers = await this.api.tickers();
+    if (!Array.isArray(tickers)) throw new Error('Current Perps mark prices unavailable.');
+    for (const ticker of tickers) {
+      const id = String(ticker.instrument_id);
+      const mark = Number(ticker.mark_price);
+      const timestamp = Number(ticker.timestamp);
+      if (!(mark > 0) || !Number.isFinite(timestamp) || this.clock() - timestamp > 30_000) continue;
+      this.state.marks[id] = mark;
+      const position = this.findPosition(id);
+      if (position) { position.markPrice = mark; position.markUpdatedAt = timestamp; }
+    }
+    this.updateSizingRatio();
   }
 
   updateSizingRatio() {
@@ -417,6 +478,8 @@ class PerpsCopyBot {
         quantityDecimals: Number(item.quantity_decimals ?? item.quantityDecimals ?? 6),
         priceBounds: finite(item.price_bounds ?? item.priceBounds, 0),
         minNotional: finite(item.min_notional ?? item.minNotional, 0),
+        maxLeverage: Number(item.max_leverage ?? 5),
+        feeOverride: item.fee_override || null,
         category: item.category || 'unknown',
       }];
     }));
@@ -453,6 +516,8 @@ class PerpsCopyBot {
     this.state.status = 'running';
     this.state.statusMessage = 'Existing source exposure adopted at current marks; prior P&L excluded.';
     this.adoptCurrentBaselinePositions();
+    await this.refreshExecutionData();
+    await this.orders.process();
     this.addEvent(
       'POSITION_BASELINE_REFRESHED',
       `Adopted ${Object.keys(sourcePositions).length} current source positions; no pre-start P&L was imported.`,
@@ -597,46 +662,16 @@ class PerpsCopyBot {
     this.state.stats.copiedGrossNotional += Math.abs((desired - beforePaperSize) * price);
     this.addEvent(
       'FILL_COPIED',
-      `${instrument.symbol}: source ${fill.side} ${quantity} @ ${price}; paper exposure ${beforePaperSize} → ${this.findPosition(instrumentId)?.size || 0}.`,
+      `${instrument.symbol}: source ${fill.side} ${quantity} @ ${price}; matching limit queued (current paper exposure ${beforePaperSize}).`,
     );
   }
 
   movePositionToTarget(instrument, targetSize, basePrice, sourceMeta) {
-    let position = this.findPosition(String(instrument.id));
-    const currentSize = position?.size || 0;
     const target = roundSize(targetSize, instrument.quantityDecimals ?? 8);
-    if (Math.abs(target - currentSize) < 1e-10) return false;
-
-    if (currentSize !== 0 && (target === 0 || Math.sign(currentSize) !== Math.sign(target))) {
-      this.executePaperDelta(instrument, -currentSize, basePrice, sourceMeta, position);
-      position = this.findPosition(String(instrument.id));
-    }
-
-    const afterClose = position?.size || 0;
-    let remainingTarget = target;
-    if (afterClose !== 0 && target !== 0 && Math.sign(afterClose) === Math.sign(target)) {
-      remainingTarget = target - afterClose;
-    }
-
-    if (remainingTarget !== 0) {
-      const isAdding = afterClose === 0 || Math.sign(afterClose) === Math.sign(remainingTarget);
-      if (isAdding) {
-        const allowed = Math.abs(remainingTarget);
-        if (allowed > 0) {
-          this.executePaperDelta(
-            instrument,
-            Math.sign(remainingTarget) * roundSize(allowed, instrument.quantityDecimals ?? 8),
-            basePrice,
-            sourceMeta,
-            this.findPosition(String(instrument.id)),
-          );
-        }
-      } else {
-        this.executePaperDelta(instrument, remainingTarget, basePrice, sourceMeta, position);
-      }
-    }
-    this.recalculateAccount();
-    return true;
+    let projected = this.orders.projectedSize(instrument.id);
+    this.orders.cancelOpposing(instrument.id, target - projected);
+    projected = this.orders.projectedSize(instrument.id);
+    return this.orders.queue(instrument, target - projected, basePrice, sourceMeta);
   }
 
   executePaperDelta(instrument, signedDelta, basePrice, sourceMeta, existingPosition) {
@@ -644,11 +679,12 @@ class PerpsCopyBot {
     if (!(size > 0)) return;
     const current = existingPosition || this.findPosition(String(instrument.id));
     const tick = 10 ** -Math.min(10, Math.max(0, Number(instrument.priceDecimals ?? 2)));
-    const executionPrice = Math.max(tick, basePrice + (Math.sign(signedDelta) * tick));
-    const fee = Math.abs(size * executionPrice) * TAKER_FEE_RATE;
+    const executionPrice = sourceMeta.executionPrice ?? Math.max(tick, basePrice + (Math.sign(signedDelta) * tick));
+    const feeRate = sourceMeta.feeRate ?? TAKER_FEE_RATE;
+    const fee = Math.abs(size * executionPrice) * feeRate;
     const now = this.clock();
     const tradeBase = {
-      id: `${sourceMeta.sourceFillId}:${this.state.trades.length}`,
+      id: `${sourceMeta.orderId || sourceMeta.sourceFillId}:${now}:${this.state.stats.executionCounter = (this.state.stats.executionCounter || 0) + 1}`,
       sourceFillId: sourceMeta.sourceFillId,
       sourceTimestamp: sourceMeta.sourceTimestamp,
       timestamp: now,
@@ -658,8 +694,13 @@ class PerpsCopyBot {
       quantity: size,
       price: executionPrice,
       fee,
-      feeRate: TAKER_FEE_RATE,
-      slippageTicks: 1,
+      feeRate,
+      slippageTicks: sourceMeta.executionPrice ? null : 1,
+      orderId: sourceMeta.orderId,
+      liquidity: sourceMeta.liquidity,
+      executionType: sourceMeta.executionType,
+      masterPrice: sourceMeta.masterPrice,
+      feeSource: sourceMeta.feeSource,
       sourceSide: sourceMeta.sourceSide,
     };
 
@@ -668,19 +709,22 @@ class PerpsCopyBot {
       && Math.sign(current.size) !== Math.sign(signedDelta);
     if (closesExisting) {
       const closeSize = Math.min(Math.abs(current.size), size);
+      const closeFee = fee * closeSize / size;
       const realized = Math.sign(current.size) * (executionPrice - current.averageEntryPrice) * closeSize;
       current.realizedPnl += realized;
-      current.fees += fee;
+      current.fees += closeFee;
       current.size = roundSize(current.size + Math.sign(signedDelta) * closeSize, 10);
       this.state.account.realizedPnl += realized;
-      this.state.account.fees += fee;
-      this.state.account.cash += realized - fee;
+      this.state.account.fees += closeFee;
+      this.state.account.cash += realized - closeFee;
       this.state.trades.unshift({
         ...tradeBase,
+        id: `${tradeBase.id}:close`,
         action: 'CLOSE',
         quantity: closeSize,
+        fee: closeFee,
         realizedPnl: realized,
-        netRealizedPnl: realized - fee,
+        netRealizedPnl: realized - closeFee,
       });
       if (Math.abs(current.size) < 1e-10) {
         this.state.positions = this.state.positions.filter((item) => item !== current);
@@ -725,7 +769,8 @@ class PerpsCopyBot {
     this.state.account.cash -= fee;
     this.state.trades.unshift({
       ...tradeBase,
-      action: tradeBase.sourceSide === 'rebalance' ? 'REBALANCE_OPEN' : 'OPEN',
+      id: `${tradeBase.id}:open`,
+      action: tradeBase.sourceSide === 'baseline' ? 'ADOPT' : tradeBase.sourceSide === 'rebalance' ? 'REBALANCE_OPEN' : 'OPEN',
       quantity: size,
       realizedPnl: 0,
       netRealizedPnl: -fee,
@@ -746,11 +791,22 @@ class PerpsCopyBot {
       const mark = finite(position.markPrice, position.averageEntryPrice);
       position.unrealizedPnl = position.size * (mark - position.averageEntryPrice);
       position.notional = Math.abs(position.size) * mark;
+      position.configuredLeverage = CONFIGURED_LEVERAGE;
+      position.initialMargin = position.notional / CONFIGURED_LEVERAGE;
       floating += position.unrealizedPnl;
     }
     this.state.account.floatingPnl = floating;
     this.state.account.openNotional = this.calculateOpenNotional();
     this.state.account.equity = this.state.account.cash + floating + this.state.account.fundingPnl;
+    this.state.account.initialMargin = this.state.account.openNotional / CONFIGURED_LEVERAGE;
+    this.state.account.pendingOrderMargin = (this.state.orders || []).reduce((sum, order) => {
+      if (!(order.remaining > 0)) return sum;
+      const sign = order.side === 'BUY' ? 1 : -1;
+      const current = this.findPosition(order.instrumentId)?.size || 0;
+      const reduction = Math.sign(current) === -sign ? Math.min(Math.abs(current), order.remaining) : 0;
+      return sum + (order.remaining - reduction) * order.limitPrice / CONFIGURED_LEVERAGE;
+    }, 0);
+    this.state.account.freeMargin = this.state.account.equity - this.state.account.initialMargin - this.state.account.pendingOrderMargin;
     this.state.account.peakEquity = Math.max(
       finite(this.state.account.peakEquity, this.state.account.startingCapital),
       this.state.account.equity,

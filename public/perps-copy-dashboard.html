@@ -166,7 +166,12 @@
         <div class="source-line"><span>Current copy ratio</span><strong id="copyRatio">—</strong></div>
         <div class="source-line"><span>Your / master effective leverage</span><strong id="leverage">—</strong></div>
       </div>
-      <div class="section-note" style="text-align:left;margin-top:7px">Position size = master size × paper equity ÷ master equity. No extra margin reserve. Refreshed with each portfolio snapshot.</div>
+      <div class="source-grid" style="margin-top:12px">
+        <div class="source-line"><span>Configured leverage</span><strong style="font-size:26px">5×</strong></div>
+        <div class="source-line"><span>Position / pending margin</span><strong id="margin">—</strong></div>
+        <div class="source-line"><span>Free margin</span><strong id="freeMargin">—</strong></div>
+      </div>
+      <div class="section-note" style="text-align:left;margin-top:7px">Quantity scales to your equity, not another 5× multiplier. Margin = notional ÷ 5. No automatic portfolio rebalance trades.</div>
     </section>
 
     <section class="panel">
@@ -177,7 +182,12 @@
         <div class="source-line"><span>Source positions</span><strong id="sourcePositionCount">—</strong></div>
         <div class="source-line"><span>Last source fill</span><strong id="lastFill">—</strong></div>
       </div>
-      <div class="notice">Current positions are copied proportionally using live equity, without importing pre-start profit or loss. Matching the master’s leverage can lose the entire paper capital. Liquidation and funding are not simulated.</div>
+      <div class="notice">PAPER ONLY · Limits use the master's exact fill price. After 5 minutes, only the remainder becomes a market sweep. Depth-backed snapshot fills are estimates, not real executions or guaranteed queue fills. Standard starting-tier fees apply; funding and liquidation are not simulated. Earlier history retains its original execution model.</div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head"><h2>Pending copy orders</h2><span id="orderCount" class="section-note">0 pending</span></div>
+      <div id="orders" class="list"><div class="empty">No pending copy orders.</div></div>
     </section>
 
     <div class="two-col">
@@ -200,10 +210,11 @@
       <summary>How this paper copy works</summary>
       <div class="strategy">
         <p><b>Source:</b> reads public Perps fills and portfolio snapshots for the selected owner EOA. It never signs or submits orders.</p>
-        <p><b>Proportional size:</b> starting capital is $5,000. Each position targets master size × current paper equity ÷ current master equity. Existing positions are adjusted at each portfolio snapshot; sizes are rounded down to instrument precision.</p>
-        <p><b>Paper execution:</b> simulates each change one tick worse than the reported source fill and applies the current tier-0 taker fee estimate (0.05%).</p>
-        <p><b>No fixed notional cap:</b> the bot matches the master’s effective leverage, without an extra margin reserve. Notional can exceed paper equity. Adjustments incur simulated fees and slippage, so matching is approximate after costs and rounding.</p>
-        <p><b>Limitations:</b> funding payments and market impact beyond one tick are not included. This is a simulator, not a promise of live execution or profitability.</p>
+        <p><b>Proportional size:</b> starting capital is $5,000. Each master fill targets master exposure × current paper equity ÷ current master equity. Outstanding quantities count toward that target. Opposing master actions cancel overlapping unfilled orders, then queue an exit for any already filled amount.</p>
+        <p><b>5× margin:</b> initial margin = notional ÷ 5. New exposure requires sufficient margin including fees; reductions remain possible. This is not a guarantee that total effective account leverage will always equal 5×.</p>
+        <p><b>Limit then force:</b> exact master-price limits wait five minutes from placement. Marketable-on-arrival fills use available depth at the best qualifying prices and pay taker fees. Later fills require opposite book prices strictly through the limit, execute at the limit, and use maker fees. Partial quantities stay pending. Expired remainders sweep fresh depth; absent liquidity is never fabricated.</p>
+        <p><b>Fees:</b> official schedule and active instrument overrides, standard starting tier: normally maker 0.02%, taker 0.05% of fill notional. For categories omitted by the live fee API, the published standard rates are explicitly marked as estimates. The master's beta discounts or volume tier are not inherited. No builder fee is added.</p>
+        <p><b>Limitations:</b> five-second polling misses between-snapshot activity and cannot prove queue priority. Funding and liquidation are not simulated. Historical trades are preserved, not recalculated under this new model. This is not a promise of live execution or profitability.</p>
       </div>
     </details>
     <p id="updated" class="footer">Connecting to public Perps data…</p>
@@ -240,7 +251,7 @@
 
     function renderTrades(state) {
       const host = document.getElementById('trades');
-      document.getElementById('fillCount').textContent = `${state.stats?.copiedFills || 0} copied`;
+      document.getElementById('fillCount').textContent = `${state.stats?.copiedFills || 0} source actions · fills below`;
       if (!state.trades?.length) {
         host.innerHTML = '<div class="empty">No post-start source fills copied yet.</div>';
         return;
@@ -252,6 +263,9 @@
           <div class="trade-meta">
             <span>${Math.abs(Number(trade.quantity)).toLocaleString(undefined, { maximumFractionDigits: 6 })} @ ${money(trade.price)}</span>
             <span>Fee ${money(trade.fee)}</span>
+            <span>${safe(trade.liquidity || 'LEGACY')} · ${safe(trade.executionType || 'prior model')}</span>
+            ${trade.feeSource ? `<span>${safe(trade.feeSource)}</span>` : ''}
+            ${trade.masterPrice ? `<span>Master ${money(trade.masterPrice)}</span>` : ''}
             <span class="${pnlClass(trade.netRealizedPnl)}">Net ${signedMoney(trade.netRealizedPnl)}</span>
             <span>${time(trade.timestamp)}</span>
           </div>
@@ -269,6 +283,23 @@
         <strong>${safe(event.type.replaceAll('_', ' '))}</strong> · ${safe(event.message)}
         <time>${time(event.timestamp)}</time>
       </article>`).join('');
+    }
+
+    function renderOrders(state) {
+      const orders = (state.orders || []).filter(o => o.remaining > 0).reverse();
+      document.getElementById('orderCount').textContent = `${orders.length} pending`;
+      document.getElementById('orders').innerHTML = orders.length ? orders.map(order => {
+        const seconds = Math.max(0, Math.ceil((order.expiresAt - state.now) / 1000));
+        return `<article class="trade">
+          <div class="trade-top"><span class="trade-action ${order.side === 'BUY' ? 'good' : 'bad'}">${safe(order.side)} · ${safe(order.status)}</span><span class="trade-symbol">${safe(order.symbol)}</span></div>
+          <div class="trade-meta">
+            <span>Master limit ${money(order.limitPrice)}</span>
+            <span>Filled ${safe(order.filled)} / ${safe(order.quantity)}</span>
+            <span>Remaining ${safe(order.remaining)}</span>
+            <span>${seconds > 0 ? `Force in ${seconds}s` : 'MARKET SWEEP'}</span>
+            ${order.blockedReason ? `<span class="bad">${safe(order.blockedReason)}</span>` : ''}
+          </div></article>`;
+      }).join('') : '<div class="empty">No pending copy orders.</div>';
     }
 
     function render(state) {
@@ -289,6 +320,8 @@
       const notional = Number(account.openNotional || 0);
       document.getElementById('capLabel').textContent = money(notional);
       document.getElementById('copyRatio').textContent = `${(Number(state.sizing?.multiplier || 0) * 100).toFixed(5)}%`;
+      document.getElementById('margin').textContent = `${money(account.initialMargin)} / ${money(account.pendingOrderMargin)}`;
+      document.getElementById('freeMargin').textContent = money(account.freeMargin);
       const sourceNotional = Object.entries(state.sourcePositions || {}).reduce((sum, [id, size]) => sum + Math.abs(Number(size)) * Number(state.marks?.[id] || 0), 0);
       const paperLeverage = Number(account.equity) > 0 ? notional / Number(account.equity) : null;
       const masterLeverage = Number(state.source?.equity) > 0 ? sourceNotional / Number(state.source.equity) : null;
@@ -301,6 +334,7 @@
       document.getElementById('sourcePositionCount').textContent = `${state.source?.positionCount || 0} open · ${state.source?.baselinePositionCount || 0} at start`;
       document.getElementById('lastFill').textContent = time(state.source?.lastFillAt);
       renderPositions(state);
+      renderOrders(state);
       renderTrades(state);
       renderEvents(state);
       document.getElementById('updated').textContent = `Updated ${time(state.now)} · API snapshot ${time(state.source?.lastPortfolioAt)}`;

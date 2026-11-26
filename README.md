@@ -8,7 +8,7 @@ This service replaces the BTC paper strategy with a **paper-only** copy simulato
 - Perps owner EOA: `0x5eee21f22ac3bb72c979d801270d7f322d6b2d6f`
 - Polymarket's Perps API keys registration, portfolio, and fills to the owner EOA. The app checks that account before initializing.
 
-The first successful start captures current positions and the newest fill watermark. Current positions are adopted at their live marks without importing pre-start profit or loss. The existing ledger is retained on updates; positions are adjusted to the current equity ratio rather than reset.
+The first successful start captures current positions and the newest fill watermark. Current positions are queued at their live marks without importing pre-start profit or loss. Existing history and positions are retained on updates; legacy executions are not rewritten.
 
 ## Paper sizing and accounting
 
@@ -16,12 +16,16 @@ The first successful start captures current positions and the newest fill waterm
 - Proportional multiplier: `current paper equity / current source equity`.
 - Target quantity: `source signed position quantity × multiplier`, rounded down to instrument precision.
 - There is no fixed notional cap and no additional margin reserve. Match the master's gross effective leverage; notional can exceed paper equity.
-- Existing positions are rebalanced at each portfolio snapshot; new fills use the latest available equity ratio. Adjustments incur simulated costs.
-- Simulated fills use one adverse price tick from each observed source fill and a tier-0 taker-fee estimate of `0.05%`.
-- Floating P&L uses mark prices derived from the public source portfolio snapshots.
+- New master fills queue limits at the **exact master execution price**. There is no automatic equity-rebalance trading that can bypass these limits. Pending quantities count toward the exposure target.
+- Configured leverage is **5×**: initial margin = position notional / 5. This does not multiply copied quantities by five or force the account's effective leverage to equal five. Opening fills require adequate initial margin and fees. Reductions can proceed in margin call.
+- Each limit expires **five minutes from local placement**. Only its remaining quantity then becomes a market sweep, using fresh depth and actual depth-weighted prices; insufficient liquidity remains explicitly pending and retries, never fabricates fills.
+- On arrival, a marketable limit fills only qualifying opposing depth at book prices (taker). A previously resting limit needs strictly-through opposing depth (not equality), fills conservatively at the master limit (maker). Book liquidity is shared across pending orders and a sequence/timestamp snapshot cannot be reused. No pre-placement or stale snapshot fills.
+- Fees come from `/v1/info/fees` and active instrument `fee_override`, standard tier 0 (normally maker `0.02%`, taker `0.05%` of executed notional). The live endpoint currently omits non-equity categories: crypto/index/commodity use the official published standard table, explicitly labelled as an estimate on each fill. Unknown categories block. Paper history does not inherit master beta/account discounts; no assumed rebate or builder fee.
+- Opposing master actions cancel overlapping unfilled previous orders before placing a limit for any filled exposure that must exit. Restarts preserve remaining size and original deadlines.
+- Floating P&L uses official `/v1/info/tickers` marks, supplemented by source portfolio marks.
 - Funding payments are not included. The dashboard labels this limitation.
 
-The proportional multiplier adapts as either account's equity changes. Fees, latency, instrument precision and slippage mean the resulting effective leverage is approximate, not tick-perfect. If either account has non-positive or unavailable equity, copying pauses explicitly. Liquidation and funding payments are not simulated; matching leverage does not guarantee capital preservation. The ledger persists source fill IDs, paper positions, P&L, and activity so restarts do not replay fills.
+The proportional multiplier adapts for new source fills as either account's equity changes. Fees, latency, instrument precision and slippage mean resulting exposure is approximate. Five-second book snapshots cannot prove queue position or reproduce activity between polls. Liquidation and funding payments are not simulated; 5× margin accounting is not a complete exchange risk engine and does not guarantee capital preservation. The ledger persists source fill IDs, outstanding orders, paper positions, P&L, and activity so restarts do not replay fills.
 
 ## Data and service
 

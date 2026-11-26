@@ -48,6 +48,18 @@ class PerpsPublicApi {
     return this.get('/v1/info/instruments');
   }
 
+  book(instrumentId) {
+    return this.get(`/v1/info/book?instrument_id=${encodeURIComponent(instrumentId)}&depth=100`);
+  }
+
+  fees() {
+    return this.get('/v1/info/fees');
+  }
+
+  tickers() {
+    return this.get('/v1/info/tickers');
+  }
+
   fills(address, cursor = null) {
     const params = new URLSearchParams({ address, sort: 'desc' });
     if (cursor) params.set('cursor', cursor);
