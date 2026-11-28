@@ -1,4 +1,30 @@
-# Polymarket Perps paper copy bot
+# Independent BTC long / ETH short paper strategy
+
+The active service no longer follows any wallet. It starts a separate **$5,000 paper account** and uses public Polymarket Perps marks, instruments, fees and books only. No signing, credentials or real order placement is used.
+
+- Both sides use **5× cross-margin accounting**.
+- Initially open BTC long with $1,500 margin ($7,500 target exposure), and ETH short with $1,000 margin ($5,000 target exposure). Size precision and fees apply.
+- Each adjustment uses two units; a unit is 1% of current marked account equity, frozen when that adjustment is requested.
+- Price levels are **0.5%, 1%, 1.5%, ... from the original filled opening VWAP**. Original references never move when the average entry changes.
+- A favourable level reduces two units; an adverse level adds two. Falling ETH is favourable for the short.
+- **Each level is used once**, including partial execution. Staying beyond or recrossing a used level does not repeat it.
+- Additions are skipped when initial margin plus fees are unaffordable; they can retry if margin frees and the unused level still qualifies.
+- A price gap across several levels processes successive unused levels using later actual books, not the historical threshold prices.
+- A fully closed side stays closed. It is not automatically rebalanced back to its initial allocation.
+- Orders wait at least 500ms and sweep later available depth with taker fees. Partial remainders are retained; unchanged consumed liquidity is not reused.
+- Both marks must be fresh for new equity-based sizing. Unknown valuations are not zero.
+- Public fee schedules and instrument overrides apply; missing crypto categories use the clearly labelled documented standard-tier estimate.
+- Funding is estimated at hourly boundaries using the last public rate and observed mark. Missed hours are labelled last-known-input estimates, not an exact funding ledger.
+- A maintenance-margin breach conservatively unwinds both sides with book depth and liquidation fees, then halts. This paper model does not reproduce exchange partial recovery, insurance transfers or ADL.
+- The independent ledger is `independent-btc-eth-grid-v1.json` alongside the configured old ledger, or under `/data` on Railway. Copy history is retained separately but never imported. Restarts restore positions, original anchors, pending remainders and used levels.
+
+Run with `npm start`; verify with `npm test`. `/api/state` is read-only and `/api/healthz` reports service status.
+
+---
+
+## Historical wallet-copy implementation — inactive
+
+The sections below document the superseded copy simulator. They do not describe the active strategy.
 
 This service replaces the BTC paper strategy with a **paper-only** copy simulator for the selected Polymarket Perps account. It reads public Perps portfolio and fill endpoints. It does not load a wallet signer, submit orders, or access private credentials.
 

@@ -1,12 +1,12 @@
 {
-  "name": "polymarket-perps-paper-copy-bot",
+  "name": "polymarket-perps-btc-eth-grid",
   "version": "1.0.0",
   "private": true,
-  "description": "Paper-only proportional copy simulator for a Polymarket Perps wallet.",
+  "description": "Independent BTC long / ETH short capital-unit paper strategy.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node --test test/perps-copy-bot.test.js"
+    "test": "node --test test/perps-grid.test.js"
   },
   "engines": {
     "node": ">=22"

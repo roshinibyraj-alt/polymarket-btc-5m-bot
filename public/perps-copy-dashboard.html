@@ -1,359 +1,240 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#07111f">
-  <title>Perps Paper Copy</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #07111f;
-      --panel: #101e31;
-      --panel-2: #14263c;
-      --line: #263a54;
-      --text: #f5f8ff;
-      --muted: #9bb0c9;
-      --green: #45dfa3;
-      --red: #ff7185;
-      --blue: #72c7ff;
-      --yellow: #ffd166;
-      --shadow: 0 16px 35px rgba(0, 0, 0, .18);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      padding: max(14px, env(safe-area-inset-top)) 14px max(28px, env(safe-area-inset-bottom));
-      background:
-        radial-gradient(ellipse at 90% -10%, rgba(78, 138, 255, .18), transparent 38%),
-        radial-gradient(ellipse at -15% 40%, rgba(25, 207, 161, .10), transparent 36%),
-        var(--bg);
-      color: var(--text);
-      font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-    main { max-width: 1080px; margin: 0 auto; }
-    h1, h2, p { margin: 0; }
-    button { font: inherit; }
-    .header {
-      display: flex; align-items: flex-start; justify-content: space-between;
-      gap: 12px; margin: 6px 0 18px;
-    }
-    .brand { display: flex; align-items: center; gap: 11px; }
-    .brand-mark {
-      width: 42px; height: 42px; border-radius: 14px; display: grid; place-items: center;
-      background: linear-gradient(135deg, #46e0aa, #37a9ff); color: #061423;
-      font-weight: 950; font-size: 19px; box-shadow: var(--shadow);
-    }
-    h1 { font-size: 21px; line-height: 1.1; letter-spacing: -.4px; }
-    .subhead { margin-top: 5px; color: var(--muted); font-size: 12px; }
-    .status {
-      flex: 0 0 auto; border: 1px solid var(--line); border-radius: 999px;
-      padding: 7px 10px; color: var(--yellow); background: rgba(255, 209, 102, .09);
-      font-size: 11px; font-weight: 850; letter-spacing: .4px; text-transform: uppercase;
-    }
-    .status.running { color: var(--green); background: rgba(69, 223, 163, .10); border-color: rgba(69, 223, 163, .32); }
-    .status.degraded, .status.persistence_error { color: var(--red); background: rgba(255, 113, 133, .10); border-color: rgba(255, 113, 133, .32); }
-    .hero {
-      padding: 19px; border: 1px solid rgba(114, 199, 255, .27); border-radius: 22px;
-      background: linear-gradient(135deg, rgba(38, 89, 127, .58), rgba(20, 38, 60, .96) 62%, rgba(40, 47, 95, .66));
-      box-shadow: var(--shadow); overflow: hidden; position: relative;
-    }
-    .hero::after {
-      content: ""; position: absolute; width: 190px; height: 190px; border-radius: 50%;
-      right: -75px; top: -90px; background: rgba(69, 223, 163, .14); filter: blur(2px);
-    }
-    .hero-label { color: #c6ddf3; text-transform: uppercase; font-size: 11px; letter-spacing: 1px; font-weight: 800; }
-    .hero-value { font-size: clamp(34px, 10vw, 50px); line-height: 1.04; font-weight: 900; letter-spacing: -1.5px; margin-top: 6px; }
-    .hero-meta { color: #d2e5f5; font-size: 13px; margin-top: 9px; }
-    .metrics {
-      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 12px 0;
-    }
-    .metric, .panel {
-      border: 1px solid var(--line); border-radius: 17px; background: rgba(16, 30, 49, .94);
-      box-shadow: var(--shadow);
-    }
-    .metric { padding: 13px 14px; min-height: 82px; }
-    .metric-label { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .55px; }
-    .metric-value { font-size: 21px; line-height: 1.2; font-weight: 850; margin-top: 6px; }
-    .good { color: var(--green); }
-    .bad { color: var(--red); }
-    .neutral { color: var(--text); }
-    .cap-wrap { margin-top: 12px; }
-    .cap-row { display: flex; justify-content: space-between; gap: 8px; color: #d8e7f6; font-size: 12px; font-weight: 750; }
-    .meter { height: 9px; background: rgba(6, 15, 27, .75); border-radius: 9px; margin-top: 8px; overflow: hidden; }
-    .meter-fill { height: 100%; width: 0%; border-radius: inherit; background: linear-gradient(90deg, #45dfa3, #72c7ff, #ffd166); transition: width .3s ease; }
-    .panel { padding: 16px; margin-top: 12px; }
-    .section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 12px; }
-    h2 { font-size: 16px; letter-spacing: -.2px; }
-    .section-note { color: var(--muted); font-size: 11px; text-align: right; }
-    .source-grid { display: grid; gap: 9px; }
-    .source-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; font-size: 13px; }
-    .source-line span:first-child { color: var(--muted); }
-    .address { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #c8e4ff; font-size: 11px; text-align: right; overflow-wrap: anywhere; }
-    .notice {
-      color: #f4d48d; font-size: 12px; background: rgba(255, 209, 102, .08);
-      border: 1px solid rgba(255, 209, 102, .18); border-radius: 12px; padding: 10px 11px; margin-top: 12px;
-    }
-    .list { display: grid; gap: 9px; }
-    .position, .trade, .event {
-      border: 1px solid #20344d; background: linear-gradient(125deg, rgba(20, 38, 60, .92), rgba(13, 27, 44, .92));
-      border-radius: 14px; padding: 12px;
-    }
-    .position-top, .trade-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-    .symbol { font-weight: 900; font-size: 16px; }
-    .side {
-      font-size: 10px; font-weight: 900; letter-spacing: .5px; padding: 5px 8px; border-radius: 99px;
-      background: rgba(69, 223, 163, .12); color: var(--green); border: 1px solid rgba(69, 223, 163, .23);
-    }
-    .side.short { background: rgba(255, 113, 133, .11); color: var(--red); border-color: rgba(255, 113, 133, .24); }
-    .position-pnl { font-size: 19px; font-weight: 900; margin: 11px 0 8px; }
-    .details-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 12px; }
-    .detail { color: var(--muted); font-size: 11px; }
-    .detail b { color: var(--text); display: block; font-size: 13px; margin-top: 1px; font-weight: 750; }
-    .trade-action { font-weight: 900; font-size: 12px; letter-spacing: .35px; }
-    .trade-symbol { color: var(--text); font-weight: 800; }
-    .trade-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; color: var(--muted); font-size: 11px; margin-top: 8px; }
-    .empty { border: 1px dashed #314762; border-radius: 13px; padding: 19px 13px; color: var(--muted); text-align: center; font-size: 13px; }
-    .event { font-size: 12px; color: #dce9f6; }
-    .event time { display: block; font-size: 10px; color: var(--muted); margin-top: 4px; }
-    details { margin-top: 12px; }
-    summary { color: #c5dcf2; cursor: pointer; font-weight: 800; font-size: 13px; padding: 3px 0; }
-    .strategy { color: #c7d7e9; font-size: 12px; display: grid; gap: 8px; margin-top: 11px; }
-    .strategy b { color: var(--text); }
-    .footer { text-align: center; color: #71869e; font-size: 10px; margin: 16px 0 2px; }
-    @media (min-width: 760px) {
-      body { padding-left: 24px; padding-right: 24px; }
-      .header { align-items: center; margin-top: 12px; }
-      .overview { display: grid; grid-template-columns: 1.2fr 1fr; gap: 12px; align-items: stretch; }
-      .metrics { margin: 0; }
-      .hero { min-height: 186px; display: flex; flex-direction: column; justify-content: center; }
-      .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
-      .two-col .panel { margin-top: 12px; }
-      .panel { padding: 18px; }
-    }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f1ece2">
+<title>Pair Grid Paper</title>
+<style>
+:root{--bg:#f1ece2;--paper:#faf6ee;--ink:#1d2430;--muted:#6b6a66;--line:#d9d1c2;--long:#1f7a5c;--short:#b4442f;--warn:#a8741a;--accent:#2b3f7a;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 "Iowan Old Style","Palatino Linotype",Georgia,serif;padding:max(12px,env(safe-area-inset-top)) 12px max(24px,env(safe-area-inset-bottom))}
+main{max-width:1100px;margin:0 auto}
+h1,h2,h3,p{margin:0}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+header{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;border-bottom:2px solid var(--ink);padding-bottom:10px}
+h1{font-size:22px;letter-spacing:-.3px}
+.sub{color:var(--muted);font-size:12px;margin-top:3px}
+.pill{font:700 11px/1 var(--mono);text-transform:uppercase;letter-spacing:.6px;padding:7px 9px;border:1.5px solid currentColor;border-radius:3px;white-space:nowrap;color:var(--warn)}
+.pill.ok{color:var(--long)}.pill.bad{color:var(--short)}
+.banner{margin-top:10px;padding:9px 11px;border-left:4px solid var(--short);background:#f6e3dc;font-size:13px;display:none}
+.banner.show{display:block}.banner.warn{border-color:var(--warn);background:#f5ead3}
+.card{background:var(--paper);border:1px solid var(--line);border-radius:6px;padding:14px;margin-top:12px}
+.label{font:700 10.5px/1.2 var(--mono);text-transform:uppercase;letter-spacing:.8px;color:var(--muted)}
+.eq{font:700 clamp(40px,12vw,64px)/1 var(--mono);letter-spacing:-2px;margin-top:6px;font-variant-numeric:tabular-nums}
+.eqmeta{font-size:13px;color:var(--muted);margin-top:6px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px;margin-top:12px}
+.kv b{display:block;font:600 16px/1.25 var(--mono);margin-top:2px;font-variant-numeric:tabular-nums}
+.pos{color:var(--long)}.neg{color:var(--short)}.unk{color:var(--warn)}
+svg{display:block;width:100%;height:150px;margin-top:12px}
+.legs{display:grid;gap:12px}
+.leg{border-top:6px solid var(--long)}.leg.SHORT{border-top-color:var(--short)}
+.leghead{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.sym{font:700 26px/1 var(--mono)}
+.dir{font:700 12px var(--mono);letter-spacing:1px}
+.mark{font:700 clamp(36px,11vw,52px)/1.05 var(--mono);letter-spacing:-1.5px;margin-top:10px;font-variant-numeric:tabular-nums}
+.anchor{font-size:13px;color:var(--muted);margin-top:4px}
+.decision{margin-top:12px;padding:10px;background:#efe8da;border-radius:4px;font-size:14px}
+.thr{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.thr div{border:1px dashed var(--line);padding:8px;border-radius:4px;font-size:12.5px}
+.thr b{font:700 17px var(--mono);display:block}
+.ladder{display:flex;flex-wrap:wrap;gap:4px;margin-top:10px}
+.lv{font:600 11px var(--mono);padding:4px 6px;border:1px solid var(--line);border-radius:3px;color:var(--muted)}
+.lv.DONE.ADD{background:var(--short);color:#fbf4ea;border-color:var(--short)}
+.lv.DONE.REDUCE{background:var(--long);color:#fbf4ea;border-color:var(--long)}
+.pend{margin-top:10px;padding:9px;border-left:3px solid var(--warn);background:#f5ead3;font-size:13px}
+.closed{margin-top:10px;font:700 13px var(--mono);color:var(--short)}
+.row{display:flex;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);font-size:13px}
+.row:last-child{border-bottom:0}
+.row small{display:block;color:var(--muted);font-size:11.5px}
+.r{text-align:right}
+details summary{cursor:pointer;font:700 12px var(--mono);text-transform:uppercase;letter-spacing:.6px;padding:6px 0}
+.empty{padding:14px;text-align:center;color:var(--muted);border:1px dashed var(--line);border-radius:4px;font-size:13px}
+.note{font-size:13px;margin-top:8px}
+h2{font-size:17px;margin-bottom:8px}
+footer{color:var(--muted);font:11px var(--mono);text-align:center;margin-top:16px}
+@media(min-width:780px){.legs{grid-template-columns:1fr 1fr}.top{display:grid;grid-template-columns:1.1fr 1fr;gap:12px}.top .card{margin-top:12px}.grid2.wide{grid-template-columns:repeat(4,1fr)}}
+</style>
 </head>
 <body>
-  <main>
-    <header class="header">
-      <div class="brand">
-        <div class="brand-mark">P</div>
-        <div>
-          <h1>Perps Paper Copy</h1>
-          <p class="subhead">All instruments · proportional sizing · no real orders</p>
-        </div>
-      </div>
-      <div id="status" class="status">CONNECTING</div>
-    </header>
+<main>
+<header>
+  <div><h1 id="name">Pair Grid Paper</h1><p class="sub" id="sub">BTC long / ETH short · paper only · read-only</p></div>
+  <span id="pill" class="pill">connecting</span>
+</header>
+<div id="banner" class="banner" role="status"></div>
 
-    <section class="overview" aria-label="Paper account overview">
-      <div class="hero">
-        <div class="hero-label">Paper equity</div>
-        <div id="equity" class="hero-value">$5,000.00</div>
-        <p id="equityMeta" class="hero-meta">Starting paper capital: $5,000.00</p>
-      </div>
-      <div class="metrics">
-        <div class="metric"><div class="metric-label">Realized P&amp;L</div><div id="realized" class="metric-value">$0.00</div></div>
-        <div class="metric"><div class="metric-label">Floating P&amp;L</div><div id="floating" class="metric-value">$0.00</div></div>
-        <div class="metric"><div class="metric-label">Open positions</div><div id="positionCount" class="metric-value">0</div></div>
-        <div class="metric"><div class="metric-label">Fees paid</div><div id="fees" class="metric-value">$0.00</div></div>
-      </div>
-    </section>
+<div class="top">
+<section class="card">
+  <div class="label">Marked equity</div>
+  <div id="equity" class="eq">--</div>
+  <p id="eqmeta" class="eqmeta"></p>
+  <svg id="chart" viewBox="0 0 600 150" preserveAspectRatio="none" aria-label="Equity curve"></svg>
+  <p id="chartmeta" class="label" style="margin-top:4px"></p>
+</section>
+<section class="card">
+  <div class="label">Account</div>
+  <div class="grid2" id="acct"></div>
+</section>
+</div>
 
-    <section class="panel cap-wrap" aria-label="Proportional exposure">
-      <div class="cap-row"><span>Open notional · no fixed cap</span><span id="capLabel">—</span></div>
-      <div class="source-grid" style="margin-top:12px">
-        <div class="source-line"><span>Current copy ratio</span><strong id="copyRatio">—</strong></div>
-        <div class="source-line"><span>Your / master effective leverage</span><strong id="leverage">—</strong></div>
-      </div>
-      <div class="source-grid" style="margin-top:12px">
-        <div class="source-line"><span>Configured leverage</span><strong style="font-size:26px">5×</strong></div>
-        <div class="source-line"><span>Position / pending margin</span><strong id="margin">—</strong></div>
-        <div class="source-line"><span>Free margin</span><strong id="freeMargin">—</strong></div>
-      </div>
-      <div class="section-note" style="text-align:left;margin-top:7px">Quantity scales to your equity, not another 5× multiplier. Margin = notional ÷ 5. No automatic portfolio rebalance trades.</div>
-    </section>
+<section class="legs" id="legs"></section>
 
-    <section class="panel">
-      <div class="section-head"><h2>Source account</h2><span id="sourceEquity" class="section-note">Perps equity loading</span></div>
-      <div class="source-grid">
-        <div class="source-line"><span>Owner EOA used by Perps</span><span id="ownerAddress" class="address">—</span></div>
-        <div class="source-line"><span>Polymarket smart wallet</span><span id="proxyAddress" class="address">—</span></div>
-        <div class="source-line"><span>Source positions</span><strong id="sourcePositionCount">—</strong></div>
-        <div class="source-line"><span>Last source fill</span><strong id="lastFill">—</strong></div>
-      </div>
-      <div class="notice">PAPER ONLY · Limits use the master's exact fill price. After 5 minutes, only the remainder becomes a market sweep. Depth-backed snapshot fills are estimates, not real executions or guaranteed queue fills. Standard starting-tier fees apply; funding and liquidation are not simulated. Earlier history retains its original execution model.</div>
-    </section>
+<section class="card">
+  <h2>Trades</h2>
+  <div id="trades"></div>
+  <details id="tradesMoreWrap"><summary>Full trade history</summary><div id="tradesMore"></div></details>
+</section>
 
-    <section class="panel">
-      <div class="section-head"><h2>Pending copy orders</h2><span id="orderCount" class="section-note">0 pending</span></div>
-      <div id="orders" class="list"><div class="empty">No pending copy orders.</div></div>
-    </section>
+<section class="card">
+  <h2>Execution honesty</h2>
+  <div id="exec"></div>
+</section>
 
-    <div class="two-col">
-      <section class="panel">
-        <div class="section-head"><h2>Paper positions</h2><span class="section-note">Mark-to-market</span></div>
-        <div id="positions" class="list"><div class="empty">Waiting for a new source fill.</div></div>
-      </section>
-      <section class="panel">
-        <div class="section-head"><h2>Copied actions</h2><span id="fillCount" class="section-note">0 copied</span></div>
-        <div id="trades" class="list"><div class="empty">No post-start fills copied yet.</div></div>
-      </section>
-    </div>
+<section class="card">
+  <details><summary>Events log</summary><div id="events"></div></details>
+</section>
 
-    <section class="panel">
-      <div class="section-head"><h2>Activity</h2><span class="section-note">Latest first</span></div>
-      <div id="events" class="list"><div class="empty">Waiting for the source baseline.</div></div>
-    </section>
+<section class="card">
+  <h2>Strategy</h2>
+  <div id="strategy"></div>
+</section>
+<footer id="foot">Waiting for first snapshot</footer>
+</main>
+<script>
+(function(){
+var $=function(id){return document.getElementById(id)};
+var isNum=function(v){return v!==null&&v!==undefined&&v!==''&&isFinite(Number(v))};
+var esc=function(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})};
+function money(v,d){if(!isNum(v))return'unknown';return'$'+Number(v).toLocaleString('en-US',{minimumFractionDigits:d==null?2:d,maximumFractionDigits:d==null?2:d})}
+function smoney(v){if(!isNum(v))return'unknown';var n=Number(v);return(n>0?'+':n<0?'-':'')+money(Math.abs(n))}
+function price(v){if(!isNum(v))return'--';var n=Number(v);return'$'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:n<10?4:2})}
+function pct(v){if(!isNum(v))return'--';var n=Number(v);return(n>0?'+':'')+n.toFixed(3)+'%'}
+function qty(v){if(!isNum(v))return'--';return Math.abs(Number(v)).toLocaleString('en-US',{maximumFractionDigits:6})}
+function cls(v){return!isNum(v)?'unk':Number(v)>0?'pos':Number(v)<0?'neg':''}
+function tm(v){if(!v)return'--';var d=new Date(isNum(v)?Number(v):v);return isNaN(d)?'--':d.toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+function ago(v){if(!v)return'';var d=new Date(isNum(v)?Number(v):v).getTime();if(isNaN(d))return'';var s=Math.round((Date.now()-d)/1000);return s<60?s+'s ago':Math.round(s/60)+'m ago'}
+var cache={};
+function set(id,html){var el=$(id);if(el&&cache[id]!==html){cache[id]=html;el.innerHTML=html}}
+function txt(id,t,c){var el=$(id);if(!el)return;if(el.textContent!==t)el.textContent=t;if(c!=null&&el.className!==c)el.className=c}
 
-    <details class="panel">
-      <summary>How this paper copy works</summary>
-      <div class="strategy">
-        <p><b>Source:</b> reads public Perps fills and portfolio snapshots for the selected owner EOA. It never signs or submits orders.</p>
-        <p><b>Proportional size:</b> starting capital is $5,000. Each master fill targets master exposure × current paper equity ÷ current master equity. Outstanding quantities count toward that target. Opposing master actions cancel overlapping unfilled orders, then queue an exit for any already filled amount.</p>
-        <p><b>5× margin:</b> initial margin = notional ÷ 5. New exposure requires sufficient margin including fees; reductions remain possible. This is not a guarantee that total effective account leverage will always equal 5×.</p>
-        <p><b>Limit then force:</b> exact master-price limits wait five minutes from placement. Marketable-on-arrival fills use available depth at the best qualifying prices and pay taker fees. Later fills require opposite book prices strictly through the limit, execute at the limit, and use maker fees. Partial quantities stay pending. Expired remainders sweep fresh depth; absent liquidity is never fabricated.</p>
-        <p><b>Fees:</b> official schedule and active instrument overrides, standard starting tier: normally maker 0.02%, taker 0.05% of fill notional. For categories omitted by the live fee API, the published standard rates are explicitly marked as estimates. The master's beta discounts or volume tier are not inherited. No builder fee is added.</p>
-        <p><b>Limitations:</b> five-second polling misses between-snapshot activity and cannot prove queue priority. Funding and liquidation are not simulated. Historical trades are preserved, not recalculated under this new model. This is not a promise of live execution or profitability.</p>
-      </div>
-    </details>
-    <p id="updated" class="footer">Connecting to public Perps data…</p>
-  </main>
+function chart(curve){
+  var pts=(Array.isArray(curve)?curve:[]).map(function(p){return{t:new Date(p&&p.at).getTime(),e:p&&isNum(p.equity)?Number(p.equity):null}}).filter(function(p){return!isNaN(p.t)});
+  var key=pts.length+':'+(pts.length?pts[0].t+':'+pts[pts.length-1].t+':'+pts[pts.length-1].e:'');
+  if(cache.chartKey===key)return;cache.chartKey=key;
+  var known=pts.filter(function(p){return p.e!==null});
+  if(known.length<2){set('chart','<text x="300" y="80" text-anchor="middle" font-family="monospace" font-size="13" fill="#6b6a66">'+(pts.length?'Not enough priced points yet':'No equity history yet')+'</text>');txt('chartmeta',pts.length-known.length?(pts.length-known.length)+' unpriced points shown as gaps':'');return}
+  var t0=pts[0].t,t1=pts[pts.length-1].t||t0+1,mn=Infinity,mx=-Infinity;known.forEach(function(p){mn=Math.min(mn,p.e);mx=Math.max(mx,p.e)});
+  if(mx-mn<1e-9){mx+=1;mn-=1}var pad=(mx-mn)*.1;mn-=pad;mx+=pad;
+  var X=function(t){return t1===t0?300:(t-t0)/(t1-t0)*600},Y=function(e){return 145-(e-mn)/(mx-mn)*140};
+  var d='',pen=false,gaps=0;pts.forEach(function(p){if(p.e===null){pen=false;gaps++;return}d+=(pen?'L':'M')+X(p.t).toFixed(1)+' '+Y(p.e).toFixed(1);pen=true});
+  var start=known[0].e,last=known[known.length-1].e,col=last>=start?'#1f7a5c':'#b4442f';
+  set('chart','<line x1="0" x2="600" y1="'+Y(start).toFixed(1)+'" y2="'+Y(start).toFixed(1)+'" stroke="#d9d1c2" stroke-dasharray="4 4"/><path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="2" vector-effect="non-scaling-stroke"/>');
+  txt('chartmeta','range '+money(mn+pad,0)+' to '+money(mx-pad,0)+(gaps?' · '+gaps+' unknown points as gaps':''));
+}
 
-  <script>
-    const money = (value) => '$' + Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const signedMoney = (value) => `${Number(value || 0) > 0 ? '+' : ''}${money(value)}`;
-    const safe = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
-    const time = (value) => value ? new Date(Number(value)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
-    const pnlClass = (value) => Number(value) > 0 ? 'good' : Number(value) < 0 ? 'bad' : 'neutral';
-    const shortAddress = (value) => value ? `${value.slice(0, 8)}…${value.slice(-6)}` : '—';
+function leg(l){
+  l=l||{};var dir=l.direction==='SHORT'?'SHORT':'LONG';
+  var nf=l.nextFavourable,na=l.nextAdverse,p=l.pending;
+  var lv=(Array.isArray(l.levels)?l.levels:[]).slice().sort(function(a,b){return Number(a&&a.level)-Number(b&&b.level)});
+  var done=lv.filter(function(x){return x&&x.status==='DONE'}).length;
+  var thr=function(x,lab,act){return'<div><span class="label">'+lab+'</span>'+(x?'<b>'+price(x.price)+'</b>level '+esc(x.level)+' · at '+pct(x.movePercent)+'<br>'+act:'<b>--</b>none remaining')+'</div>'};
+  return'<article class="card leg '+dir+'">'+
+   '<div class="leghead"><span class="sym">'+esc(l.symbol||'--')+'</span><span class="dir '+(dir==='LONG'?'pos':'neg')+'">'+dir+(l.instrumentId?' · '+esc(l.instrumentId):'')+'</span></div>'+
+   '<div class="mark">'+price(l.mark)+'</div>'+
+   '<p class="anchor">mark '+(l.markAt?ago(l.markAt):'time unknown')+' · original anchor <b class="num">'+price(l.originalEntry)+'</b> · move <b class="num '+cls(l.movePercent)+'">'+pct(l.movePercent)+'</b> (favourable +)</p>'+
+   (l.closedPermanently?'<p class="closed">CLOSED PERMANENTLY · never reopens</p>':'')+
+   (!l.initialized?'<p class="closed" style="color:var(--warn)">Not yet initialized</p>':'')+
+   '<div class="decision"><span class="label">Decision</span><br>'+esc(l.decision||'No decision reported')+'</div>'+
+   '<div class="grid2">'+
+    '<div class="kv"><span class="label">Unrealized</span><b class="'+cls(l.unrealizedPnl)+'">'+smoney(l.unrealizedPnl)+'</b></div>'+
+    '<div class="kv"><span class="label">Margin units</span><b>'+(isNum(l.capitalUnits)?Number(l.capitalUnits).toFixed(2):'--')+' / init '+(isNum(l.initialUnits)?esc(l.initialUnits):'--')+'</b></div>'+
+    '<div class="kv"><span class="label">Quantity</span><b>'+qty(l.quantity)+'</b></div>'+
+    '<div class="kv"><span class="label">Avg entry</span><b>'+price(l.entryPrice)+'</b></div>'+
+    '<div class="kv"><span class="label">Notional</span><b>'+money(l.notional)+'</b></div>'+
+    '<div class="kv"><span class="label">Margin</span><b>'+money(l.margin)+'</b></div>'+
+   '</div>'+
+   '<div class="thr">'+thr(nf,'Next favourable','reduce 2 units')+thr(na,'Next adverse','add 2 units if margin allows')+'</div>'+
+   (p?'<div class="pend"><b>PENDING '+esc(p.kind)+'</b> level '+esc(p.level)+' · '+esc(p.units)+' units @ '+money(p.unitValue)+'/unit · remaining '+money(p.notionalRemaining)+' · filled '+money(p.filledNotional)+'<br><small>'+esc(p.reason||'')+' · since '+tm(p.createdAt)+'</small></div>':'')+
+   '<p class="label" style="margin-top:12px">Levels · '+done+' done / '+lv.length+'</p>'+
+   (lv.length?'<div class="ladder">'+lv.map(function(x){x=x||{};return'<span class="lv '+esc(x.status)+' '+esc(x.action)+'" title="'+esc(x.action)+' '+esc(x.status)+(x.at?' '+tm(x.at):'')+(isNum(x.filledNotional)?' filled '+money(x.filledNotional):'')+'">'+(Number(x.level)>0?'+':'')+esc(x.level)+' '+price(x.price)+'</span>'}).join('')+'</div>':'<div class="empty">No levels reported</div>')+
+  '</article>';
+}
 
-    function renderPositions(state) {
-      const host = document.getElementById('positions');
-      if (!state.positions?.length) {
-        host.innerHTML = '<div class="empty">No copied open positions yet.</div>';
-        return;
-      }
-      host.innerHTML = state.positions.map((position) => {
-        const side = Number(position.size) >= 0 ? 'LONG' : 'SHORT';
-        return `<article class="position">
-          <div class="position-top"><span class="symbol">${safe(position.symbol)}</span><span class="side ${side === 'SHORT' ? 'short' : ''}">${side}</span></div>
-          <div class="position-pnl ${pnlClass(position.unrealizedPnl)}">${signedMoney(position.unrealizedPnl)}</div>
-          <div class="details-grid">
-            <div class="detail">Paper size<b>${Math.abs(Number(position.size)).toLocaleString(undefined, { maximumFractionDigits: 6 })}</b></div>
-            <div class="detail">Open notional<b>${money(position.notional)}</b></div>
-            <div class="detail">Avg entry<b>${money(position.averageEntryPrice)}</b></div>
-            <div class="detail">Current mark<b>${money(position.markPrice)}</b></div>
-          </div>
-        </article>`;
-      }).join('');
-    }
+function trade(t){
+  t=t||{};
+  return'<div class="row"><div><b class="'+(t.side==='BUY'?'pos':'neg')+'">'+esc(t.action)+' '+esc(t.side)+'</b> '+esc(t.symbol)+(t.level!=null?' · L'+esc(t.level):'')+
+   '<small class="num">'+qty(t.quantity)+' @ '+price(t.price)+' = '+money(t.notional)+(isNum(t.triggerPrice)?' · trigger '+price(t.triggerPrice):'')+'</small>'+
+   '<small>'+esc(t.reason||'')+' · '+esc(t.liquidity||'')+' · '+tm(t.timestamp)+'</small></div>'+
+   '<div class="r num"><b class="'+cls(t.netRealizedPnl)+'">'+smoney(t.netRealizedPnl)+'</b><small>gross '+smoney(t.realizedPnl)+'</small><small>fee -'+money(t.fee)+'</small></div></div>';
+}
 
-    function renderTrades(state) {
-      const host = document.getElementById('trades');
-      document.getElementById('fillCount').textContent = `${state.stats?.copiedFills || 0} source actions · fills below`;
-      if (!state.trades?.length) {
-        host.innerHTML = '<div class="empty">No post-start source fills copied yet.</div>';
-        return;
-      }
-      host.innerHTML = state.trades.slice(0, 12).map((trade) => {
-        const actionClass = trade.side === 'BUY' ? 'good' : 'bad';
-        return `<article class="trade">
-          <div class="trade-top"><span class="trade-action ${actionClass}">${safe(trade.action)} ${safe(trade.side)}</span><span class="trade-symbol">${safe(trade.symbol)}</span></div>
-          <div class="trade-meta">
-            <span>${Math.abs(Number(trade.quantity)).toLocaleString(undefined, { maximumFractionDigits: 6 })} @ ${money(trade.price)}</span>
-            <span>Fee ${money(trade.fee)}</span>
-            <span>${safe(trade.liquidity || 'LEGACY')} · ${safe(trade.executionType || 'prior model')}</span>
-            ${trade.feeSource ? `<span>${safe(trade.feeSource)}</span>` : ''}
-            ${trade.masterPrice ? `<span>Master ${money(trade.masterPrice)}</span>` : ''}
-            <span class="${pnlClass(trade.netRealizedPnl)}">Net ${signedMoney(trade.netRealizedPnl)}</span>
-            <span>${time(trade.timestamp)}</span>
-          </div>
-        </article>`;
-      }).join('');
-    }
+function render(s){
+  var a=s.account||{},st=s.strategy||{},ex=s.execution||{},ps=s.persistence||{};
+  txt('name',st.name||'Pair Grid Paper');
+  txt('sub',(st.mode?st.mode+' · ':'')+(isNum(st.leverage)?st.leverage+'x':'--')+' · step '+(isNum(st.stepPercent)?st.stepPercent+'%':'--')+' · read-only');
+  var status=String(s.status||'unknown');
+  txt('pill',status.replace(/_/g,' '),'pill '+(/run|ok|active/i.test(status)?'ok':/err|degrad|halt|fail/i.test(status)?'bad':''));
+  var known=a.equityKnown!==false&&isNum(a.equity);
+  txt('equity',known?money(a.equity):'unknown','eq '+(known?cls(Number(a.equity)-Number(a.startingCapital)):'unk'));
+  txt('eqmeta',(known?'':'Unpriced: '+((a.unpricedSymbols||[]).join(', ')||'unknown')+' · ')+'start '+money(a.startingCapital)+' · '+(s.statusMessage||''));
+  var kv=function(l,v,c){return'<div class="kv"><span class="label">'+l+'</span><b class="'+(c||'')+'">'+v+'</b></div>'};
+  set('acct',
+   kv('Unit (1% equity)',money(a.unitValue))+kv('Cash',money(a.cash))+
+   kv('Floating P&amp;L',smoney(a.floatingPnl),cls(a.floatingPnl))+kv('Realized P&amp;L',smoney(a.realizedPnl),cls(a.realizedPnl))+
+   kv('Fees paid',money(a.fees))+kv('Funding P&amp;L',smoney(a.fundingPnl),cls(a.fundingPnl))+
+   kv('Open notional',money(a.openNotional))+kv('Initial margin',money(a.initialMargin))+
+   kv('Free margin',money(a.freeMargin),isNum(a.freeMargin)&&Number(a.freeMargin)<0?'neg':'')+kv('Peak equity',money(a.peakEquity))+
+   kv('Max drawdown',isNum(a.maxDrawdown)?money(a.maxDrawdown):'--')+kv('Effective lev.',known&&isNum(a.openNotional)&&Number(a.equity)>0?(a.openNotional/a.equity).toFixed(2)+'x':'--'));
+  chart(s.equityCurve);
+  var legs=Array.isArray(s.legs)?s.legs:[];
+  set('legs',legs.length?legs.map(leg).join(''):'<div class="card empty">No legs reported yet</div>');
+  var tr=(Array.isArray(s.trades)?s.trades:[]).slice().sort(function(x,y){return new Date(y&&y.timestamp)-new Date(x&&x.timestamp)});
+  set('trades',tr.length?tr.slice(0,6).map(trade).join(''):'<div class="empty">No trades yet</div>');
+  $('tradesMoreWrap').style.display=tr.length>6?'':'none';
+  set('tradesMore',tr.slice(6).map(trade).join(''));
+  var fe=ex.feeEstimates;
+  set('exec','<p class="note"><b>Fees:</b> '+(fe&&typeof fe==='object'?esc(Object.keys(fe).map(function(k){var v=fe[k];return k+': '+(v&&typeof v==='object'?JSON.stringify(v):v)}).join(' · ')):'not reported')+(ex.feesUpdatedAt?' (updated '+tm(ex.feesUpdatedAt)+')':'')+'</p>'+
+   '<p class="note"><b>Latency:</b> '+(isNum(ex.latencyMs)?esc(ex.latencyMs)+' ms simulated':'not reported')+'</p>'+
+   '<p class="note"><b>Funding:</b> '+esc(ex.fundingNote||'not reported')+'</p>'+
+   '<p class="note"><b>Liquidation:</b> '+esc(ex.liquidationNote||'not reported')+'</p>'+
+   '<p class="note"><b>Persistence:</b> '+(ps.enabled?'on':'off')+(ps.lastSavedAt?' · saved '+tm(ps.lastSavedAt):'')+(ps.error?' · <span class="neg">'+esc(ps.error)+'</span>':'')+'</p>');
+  var ev=(Array.isArray(s.events)?s.events:[]).slice().sort(function(x,y){return new Date(y&&y.timestamp)-new Date(x&&x.timestamp)});
+  set('events',ev.length?ev.map(function(e){e=e||{};return'<div class="row"><div><b>'+esc(String(e.type||'').replace(/_/g,' '))+'</b><small>'+esc(e.message)+'</small></div><div class="r"><small>'+tm(e.timestamp)+'</small></div></div>'}).join(''):'<div class="empty">No events</div>');
+  var iu=st.initialUnits||{};
+  set('strategy','<p class="note">Independent paper grid: <b>BTC long</b> ('+esc(iu.BTC==null?'--':iu.BTC)+' initial units) and <b>ETH short</b> ('+esc(iu.ETH==null?'--':iu.ETH)+' initial units) at '+esc(st.leverage==null?'--':st.leverage)+'x. Each unit is 1% of current marked equity.</p>'+
+   '<p class="note">Levels are anchored to each leg\'s original entry every '+esc(st.stepPercent==null?'--':st.stepPercent)+'% and each fires only once. Favourable move: reduce '+esc(st.adjustmentUnits==null?'--':st.adjustmentUnits)+' units. Adverse move: add '+esc(st.adjustmentUnits==null?'--':st.adjustmentUnits)+' units, skipped when margin is unavailable. A closed side never reopens.</p>'+
+   '<p class="note">Fills use later order-book sweeps with taker fees and quantity precision; no fills at the theoretical threshold price.</p>'+
+   (st.levelPolicy?'<p class="note"><b>Level policy:</b> '+esc(typeof st.levelPolicy==='object'?JSON.stringify(st.levelPolicy):st.levelPolicy)+'</p>':'')+
+   '<p class="note label" style="margin-top:10px">id '+esc(st.id||'--')+' · created '+tm(s.createdAt)+'</p>');
+}
 
-    function renderEvents(state) {
-      const host = document.getElementById('events');
-      if (!state.events?.length) {
-        host.innerHTML = '<div class="empty">No activity yet.</div>';
-        return;
-      }
-      host.innerHTML = state.events.slice(0, 8).map((event) => `<article class="event">
-        <strong>${safe(event.type.replaceAll('_', ' '))}</strong> · ${safe(event.message)}
-        <time>${time(event.timestamp)}</time>
-      </article>`).join('');
-    }
-
-    function renderOrders(state) {
-      const orders = (state.orders || []).filter(o => o.remaining > 0).reverse();
-      document.getElementById('orderCount').textContent = `${orders.length} pending`;
-      document.getElementById('orders').innerHTML = orders.length ? orders.map(order => {
-        const seconds = Math.max(0, Math.ceil((order.expiresAt - state.now) / 1000));
-        return `<article class="trade">
-          <div class="trade-top"><span class="trade-action ${order.side === 'BUY' ? 'good' : 'bad'}">${safe(order.side)} · ${safe(order.status)}</span><span class="trade-symbol">${safe(order.symbol)}</span></div>
-          <div class="trade-meta">
-            <span>Master limit ${money(order.limitPrice)}</span>
-            <span>Filled ${safe(order.filled)} / ${safe(order.quantity)}</span>
-            <span>Remaining ${safe(order.remaining)}</span>
-            <span>${seconds > 0 ? `Force in ${seconds}s` : 'MARKET SWEEP'}</span>
-            ${order.blockedReason ? `<span class="bad">${safe(order.blockedReason)}</span>` : ''}
-          </div></article>`;
-      }).join('') : '<div class="empty">No pending copy orders.</div>';
-    }
-
-    function render(state) {
-      const status = document.getElementById('status');
-      status.textContent = String(state.status || 'unknown').replaceAll('_', ' ');
-      status.className = `status ${safe(state.status || '')}`;
-      const account = state.account || {};
-      document.getElementById('equity').textContent = money(account.equity);
-      document.getElementById('equity').className = `hero-value ${pnlClass(Number(account.equity) - Number(account.startingCapital))}`;
-      document.getElementById('equityMeta').textContent = `${state.statusMessage || 'Paper account'} · start ${money(account.startingCapital)}`;
-      for (const [id, key] of [['realized', 'realizedPnl'], ['floating', 'floatingPnl']]) {
-        const element = document.getElementById(id);
-        element.textContent = signedMoney(account[key]);
-        element.className = `metric-value ${pnlClass(account[key])}`;
-      }
-      document.getElementById('fees').textContent = money(account.fees);
-      document.getElementById('positionCount').textContent = String(state.positions?.length || 0);
-      const notional = Number(account.openNotional || 0);
-      document.getElementById('capLabel').textContent = money(notional);
-      document.getElementById('copyRatio').textContent = `${(Number(state.sizing?.multiplier || 0) * 100).toFixed(5)}%`;
-      document.getElementById('margin').textContent = `${money(account.initialMargin)} / ${money(account.pendingOrderMargin)}`;
-      document.getElementById('freeMargin').textContent = money(account.freeMargin);
-      const sourceNotional = Object.entries(state.sourcePositions || {}).reduce((sum, [id, size]) => sum + Math.abs(Number(size)) * Number(state.marks?.[id] || 0), 0);
-      const paperLeverage = Number(account.equity) > 0 ? notional / Number(account.equity) : null;
-      const masterLeverage = Number(state.source?.equity) > 0 ? sourceNotional / Number(state.source.equity) : null;
-      document.getElementById('leverage').textContent = `${paperLeverage === null ? '—' : paperLeverage.toFixed(2) + '×'} / ${masterLeverage === null ? '—' : masterLeverage.toFixed(2) + '×'}`;
-      document.getElementById('sourceEquity').textContent = `Source equity ${money(state.source?.equity)}`;
-      document.getElementById('ownerAddress').textContent = shortAddress(state.source?.ownerEoa);
-      document.getElementById('ownerAddress').title = state.source?.ownerEoa || '';
-      document.getElementById('proxyAddress').textContent = shortAddress(state.source?.proxyWallet);
-      document.getElementById('proxyAddress').title = state.source?.proxyWallet || '';
-      document.getElementById('sourcePositionCount').textContent = `${state.source?.positionCount || 0} open · ${state.source?.baselinePositionCount || 0} at start`;
-      document.getElementById('lastFill').textContent = time(state.source?.lastFillAt);
-      renderPositions(state);
-      renderOrders(state);
-      renderTrades(state);
-      renderEvents(state);
-      document.getElementById('updated').textContent = `Updated ${time(state.now)} · API snapshot ${time(state.source?.lastPortfolioAt)}`;
-    }
-
-    async function refresh() {
-      try {
-        const response = await fetch('/api/state', { cache: 'no-store' });
-        if (!response.ok) throw new Error(`Dashboard API returned ${response.status}`);
-        render(await response.json());
-      } catch (error) {
-        const status = document.getElementById('status');
-        status.textContent = 'dashboard offline';
-        status.className = 'status degraded';
-        document.getElementById('updated').textContent = error.message;
-      }
-    }
-    refresh();
-    setInterval(refresh, 3000);
-  </script>
+var last=null,lastOk=0,lastNow=null,sameCount=0;
+function banner(msg,warn){var b=$('banner');var c='banner'+(msg?' show':'')+(warn?' warn':'');if(b.className!==c)b.className=c;if(b.textContent!==(msg||''))b.textContent=msg||''}
+async function refresh(){
+  try{
+    var r=await fetch('api/state',{cache:'no-store'});
+    if(!r.ok)throw new Error('API returned HTTP '+r.status);
+    var raw=await r.text();var s=JSON.parse(raw);
+    if(!s||typeof s!=='object')throw new Error('Malformed state');
+    lastOk=Date.now();
+    if(s.now===lastNow)sameCount++;else sameCount=0;lastNow=s.now;
+    if(raw!==last){last=raw;render(s)}
+    var serverAge=s.updatedAt?(Date.now()-new Date(isNum(s.updatedAt)?Number(s.updatedAt):s.updatedAt).getTime())/1000:null;
+    if(s.persistence&&s.persistence.error)banner('Persistence error: '+s.persistence.error);
+    else if(serverAge!==null&&serverAge>30)banner('Stale: strategy state last updated '+Math.round(serverAge)+'s ago. Prices shown may be out of date.',true);
+    else if(sameCount>=5)banner('Server clock not advancing; data may be frozen.',true);
+    else banner('');
+    txt('foot','Fetched '+new Date().toLocaleTimeString()+' · server '+tm(s.now)+' · updated '+tm(s.updatedAt));
+  }catch(e){
+    var since=lastOk?Math.round((Date.now()-lastOk)/1000):null;
+    banner((navigator.onLine===false?'Network offline. ':'Fetch failed: '+e.message+'. ')+(since!==null?'Showing last good data from '+since+'s ago.':'No data received yet.'));
+    txt('pill',lastOk?'stale':'offline','pill bad');
+  }
+}
+window.__render=render;
+refresh();setInterval(refresh,2000);
+})();
+</script>
 </body>
 </html>

@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { PerpsPublicApi } = require('./perps-public-api');
 const { PerpsPaperStore } = require('./perps-paper-store');
-const { PerpsCopyBot } = require('./perps-copy-bot');
+const { PerpsGridBot } = require('./perps-grid-bot');
 const startServer = require('./server');
 
 async function startApplication({
@@ -16,21 +16,22 @@ async function startApplication({
   listen = true,
 } = {}) {
   if (String(env.LIVE_TRADING || '').toLowerCase() === 'true') {
-    throw new Error('Safety stop: this copy bot is paper-only; LIVE_TRADING must not be enabled.');
+    throw new Error('Safety stop: this strategy is paper-only; LIVE_TRADING must not be enabled.');
   }
 
   const resolvedStore = store || new PerpsPaperStore(
     env.PERPS_COPY_LEDGER_PATH
-      || (env.RAILWAY_PROJECT_ID || env.RAILWAY_ENVIRONMENT_ID
-        ? '/data/perps-copy-paper-state.json'
-        : path.join(__dirname, '.data', 'perps-copy-paper-state.json')),
+      ? path.join(path.dirname(env.PERPS_COPY_LEDGER_PATH), 'independent-btc-eth-grid-v1.json')
+      : (env.RAILWAY_PROJECT_ID || env.RAILWAY_ENVIRONMENT_ID
+        ? '/data/independent-btc-eth-grid-v1.json'
+        : path.join(__dirname, '.data', 'independent-btc-eth-grid-v1.json')),
   );
   const railwayRuntime = Boolean(env.RAILWAY_PROJECT_ID || env.RAILWAY_ENVIRONMENT_ID);
   if (railwayRuntime && !fs.existsSync(path.dirname(resolvedStore.filePath))) {
     throw new Error(`Perps paper-history storage is unavailable at ${path.dirname(resolvedStore.filePath)}.`);
   }
 
-  const resolvedBot = bot || new PerpsCopyBot({
+  const resolvedBot = bot || new PerpsGridBot({
     api: api || new PerpsPublicApi(),
     store: resolvedStore,
   });
@@ -38,7 +39,7 @@ async function startApplication({
   resolvedBot.start();
   const server = startServer(resolvedBot, port, { listen });
 
-  console.log('MODE: PAPER ONLY — Polymarket Perps public fills; no wallet signing or order placement.');
+  console.log('MODE: PAPER ONLY — independent BTC/ETH capital-unit strategy; no master wallet, signing or real orders.');
   console.log(`[paper-state] using separate ledger ${resolvedStore.filePath}`);
 
   const shutdown = async () => {
